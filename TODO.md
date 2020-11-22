@@ -1,0 +1,4 @@
+- [ ] make a feeds list on README
+- [ ] fetch titles then shows on the list
+- [ ] xml to JSON
+- [ ] fixed list size
