@@ -1002,6 +1002,451 @@ For this project, I went with &lt;a href="https://github.com/rakyll/statik"&gt;s
       <category>android</category>
     </item>
     <item>
+      <title>How I reduced the runtime of an RSpec test suite by 15%</title>
+      <author>Nadia Zhuk</author>
+      <pubDate>Mon, 11 Jan 2021 11:03:15 +0000</pubDate>
+      <link>https://dev.to/beetlehope/how-i-reduced-the-runtime-of-an-rspec-test-suite-by-15-5ed1</link>
+      <guid>https://dev.to/beetlehope/how-i-reduced-the-runtime-of-an-rspec-test-suite-by-15-5ed1</guid>
+      <description>&lt;p&gt;Some time ago I worked on a project whose goal was to improve the speed of automated tests in a Ruby on Rails application. In this post, I'd like to share my learnings as well as some tips that might help you increase the speed of your project's test suite as well. In my case, the runtime of the test suite increased by 15%.&lt;/p&gt;
+
+&lt;p&gt;Note: all code examples in this article are related to Ruby on Rails, RSpec, and FactoryBot, but some of the general principles can be carried over to other testing frameworks and programming languages.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#step-1-find-the-slowest-tests-in-your-test-suite" class="anchor"&gt;
+  &lt;/a&gt;
+  Step 1: Find the slowest tests in your test suite
+&lt;/h3&gt;
+
+&lt;p&gt;I started out by making a list of the slowest tests in our suite and analyzing each of them. To find the top 10 slowest tests in your suite, run the following command from your project's root (replace 10 with the number of slow tests you wish to get):&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight ruby"&gt;&lt;code&gt;&lt;span class="n"&gt;rspec&lt;/span&gt; &lt;span class="o"&gt;--&lt;/span&gt;&lt;span class="n"&gt;profile&lt;/span&gt; &lt;span class="mi"&gt;10&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#step-2-analyze-each-of-the-slow-tests" class="anchor"&gt;
+  &lt;/a&gt;
+  Step 2: Analyze each of the slow tests
+&lt;/h3&gt;
+
+&lt;p&gt;With each test that appears slow relative to other tests, it's important to determine whether the test is slow for legitimate reasons or it is slow because the underlying code is buggy or inefficient. What follows is the rubric I used to analyze the slow tests.&lt;/p&gt;
+
+&lt;p&gt;&lt;em&gt;The test slow, but it's acceptable if:&lt;/em&gt;&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;p&gt;It doesn’t make unnecessary calls to external services, i.e. all necessary external requests are stubbed.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;All objects that are not under test have been replaced with mocks or stubs.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;It writes objects into the database, but this is necessary for the tests to work, i.e. &lt;code&gt;:create&lt;/code&gt; can’t be replaced with &lt;code&gt;:build_stubbed&lt;/code&gt; or &lt;code&gt;:build&lt;/code&gt;.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Factories used for creating objects don’t create unnecessary Active Record associations. &lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;It doesn’t test private methods.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;It doesn’t test logic that belongs to other classes.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;It doesn’t test logic that has already been tested by someone else (an external library or a gem).&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;If this is a request/integration spec, it doesn’t test edge cases or cases that have already been tested on the unit level.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;More broadly, the test tests behavior, not implementation.&lt;/p&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;The slow tests I analyzed faired well under all of the above-mentioned points, except for the test data generation rubric where it was hard to assess the test without further investigation. So my hypothesis was that some of the tests were so slow because they created too much test data that wasn't necessary for the test to work properly. In general, unnecessary test data creation is one of the most common reasons why a test suite gets slow: writing to a database is one of the slowest operations a test can perform (this, and calling external APIs).&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#step-3-check-how-many-test-objects-are-created-during-a-test-run" class="anchor"&gt;
+  &lt;/a&gt;
+  Step 3: Check how many test objects are created during a test run
+&lt;/h3&gt;
+
+&lt;p&gt;✅ Add this snippet to &lt;code&gt;spec_helper.rb&lt;/code&gt;:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight ruby"&gt;&lt;code&gt;&lt;span class="c1"&gt;# spec/spec_helper.rb&lt;/span&gt;
+
+&lt;span class="n"&gt;config&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;before&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="ss"&gt;:each&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="ss"&gt;:monitor_database_record_creation&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt; &lt;span class="o"&gt;|&lt;/span&gt;&lt;span class="n"&gt;example&lt;/span&gt;&lt;span class="o"&gt;|&lt;/span&gt;
+  &lt;span class="no"&gt;ActiveSupport&lt;/span&gt;&lt;span class="o"&gt;::&lt;/span&gt;&lt;span class="no"&gt;Notifications&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;subscribe&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;"factory_girl.run_factory"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt; &lt;span class="o"&gt;|&lt;/span&gt;&lt;span class="nb"&gt;name&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;start&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;finish&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nb"&gt;id&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;payload&lt;/span&gt;&lt;span class="o"&gt;|&lt;/span&gt;
+    &lt;span class="vg"&gt;$stderr&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;puts&lt;/span&gt; &lt;span class="s2"&gt;"FactoryGirl: &lt;/span&gt;&lt;span class="si"&gt;#{&lt;/span&gt;&lt;span class="n"&gt;payload&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="ss"&gt;:strategy&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;(:&lt;/span&gt;&lt;span class="si"&gt;#{&lt;/span&gt;&lt;span class="n"&gt;payload&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="ss"&gt;:name&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;)"&lt;/span&gt;
+  &lt;span class="k"&gt;end&lt;/span&gt;
+&lt;span class="k"&gt;end&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;p&gt;✅ Add a meta tag &lt;code&gt;:monitor_database_record_creation&lt;/code&gt; to the test example or test group that you suspect of creating too many objects:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight ruby"&gt;&lt;code&gt;&lt;span class="n"&gt;describe&lt;/span&gt; &lt;span class="s1"&gt;'#recipe_complete?'&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
+  &lt;span class="n"&gt;it&lt;/span&gt; &lt;span class="s1"&gt;'returns true if a recipe is complete'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="ss"&gt;:monitor_database_record_creation&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
+    &lt;span class="c1"&gt;# test body&lt;/span&gt;
+  &lt;span class="k"&gt;end&lt;/span&gt;
+&lt;span class="k"&gt;end&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;p&gt;✅ Run the test.&lt;br&gt;
+The console output will tell you how many objects were created for this particular test along with which strategy was used to create them:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight ruby"&gt;&lt;code&gt;&lt;span class="no"&gt;FactoryGirl&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;create&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="ss"&gt;:recipe&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;                                                                                                                                                                                        &lt;span class="no"&gt;FactoryGirl&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;create&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="ss"&gt;:step&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="no"&gt;FactoryGirl&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;create&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="ss"&gt;:step&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="no"&gt;FactoryGirl&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;create&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="ss"&gt;:ingredient&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="no"&gt;FactoryGirl&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;create&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="ss"&gt;:step&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;p&gt;❓ At this stage, you might wonder why so many objects are created for this test example or, more specifically, should the &lt;code&gt;step&lt;/code&gt; object be created twice for this test example to work. Often such duplicate objects happen to be nothing but "mystery guests", i.e. unnecessary—and hard to spot—objects that were written to the database but weren't used by the test. &lt;/p&gt;
+
+&lt;p&gt;In many cases, you should be able to refactor your test and get rid of these "guests" that slow down your test suit.&lt;/p&gt;
+
+
+
+
+&lt;p&gt;Next, I'll go over the main culprits of unnecessary test data creation and describe how you can deal with them.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#culprit-1-using-raw-create-endraw-where-raw-build-endraw-would-do-the-job" class="anchor"&gt;
+  &lt;/a&gt;
+  Culprit #1: Using &lt;code&gt;:create&lt;/code&gt; where &lt;code&gt;:build&lt;/code&gt; would do the job
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--tMTy6Slk--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/i/3dxz0qc9te78fup6fr5b.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--tMTy6Slk--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/i/3dxz0qc9te78fup6fr5b.png" alt="Screenshot 2021-01-10 at 14.59.43"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;It's likely that your specs predominantly rely on &lt;code&gt;:create&lt;/code&gt; strategy. In many of these specs, you might be able to safely replace &lt;code&gt;:create&lt;/code&gt; with &lt;code&gt;:build&lt;/code&gt;. These are the cases where the test doesn’t assume the object has actually been written to the database, which is often true for model tests.&lt;/p&gt;
+
+&lt;p&gt;In my case, I replaced &lt;code&gt;:create&lt;/code&gt; with &lt;code&gt;:build&lt;/code&gt; in the slowest tests whenever it made sense, and also grepped through several of the unit tests for the most often used models in the application. Such models tend to become responsibility magnets and accumulate many methods, and, consequently, many tests.&lt;/p&gt;
+
+&lt;p&gt;Word of caution: some blog posts recommend doing a global &lt;code&gt;find and replace&lt;/code&gt; throughout your whole project and replacing all instances of &lt;code&gt;:create&lt;/code&gt; with &lt;code&gt;:build&lt;/code&gt;. I don't recommend doing that: you are likely to end up with numerous failing tests 🤯 Fix the specs one-by-one. It will take longer, but you will be confident of the end result.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#culprit-2-relying-on-default-raw-create-endraw-strategy-for-creating-associated-objects-in-factories" class="anchor"&gt;
+  &lt;/a&gt;
+  Culprit #2: Relying on default &lt;code&gt;:create&lt;/code&gt; strategy for creating associated objects in factories
+&lt;/h3&gt;
+
+&lt;p&gt;You are likely to have several factories where you provide associations as well, and this is where things might get tricky.&lt;/p&gt;
+
+&lt;p&gt;By default, even if you call the parent factory with &lt;code&gt;:build&lt;/code&gt;, the subordinate factory will still be called with &lt;code&gt;:create&lt;/code&gt;. This means that in your tests, you will always write associated objects to the database even when it isn't necessary for the test.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight ruby"&gt;&lt;code&gt;&lt;span class="n"&gt;factory&lt;/span&gt; &lt;span class="ss"&gt;:step&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
+  &lt;span class="n"&gt;association&lt;/span&gt; &lt;span class="ss"&gt;:recipe&lt;/span&gt;
+&lt;span class="k"&gt;end&lt;/span&gt;
+
+&lt;span class="no"&gt;FactoryBot&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;build&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="ss"&gt;:step&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mf"&gt;0.1&lt;/span&gt;&lt;span class="n"&gt;ms&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="k"&gt;begin&lt;/span&gt; &lt;span class="n"&gt;transation&lt;/span&gt;
+&lt;span class="no"&gt;Recipe&lt;/span&gt; &lt;span class="no"&gt;Create&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mf"&gt;0.5&lt;/span&gt;&lt;span class="n"&gt;ms&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="no"&gt;INSERT&lt;/span&gt; &lt;span class="no"&gt;INTO&lt;/span&gt; &lt;span class="s2"&gt;"recipes"&lt;/span&gt; &lt;span class="no"&gt;DEFAULT&lt;/span&gt; &lt;span class="no"&gt;VALUES&lt;/span&gt;
+&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mf"&gt;0.6&lt;/span&gt;&lt;span class="n"&gt;ms&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="n"&gt;commit&lt;/span&gt; &lt;span class="n"&gt;transaction&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;p&gt;To avoid this, you can explicitly use the &lt;code&gt;:build&lt;/code&gt; strategy in the factories whenever possible.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight ruby"&gt;&lt;code&gt;&lt;span class="n"&gt;factory&lt;/span&gt; &lt;span class="ss"&gt;:step&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
+  &lt;span class="n"&gt;association&lt;/span&gt; &lt;span class="ss"&gt;:recipe&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="ss"&gt;strategy: :build&lt;/span&gt;
+&lt;span class="k"&gt;end&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#culprit-3-not-providing-associated-objects-in-factory-callbacks-explicitly" class="anchor"&gt;
+  &lt;/a&gt;
+  Culprit #3: Not providing associated objects in factory callbacks &lt;em&gt;explicitly&lt;/em&gt;
+&lt;/h3&gt;
+
+&lt;p&gt;Say we have a factory trait for creating a &lt;code&gt;recipe&lt;/code&gt; that has two &lt;code&gt;steps&lt;/code&gt;:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight ruby"&gt;&lt;code&gt;&lt;span class="c1"&gt;# spec/factories/recipe_factory.rb&lt;/span&gt;
+&lt;span class="no"&gt;FactoryBot&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;define&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
+  &lt;span class="n"&gt;factory&lt;/span&gt; &lt;span class="ss"&gt;:recipe&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
+    &lt;span class="c1"&gt;# more code&lt;/span&gt;
+    &lt;span class="n"&gt;trait&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="ss"&gt;:with_two_steps&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
+      &lt;span class="n"&gt;after&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="ss"&gt;:create&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt; &lt;span class="o"&gt;|&lt;/span&gt;&lt;span class="n"&gt;record&lt;/span&gt;&lt;span class="o"&gt;|&lt;/span&gt;
+        &lt;span class="n"&gt;record&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;steps&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&amp;lt;&lt;/span&gt; &lt;span class="n"&gt;create_pair&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="ss"&gt;:step&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+          &lt;span class="ss"&gt;account_id: &lt;/span&gt;&lt;span class="n"&gt;record&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;account_id&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+          &lt;span class="ss"&gt;body: &lt;/span&gt;&lt;span class="no"&gt;Faker&lt;/span&gt;&lt;span class="o"&gt;::&lt;/span&gt;&lt;span class="no"&gt;Food&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;description&lt;/span&gt;
+        &lt;span class="p"&gt;)&lt;/span&gt;
+      &lt;span class="k"&gt;end&lt;/span&gt;
+    &lt;span class="k"&gt;end&lt;/span&gt;
+  &lt;span class="k"&gt;end&lt;/span&gt;
+&lt;span class="k"&gt;end&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The issue with &lt;code&gt;with_two_steps&lt;/code&gt; trait is that &lt;code&gt;after(:create)&lt;/code&gt; callback doesn't explicitly specify the &lt;code&gt;recipe&lt;/code&gt; for the &lt;code&gt;step&lt;/code&gt; object that is being created. When &lt;code&gt;step&lt;/code&gt; factory is called from this callback, another &lt;code&gt;recipe&lt;/code&gt; object is always created, unbeknown to anyone. Why?&lt;/p&gt;
+
+&lt;p&gt;Let's have a look at how the &lt;code&gt;step&lt;/code&gt; factory is designed. For each new &lt;code&gt;step&lt;/code&gt; an associated &lt;code&gt;recipe&lt;/code&gt; object is created:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight ruby"&gt;&lt;code&gt;&lt;span class="c1"&gt;# spec/factories/step_factory.rb&lt;/span&gt;
+&lt;span class="no"&gt;FactoryBot&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;define&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
+  &lt;span class="n"&gt;factory&lt;/span&gt; &lt;span class="ss"&gt;:step&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
+    &lt;span class="ss"&gt;account_id: &lt;/span&gt;&lt;span class="no"&gt;Faker&lt;/span&gt;&lt;span class="o"&gt;::&lt;/span&gt;&lt;span class="no"&gt;Number&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;number&lt;/span&gt;
+      &lt;span class="c1"&gt;# more code&lt;/span&gt;
+    &lt;span class="n"&gt;association&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="ss"&gt;:recipe&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;# this always creates a recipe&lt;/span&gt;
+  &lt;span class="k"&gt;end&lt;/span&gt; 
+&lt;span class="k"&gt;end&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This is what causes that extra &lt;code&gt;recipe&lt;/code&gt; to be created in the example above. By explicitly setting the &lt;code&gt;recipe&lt;/code&gt; object in the &lt;code&gt;:with_two_steps&lt;/code&gt; trait definition, you can avoid writing an unnecessary extra &lt;code&gt;recipe&lt;/code&gt; into the database:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight ruby"&gt;&lt;code&gt;&lt;span class="c1"&gt;# spec/factories/recipe_factory.rb&lt;/span&gt;
+&lt;span class="no"&gt;FactoryBot&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;define&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
+  &lt;span class="n"&gt;factory&lt;/span&gt; &lt;span class="ss"&gt;:recipe&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
+  &lt;span class="c1"&gt;# more code&lt;/span&gt;
+    &lt;span class="n"&gt;trait&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="ss"&gt;:with_two_steps&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
+      &lt;span class="n"&gt;after&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="ss"&gt;:create&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt; &lt;span class="o"&gt;|&lt;/span&gt;&lt;span class="n"&gt;record&lt;/span&gt;&lt;span class="o"&gt;|&lt;/span&gt;
+        &lt;span class="n"&gt;record&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;steps&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&amp;lt;&lt;/span&gt; &lt;span class="n"&gt;create_pair&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="ss"&gt;:step&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+          &lt;span class="ss"&gt;account_id: &lt;/span&gt;&lt;span class="n"&gt;record&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;account_id&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+          &lt;span class="ss"&gt;body: &lt;/span&gt;&lt;span class="no"&gt;Faker&lt;/span&gt;&lt;span class="o"&gt;::&lt;/span&gt;&lt;span class="no"&gt;Food&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;description&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+          &lt;span class="ss"&gt;recipe: &lt;/span&gt;&lt;span class="n"&gt;record&lt;/span&gt; &lt;span class="c1"&gt;# set the recipe explicitly&lt;/span&gt;
+        &lt;span class="p"&gt;)&lt;/span&gt;
+      &lt;span class="k"&gt;end&lt;/span&gt;
+    &lt;span class="k"&gt;end&lt;/span&gt;
+  &lt;span class="k"&gt;end&lt;/span&gt;
+&lt;span class="k"&gt;end&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This might seem like a minor win, but if this trait is called from multiple tests, a fix like this can remove dozens of unnecessary writes to the database. If multiple factories are buggy in similar ways, we can be talking about hundreds of unnecessary writes.&lt;/p&gt;
+
+&lt;p&gt;This might also seem like a convoluted tutorial example, but sadly, bugs related to associations in factories are very common, incredibly tricky to spot, and can be even more convoluted in real-life projects.&lt;/p&gt;
+
+&lt;p&gt;A good rule of thumb here is this: whenever possible, avoid defining associations in factory definitions. Create the associated objects test by test, as needed. You’ll end up with much more manageable test data. If this is not possible, make sure you are not creating more data than is strictly necessary.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#culprit-4-using-raw-let-endraw-incorrectly" class="anchor"&gt;
+  &lt;/a&gt;
+  Culprit #4: Using &lt;code&gt;let!&lt;/code&gt; incorrectly
+&lt;/h3&gt;
+
+&lt;p&gt;It might seem convenient to define all the test data you need in your test examples on top of your test file in this way:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight ruby"&gt;&lt;code&gt;&lt;span class="n"&gt;let!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;recipe_1&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="o"&gt;...&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="n"&gt;let!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;recipe_2&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="o"&gt;...&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="n"&gt;let!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;step_1&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="o"&gt;...&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="n"&gt;let!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;step_2&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="o"&gt;...&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="n"&gt;it&lt;/span&gt; &lt;span class="s1"&gt;'test example that uses recipe_1 and recipe_2 objects'&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
+&lt;span class="k"&gt;end&lt;/span&gt;
+
+&lt;span class="n"&gt;it&lt;/span&gt; &lt;span class="s1"&gt;'test example that uses just recipe_1 object'&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
+&lt;span class="k"&gt;end&lt;/span&gt;
+
+&lt;span class="n"&gt;it&lt;/span&gt; &lt;span class="s1"&gt;'test example that uses step_1 and step_2 objects'&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
+&lt;span class="k"&gt;end&lt;/span&gt;
+
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This looks clean and easy to read. However, due to the nature of how &lt;code&gt;let!&lt;/code&gt; &lt;a href="https://relishapp.com/rspec/rspec-core/v/2-5/docs/helper-methods/let-and-let"&gt;works&lt;/a&gt;, a new instance of &lt;strong&gt;all&lt;/strong&gt; of these test objects will be created before each test example run, even for test cases that don’t require all (&lt;strong&gt;or any!&lt;/strong&gt;) of those objects to exist. In a big test group, this innocent mistake might lead to &lt;strong&gt;dozens&lt;/strong&gt; of unnecessary writes to the database. &lt;/p&gt;
+
+&lt;p&gt;To fix this, see if it's possible to create separate contexts for related text examples:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight ruby"&gt;&lt;code&gt;
+&lt;span class="n"&gt;context&lt;/span&gt; &lt;span class="s1"&gt;'tests that use recipe_1 and recipe_2 objects'&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
+  &lt;span class="n"&gt;let!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;recipe_1&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="o"&gt;...&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;
+  &lt;span class="n"&gt;let!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;recipe_2&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="o"&gt;...&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;
+
+  &lt;span class="n"&gt;it&lt;/span&gt; &lt;span class="s1"&gt;'test example that uses recipe_1 and recipe_2 objects'&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
+  &lt;span class="k"&gt;end&lt;/span&gt;
+  &lt;span class="c1"&gt;# more test examples&lt;/span&gt;
+&lt;span class="k"&gt;end&lt;/span&gt;
+
+&lt;span class="n"&gt;context&lt;/span&gt; &lt;span class="s1"&gt;'tests that use step_1 and step_2 objects'&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
+  &lt;span class="n"&gt;let!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;step_1&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="o"&gt;...&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;
+  &lt;span class="n"&gt;let!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;step_2&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="o"&gt;...&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;
+
+  &lt;span class="n"&gt;it&lt;/span&gt; &lt;span class="s1"&gt;'test example that uses step_1 and step_2 objects'&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
+  &lt;span class="k"&gt;end&lt;/span&gt;
+  &lt;span class="c1"&gt;# more test examples&lt;/span&gt;
+&lt;span class="k"&gt;end&lt;/span&gt;
+
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+
+
+
+&lt;p&gt;All of these tips come down to the simple idea of being mindful of the objects your tests generate and never creating more than the bare minimum of data that is necessary for your test to work properly. It's a mindset shift that can take a while to adopt, but that is likely to pay off in the future. After all, a slow test suite kills your team's productivity and makes certain programming approaches like Test-driven development &lt;del&gt;impossible&lt;/del&gt; incredibly painful. &lt;/p&gt;
+
+&lt;p&gt;I hope this tutorial will help you speed up your project's tests. If you are aware of other common issues that can slow down a test suite, please share them in the comments below.&lt;/p&gt;
+
+&lt;p&gt;Happy testing!&lt;/p&gt;
+
+</description>
+      <category>ruby</category>
+      <category>rails</category>
+      <category>testing</category>
+      <category>tdd</category>
+    </item>
+    <item>
       <title>HTTP Fundamentals</title>
       <author>Anubhav Singhal ☃️</author>
       <pubDate>Mon, 11 Jan 2021 07:46:13 +0000</pubDate>
@@ -1156,6 +1601,30 @@ Connect with me: &lt;a href="https://linkedin.com/in/anubhavitis"&gt; LinkedIn &
       <category>html</category>
       <category>webdev</category>
       <category>beginners</category>
+    </item>
+    <item>
+      <title>Understanding Docker: part 26 – Docker components</title>
+      <author>Aurélie Vache</author>
+      <pubDate>Mon, 11 Jan 2021 07:29:52 +0000</pubDate>
+      <link>https://dev.to/aurelievache/understanding-docker-part-26-docker-components-pfc</link>
+      <guid>https://dev.to/aurelievache/understanding-docker-part-26-docker-components-pfc</guid>
+      <description>&lt;p&gt;Understanding Docker can be difficult or time-consuming. In order to spread knowledge about Cloud technologies I started to create sketchnotes about Docker. I think it could be a good way, more visual, to explain Docker (and other technologies like Kubernetes and Istio).&lt;/p&gt;
+
+&lt;p&gt;We continue the series of Docker sketchnotes with an explanation about Docker Engine components.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--JSL7qHE---/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/i/9ktykligj5zatlzw70vz.jpeg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--JSL7qHE---/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/i/9ktykligj5zatlzw70vz.jpeg" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Ac54cXpp--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/i/37xpeg3s5mcj2y5555ay.jpeg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Ac54cXpp--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/i/37xpeg3s5mcj2y5555ay.jpeg" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;As usual, if you like theses sketchnotes, you can follow me, and tell me what do you think. I will publish others sketchs shortly :-).&lt;/p&gt;
+
+&lt;p&gt;If you are interested, I published all the sketchnotes on Kubernetes (and new ones!) to make a "book" of 120 pages: ["Understanding Kubernetes in a visual way"] and a sketchbook about Istio (&lt;a href="https://gumroad.com/aurelievache#uCxcr"&gt;https://gumroad.com/aurelievache#uCxcr&lt;/a&gt;).&lt;/p&gt;
+
+</description>
+      <category>docker</category>
+      <category>devops</category>
+      <category>beginners</category>
+      <category>cloud</category>
     </item>
     <item>
       <title>Create animated navigation indicator with HTML, CSS and JS</title>
@@ -1376,6 +1845,178 @@ Connect with me: &lt;a href="https://linkedin.com/in/anubhavitis"&gt; LinkedIn &
       <category>webdev</category>
       <category>html</category>
       <category>css</category>
+    </item>
+    <item>
+      <title>An Introduction to Web Accessibility</title>
+      <author>EidorianAvi</author>
+      <pubDate>Mon, 11 Jan 2021 03:23:03 +0000</pubDate>
+      <link>https://dev.to/eidorianavi/an-introduction-to-web-accessibility-3mfl</link>
+      <guid>https://dev.to/eidorianavi/an-introduction-to-web-accessibility-3mfl</guid>
+      <description>&lt;p&gt;This week I'd like to talk about web accessibility. It's a topic I find not only interesting but also really important. I was asked once during an interview how to make your page more accessible and I blanked. I had all the answers I just didn't piece them together properly. Recently I've reexamined the topic and I'd like to share some of the points I've come across.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#what-is-web-accessibility" class="anchor"&gt;
+  &lt;/a&gt;
+  What is Web Accessibility?
+&lt;/h3&gt;
+
+&lt;p&gt;Well it's a pretty fitting name. It's making your web page more accessible to a larger audience. This means designing it in a way that allows for people of all varieties, disabilities included, to have equal access to your page. This is important for a multitude of reasons. From a business standpoint it makes sense you'd want your product to reach as many people as humanely possible. From an inclusivity standpoint it makes sense to build your page out in a way that allows those with disabilities to partake in standard societal practices such as browsing the web.&lt;/p&gt;
+
+&lt;p&gt;Luckily HTML5 brought along many features that allow for much more inclusive practices. It allowed for writing much more semantic HTML. Semantic HTML meaning the code is much more descriptive to what it performs and contains. This allowed for screen readers, that someone with a visual disability might use, to sort through much more organized and sectioned off web pages. &lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#ways-to-improve-accessibility" class="anchor"&gt;
+  &lt;/a&gt;
+  Ways to Improve Accessibility:
+&lt;/h3&gt;
+
+&lt;h4&gt;
+  &lt;a href="#1-headerbodyfooter" class="anchor"&gt;
+  &lt;/a&gt;
+  1. Header/Body/Footer
+&lt;/h4&gt;
+
+&lt;p&gt;Using tags to identify the three major parts of the page is easy to overlook considering they're not required when building out your page. It's important when making your page accessible to not section it out into its proper segments however.&lt;/p&gt;
+
+&lt;p&gt;Use the header tags to store stuff such as your h1 tag which is the primary focus of the page as well as stuff like navigation bars or logo images. &lt;/p&gt;
+
+&lt;p&gt;Use the body tags to store your pages actual content whatever that may be. You can only use these once on each page which makes sense there shouldn't be two body sections. This is used to store the mass majority of your page, the content the user is likely on the page to see. This can include tags of almost all varieties to be frank and will take up the majority of your HTML document. &lt;/p&gt;
+
+&lt;p&gt;Use the footer tags to store stuff such as copyright information, contact info, a sitemap or a link to the top of the page. All things that are necessary for your page but aren't necessarily actual content of the page.&lt;/p&gt;
+
+&lt;p&gt;These not only help you organize your page but a lot of screen readers can use them to quickly navigate the page for the user. &lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#2-h1-h6-tags" class="anchor"&gt;
+  &lt;/a&gt;
+  2. h1 - h6 tags
+&lt;/h4&gt;
+
+&lt;p&gt;So we all use these already on our pages but are we using them correctly? To be honest I definitely wasn't for a good while.&lt;/p&gt;
+
+&lt;p&gt;Here's the thing when it comes to the header tags. A lot of people myself included use them for their sizing as opposed to their importance. Don't do that. I'm going to say it one more time just to drive it home. Don't do that. &lt;/p&gt;
+
+&lt;p&gt;This matters for not only web accessibility but also for search engine optimization(SEO). &lt;/p&gt;
+
+&lt;p&gt;From what I've gathered the h1 tag should be used only once per page. This is the overall point of the page and will be the first thing a search engine is seeking to learn if the page is relevant to a search. If you use it all over the place because you need larger text your pages meaning is lost. &lt;/p&gt;
+
+&lt;p&gt;Following h2-h6 should be used in accordance with overall relevancy to the pages topic and to each other. These can be used multiple times throughout the page but each should be tagged accordingly.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;&amp;lt;header&amp;gt;
+   &amp;lt;h1&amp;gt;This page is about Star Wars!&amp;lt;/h1&amp;gt;
+&amp;lt;header&amp;gt;
+&amp;lt;body&amp;gt;
+   &amp;lt;h2&amp;gt;The Prequel Trilogy&amp;lt;/h2&amp;gt;
+     &amp;lt;h3&amp;gt;Episode I: The Phantom Menace&amp;lt;/h3&amp;gt;
+     &amp;lt;h3&amp;gt;Episode II: Attack of the Clones&amp;lt;/h3&amp;gt;
+     &amp;lt;h3&amp;gt;Episode III: Revenge of the Sith&amp;lt;/h3&amp;gt;
+   &amp;lt;h2&amp;gt;The Original Trilogy&amp;lt;/h2&amp;gt;
+      &amp;lt;h3&amp;gt;Episode IV: A New Hope&amp;lt;/h3&amp;gt;
+      &amp;lt;h3&amp;gt;Episode V: The Empire Strikes Back&amp;lt;/h3&amp;gt;
+      &amp;lt;h3&amp;gt;Episode VI: Return of the Jedi&amp;lt;/h3&amp;gt;
+&amp;lt;/body&amp;gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Notice how the tags are used in relation to their importance to the overall structure of the page. Not only that but I didn't jump from h2 to h5. The h3's are related to the h2 that precedes them. Structure your headers in such a fashion. &lt;/p&gt;
+
+&lt;p&gt;One last thing I have to mention on using your headers properly is to just use your CSS styling to adjust their sizing and style to what you need.&lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#3-labels-on-forms-alt-attribute-on-images" class="anchor"&gt;
+  &lt;/a&gt;
+  3. Labels on forms / alt attribute on images
+&lt;/h4&gt;
+
+&lt;p&gt;When creating a form it's important to associate a label with a provided input field. It's easy to do you simply pass in the id of the input field into the 'for' attribute of the label. This identifies exactly what is supposed to go into the input field.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;&amp;lt;form action=""&amp;gt;
+  &amp;lt;label for="username"&amp;gt;Male&amp;lt;/label&amp;gt;
+  &amp;lt;input type="text" id="username" value="male"&amp;gt;&amp;lt;br&amp;gt;
+  &amp;lt;input type="submit" value="Submit"&amp;gt;
+&amp;lt;/form&amp;gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;p&gt;When using an image that is a visual representation of a topic on the page it's important to provide a value for the alt attribute.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;&amp;lt;img src="deathstar.jpg" alt="The Death Star looming over Alderaan"&amp;gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This attribute is important for not if the image fails to load but if a user can't personally experience the image. &lt;/p&gt;
+
+&lt;p&gt;An instance of when not to use it is if the image is purely for styling effects on the page or if it already has a caption under it detailing it.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#wrap-up" class="anchor"&gt;
+  &lt;/a&gt;
+  Wrap Up
+&lt;/h3&gt;
+
+&lt;p&gt;These are just an introduction into making your page more accessible. There's really a lot more to it but I feel like these are a strong starting point in understanding what it is, why it matters and how to approach it. These are things you likely knew about but maybe didn't know why it mattered in using them correctly like I didn't initially. &lt;/p&gt;
+
+&lt;p&gt;I'll be wrapping up there but here are some great resources to further read on the topic: &lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="https://www.w3.org/WAI/fundamentals/accessibility-intro/"&gt;https://www.w3.org/WAI/fundamentals/accessibility-intro/&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://www.freecodecamp.org/learn/responsive-web-design/applied-accessibility/"&gt;https://www.freecodecamp.org/learn/responsive-web-design/applied-accessibility/&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Thanks for checking this out if you did and as always.. Happy Coding!&lt;/p&gt;
+
+</description>
+      <category>beginners</category>
+      <category>a11y</category>
+      <category>html</category>
     </item>
     <item>
       <title>focused breathing - A CSS animation to help with meditation and focused breathing exercises</title>
@@ -2469,982 +3110,6 @@ With great documentation and browser support, it is certainly going to be useful
       <category>programming</category>
       <category>productivity</category>
       <category>algorithms</category>
-    </item>
-    <item>
-      <title>5 tips to break up your workdays while working from home as a developer</title>
-      <author>Joachim Zeelmaekers</author>
-      <pubDate>Sun, 10 Jan 2021 22:17:22 +0000</pubDate>
-      <link>https://dev.to/joachimzeelmaekers/5-tips-to-break-up-your-workdays-while-working-from-home-as-a-developer-38oi</link>
-      <guid>https://dev.to/joachimzeelmaekers/5-tips-to-break-up-your-workdays-while-working-from-home-as-a-developer-38oi</guid>
-      <description>&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--EVleEV33--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://www.joachimzeelmaekers.be/content/images/2021/01/daria-nepriakhina-gm3bxHin8VA-unsplash.jpg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--EVleEV33--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://www.joachimzeelmaekers.be/content/images/2021/01/daria-nepriakhina-gm3bxHin8VA-unsplash.jpg" alt="5 tips to break up your workdays while working from home as a developer"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;As you might know, I'm a young developer. In my early days, I always thought that working as long as possible was the way to achieve my goals. And in a way, it helped me a lot, but there is a downside to this approach. You tend to burn out on programming from time to time. And this is normal, but often ignored by working "even harder".&lt;/p&gt;
-
-&lt;p&gt;My solution to this problem was always working out, but this is not for everyone. That's why I wanted to find a way for every developer to break up the workdays and get the rest you deserve. Best case scenario, you will even get more work done by working less. Crazy right?&lt;/p&gt;
-
-&lt;p&gt;As a developer, we work very goal-oriented. Every feature has acceptance criteria and has to be finished within a certain period of time. This can put a lot of pressure on the developer and certainly more junior ones. In the beginning, it's difficult to complete the issues within this timeframe and you get the feeling you have to work on it in your free time. And as we all know, that's not the thing you should do during your free time.&lt;/p&gt;
-
-&lt;p&gt;While working from home, I find it's even more difficult to close up the workday. Let's discuss some things you can do to break up your workdays while working from home.&lt;/p&gt;
-
-
-
-
-&lt;h3&gt;
-  &lt;a href="#nocode-day" class="anchor"&gt;
-  &lt;/a&gt;
-  No-code day
-&lt;/h3&gt;
-
-&lt;p&gt;The first thing that really works for me, is a no-code day. This day is either Saturday or Sunday for me. On this day, I write blog posts, listen to audiobooks, and sometimes even read about new technologies, but I don't write a line of code. This helps me to remove the focus on the pile of work that is waiting for me and allows me to do other things that I enjoy.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--pdFujrCk--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://images.unsplash.com/photo-1493711662062-fa541adb3fc8%3Fcrop%3Dentropy%26cs%3Dtinysrgb%26fit%3Dmax%26fm%3Djpg%26ixid%3DMXwxMTc3M3wwfDF8c2VhcmNofDN8fGhvYmJ5fGVufDB8fHw%26ixlib%3Drb-1.2.1%26q%3D80%26w%3D2000" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--pdFujrCk--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://images.unsplash.com/photo-1493711662062-fa541adb3fc8%3Fcrop%3Dentropy%26cs%3Dtinysrgb%26fit%3Dmax%26fm%3Djpg%26ixid%3DMXwxMTc3M3wwfDF8c2VhcmNofDN8fGhvYmJ5fGVufDB8fHw%26ixlib%3Drb-1.2.1%26q%3D80%26w%3D2000" alt="5 tips to break up your workdays while working from home as a developer"&gt;&lt;/a&gt;Photo by &lt;a href="https://unsplash.com/@jeshoots?utm_source=ghost&amp;amp;utm_medium=referral&amp;amp;utm_campaign=api-credit"&gt;JESHOOTS.COM&lt;/a&gt; / &lt;a href="https://unsplash.com/?utm_source=ghost&amp;amp;utm_medium=referral&amp;amp;utm_campaign=api-credit"&gt;Unsplash&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;I never knew that it would even improve my productivity by giving programming a rest. And what I also saw, is that it gives me a motivation boost. Certainly during these difficult times of Covid where we work from home and don't have a real break from the working environment.&lt;/p&gt;
-
-&lt;p&gt;What also works for me is to create a plan of attack for the next week during the no-code day. A good schedule will be beneficial in the long run, because you can simply focus on executing the plan, instead of wasting your precious coding time figuring out what to do.&lt;/p&gt;
-
-
-
-
-&lt;h3&gt;
-  &lt;a href="#take-breaks-like-you-would-at-the-office" class="anchor"&gt;
-  &lt;/a&gt;
-  Take breaks like you would at the office
-&lt;/h3&gt;
-
-&lt;p&gt;If you're used to working at the office, you probably take some breaks during the day and a pretty long lunch break. But when you have a pile of work waiting for you, you tend to take fewer breaks when you're sitting at home. I tend to do this as well.&lt;/p&gt;
-
-&lt;p&gt;Things like eating during a video call to avoid "wasting time" or even skip breakfast, because you have a call at 9 AM and still have to finish your demo. I solved this problem by scheduling three breaks at certain hours. When you plan out your days in the week, you can easily see where breaks can fit in. These breaks will reduce your stress levels by a lot.&lt;/p&gt;
-
-
-
-
-&lt;h3&gt;
-  &lt;a href="#create-a-separate-workspace" class="anchor"&gt;
-  &lt;/a&gt;
-  Create a separate workspace
-&lt;/h3&gt;
-
-&lt;p&gt;I know this is not always possible for everyone, but for those of you who can, make sure to separate your working environment from your private environments. I turned a bedroom into an office to be able to work from home and I only sit there while working. I never work from any of the other rooms.&lt;/p&gt;
-
-&lt;p&gt;This helps me to set the mindset to relax once I get out of my office. Leaving the office finishes off the day and allows me to start doing something else. I choose to go for a run or a walk and start my evening.&lt;/p&gt;
-
-
-
-
-&lt;h3&gt;
-  &lt;a href="#sleep" class="anchor"&gt;
-  &lt;/a&gt;
-  Sleep
-&lt;/h3&gt;
-
-&lt;p&gt;This is not a specific tip for working from home, but it's so important that I have to put it in here. You might be coding at night and it could carry you away. When I get in the zone, it could result in staying awake till 2 AM, and that's not good when you're waking up at 6 AM.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--HnET6tMB--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://images.unsplash.com/photo-1487300001871-12053913095d%3Fcrop%3Dentropy%26cs%3Dtinysrgb%26fit%3Dmax%26fm%3Djpg%26ixid%3DMXwxMTc3M3wwfDF8c2VhcmNofDV8fHNsZWVwfGVufDB8fHw%26ixlib%3Drb-1.2.1%26q%3D80%26w%3D2000" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--HnET6tMB--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://images.unsplash.com/photo-1487300001871-12053913095d%3Fcrop%3Dentropy%26cs%3Dtinysrgb%26fit%3Dmax%26fm%3Djpg%26ixid%3DMXwxMTc3M3wwfDF8c2VhcmNofDV8fHNsZWVwfGVufDB8fHw%26ixlib%3Drb-1.2.1%26q%3D80%26w%3D2000" alt="5 tips to break up your workdays while working from home as a developer"&gt;&lt;/a&gt;Photo by &lt;a href="https://unsplash.com/@allexx54?utm_source=ghost&amp;amp;utm_medium=referral&amp;amp;utm_campaign=api-credit"&gt;Alexander Possingham&lt;/a&gt; / &lt;a href="https://unsplash.com/?utm_source=ghost&amp;amp;utm_medium=referral&amp;amp;utm_campaign=api-credit"&gt;Unsplash&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;To make sure you sleep well, try and put away all devices 1 hour before going to bed. Maybe you could pick up a book and read some pages to finish off your workday.&lt;/p&gt;
-
-
-
-
-&lt;h3&gt;
-  &lt;a href="#turn-off-your-notifications" class="anchor"&gt;
-  &lt;/a&gt;
-  Turn off your notifications
-&lt;/h3&gt;
-
-&lt;p&gt;I know the FOMO (Fear Of Missing Out) is very high. Certainly when you have an active and interesting Slack in your company. But try turning off your notifications for 1 day and check it 3 times a day. You will thank me later.&lt;/p&gt;
-
-&lt;p&gt;This improved my productivity by at least 20% on the first day. I also figured out that checking my emails only 3 times a day has the same impact because mails are not that urgent. When the matter is urgent enough, they will just call you. That's why I check my emails at 7 AM, 11 AM and 4 PM.&lt;/p&gt;
-
-
-
-
-&lt;p&gt;I tested out these tips over the last couple of months, and I must say it helped me a lot and I hope they can help you as well. If you want to read more on this topic, you should certainly check out my blog &lt;a href="https://www.joachimzeelmaekers.be/the-6-things-i-do-to-motivate-myself-every-single-day/"&gt;The 6 Things I Do to Motivate Myself Every Single Day&lt;/a&gt;.&lt;/p&gt;
-
-</description>
-      <category>wfh</category>
-      <category>productivity</category>
-      <category>career</category>
-      <category>motivation</category>
-    </item>
-    <item>
-      <title>How to Write CSS for Both Light &amp; Dark Display Modes</title>
-      <author>Nathan Pasko</author>
-      <pubDate>Sun, 10 Jan 2021 21:52:30 +0000</pubDate>
-      <link>https://dev.to/sprite421/how-to-write-css-for-both-light-dark-display-modes-4bok</link>
-      <guid>https://dev.to/sprite421/how-to-write-css-for-both-light-dark-display-modes-4bok</guid>
-      <description>&lt;p&gt;This is the beginning of a little series about responsive design and some cool new ways to make your web projects—sites, apps, games—more responsive. In this article we'll check out a quick and easy way to use CSS media queries to check if the client device is using light or dark display mode, and set different styles for light and dark.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#why-lightdark-mode-shifting-is-cool" class="anchor"&gt;
-  &lt;/a&gt;
-  Why Light/Dark Mode Shifting is Cool
-&lt;/h1&gt;
-
-&lt;p&gt;Responsive web design has accelerated to meet the needs of an ecosystem full of different web-capable devices. Designers no longer take screen sizes for granted, so the web has become more fluid as designers create sites that adapt to context. Responsiveness dovetails with the industry standardization of "&lt;strong&gt;Dark Mode&lt;/strong&gt;"—that is, the capability of your OS to switch between a light- or dark-toned UI.&lt;/p&gt;
-
-&lt;p&gt;I was converted to Dark Mode fandom when I discovered I could set my phone and laptop to switch &lt;strong&gt;automatically&lt;/strong&gt; from light to dark at sunset (and back to light at sunrise).&lt;/p&gt;
-
-&lt;p&gt;From a design standpoint, an OS with these features is an invitation to create more fluid images and brand identities; the proliferation of these features &lt;strong&gt;encourages designers to express the same identity using multiple color schemes&lt;/strong&gt;, where in the past they might've stopped at one. This makes media more comfortable for users and helps images, websites, apps, and brands feel more intelligent and less static.&lt;/p&gt;
-
-&lt;p&gt;We can use a CSS media query to set up alternate styles for when users switch their client device between light and dark display modes. Now our site is responsive not only on a basis of screen size, but a basis of color scheme as well. Remember, responsiveness is all about responding to the context that different users and situations bring to our site.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#how-to-use-raw-preferscolorscheme-endraw-to-set-styles-specific-to-light-or-dark-mode" class="anchor"&gt;
-  &lt;/a&gt;
-  How to Use &lt;code&gt;prefers-color-scheme&lt;/code&gt; to Set Styles Specific to Light or Dark Mode
-&lt;/h1&gt;
-
-&lt;p&gt;Here's the media query that we can use to tap into the display color scheme, light or dark:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="k"&gt;@media&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;prefers-color-scheme&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;dark&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="c"&gt;/* These styles will be applied only in dark mode */&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;span class="k"&gt;@media&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;prefers-color-scheme&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;light&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="c"&gt;/* These styles will be applied only in light mode */&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-&lt;div class="highlight__panel js-actions-panel"&gt;
-&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
-    Enter fullscreen mode
-    
-
-
-    Exit fullscreen mode
-    
-
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-
-
-&lt;p&gt;As you can see, CSS gives us everything we need with media queries. Let's whip up a very basic example to test it out.&lt;/p&gt;
-
-&lt;p&gt;Let's start by making a blank HTML page. We just need to add some text to demonstrate the change from light to dark.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;h1&amp;gt;&lt;/span&gt;Light vs. Dark&lt;span class="nt"&gt;&amp;lt;/h1&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;h2&amp;gt;&lt;/span&gt;Testing&lt;span class="nt"&gt;&amp;lt;/h2&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;h2&amp;gt;&lt;/span&gt;Testing&lt;span class="nt"&gt;&amp;lt;/h2&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-&lt;div class="highlight__panel js-actions-panel"&gt;
-&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
-    Enter fullscreen mode
-    
-
-
-    Exit fullscreen mode
-    
-
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Similar to the way, in working with screen width, we write base styles assuming a very narrow breakpoint and use media queries to adapt to progressively wider breakpoints, we will write some CSS assuming light mode to start. Then we use the &lt;code&gt;prefers-color-scheme: dark&lt;/code&gt; media query to write corrective styles for dark mode.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="c"&gt;/* Default styles */&lt;/span&gt;
-&lt;span class="nt"&gt;html&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="c"&gt;/* Black text on a white background */&lt;/span&gt;
-  &lt;span class="nl"&gt;color&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="no"&gt;black&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;background&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="no"&gt;white&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;span class="c"&gt;/* Style changes to use in dark mode */&lt;/span&gt;
-&lt;span class="k"&gt;@media&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;prefers-color-scheme&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;dark&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="nt"&gt;html&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="c"&gt;/* White text on a black background */&lt;/span&gt;
-    &lt;span class="nl"&gt;color&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="no"&gt;white&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;background&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="no"&gt;black&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-&lt;div class="highlight__panel js-actions-panel"&gt;
-&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
-    Enter fullscreen mode
-    
-
-
-    Exit fullscreen mode
-    
-
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-
-
-&lt;p&gt;If we use that CSS on our page and then switch between light and dark display modes... voilà!&lt;/p&gt;
-
-&lt;p&gt;This example just inverts text color and background color on our page. That's a basic and pretty common application of light/dark mode responsiveness, but it's pretty useful. Like  the other building blocks of CSS, the possibilities this provides are endless.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#go-make-something-more-responsive" class="anchor"&gt;
-  &lt;/a&gt;
-  Go Make Something More Responsive
-&lt;/h1&gt;
-
-&lt;p&gt;The changes between light and dark mode can be subtle if diluting a brand or aesthetic is too risky, or they can be drastic, putting full emphasis on readability or low-light operation. Responsive design is all about expanding a design's preparedness and creating opportunities for a more specific and intuitive user experience. Using the &lt;code&gt;prefers-color-scheme&lt;/code&gt; query will help you invest more in your designs and serve users a more engaging experience.&lt;/p&gt;
-
-</description>
-      <category>html</category>
-      <category>css</category>
-      <category>beginners</category>
-      <category>webdev</category>
-    </item>
-    <item>
-      <title>Let’s Develop an E-Commerce Application From Scratch Using Java</title>
-      <author>nilmadhab mondal</author>
-      <pubDate>Sun, 10 Jan 2021 21:03:38 +0000</pubDate>
-      <link>https://dev.to/nilmadhab/let-s-develop-an-e-commerce-application-from-scratch-using-java-g1d</link>
-      <guid>https://dev.to/nilmadhab/let-s-develop-an-e-commerce-application-from-scratch-using-java-g1d</guid>
-      <description>&lt;p&gt;&lt;strong&gt;We are going to build an e-commerce application using Java, Spring backend, build web UI in Vue.js, and mobile UI using android. Stay tuned!&lt;/strong&gt;&lt;br&gt;
-&lt;a href="/api/collection/5948990638522368/5499519291097088/page/6412630948839424/image/4964528199041024" class="article-body-image-wrapper"&gt;&lt;img src="/api/collection/5948990638522368/5499519291097088/page/6412630948839424/image/4964528199041024" alt=""&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Every E-Commerce platform needs users, so in the first tutorial, we are going to create and display user-profiles. We are going to first build the backend APIs using Java and Springboot, then we are going to create UI in Vue.js and android mobile app. &lt;/p&gt;
-&lt;h2&gt;
-  &lt;a href="#live-demo" class="anchor"&gt;
-  &lt;/a&gt;
-  Live Demo
-&lt;/h2&gt;
-
-&lt;p&gt;You can test the API at the following swagger link. You can create and list all the users.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="http://remotedevs.org:8080/api/swagger-ui.html"&gt;Link&lt;/a&gt;&lt;/p&gt;
-&lt;h2&gt;
-  &lt;a href="#about-spring-framework" class="anchor"&gt;
-  &lt;/a&gt;
-  About Spring Framework
-&lt;/h2&gt;
-
-&lt;p&gt;The Spring Framework is a major open-source Java/J2EE application development framework for more productive application development. It is the most popular Java framework with a 30% share of usage. The Spring Framework features enable efficient development from simple Web to complex enterprise applications.&lt;/p&gt;
-
-&lt;p&gt;The main concepts that the Spring Framework depends on are:&lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;Dependency Injection (DI)&lt;/li&gt;
-&lt;li&gt;Aspect-Oriented Programming (AOP)&lt;/li&gt;
-&lt;li&gt;Java Persistence API (JPA)
-## Prerequisites&lt;/li&gt;
-&lt;li&gt;Knowledge in Core Java&lt;/li&gt;
-&lt;li&gt;Coding skills&lt;/li&gt;
-&lt;li&gt;Knowledge in Servlet and JSP&lt;/li&gt;
-&lt;li&gt;Java Development Kit (JDK)&lt;/li&gt;
-&lt;li&gt;IntelliJ IDEA Ultimate — open-source (recommended)&lt;/li&gt;
-&lt;li&gt;MySQL database — You can get it here!&lt;/li&gt;
-&lt;li&gt;A good browser (Chrome — recommended)&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;p&gt;Make sure you have all the listed prerequisites software installed and have basic knowledge of the request-response cycle as well as web containers. What more? Let’s jump into the tutorial!&lt;/p&gt;
-&lt;h2&gt;
-  &lt;a href="#project-setup" class="anchor"&gt;
-  &lt;/a&gt;
-  Project Setup
-&lt;/h2&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Open Spring Tool Suite application&lt;/li&gt;
-&lt;li&gt;Click File -&amp;gt; New -&amp;gt; Project -&amp;gt;Spring Starter Project&lt;/li&gt;
-&lt;li&gt;Give the essential data in the opened dialog box
-## Dependencies
-The dependencies I am adding to this project are given below. You can either add them during the creation of the project itself or later search for them in the Maven repository and add the tags of the required version in the pom.xml file.&lt;/li&gt;
-&lt;li&gt;Spring boot starter web&lt;/li&gt;
-&lt;li&gt;Tomcat embed jasper&lt;/li&gt;
-&lt;li&gt;Spring boot starter Data JPA&lt;/li&gt;
-&lt;li&gt;Mysql connector java&lt;/li&gt;
-&lt;li&gt;Spring boot starter test&lt;/li&gt;
-&lt;li&gt;Swagger 2&lt;/li&gt;
-&lt;li&gt;Swagger UI
-## Project Hierarchy
-The hierarchy is the important thing to notice in the Spring boot Application design structure. My project hierarchy is as below.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;&lt;a href="/api/collection/5948990638522368/5499519291097088/page/6412630948839424/image/5498746733854720" class="article-body-image-wrapper"&gt;&lt;img src="/api/collection/5948990638522368/5499519291097088/page/6412630948839424/image/5498746733854720" alt=""&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;h2&gt;
-  &lt;a href="#overview-of-our-backend-application" class="anchor"&gt;
-  &lt;/a&gt;
-  Overview of our Backend Application
-&lt;/h2&gt;
-
-&lt;p&gt;In this Spring Application following are important packages that you have to know before starting.&lt;/p&gt;
-
-&lt;p&gt;This is the spring architecture. The outside world calls the REST Apis, which interacts with the Service. Service calls the repository. The repository interacts with the database. We follow this pattern to make the codebase maintainable, instead of having spaghetti code which can be a nightmare in long term.&lt;a href="/api/collection/5948990638522368/5499519291097088/page/6412630948839424/image/4565464181637120" class="article-body-image-wrapper"&gt;&lt;img src="/api/collection/5948990638522368/5499519291097088/page/6412630948839424/image/4565464181637120" alt=""&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Let's look at first Rest controllers&lt;/p&gt;
-&lt;h2&gt;
-  &lt;a href="#controller" class="anchor"&gt;
-  &lt;/a&gt;
-  Controller
-&lt;/h2&gt;
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;package com.webtutsplus.ecommerce.controller;
-
-import java.util.List;
-
-import javax.validation.Valid;
-
-import com.webtutsplus.ecommerce.model.UserProfile;
-import com.webtutsplus.ecommerce.service.UserService;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
-
-import com.webtutsplus.ecommerce.common.ApiResponse;
-
-@RestController
-@RequestMapping("/user")
-public class    UserController {
-
-    @Autowired private UserService userService;
-
-    @GetMapping("/")
-    public ResponseEntity&amp;lt;List&amp;lt;UserProfile&amp;gt;&amp;gt; getUsers() {
-        List&amp;lt;UserProfile&amp;gt; dtos = userService.listProfiles();
-        return new ResponseEntity&amp;lt;List&amp;lt;UserProfile&amp;gt;&amp;gt;(dtos, HttpStatus.OK);
-    }
-
-    @PostMapping("/add")
-    public ResponseEntity&amp;lt;ApiResponse&amp;gt; addSurvey(@RequestBody @Valid UserProfile profile) {
-        userService.addProfile(profile);
-        return new ResponseEntity&amp;lt;&amp;gt;(new ApiResponse(true, "Profile has been created."), HttpStatus.CREATED);
-    }   
-}
-&lt;/code&gt;&lt;/pre&gt;
-&lt;div class="highlight__panel js-actions-panel"&gt;
-&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
-    Enter fullscreen mode
-    
-
-
-    Exit fullscreen mode
-    
-
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-
-&lt;p&gt;The User Controller class provides two HTTP methods GET and Post. The Get mapping function return a complete list of Users and the Post Mapping Function saves the new user profile in the Database.&lt;/p&gt;
-
-&lt;p&gt;As we can see UserControllers has a reference to UserService.&lt;/p&gt;
-&lt;h2&gt;
-  &lt;a href="#service" class="anchor"&gt;
-  &lt;/a&gt;
-  Service
-&lt;/h2&gt;
-
-&lt;p&gt;As we know the spring boot framework follows the POJO model and every controller has its own service interface, which provides the methods / Operation that is performed in the application.&lt;/p&gt;
-
-&lt;p&gt;In service class, there are only two methods list Profiles and add Profiles, which provide information. We can extend or add more functionality in the future according to requirements.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;package com.webtutsplus.ecommerce.service;
-
-import java.util.List;
-
-import com.webtutsplus.ecommerce.model.UserProfile;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.stereotype.Service;
-
-import com.webtutsplus.ecommerce.repository.UserProfileRepository;
-
-@Service
-public class UserService {
-
-    @Autowired private UserProfileRepository userRepo;
-
-
-    public void addProfile(UserProfile userProfile) {
-        userRepo.save(userProfile);
-    }
-
-    public List&amp;lt;UserProfile&amp;gt; listProfiles(){
-        return userRepo.findAll();      
-    }
-
-}
-&lt;/code&gt;&lt;/pre&gt;
-&lt;div class="highlight__panel js-actions-panel"&gt;
-&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
-    Enter fullscreen mode
-    
-
-
-    Exit fullscreen mode
-    
-
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Service calls UserProfileRepository which interacts with the database in form of models. Let's have a look at UserModel.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#model" class="anchor"&gt;
-  &lt;/a&gt;
-  Model
-&lt;/h2&gt;
-
-&lt;p&gt;The model class is a mirror of the user_profile table in the database in form of a java object. All attributes can be accessed through this class. You can also update the attribute values using the model class, which also makes changes in a database table.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;package com.webtutsplus.ecommerce.model;
-
-
-import javax.persistence.Entity;
-import javax.persistence.GeneratedValue;
-import javax.persistence.GenerationType;
-import javax.persistence.Id;
-import javax.persistence.Table;
-
-
-@Entity
-@Table(name="user_profile")
-public class UserProfile {
-
-    private long id;
-    private String username;
-    private String email;
-    private String firstName;
-    private String lastName;
-
-    public UserProfile() {}
-
-    public UserProfile(long id, String username, String email, String firstName, String lastName) {
-        super();
-        this.id = id;
-        this.username = username;
-        this.email = email;
-        this.firstName = firstName;
-        this.lastName = lastName;
-    }
-
-    @Id 
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
-    public long getId() {
-        return id;
-    }
-    public void setId(long id) {
-        this.id = id;
-    }
-    public String getUsername() {
-        return username;
-    }
-    public void setUsername(String username) {
-        this.username = username;
-    }
-    public String getEmail() {
-        return email;
-    }
-    public void setEmail(String email) {
-        this.email = email;
-    }
-    public String getFirstName() {
-        return firstName;
-    }
-    public void setFirstName(String firstName) {
-        this.firstName = firstName;
-    }
-    public String getLastName() {
-        return lastName;
-    }
-    public void setLastName(String lastName) {
-        this.lastName = lastName;
-    }
-
-}
-&lt;/code&gt;&lt;/pre&gt;
-&lt;div class="highlight__panel js-actions-panel"&gt;
-&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
-    Enter fullscreen mode
-    
-
-
-    Exit fullscreen mode
-    
-
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#result" class="anchor"&gt;
-  &lt;/a&gt;
-  Result
-&lt;/h2&gt;
-
-&lt;p&gt;After this save the file and run the application. Now you tomcat is listening on 8182 port.&lt;/p&gt;
-
-&lt;p&gt;[Link] 138.68.64.95:8080/api/swagger-ui.html#/user-controller&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#what-is-swagger" class="anchor"&gt;
-  &lt;/a&gt;
-  What is Swagger
-&lt;/h2&gt;
-
-&lt;p&gt;Swagger is an Interface Description Language for describing RESTful APIs expressed using JSON. Swagger is used together with a set of open-source software tools to design, build, document, and use RESTful web services. Swagger includes automated documentation, code generation, and test-case generation.&lt;/p&gt;
-
-&lt;p&gt;You can access the application documentation by entering the following URL in your browser.&lt;br&gt;
-&lt;a href="/api/collection/5948990638522368/5499519291097088/page/6412630948839424/image/5382097586356224" class="article-body-image-wrapper"&gt;&lt;img src="/api/collection/5948990638522368/5499519291097088/page/6412630948839424/image/5382097586356224" alt=""&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;You can edit your API information in documentation.swaggerConfig.java class and getApiInfo() method.&lt;/p&gt;
-
-&lt;p&gt;Swagger is very useful on the developer side because it provides very user-friendly API information as well as provide a way to test the API.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;    private ApiInfo getApiInfo() {
-        Contact contact = new Contact("webtutsplus", "http://webtutsplus.com", "contact.webtutsplus@gmail.com");
-        return new ApiInfoBuilder()
-                .title("User Profile API")
-                .description("Documentation User profile api")
-                .version("1.0.0")
-                .license("Apache 2.0")
-                .licenseUrl("http://www.apache.org/licenses/LICENSE-2.0")
-                .contact(contact)
-                .build();
-}
-&lt;/code&gt;&lt;/pre&gt;
-&lt;div class="highlight__panel js-actions-panel"&gt;
-&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
-    Enter fullscreen mode
-    
-
-
-    Exit fullscreen mode
-    
-
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Now we are going to look at some extra classes, which play an important role too.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#common" class="anchor"&gt;
-  &lt;/a&gt;
-  common
-&lt;/h2&gt;
-
-&lt;p&gt;In this package, there are two classes&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;· ApiResponse.java&lt;/strong&gt;&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;package com.webtutsplus.ecommerce.common;
-
-import java.time.LocalDateTime;
-
-public class ApiResponse {
-    private final boolean success;
-    private final String message;
-
-    public ApiResponse(boolean success, String message) {
-        this.success = success;
-        this.message = message;
-    }
-
-    public boolean isSuccess() {
-        return success;
-    }
-
-    public String getMessage() {
-        return message;
-    }
-
-    public String getTimestamp() {
-        return LocalDateTime.now().toString();
-    }
-}
-&lt;/code&gt;&lt;/pre&gt;
-&lt;div class="highlight__panel js-actions-panel"&gt;
-&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
-    Enter fullscreen mode
-    
-
-
-    Exit fullscreen mode
-    
-
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-
-
-&lt;p&gt;This class provides the status of API response. It has three methods is Success (), get Message (), get Timestamp (). The get Timestamp () method returns the Current Date and Time in String format.&lt;br&gt;
-&lt;strong&gt;PagedList.java&lt;/strong&gt;&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;package com.webtutsplus.ecommerce.common;
-
-import java.util.List;
-
-public class PagedList&amp;lt;T&amp;gt; {
-    private int totalPages;
-    private long totalElements;
-    private boolean hasNext;
-    private boolean hasPrevious;
-
-    private List&amp;lt;T&amp;gt; data;
-
-    public int getTotalPages() {
-        return totalPages;
-    }
-    public void setTotalPages(int totalPages) {
-        this.totalPages = totalPages;
-    }
-    public long getTotalElements() {
-        return totalElements;
-    }
-    public void setTotalElements(long totalElements) {
-        this.totalElements = totalElements;
-    }
-    public boolean isHasNext() {
-        return hasNext;
-    }
-    public void setHasNext(boolean hasNext) {
-        this.hasNext = hasNext;
-    }
-    public boolean isHasPrevious() {
-        return hasPrevious;
-    }
-    public void setHasPrevious(boolean hasPrevious) {
-        this.hasPrevious = hasPrevious;
-    }
-
-    public List&amp;lt;T&amp;gt; getData() {
-        return data;
-    }
-    public void setData(List&amp;lt;T&amp;gt; data) {
-        this.data = data;
-    }
-}
-&lt;/code&gt;&lt;/pre&gt;
-&lt;div class="highlight__panel js-actions-panel"&gt;
-&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
-    Enter fullscreen mode
-    
-
-
-    Exit fullscreen mode
-    
-
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-
-
-&lt;p&gt;This class contains all the information about the pages in the List data structure and provides total Pages, total Elements, has Next, has Previous attributes getter and setter.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#config" class="anchor"&gt;
-  &lt;/a&gt;
-  Config
-&lt;/h2&gt;
-
-&lt;p&gt;In these packages, there are two sub-packages named documentation and security.&lt;/p&gt;
-
-&lt;p&gt;· Documentation&lt;/p&gt;
-
-&lt;p&gt;In this Package, it provides information about the product and API.&lt;/p&gt;
-
-&lt;p&gt;Product API method provides information about the product and gets the Api Info method return information about Api like contact, Title, version, license.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;package com.webtutsplus.ecommerce.config.documentation;
-
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-
-import springfox.documentation.builders.ApiInfoBuilder;
-import springfox.documentation.builders.PathSelectors;
-import springfox.documentation.builders.RequestHandlerSelectors;
-import springfox.documentation.service.ApiInfo;
-import springfox.documentation.service.Contact;
-import springfox.documentation.spi.DocumentationType;
-import springfox.documentation.spring.web.plugins.Docket;
-import springfox.documentation.swagger2.annotations.EnableSwagger2;
-
-@Configuration
-@EnableSwagger2
-public class SwaggerConfig {
-    @Bean
-    public Docket productApi() {
-        return new Docket(DocumentationType.SWAGGER_2)
-                .apiInfo(getApiInfo())
-                .select()
-                .apis(RequestHandlerSelectors.basePackage("com.webtutsplus.ecommerce"))
-                .paths(PathSelectors.any())
-                .build();
-    }
-
-    private ApiInfo getApiInfo() {
-        Contact contact = new Contact("Umar Draz", "-", "umar.umar82@gmail.com");
-        return new ApiInfoBuilder()
-                .title("User Profile API")
-                .description("Documentation User profile api")
-                .version("1.0.0")
-                .license("Apache 2.0")
-                .licenseUrl("http://www.apache.org/licenses/LICENSE-2.0")
-                .contact(contact)
-                .build();
-    }
-}
-&lt;/code&gt;&lt;/pre&gt;
-&lt;div class="highlight__panel js-actions-panel"&gt;
-&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
-    Enter fullscreen mode
-    
-
-
-    Exit fullscreen mode
-    
-
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#security" class="anchor"&gt;
-  &lt;/a&gt;
-  Security
-&lt;/h2&gt;
-
-&lt;p&gt;This class is very important for applications because it provides the basic security for the whole application over HTTP or HTTPS protocol. It also implements configuration for users that which users have access to which pages or repositories.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;package com.webtutsplus.ecommerce.config.security;
-
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.security.config.annotation.authentication.builders.AuthenticationManagerBuilder;
-import org.springframework.security.config.annotation.web.builders.HttpSecurity;
-import org.springframework.security.config.annotation.web.builders.WebSecurity;
-import org.springframework.security.config.annotation.web.configuration.WebSecurityConfigurerAdapter;
-
-@Configuration
-public class SecurityConfig extends WebSecurityConfigurerAdapter
-{
-    @Override
-    protected void configure(HttpSecurity http) throws Exception 
-    {
-        http
-         .csrf().disable()
-         .authorizeRequests().anyRequest().authenticated()
-         .and()
-         .httpBasic();
-    }
-
-    @Autowired
-    public void configureGlobal(AuthenticationManagerBuilder auth) 
-            throws Exception 
-    {
-        auth.inMemoryAuthentication()
-            .withUser("admin")
-            .password("admin")
-            .roles("USER");
-    }
-
-    @Override
-    public void configure(WebSecurity registry) throws Exception {
-        registry.ignoring()
-        .antMatchers("/docs/**").antMatchers("/actuator/**").antMatchers("/v2/api-docs", "/configuration/ui",
-                "/swagger-resources/**", "/configuration/security", "/swagger-ui.html", "/webjars/**");
-    }
-}
-&lt;/code&gt;&lt;/pre&gt;
-&lt;div class="highlight__panel js-actions-panel"&gt;
-&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
-    Enter fullscreen mode
-    
-
-
-    Exit fullscreen mode
-    
-
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#exception" class="anchor"&gt;
-  &lt;/a&gt;
-  Exception
-&lt;/h2&gt;
-
-&lt;p&gt;This class is used in case of exception in any stage of the application. It has two classes Exception handler and validation exception, which throws when there is a validation error in the application at run time.&lt;/p&gt;
-
-&lt;p&gt;&lt;code&gt;ExceptionHandlerAdvice.java&lt;/code&gt;&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;package com.webtutsplus.ecommerce.exception;
-
-import com.webtutsplus.ecommerce.common.ApiResponse;
-import org.springframework.core.NestedExceptionUtils;
-import org.springframework.dao.DataIntegrityViolationException;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.ControllerAdvice;
-import org.springframework.web.bind.annotation.ExceptionHandler;
-import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
-
-
-@ControllerAdvice
-public class ExceptionHandlerAdvice {
-
-    @ExceptionHandler(DataIntegrityViolationException.class)
-    public ResponseEntity&amp;lt;ApiResponse&amp;gt; conflict(DataIntegrityViolationException ex){
-        String message = getMostSpecificMessage(ex);
-
-        return new ResponseEntity&amp;lt;ApiResponse&amp;gt;(new ApiResponse(false, message), HttpStatus.CONFLICT);
-    }
-
-//  @ExceptionHandler(AccessDeniedException.class)
-//  public ResponseEntity&amp;lt;ApiResponse&amp;gt; accessDenied(AccessDeniedException ex){
-//      String message = ex.getMessage();
-//      
-//      return new ResponseEntity&amp;lt;ApiResponse&amp;gt;(new ApiResponse(false, message), HttpStatus.FORBIDDEN);
-//  }
-
-    @ExceptionHandler(ValidationException.class)
-    public ResponseEntity&amp;lt;ApiResponse&amp;gt; validationException(ValidationException ex){
-        String message = ex.getMessage();
-
-        return new ResponseEntity&amp;lt;ApiResponse&amp;gt;(new ApiResponse(false, message), HttpStatus.UNPROCESSABLE_ENTITY);
-    }
-
-    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
-    public ResponseEntity&amp;lt;ApiResponse&amp;gt; methodArgumentTypeMismatchException(MethodArgumentTypeMismatchException ex){
-        ex.printStackTrace();
-
-        String message = ex.getMessage();
-        return new ResponseEntity&amp;lt;ApiResponse&amp;gt;(new ApiResponse(false, message), HttpStatus.INTERNAL_SERVER_ERROR);
-    }
-
-    @ExceptionHandler(Exception.class)
-    public ResponseEntity&amp;lt;ApiResponse&amp;gt; unhandledExceptions(Exception ex){
-        String message = NestedExceptionUtils.getMostSpecificCause(ex).getMessage();
-
-        ex.printStackTrace();
-
-        return new ResponseEntity&amp;lt;ApiResponse&amp;gt;(new ApiResponse(false, message), HttpStatus.INTERNAL_SERVER_ERROR);
-    }
-
-    private String getMostSpecificMessage(DataIntegrityViolationException ex) {
-        String message = NestedExceptionUtils.getMostSpecificCause(ex).getMessage();
-
-        if(message.contains("Detail:")) {
-            message = message.substring(message.indexOf("Detail:")+"Detail:".length());
-        }
-
-        return message;
-    }
-}
-&lt;/code&gt;&lt;/pre&gt;
-&lt;div class="highlight__panel js-actions-panel"&gt;
-&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
-    Enter fullscreen mode
-    
-
-
-    Exit fullscreen mode
-    
-
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-
-
-&lt;p&gt;&lt;code&gt;ValidationException.java&lt;/code&gt;&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;package com.webtutsplus.ecommerce.exception;
-
-public class ValidationException extends RuntimeException{
-    private static final long serialVersionUID = 6064663768170825752L;
-
-    public ValidationException(String message) {
-        super(message);
-    }
-
-    public ValidationException(String message, Throwable cause) {
-        super(message, cause);
-    }
-}
-&lt;/code&gt;&lt;/pre&gt;
-&lt;div class="highlight__panel js-actions-panel"&gt;
-&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
-    Enter fullscreen mode
-    
-
-
-    Exit fullscreen mode
-    
-
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-
-
-&lt;p&gt;&lt;strong&gt;Hope you had a great session with us! Follow us for such great and awesome tutorials!&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;Follow the next tutorial where we will build UI in both Vue.js and Android.&lt;/p&gt;
-
-</description>
-      <category>javascript</category>
-      <category>java</category>
     </item>
   </channel>
 </rss>
