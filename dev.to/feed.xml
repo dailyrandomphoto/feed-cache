@@ -251,6 +251,397 @@ today.setDate(today.getDate() - 1)&lt;/code&gt;&lt;/pre&gt;
       <category>javascript</category>
     </item>
     <item>
+      <title>How to Implement Google Photos Grid in javascript</title>
+      <author>Shailesh</author>
+      <pubDate>Fri, 12 Feb 2021 13:59:08 +0000</pubDate>
+      <link>https://dev.to/shaileshpandit/how-to-implement-google-photos-grid-in-javascript-575i</link>
+      <guid>https://dev.to/shaileshpandit/how-to-implement-google-photos-grid-in-javascript-575i</guid>
+      <description>&lt;p&gt;This is a step by step tutorial of how I implemented Scrubbable Photos Grid in javascript.&lt;/p&gt;
+
+&lt;p&gt;Google Photos uses virtual scrubbable photos grid. Scrubbable photos grid is laying out all your photos in grid so that users can jump to any random year/month/day in their timeline. This grid is virtual so that we are efficiently using the user's resources like cpu, memory, disk and network.&lt;/p&gt;
+
+&lt;p&gt;In this blog post I will cover how to implement such a grid in javascript, whether we can substitute this with a simple navigation mechanism for jumping to random year/month/day is separate design discussion all together.&lt;/p&gt;
+
+&lt;p&gt;This implementation will use many techniques to make this virtual grid as close to actual grid including&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Estimating and maintaining grid height as close to actual&lt;/li&gt;
+&lt;li&gt;Loading only visible photos to DOM&lt;/li&gt;
+&lt;li&gt;Detaching not visible photos from DOM&lt;/li&gt;
+&lt;li&gt;Positioning photos absolutely inside grid&lt;/li&gt;
+&lt;li&gt;Adjusting scroll position to compensate layout shifts in some scenarios&lt;/li&gt;
+&lt;/ul&gt;
+
+
+
+&lt;h1&gt;
+  &lt;a href="#design" class="anchor"&gt;
+  &lt;/a&gt;
+  Design
+&lt;/h1&gt;
+
+&lt;p&gt;Throughout the blog I will give summary of design decisions Google has taken for their scrubbable grid, but I will recommend to check this &lt;a href="https://medium.com/google-design/google-photos-45b714dfbed1"&gt;Google Design Blog&lt;/a&gt; for details.&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;We are going to keep our design goals same as stated in Google Design Blog:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;"&lt;strong&gt;Scrubbable Photos&lt;/strong&gt; - the ability to quickly jump to any part of the photo library.&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;Justified Layout&lt;/strong&gt; - fill the width of the browser and preserve the aspect-ratio of each photo (no square crops).&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;60fps Scrolling&lt;/strong&gt; - ensuring the page remains responsive even when looking at many thousands of photos.&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;Instantaneous Feel&lt;/strong&gt; - minimize the time waiting for anything to load."
+&lt;/li&gt;
+&lt;/ul&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;Google has gone extra mile to ensure row heights are uniform and near the target height while implementing justified layout, we will just use Flicker's justified layout lib for this demo.&lt;/p&gt;
+
+
+
+&lt;h1&gt;
+  &lt;a href="#implementation" class="anchor"&gt;
+  &lt;/a&gt;
+  Implementation
+&lt;/h1&gt;
+
+&lt;p&gt;I will be implementing this step by step, each step is a commit in the &lt;a href="https://github.com/shaileshpandit/scrubbable-photos-grid"&gt;scrubbable-photos-grid&lt;/a&gt; Github Repo. If you want to skip all detailed explanation and check final implementation, check this &lt;a href="https://glitch.com/edit/#!/scrubbable-photos-grid?path=script.js%3A15%3A0"&gt;Glitch&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;Our grid will be divided into sections, sections will have segments, segments will have tiles and tiles will have an image tag. Will cover reasons for these divisions in detail when we need to add them.&lt;br&gt;
+&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--EE58vtid--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/i/fg27c23lcwzbdcve5rhj.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--EE58vtid--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/i/fg27c23lcwzbdcve5rhj.png" alt="Section Segments and Tiles"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;I chose javascript to demonstrate how things should happen at runtime, you should be able to implement this in any client side framework of your choice.&lt;/p&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#step-1-dividing-whole-grid-in-sections-and-estimating-their-heights" class="anchor"&gt;
+  &lt;/a&gt;
+  Step 1 - Dividing whole grid in sections and estimating their heights
+&lt;/h2&gt;
+
+&lt;p&gt;In contrast to pagination and infinite scrolling, scrubbable grid always has all the photos present in the grid giving correct representation of finite height and size of scroll knob. This also gives the user ability to jump to any random time in the whole timeline of photos instantly.&lt;/p&gt;
+
+&lt;p&gt;An inefficient implementation of this will load metadata like width and height of all photos in the whole timeline as soon as page loads. Using the width and height of each photo we can allocate space on page for actual height of the grid. This will waste a lot of bandwidth and initial load time will be unacceptable.&lt;/p&gt;
+
+&lt;p&gt;To reduce this initial metadata payload, we will divide the whole timeline into virtual sections and estimate the height of each section to get the estimated height of the grid. Our initial payload will consist of an array of all sections with a number of images in those sections. Simplest way to divide the whole grid into sections is to have a section per month in the timeline. So if users timeline spans 10 years, our initial payload will consist of max 120 sections and number of photos in each section.&lt;/p&gt;
+
+&lt;p&gt;We start by adding basic html with a &lt;code&gt;grid div&lt;/code&gt; as a container of our  grid.&lt;/p&gt;
+
+
+&lt;div class="ltag_gist-liquid-tag"&gt;
+  
+&lt;/div&gt;
+
+
+&lt;p&gt;&lt;br&gt;Apis used are simulated in &lt;code&gt;api.js&lt;/code&gt;, it basically depends on included &lt;code&gt;store.json&lt;/code&gt; for all section details. We add the &lt;code&gt;getSections&lt;/code&gt; api to retrieve all sections and count of images inside each section. Apis are using random latency of 50-550ms.&lt;/p&gt;
+
+
+&lt;div class="ltag_gist-liquid-tag"&gt;
+  
+&lt;/div&gt;
+
+
+&lt;p&gt;&lt;br&gt;Sample output of &lt;code&gt;getSections&lt;/code&gt; api&lt;/p&gt;
+
+
+&lt;div class="ltag_gist-liquid-tag"&gt;
+  
+&lt;/div&gt;
+
+
+&lt;p&gt;&lt;br&gt;We add &lt;code&gt;script.js&lt;/code&gt; for loading our grid. Our entry point is &lt;code&gt;loadUi&lt;/code&gt;, in this we call &lt;code&gt;getSections&lt;/code&gt; api. After getting all sections we allocate space by creating an empty &lt;code&gt;div&lt;/code&gt; for each section with estimated height.&lt;/p&gt;
+
+
+&lt;div class="ltag_gist-liquid-tag"&gt;
+  
+&lt;/div&gt;
+
+
+&lt;p&gt; &lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;As described in Google Design Blog, to estimate height of sections we will assume average aspect ratio of all images being 3:2, approximate total width of all images in that section if laid horizontally and divide it by our grid width to approximate height of section when these images are wrapped at grid width.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+
+&lt;div class="ltag_gist-liquid-tag"&gt;
+  
+&lt;/div&gt;
+
+
+&lt;p&gt;&lt;br&gt;Next we add basic &lt;code&gt;style.css&lt;/code&gt; to highlight sections&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="ltag_gist-liquid-tag"&gt;
+  
+&lt;/div&gt;
+
+
+&lt;p&gt;&lt;a href="https://github.com/shaileshpandit/scrubbable-photos-grid/commit/7ddef4c73ee010f248a0235bddc3a80496ec4bb5"&gt;Step 1 Full Commit&lt;/a&gt;&lt;/p&gt;
+
+
+
+
+&lt;p&gt;&lt;strong&gt;Step 1 Result&lt;/strong&gt; - Observe that all empty section divs with estimated heights are created on load and give estimated height to the whole grid and scroll knob.&lt;br&gt;
+&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--9JpUmHmX--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/i/bsrtdeavyr84276gzyj4.gif" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--9JpUmHmX--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/i/bsrtdeavyr84276gzyj4.gif" alt="Step 1"&gt;&lt;/a&gt;&lt;/p&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#step-2-populating-section-with-segments" class="anchor"&gt;
+  &lt;/a&gt;
+  Step 2 - Populating section with segments
+&lt;/h2&gt;
+
+&lt;p&gt;While sections are virtual divisions of the whole grid to minimize initial load resources, segments are visible divisions of the grid for users to navigate and see photos in logical groups. We are going to use static segments for each day, but can be dynamic based on location or more granular time slots based on the number of photos a user has in a day.&lt;/p&gt;
+
+&lt;p&gt;We add &lt;code&gt;getSegments(sectionId)&lt;/code&gt; api to retrieve all segments of a section and images inside each segment.&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="ltag_gist-liquid-tag"&gt;
+  
+&lt;/div&gt;
+
+
+&lt;p&gt;&lt;br&gt;Here is a sample output of a &lt;code&gt;getSegments(sectionId)&lt;/code&gt; call&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="ltag_gist-liquid-tag"&gt;
+  
+&lt;/div&gt;
+
+
+&lt;p&gt;&lt;br&gt;Next we add &lt;code&gt;populateSection(sectionDiv)&lt;/code&gt; method in &lt;code&gt;script.js&lt;/code&gt; to populate a section div. While populating a section div we call &lt;code&gt;getSegments(sectionId)&lt;/code&gt; api, get segment html for all inner segments, add it to section div and update its height to 100% from the estimated height set initially.&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="ltag_gist-liquid-tag"&gt;
+  
+&lt;/div&gt;
+
+
+&lt;p&gt;&lt;br&gt;For generating segment html we use &lt;a href="https://www.npmjs.com/package/justified-layout"&gt;justified-layout&lt;/a&gt; lib. It gives us an absolute layout for all the tiles inside the segment. We generate individual tile html using this absolute layout and add it as segment childs.&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="ltag_gist-liquid-tag"&gt;
+  
+&lt;/div&gt;
+
+
+&lt;p&gt;&lt;br&gt;We call &lt;code&gt;populateSection&lt;/code&gt; eagerly in &lt;code&gt;populateGrid&lt;/code&gt; for all sections to demonstrate how populated sections will look like in ui and in DOM.&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="ltag_gist-liquid-tag"&gt;
+  
+&lt;/div&gt;
+
+
+&lt;p&gt;&lt;br&gt;Finally we make tiles absolutely positioned relative to segments and highlight segments and tiles in &lt;code&gt;style.css&lt;/code&gt;&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="ltag_gist-liquid-tag"&gt;
+  
+&lt;/div&gt;
+
+
+&lt;p&gt;&lt;a href="https://github.com/shaileshpandit/scrubbable-photos-grid/commit/200db9fc752ae537c8f8d153148a27c5add6e0d4"&gt;Step 2 Full Commit&lt;/a&gt;&lt;/p&gt;
+
+
+
+
+&lt;p&gt;&lt;strong&gt;Step 2 Result&lt;/strong&gt; - Observe all sections and segments eagerly loaded.&lt;br&gt;
+&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--fJZRGi21--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/i/hl2mghdchvvmc04udpns.gif" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--fJZRGi21--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/i/hl2mghdchvvmc04udpns.gif" alt="Step 2"&gt;&lt;/a&gt;&lt;/p&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#step-3-lazily-load-and-unload-sections" class="anchor"&gt;
+  &lt;/a&gt;
+  Step 3 - Lazily load and unload sections
+&lt;/h2&gt;
+
+&lt;p&gt;While in previous step we eagerly loaded all sections on page load for demo, we want to attach sections when they are about to come in viewport and detach when they go out of viewport. We will use &lt;a href="https://developer.mozilla.org/en-US/docs/Web/API/Intersection_Observer_API"&gt;intersection observer&lt;/a&gt; to implement this.&lt;/p&gt;
+
+&lt;p&gt;First we create &lt;code&gt;sectionObserver&lt;/code&gt; IntersectionObserver with &lt;code&gt;handleSectionIntersection&lt;/code&gt; as the intersection handler and use &lt;code&gt;200px&lt;/code&gt; of margin so that intersection will be triggered when our sections cross virtual viewport of actual viewport + 200px extra on both sides vertically.&lt;/p&gt;
+
+
+&lt;div class="ltag_gist-liquid-tag"&gt;
+  
+&lt;/div&gt;
+
+
+&lt;p&gt;&lt;br&gt;We handle intersection events by populating incoming sections and detaching outgoing sections from the virtual viewport. As populating a section needs fetching segments which is async, actual population can go out of order from intersection order. To mitigate this we maintain &lt;code&gt;lastSectionUpdateTimes&lt;/code&gt; for all sections and only populate if this section was not updated meanwhile.&lt;/p&gt;
+
+
+&lt;div class="ltag_gist-liquid-tag"&gt;
+  
+&lt;/div&gt;
+
+
+&lt;p&gt;&lt;br&gt;We detach the section by removing all child segments and not changing height.&lt;/p&gt;
+
+
+&lt;div class="ltag_gist-liquid-tag"&gt;
+  
+&lt;/div&gt;
+
+
+&lt;p&gt;&lt;br&gt;We attach &lt;code&gt;sectionObserver&lt;/code&gt; to all sections instead of eagerly loading all sections in &lt;code&gt;populateGrid&lt;/code&gt;.&lt;/p&gt;
+
+
+&lt;div class="ltag_gist-liquid-tag"&gt;
+  
+&lt;/div&gt;
+
+
+&lt;p&gt;&lt;a href="https://github.com/shaileshpandit/scrubbable-photos-grid/commit/b6cab98216964a789f250285cf725e91cad535a7"&gt;Step 3 Full Commit&lt;/a&gt;&lt;/p&gt;
+
+
+
+
+&lt;p&gt;&lt;strong&gt;Step 3 Result&lt;/strong&gt; - Observe how section divs are getting loaded and unloaded as we scroll.&lt;br&gt;
+&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--9EYyEfaZ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/i/z04umeikzxp2exgz6i6q.gif" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--9EYyEfaZ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/i/z04umeikzxp2exgz6i6q.gif" alt="Step 3"&gt;&lt;/a&gt;&lt;/p&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#step-4-moving-segments-and-sections-to-absolute-positioning" class="anchor"&gt;
+  &lt;/a&gt;
+  Step 4 - Moving segments and sections to absolute positioning
+&lt;/h2&gt;
+
+&lt;p&gt;Ideally browsers will calculate positioning changes of all segments and sections efficiently when height of some section changes. But if we want to make sure we control all positioning changes, we can move both segments and sections to absolute positioning. Our sections will be positioned absolutely within the grid and segments will be positioned absolutely within sections. Our tiles are already positioned absolutely within segments.&lt;/p&gt;
+
+&lt;p&gt;First we set sections and segments to absolute positioning and remove margins in css.&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="ltag_gist-liquid-tag"&gt;
+  
+&lt;/div&gt;
+
+
+&lt;p&gt;&lt;br&gt;Next we maintain &lt;code&gt;top&lt;/code&gt;, &lt;code&gt;height&lt;/code&gt; and &lt;code&gt;lastUpdateTime&lt;/code&gt; of all sections as a state in &lt;code&gt;sectionStates&lt;/code&gt;. We initialize it in &lt;code&gt;populateGrid&lt;/code&gt; and use it while creating initial detached sections.&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="ltag_gist-liquid-tag"&gt;
+  
+&lt;/div&gt;
+
+
+&lt;p&gt;&lt;br&gt;Next we update &lt;code&gt;populateSection&lt;/code&gt; to generate segments with absolute positioning, calculating top of each segment. We calculate the new height of the section, check if it has changed, in case it is changed, we move all next sections by adding &lt;code&gt;heightDelta&lt;/code&gt; to their tops. We also keep &lt;code&gt;sectionStates&lt;/code&gt; in sync of these changes.&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="ltag_gist-liquid-tag"&gt;
+  
+&lt;/div&gt;
+
+
+&lt;p&gt;&lt;br&gt;We don't need to keep the old height any more after detaching the section now, because absolute height remains the same after removing child segments.&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="ltag_gist-liquid-tag"&gt;
+  
+&lt;/div&gt;
+
+
+&lt;p&gt;&lt;a href="https://github.com/shaileshpandit/scrubbable-photos-grid/commit/ce0d430f51550ea6c69dd0a81cde9fcb5b5b8b26"&gt;Step 4 Full Commit&lt;/a&gt;&lt;/p&gt;
+
+
+
+
+&lt;p&gt;&lt;strong&gt;Step 4 Result&lt;/strong&gt; - Observe how absolute positioning is maintained by updating the top of all following section divs.&lt;br&gt;
+&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--3Xb6aDN---/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/i/bu4sw6mx9bfstiya2v7y.gif" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--3Xb6aDN---/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/i/bu4sw6mx9bfstiya2v7y.gif" alt="Step 4"&gt;&lt;/a&gt;&lt;/p&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#step-5-adjust-scroll-position-in-case-of-layout-shift" class="anchor"&gt;
+  &lt;/a&gt;
+  Step 5 - Adjust scroll position in case of layout shift
+&lt;/h2&gt;
+
+&lt;p&gt;At this point if you try to scroll down, sections will get attached and detached as expected and scrolling will feel normal. This works as the user scrolls linearly, sections get attached, their height changes, top of further sections increases, grid height changes, whole layout changes and yet we don't feel jumps while scrolling. This is because all layout changes are after current scroll position.&lt;/p&gt;
+
+&lt;p&gt;This will change if we allow random jumps to the scroll position. e.g. If we jump to a random scroll position on page load, we will be in state with some detached sections with estimated height prior to our current scroll position. Now if we scroll up, sections will get attached before scroll position and will result in layout changes before scroll position. It will feel like the whole page is jumping when we scroll. To try this just add the following to Step 4 commit inside &lt;code&gt;loadUi&lt;/code&gt; and try scrolling up.&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="ltag_gist-liquid-tag"&gt;
+  
+&lt;/div&gt;
+
+
+&lt;p&gt;&lt;br&gt;&lt;strong&gt;Page Jumping&lt;/strong&gt; - Observe how it feels like page is jumping to new position while scrolling&lt;br&gt;
+&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--P1ABhhoA--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/i/sp8rhw5l0ii046gsk5n2.gif" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--P1ABhhoA--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/i/sp8rhw5l0ii046gsk5n2.gif" alt="Page Jumping"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;br&gt;To fix this, we check if our current scroll position is ahead of the section for which we adjusted height and adjust scroll by &lt;code&gt;heightDelta&lt;/code&gt; at end of &lt;code&gt;populateSection&lt;/code&gt;.&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="ltag_gist-liquid-tag"&gt;
+  
+&lt;/div&gt;
+
+
+&lt;p&gt;&lt;a href="https://github.com/shaileshpandit/scrubbable-photos-grid/commit/df9599074b011876b9b31b2466503d47b20e98ef"&gt;Step 5 Full Commit&lt;/a&gt;&lt;/p&gt;
+
+
+
+
+&lt;p&gt;&lt;strong&gt;Final Result&lt;/strong&gt; - Observe how page jumping is fixed by adjusting scroll position&lt;br&gt;
+&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--JCdbb4Ql--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/i/jq46vi1o3gsmhgin8b8c.gif" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--JCdbb4Ql--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/i/jq46vi1o3gsmhgin8b8c.gif" alt="Final"&gt;&lt;/a&gt;&lt;/p&gt;
+
+
+
+
+&lt;p&gt;&lt;strong&gt;Final Glitch&lt;/strong&gt; - Open &lt;a href="https://scrubbable-photos-grid.glitch.me"&gt;live app&lt;/a&gt;. Use rewind in Glitch to see each step in action.&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="glitch-embed-wrap"&gt;
+  &lt;iframe src="https://glitch.com/embed/#!/embed/scrubbable-photos-grid?path=script.js" alt="scrubbable-photos-grid on glitch"&gt;&lt;/iframe&gt;
+&lt;/div&gt;
+
+
+
+
+&lt;h1&gt;
+  &lt;a href="#whats-next" class="anchor"&gt;
+  &lt;/a&gt;
+  Whats next
+&lt;/h1&gt;
+
+&lt;p&gt;There is lot to add to this, here are some things you can try:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Add actual images.&lt;/li&gt;
+&lt;li&gt;Go through google blog and add improvements they mentioned.&lt;/li&gt;
+&lt;li&gt;Cancel ongoing api call to fetch segments when that section goes out of the virtual viewport to save bandwidth when the user is scrolling fast. We can even defer fetching when the speed of scrolling is high.&lt;/li&gt;
+&lt;li&gt;Add intersection observers to tiles to load low-res thumbnails for distant tiles and high-res thumbnails for nearer ones.&lt;/li&gt;
+&lt;li&gt;Add Google Photos like timeline instead of scroll knob, with this user will be able to jump to any year/month.&lt;/li&gt;
+&lt;li&gt;Implement whole thing in some framework like React, you can create components for Section, Segment and Tile.&lt;/li&gt;
+&lt;li&gt;This demo assumes that the grid consumes the whole viewport width, you can use grid container's width. It is currently not handling viewport resize also.&lt;/li&gt;
+&lt;li&gt;One can even make open source component for scrubbable grid.&lt;/li&gt;
+&lt;/ul&gt;
+
+
+
+&lt;h1&gt;
+  &lt;a href="#resources" class="anchor"&gt;
+  &lt;/a&gt;
+  Resources
+&lt;/h1&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Google Design Blog - &lt;a href="https://medium.com/google-design/google-photos-45b714dfbed1"&gt;Building the Google Photos Web UI&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;Flickr's Justified Layout Lib - &lt;a href="https://www.npmjs.com/package/justified-layout"&gt;justified-layout npm&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;Intersection Observer - &lt;a href="https://developer.mozilla.org/en-US/docs/Web/API/Intersection_Observer_API"&gt;Intersection Observer Api - Web Apis - MDN&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;Github Repo for this implementation, with commits for each Step - &lt;a href="https://github.com/shaileshpandit/scrubbable-photos-grid"&gt;scrubbable-photos-grid&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;Live App with Source Code for this implementation - &lt;a href="https://glitch.com/edit/#!/scrubbable-photos-grid?path=script.js%3A15%3A0"&gt;Glitch&lt;/a&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+
+
+
+
+&lt;p&gt;If you made it this far, kudos to you! I enjoyed implementing this and even more, writing about it. This is my first tech article in long time, so any feedback is much appretiated.&lt;/p&gt;
+
+</description>
+      <category>webdev</category>
+      <category>javascript</category>
+      <category>html</category>
+      <category>tutorial</category>
+    </item>
+    <item>
       <title>Protecting your API keys with Next JS</title>
       <author>Ivan Maximiliano Saldano</author>
       <pubDate>Fri, 12 Feb 2021 13:36:49 +0000</pubDate>
@@ -2290,112 +2681,71 @@ If want to watch these recordings then check out the &lt;a href="https://www.twi
       <category>gamedev</category>
     </item>
     <item>
-      <title>The Secrets of An Authenticated  GitHub Action Workflow
-</title>
-      <author>Brian Douglas</author>
-      <pubDate>Thu, 11 Feb 2021 23:26:13 +0000</pubDate>
-      <link>https://dev.to/github/the-secrets-of-authenticated-github-action-workflow-3i5o</link>
-      <guid>https://dev.to/github/the-secrets-of-authenticated-github-action-workflow-3i5o</guid>
-      <description>&lt;p&gt;GitHub Actions is a combination of primitives for users to quickly ship integrations for their repos. Some of these primitives include the API, webhooks, and authentication.&lt;/p&gt;
+      <title>Low-Hanging Fruits of Web Security</title>
+      <author>Karmasakshi Goyal</author>
+      <pubDate>Fri, 12 Feb 2021 06:35:09 +0000</pubDate>
+      <link>https://dev.to/karmasakshi/low-hanging-fruits-of-web-security-16fk</link>
+      <guid>https://dev.to/karmasakshi/low-hanging-fruits-of-web-security-16fk</guid>
+      <description>&lt;blockquote&gt;
+&lt;p&gt;I talk about implementing common headers in your web app to increase its security.&lt;/p&gt;
+&lt;/blockquote&gt;
 
-&lt;p&gt;The approach towards authentication has previously been centralized around the &lt;strong&gt;GITHUB_TOKEN&lt;/strong&gt;. Before GitHub Actions, your need to create these manually. &lt;/p&gt;
+&lt;h3&gt;
+  &lt;a href="#headers" class="anchor"&gt;
+  &lt;/a&gt;
+  Headers
+&lt;/h3&gt;
 
-&lt;p&gt;&lt;em&gt;If you are unfamiliar tokens, let me point you to the docs on &lt;a href="https://docs.github.com/en/github/authenticating-to-github/creating-a-personal-access-token"&gt;creating a personal access token&lt;/a&gt;.&lt;/em&gt;&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;&lt;p&gt;&lt;code&gt;Access-Control-Allow-Origin&lt;/code&gt;: Defines domains that can access your content. &lt;a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Access-Control-Allow-Origin"&gt;MDN link&lt;/a&gt;.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;&lt;code&gt;Permissions-Policy&lt;/code&gt;: Defines permissions your web app can request for. &lt;a href="https://w3c.github.io/webappsec-permissions-policy/#permissions-policy-http-header-field"&gt;W3C link&lt;/a&gt;.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;&lt;code&gt;Referrer-Policy&lt;/code&gt;: Defines how much information you share with link B about link A when you go from link A to link B. &lt;a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Referrer-Policy"&gt;MDN link&lt;/a&gt;.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;&lt;code&gt;Strict-Transport-Security&lt;/code&gt;: Defines whether or not &lt;code&gt;https://&lt;/code&gt; should be compulsory when accessing your web app. &lt;a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Strict-Transport-Security"&gt;MDN link&lt;/a&gt;.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;&lt;code&gt;X-Content-Type-Options&lt;/code&gt;: Mandates content to be of the type defined. &lt;a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Content-Type-Options"&gt;MDN link&lt;/a&gt;.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;&lt;code&gt;X-Frame-Options&lt;/code&gt;: Defines whether or not your web app can be loaded within an iframe or other embed elements. &lt;a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Frame-Options"&gt;MDN link&lt;/a&gt;.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;&lt;code&gt;X-XSS-Protection&lt;/code&gt;: Defines Cross-Site Scripting filter level. &lt;a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-XSS-Protection"&gt;MDN link&lt;/a&gt;.&lt;/p&gt;&lt;/li&gt;
+&lt;/ol&gt;
 
-&lt;p&gt;GitHub automatically creates a &lt;strong&gt;GITHUB_TOKEN&lt;/strong&gt; secret to use in your Github Action workflows. You can use this &lt;strong&gt;GITHUB_TOKEN&lt;/strong&gt; to authenticate in a specific workflow runs.&lt;/p&gt;
+&lt;h3&gt;
+  &lt;a href="#examples" class="anchor"&gt;
+  &lt;/a&gt;
+  Examples
+&lt;/h3&gt;
 
-&lt;p&gt;When you enable GitHub Actions, GitHub installs a GitHub App on your repository. The &lt;strong&gt;GITHUB_TOKEN&lt;/strong&gt; secret is a GitHub App installation access token. You can use the installation access token to authenticate on behalf of the GitHub App installed on your repository. The token's permissions are limited to the repository that contains your workflow. &lt;/p&gt;
-
-&lt;p&gt;For more information, see "&lt;a href="https://docs.github.com/en/actions/reference/authentication-in-a-workflow#permissions-for-the-github_token"&gt;Permissions for the GITHUB_TOKEN&lt;/a&gt;."&lt;/p&gt;
-
-&lt;div class="table-wrapper-paragraph"&gt;&lt;table&gt;
-&lt;thead&gt;
-&lt;tr&gt;
-&lt;th&gt;Permission&lt;/th&gt;
-&lt;th&gt;Access type&lt;/th&gt;
-&lt;th&gt;Access by forked repos&lt;/th&gt;
-&lt;/tr&gt;
-&lt;/thead&gt;
-&lt;tbody&gt;
-&lt;tr&gt;
-&lt;td&gt;actions&lt;/td&gt;
-&lt;td&gt;read/write&lt;/td&gt;
-&lt;td&gt;read&lt;/td&gt;
-&lt;/tr&gt;
-&lt;tr&gt;
-&lt;td&gt;checks&lt;/td&gt;
-&lt;td&gt;read/write&lt;/td&gt;
-&lt;td&gt;read&lt;/td&gt;
-&lt;/tr&gt;
-&lt;tr&gt;
-&lt;td&gt;contents&lt;/td&gt;
-&lt;td&gt;read/write&lt;/td&gt;
-&lt;td&gt;read&lt;/td&gt;
-&lt;/tr&gt;
-&lt;tr&gt;
-&lt;td&gt;deployments&lt;/td&gt;
-&lt;td&gt;read/write&lt;/td&gt;
-&lt;td&gt;read&lt;/td&gt;
-&lt;/tr&gt;
-&lt;tr&gt;
-&lt;td&gt;issues&lt;/td&gt;
-&lt;td&gt;read/write&lt;/td&gt;
-&lt;td&gt;read&lt;/td&gt;
-&lt;/tr&gt;
-&lt;tr&gt;
-&lt;td&gt;metadata&lt;/td&gt;
-&lt;td&gt;read&lt;/td&gt;
-&lt;td&gt;read&lt;/td&gt;
-&lt;/tr&gt;
-&lt;tr&gt;
-&lt;td&gt;packages&lt;/td&gt;
-&lt;td&gt;read/write&lt;/td&gt;
-&lt;td&gt;read&lt;/td&gt;
-&lt;/tr&gt;
-&lt;tr&gt;
-&lt;td&gt;pull requests&lt;/td&gt;
-&lt;td&gt;read/write&lt;/td&gt;
-&lt;td&gt;read&lt;/td&gt;
-&lt;/tr&gt;
-&lt;tr&gt;
-&lt;td&gt;repository projects&lt;/td&gt;
-&lt;td&gt;read/write&lt;/td&gt;
-&lt;td&gt;read&lt;/td&gt;
-&lt;/tr&gt;
-&lt;tr&gt;
-&lt;td&gt;statuses&lt;/td&gt;
-&lt;td&gt;read/write&lt;/td&gt;
-&lt;td&gt;read&lt;/td&gt;
-&lt;/tr&gt;
-&lt;/tbody&gt;
-&lt;/table&gt;&lt;/div&gt;
-
-&lt;p&gt;If you need a token that requires permissions that aren't available in the given &lt;strong&gt;GITHUB_TOKEN&lt;/strong&gt;, you can create a personal access token and set it as a secret in your repository.&lt;/p&gt;
-
-&lt;p&gt;Before each job begins, GitHub fetches an installation access token for the job. The token expires when the job is finished.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;GITHUB_TOKEN&lt;/strong&gt; to create an issue in my team's repository. As an aside, GitHub uses GitHub to build GitHub, and that means most teams have a repository associated with them, including (finance).&lt;/p&gt;
-
-&lt;p&gt;The permission to create and manage issues is granted through the &lt;strong&gt;GITHUB_TOKEN&lt;/strong&gt;. To leverage it, I pass it to my created Action directly.&lt;br&gt;
+&lt;p&gt;Say you have a web app hosted on &lt;a href="https://example.com:"&gt;https://example.com:&lt;/a&gt;&lt;br&gt;
 &lt;/p&gt;
 
 &lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;on&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
-  &lt;span class="na"&gt;schedule&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
-  &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;cron&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;01 13 * * &lt;/span&gt;&lt;span class="m"&gt;0&lt;/span&gt;
-&lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Top &lt;/span&gt;&lt;span class="m"&gt;5&lt;/span&gt;
-&lt;span class="na"&gt;jobs&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
-  &lt;span class="na"&gt;createAnIssue&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
-    &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Create an issue&lt;/span&gt;
-    &lt;span class="na"&gt;runs-on&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;ubuntu-latest&lt;/span&gt;
-    &lt;span class="na"&gt;steps&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
-    &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;uses&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;actions/checkout@v2&lt;/span&gt;
-    &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Create an issue&lt;/span&gt;
-      &lt;span class="na"&gt;uses&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;bdougie/create-an-issue@e43b083ea71e22e77a81ffb4a55dacb2addb71ed&lt;/span&gt;
-      &lt;span class="na"&gt;env&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
-        &lt;span class="na"&gt;GITHUB_TOKEN&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ secrets.GITHUB_TOKEN }}&lt;/span&gt;
-      &lt;span class="na"&gt;with&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
-        &lt;span class="na"&gt;args&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;.github/ISSUE_TEMPLATE/TOP5.md&lt;/span&gt;
+&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;HEADERS&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;
+  &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="na"&gt;key&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Access-Control-Allow-Origin&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="na"&gt;value&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;https://example.com&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+  &lt;span class="p"&gt;},&lt;/span&gt;
+  &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="na"&gt;key&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Permissions-Policy&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="na"&gt;value&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;autoplay=(), camera=(), fullscreen=(), geolocation=(), microphone=()&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+  &lt;span class="p"&gt;},&lt;/span&gt;
+  &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="na"&gt;key&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Referrer-Policy&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="na"&gt;value&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;no-referrer&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+  &lt;span class="p"&gt;},&lt;/span&gt;
+  &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="na"&gt;key&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Strict-Transport-Security&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="na"&gt;value&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;max-age=63072000; includeSubDomains; preload&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+  &lt;span class="p"&gt;},&lt;/span&gt;
+  &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="na"&gt;key&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;X-Content-Type-Options&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="na"&gt;value&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;nosniff&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+  &lt;span class="p"&gt;},&lt;/span&gt;
+  &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="na"&gt;key&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;X-Frame-Options&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="na"&gt;value&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;DENY&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+  &lt;span class="p"&gt;},&lt;/span&gt;
+  &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="na"&gt;key&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;X-XSS-protection&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="na"&gt;value&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;1; mode=block&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+  &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;]&lt;/span&gt;
 &lt;/code&gt;&lt;/pre&gt;
 &lt;div class="highlight__panel js-actions-panel"&gt;
 &lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
@@ -2412,122 +2762,139 @@ If want to watch these recordings then check out the &lt;a href="https://www.twi
 &lt;/div&gt;
 
 
-&lt;p&gt;&lt;em&gt;This is part of my 28 days of Actions series. To get notified of more GitHub Action tips, follow the GitHub organization right here on Dev.&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;On Next.js apps deployed on Vercel, you set the headers in &lt;code&gt;next.config.js&lt;/code&gt; like so:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// next.config.js&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;headers&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;
+  &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="na"&gt;source&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;/(.*)&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="na"&gt;headers&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="c1"&gt;// Paste HEADERS here&lt;/span&gt;
+  &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;];&lt;/span&gt;
+&lt;span class="nx"&gt;module&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;exports&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="nx"&gt;headers&lt;/span&gt;
+&lt;span class="p"&gt;};&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
 
 
-&lt;div class="ltag__link"&gt;
-    &lt;a href="/github/run-complex-matrix-builds-in-github-actions-29o1" class="video-image"&gt;
-      &lt;span class="video-timestamp"&gt;
-        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Nzhggq4U--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://practicaldev-herokuapp-com.freetls.fastly.net/assets/video-camera-9a2eda0979fd9ce3933037481ee8828557b6c7f5533e1de458b8c2648a60b097.svg" alt="video camera"&gt;
-        01:52&lt;/span&gt;
-    &lt;/a&gt;
-  &lt;a href="/bdougieyo" class="ltag__link__link"&gt;
-    &lt;div class="ltag__link__pic"&gt;
-      &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--c6dMu0Ly--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://res.cloudinary.com/practicaldev/image/fetch/s--6jsOd2Rx--/c_fill%2Cf_auto%2Cfl_progressive%2Ch_150%2Cq_auto%2Cw_150/https://dev-to-uploads.s3.amazonaws.com/uploads/user/profile_image/19970/6dc0f11e-a4da-4762-aed8-11f70143d31b.jpeg" alt="bdougieyo image"&gt;
-    &lt;/div&gt;
-  &lt;/a&gt;
-  &lt;a href="/github/run-complex-matrix-builds-in-github-actions-29o1" class="ltag__link__link"&gt;
-    &lt;div class="ltag__link__content"&gt;
-      &lt;h2&gt;Running complex matrix builds using variable substitution in GitHub Actions &lt;/h2&gt;
-      &lt;h3&gt;Brian Douglas ・ Feb 10 ・ 2 min read&lt;/h3&gt;
-      &lt;div class="ltag__link__taglist"&gt;
-      &lt;/div&gt;
-    &lt;/div&gt;
-  &lt;/a&gt;
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
 &lt;/div&gt;
 
 
 
-</description>
-      <category>devops</category>
-      <category>github</category>
-    </item>
-    <item>
-      <title>Front-End VS Back-End Web Development</title>
-      <author>Lanre Fagbeyiro</author>
-      <pubDate>Thu, 11 Feb 2021 23:25:21 +0000</pubDate>
-      <link>https://dev.to/lanrewaju/front-end-vs-back-end-web-development-4olb</link>
-      <guid>https://dev.to/lanrewaju/front-end-vs-back-end-web-development-4olb</guid>
-      <description>&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--GahPtryq--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1613085156996/HpflGoMbb.jpeg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--GahPtryq--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1613085156996/HpflGoMbb.jpeg" alt="photo-1571171637578-41bc2dd41cd2.jpg"&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;On SPAs deployed on Firebase Hosting, you set the headers in &lt;code&gt;firebase.json&lt;/code&gt; like so:&lt;br&gt;
+&lt;/p&gt;
 
-&lt;p&gt;Photo by  &lt;a href="https://unsplash.com/@ffstop?utm_source=medium&amp;amp;utm_medium=referral"&gt;Fotis Fotopoulos&lt;/a&gt; on &lt;a href="https://unsplash.com/"&gt;Unsplash&lt;/a&gt;&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// firebase.json&lt;/span&gt;
 
-&lt;p&gt;If you are a developer just learning to code with a desire to focus on web development but confused on what path to take. Be that front-end or back-end web development or perhaps you have already started your journey and are questioning whether you are on the right path? This would be a good article for you to read. It’s important to have a good understanding of both front-end and back-end web development when starting.&lt;/p&gt;
+&lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;hosting&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;headers&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;
+      &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;source&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;**&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+        &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;headers&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="c1"&gt;// Paste HEADERS here&lt;/span&gt;
+      &lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="p"&gt;]&lt;/span&gt;
+  &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
 
-&lt;h2&gt;
-  &lt;a href="#introduction" class="anchor"&gt;
-  &lt;/a&gt;
-  Introduction
-&lt;/h2&gt;
 
-&lt;p&gt;Front-end development is commonly referred to as client-side development and that focuses on everything that you see, experience, and interact with on a website or an application.&lt;br&gt;
-On the flip side of things, we have back-end development, and it’s commonly referred to as server-side development and that’s going to be things that are more focused on functionality, data, algorithms, and such.&lt;/p&gt;
+    Exit fullscreen mode
+    
 
-&lt;h3&gt;
-  &lt;a href="#frontend-development" class="anchor"&gt;
-  &lt;/a&gt;
-  Front-End Development
-&lt;/h3&gt;
 
-&lt;blockquote&gt;
-&lt;p&gt;Front-end web development is the practice of converting data to a graphical interface, through the use of HTML, CSS, and JavaScript, so that users can view and interact with that data.&lt;/p&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
 
-&lt;p&gt;― Wikipedia&lt;/p&gt;
-&lt;/blockquote&gt;
 
-&lt;p&gt;Front-end development encompasses everything on the website or application that you’re used to seeing. Things like layouts, dropdown menus, buttons, and responsive design. The core three languages you’ll need to learn if you want to do front-end development are HTML, CSS, and JavaScript. These technologies all enable us to design our website and also allow for interaction on the client-side which is the browser. Also, there are front-end frameworks like Bootstrap, Foundation, Stylus, Semantic UI, Tailwind CSS, and so on for CSS which speeds up workflow. React, Vue, and Angular for JavaScript, are tools developers leverage to develop advanced web applications.&lt;/p&gt;
 
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--BYVN9PWY--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1613084576262/OhA4JGeRF.jpeg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--BYVN9PWY--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1613084576262/OhA4JGeRF.jpeg" alt="pexels-photo-3800536.jpeg"&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;You may want to change the value of &lt;code&gt;Access-Control-Allow-Origin&lt;/code&gt; header to allow &lt;a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS"&gt;CORS&lt;/a&gt;.&lt;/p&gt;
 
-&lt;p&gt;Photo by  &lt;a href="https://www.pexels.com/@olly"&gt;Andrea Piacquadio&lt;/a&gt;  on  &lt;a href="https://www.pexels.com/"&gt;Pexels&lt;/a&gt; &lt;/p&gt;
-
-&lt;p&gt;A great analogy to describe front-end development is kind of like a restaurant. There’s the dining room which is the main restaurant where a client sits down, a serving staff brings the menu, the client reads, makes an order, and their food is served. This is client-side, this is what the user sees in the browser, they can interact with the website using JavaScript and see the information that’s been displayed using HTML and CSS.&lt;/p&gt;
-
-&lt;p&gt;Enough said about front-end development, now let’s move on to back-end development.&lt;/p&gt;
+&lt;p&gt;You may also want to change the value of &lt;code&gt;Permissions-Policy&lt;/code&gt; header based on permissions you intend to ask for.&lt;/p&gt;
 
 &lt;h3&gt;
-  &lt;a href="#backend-development" class="anchor"&gt;
+  &lt;a href="#csp-the-king-of-security-headers" class="anchor"&gt;
   &lt;/a&gt;
-  Back-End Development
+  CSP: The King of Security Headers
 &lt;/h3&gt;
 
-&lt;blockquote&gt;
-&lt;p&gt;Back-end web development is the core computational logic of a website, software, or information system. A back-end developer creates components and features that are indirectly accessed by a user through a front-end application or system.&lt;/p&gt;
+&lt;p&gt;&lt;code&gt;Content-Security-Policy&lt;/code&gt; (&lt;a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP"&gt;MDN link&lt;/a&gt;) is an extremely powerful header since it combines various policies, allowing you to define the security policy of your web app in a fine-grained fashion. It is difficult to get right in the first attempt, so it behoves to not be included in the “low-hanging fruits” list above — but you shouldn’t skip it. It guarantees visitors have a safe time on your web app.&lt;/p&gt;
 
-&lt;p&gt;― Wikipedia&lt;/p&gt;
-&lt;/blockquote&gt;
+&lt;p&gt;To build the tightest CSP for your web app, it is recommended to start with locked-down policies and open them up as you proceed. Chrome is very descriptive about CSP violations so it is easy to know which policy to open-up next. It is essential to test all features of your web app to ensure there are no violations. Use a new Incognito window every time you make changes to any policy to ensure you aren’t working with cached results.&lt;/p&gt;
 
-&lt;p&gt;The back-end is the structure and processes behind the curtains that make everything run, these include storing and organizing data, creating algorithms and complex logic for a seamless experience on the front-end. The languages a back-end developer should be well versed in are Python, PHP, Ruby, or Java, and also, it’s interesting to note that JavaScript can also be used as a back-end language with something like NodeJS which allows you to execute JavaScript not just in the browser but in a back-end environment. Also, there are frameworks like Express for NodeJS, Ruby on Rails, Flask/Django for Python, and these speed up development using the particular back-end technology you chose. The main job of these frameworks is simply to reduce the amount of repetitive stuff that a developer has to do. They make our lives as developers so much easier by cutting down some of the grinch work and saving us a lot of time.&lt;/p&gt;
+&lt;p&gt;It is common to disable CSP during development to allow tools to work properly. You can use an environment variable to disable CSP during development. Here’s an example of a CSP header configuration of a Next.js app that uses Google Fonts (note the usage of environment variable &lt;code&gt;NEXT_PUBLIC_IS_PRODUCTION&lt;/code&gt;):&lt;br&gt;
+&lt;/p&gt;
 
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--OK7rbwkJ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1613084943848/FYc2b_EOH.jpeg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--OK7rbwkJ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1613084943848/FYc2b_EOH.jpeg" alt="photo-1524491561693-20766fdcd934.jpg"&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// next.config.js&lt;/span&gt;
 
-&lt;p&gt;Photo by  &lt;a href="https://unsplash.com/@kennyluoping?utm_source=medium&amp;amp;utm_medium=referral"&gt;Kenny Luo&lt;/a&gt;  on  &lt;a href="https://unsplash.com/"&gt;Unsplash&lt;/a&gt;&lt;/p&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;HEADERS&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;
+  &lt;span class="p"&gt;...,&lt;/span&gt;
+  &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="na"&gt;key&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Content-Security-Policy&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="na"&gt;value&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;process&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;env&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;NEXT_PUBLIC_IS_PRODUCTION&lt;/span&gt; &lt;span class="o"&gt;===&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;true&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt; &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;connect-src 'self'; default-src 'self'; font-src https://fonts.gstatic.com; img-src 'self' data:; manifest-src 'self'; object-src 'none'; script-src 'self'; style-src 'self' https://fonts.googleapis.com 'unsafe-inline'; upgrade-insecure-requests;&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt; &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;''&lt;/span&gt;
+  &lt;span class="p"&gt;},&lt;/span&gt;
+  &lt;span class="p"&gt;...&lt;/span&gt;
+&lt;span class="p"&gt;]&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
 
-&lt;p&gt;Moving forward with our analogy, on the back-end, we’ve got the kitchen, and this is analogous to our server, this is the place where all of our dishes get prepared and served. When the client asks for pizza, that order gets sent to the server, the server should be able to send back what it was that the client ordered, which is the actual pizza.&lt;/p&gt;
 
-&lt;p&gt;And finally, the larder where all the ingredients are stored is of course the database, this is where all of our user data, our event data, all of the data that makes our website work is stored. So, this is where the divide between the front end and back end happens. It’s between the dining room of the restaurant and the kitchen and larder.&lt;/p&gt;
+    Exit fullscreen mode
+    
 
-&lt;p&gt;Back-end technologies such as Node.js, MongoDB, etc, enable us to interact with databases and have business logic on a server and a whole lot more.&lt;/p&gt;
 
-&lt;p&gt;The back-end consists of things such as:&lt;/p&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
 
-&lt;ul&gt;
-&lt;li&gt;A server that will serve up your files that’s your HTML, CSS, and JavaScript.&lt;/li&gt;
-&lt;li&gt;A database that can store your user data as their logins and passwords,&lt;/li&gt;
-&lt;li&gt;Applications which are where you create your business logic, you determine how your web applications work, for example, things such as calculating flight prices or making payments, that sort of stuff.&lt;/li&gt;
-&lt;/ul&gt;
 
-&lt;p&gt;Let’s assume you want to book a ticket for an event on a website and you enter your name and buy a ticket, now that information which consists of your name, how many tickets you bought, and your registration details such as your email gets saved to the website’s database. You can just imagine these databases as these giant excellent spreadsheets living somewhere, and almost all of your data that you’ve entered gets saved onto these spreadsheets, and that means that when you come back at a later date, you’re able to log back on to the website and it would be able to retrieve from its database all of the data that is associated with your account, in this case, it would retrieve your tickets to the event.&lt;/p&gt;
 
-&lt;p&gt;Finally, we also have what we call full-stack developers, and you can tell by the name that it’s the combination of both front-end and back-end development. It is the flexibility of working with the front and back end that makes you so much more desirable as a developer.&lt;/p&gt;
+&lt;p&gt;You can evaluate the strictness of your policy using Google’s &lt;a href="https://csp-evaluator.withgoogle.com"&gt;CSP Evaluator&lt;/a&gt;.&lt;/p&gt;
 
-&lt;p&gt;Thanks for reading, I hope having a basic understanding of this will help you choose the right path.&lt;/p&gt;
+&lt;h3&gt;
+  &lt;a href="#quantifying-the-result" class="anchor"&gt;
+  &lt;/a&gt;
+  Quantifying the Result
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;a href="https://observatory.mozilla.org"&gt;Mozilla Observatory&lt;/a&gt; is to Web Security, what &lt;a href="https://developers.google.com/web/tools/lighthouse"&gt;Lighthouse&lt;/a&gt; is to Web Performance. It rates the security of your web app and provides suggestions to improve that rating. It also integrates 3rd party scanners like &lt;a href="https://securityheaders.com"&gt;Security Headers&lt;/a&gt; so you can have multiple opinions.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--QnfHOUhb--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/i/ubnif984uhr9ht2kkx3x.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--QnfHOUhb--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/i/ubnif984uhr9ht2kkx3x.png" alt="Mozilla Observatory’s security score of Share By Cam" title="Mozilla Observatory’s security score of Share By Cam"&gt;&lt;/a&gt;&lt;/p&gt;
+
+
+
+
+&lt;p&gt;Was I able to help you increase your web app’s security score? Let me know on &lt;a href="https://twitter.com/karmasakshi/status/1359986487467606021"&gt;my Twitter&lt;/a&gt;. Cheers!&lt;/p&gt;
 
 </description>
       <category>webdev</category>
-      <category>html</category>
-      <category>css</category>
-      <category>javascript</category>
+      <category>security</category>
+      <category>react</category>
+      <category>angular</category>
     </item>
   </channel>
 </rss>
