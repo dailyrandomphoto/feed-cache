@@ -569,6 +569,391 @@ Firestore Setup&lt;/h3&gt;
       <category>darkmode</category>
     </item>
     <item>
+      <title>Replacing FastAPI with Rust: Part 5 - Rocket 0.5</title>
+      <author>Dylan Anthony</author>
+      <pubDate>Sat, 20 Feb 2021 23:57:48 +0000</pubDate>
+      <link>https://dev.to/dbanty/replacing-fastapi-with-rust-part-5-rocket-0-5-3kb3</link>
+      <guid>https://dev.to/dbanty/replacing-fastapi-with-rust-part-5-rocket-0-5-3kb3</guid>
+      <description>&lt;blockquote&gt;
+&lt;p&gt;Cover image created by me using &lt;a href="https://www.rustacean.net"&gt;Ferris the Crab&lt;/a&gt;, &lt;a href="https://www.rust-lang.org/policies/media-guide"&gt;the Rust logo&lt;/a&gt;, and &lt;a href="https://github.com/tiangolo/fastapi"&gt;the FastAPI logo&lt;/a&gt;.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+
+
+
+&lt;p&gt;In the &lt;a href="https://dylananthony.com/posts/fastapi-rust-4-a-solution"&gt;previous post&lt;/a&gt;, I decided that Rocket is the best candidate to replace FastAPI with two big caveats:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;It &lt;em&gt;requires&lt;/em&gt; nightly Rust, and therefore &lt;a href="https://doc.rust-lang.org/stable/book/appendix-07-nightly-rust.html#unstable-features"&gt;unstable features&lt;/a&gt;.&lt;/li&gt;
+&lt;li&gt;It is not async, and therefore not compatible with my favorite option for handling SQL: &lt;a href="https://crates.io/crates/sqlx"&gt;SQLx&lt;/a&gt;.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;Both of these issues are fixed on the &lt;code&gt;master&lt;/code&gt; branch of the Rocket repository, which will become Rocket 0.5 once released. However, hosting a Rocket application on AWS Lambda requires a crate called &lt;code&gt;rocket_lamb&lt;/code&gt; which will need to be updated for Rocket 0.5 before it will work.&lt;/p&gt;
+
+&lt;p&gt;In this post, I walk through my experience updating &lt;code&gt;rocket_lamb&lt;/code&gt; to support the latest development version of Rocket in an effort to prepare it for the inevitable 0.5 Rocket release. The highlights are:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;My general purpose process for refactoring in Rust&lt;/li&gt;
+&lt;li&gt;How to solve async lifetime issues using &lt;code&gt;Arc&lt;/code&gt; and &lt;code&gt;Mutex&lt;/code&gt;
+&lt;/li&gt;
+&lt;li&gt;Some thoughts on testing methodology&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;h2&gt;
+  &lt;a href="#step-1-just-try-it" class="anchor"&gt;
+  &lt;/a&gt;
+  Step 1: Just Try It!
+&lt;/h2&gt;
+
+&lt;p&gt;One of the nicest things about Rust's strict compiler is that you can generally refactor by following the errors. If you also have good test coverage in your project, you can be even more confident! So far in my Rust journey, I’ve been able to follow this process in every significant refactor:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;Just do the thing you’re trying to achieve.&lt;/li&gt;
+&lt;li&gt;Run &lt;code&gt;cargo check&lt;/code&gt;, fix errors, rinse, and repeat.&lt;/li&gt;
+&lt;li&gt;Run &lt;code&gt;cargo test&lt;/code&gt;, fix failures, rinse, and repeat.&lt;/li&gt;
+&lt;li&gt;It just works!&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;So in this case, step 1 is to replace Rocket 0.4 with the current development version using a Git dependency and replace all the &lt;code&gt;lambda_&lt;/code&gt; crates with the equivalent &lt;code&gt;lamedh_&lt;/code&gt; crates. This all happened &lt;a href="https://github.com/dbanty/rocket-lamb/commit/2d4fe5102dcc23898941f9c8bb2374e831f6d5eb"&gt;in this commit&lt;/a&gt; if you’d like to follow along. Here’s a summary:&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#step-10-replace-the-dependencies" class="anchor"&gt;
+  &lt;/a&gt;
+  Step 1.0: Replace the Dependencies
+&lt;/h3&gt;
+
+&lt;p&gt;In addition to the changes mentioned above, I had to change out the &lt;code&gt;http&lt;/code&gt; version based on some &lt;code&gt;cargo check&lt;/code&gt; complaints. I also needed to add &lt;code&gt;aws_lambda_events&lt;/code&gt;, &lt;code&gt;tokio&lt;/code&gt;, and &lt;code&gt;parking_lot&lt;/code&gt; for some code changes that come later. All in all, here are the changes:&lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#before" class="anchor"&gt;
+  &lt;/a&gt;
+  Before
+&lt;/h4&gt;
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight toml"&gt;&lt;code&gt;&lt;span class="nn"&gt;rocket&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="py"&gt;version&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="s"&gt;"0.4.0"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="py"&gt;default-features&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="kc"&gt;false&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="py"&gt;lambda_runtime&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="s"&gt;"0.2.1"&lt;/span&gt;
+&lt;span class="py"&gt;lambda_http&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="s"&gt;"0.1.1"&lt;/span&gt;
+&lt;span class="py"&gt;http&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="s"&gt;"0.1"&lt;/span&gt;
+&lt;span class="py"&gt;failure&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="s"&gt;"0.1.5"&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;h4&gt;
+  &lt;a href="#after" class="anchor"&gt;
+  &lt;/a&gt;
+  After
+&lt;/h4&gt;
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight toml"&gt;&lt;code&gt;&lt;span class="nn"&gt;rocket&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="py"&gt;git&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="s"&gt;"https://github.com/SergioBenitez/Rocket"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="py"&gt;branch&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="s"&gt;"master"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="py"&gt;default-features&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="kc"&gt;false&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="py"&gt;lamedh_runtime&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="s"&gt;"0.3.0"&lt;/span&gt;
+&lt;span class="py"&gt;lamedh_http&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="s"&gt;"0.3.0"&lt;/span&gt;
+&lt;span class="py"&gt;http&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="s"&gt;"0.2.3"&lt;/span&gt;
+&lt;span class="py"&gt;failure&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="s"&gt;"0.1.5"&lt;/span&gt;
+&lt;span class="py"&gt;aws_lambda_events&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="s"&gt;"0.4.0"&lt;/span&gt;
+&lt;span class="py"&gt;tokio&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="s"&gt;"1"&lt;/span&gt;
+&lt;span class="py"&gt;parking_lot&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="s"&gt;"0.11.1"&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Cargo (or maybe it’s &lt;code&gt;rustc&lt;/code&gt; under the hood?) can provide pretty helpful error messages in this process, though sometimes you have to know what to look for. I always recommend reading the &lt;em&gt;entire&lt;/em&gt; output of Rust compiler errors. In other languages (notably Python) I’m used to looking at stack traces where I’ve gotten good at ignoring most of the content since it’s not relevant to the problem I’m solving. A ton of care is taken in designing Rust compiler messages, so all of the information is likely to be relevant. In the case of &lt;code&gt;http&lt;/code&gt; being on the wrong version, the error was something like &lt;code&gt;expected struct http::Method, found struct lamedh_http::http::Method&lt;/code&gt; however there is a note which says “perhaps two different versions of crate &lt;code&gt;http&lt;/code&gt; are being used?” informing you of exactly the problem!&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#step-11-update-the-imports" class="anchor"&gt;
+  &lt;/a&gt;
+  Step 1.1: Update the Imports
+&lt;/h3&gt;
+
+&lt;p&gt;If you’re replacing one package with another, the next step after updating your &lt;code&gt;Cargo.toml&lt;/code&gt; is to update all the &lt;code&gt;use&lt;/code&gt; statements. Going from &lt;code&gt;lambda_&lt;/code&gt; to &lt;code&gt;lamedh_&lt;/code&gt; was &lt;em&gt;mostly&lt;/em&gt; straight forward, just replace one crate with the equivalent. There were a couple notable exceptions though:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;Instead of using a &lt;code&gt;lambda!&lt;/code&gt; macro to start things up, you want to use the &lt;code&gt;lamedh_runtime::run&lt;/code&gt; function, which takes the result of the &lt;code&gt;lamedh_http::handler&lt;/code&gt; function. I prefer explicit function invocations anyway over macros when it doesn’t make a huge difference to readability (that’s foreshadowing).&lt;/li&gt;
+&lt;li&gt;
+&lt;code&gt;lambda_http&lt;/code&gt; was re-exporting &lt;code&gt;aws_lambda_events::encodings::Body&lt;/code&gt; but &lt;code&gt;lamedh_http&lt;/code&gt; does not, so that had to be imported separately.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;h3&gt;
+  &lt;a href="#step-12-update-the-code" class="anchor"&gt;
+  &lt;/a&gt;
+  Step 1.2: Update the Code
+&lt;/h3&gt;
+
+&lt;p&gt;There were some API differences both in the new &lt;code&gt;rocket&lt;/code&gt; version and in the &lt;code&gt;lamedh_&lt;/code&gt; conversion that had to be handled here:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;
+&lt;code&gt;rocket::local&lt;/code&gt; was split into &lt;code&gt;rocket::local::blocking&lt;/code&gt; and &lt;code&gt;rocket::local::asynchronous&lt;/code&gt; so you can choose how you handle things. I picked &lt;code&gt;blocking&lt;/code&gt; for now just to minimize the up front changes. I go back and update it to &lt;code&gt;asynchronous&lt;/code&gt; later.&lt;/li&gt;
+&lt;li&gt;The &lt;code&gt;Handler&lt;/code&gt; trait from &lt;code&gt;lamedh&lt;/code&gt; switches the &lt;code&gt;run&lt;/code&gt; function for one called &lt;code&gt;call&lt;/code&gt; and requires an associated &lt;code&gt;Fut&lt;/code&gt; type.&lt;/li&gt;
+&lt;li&gt;The &lt;code&gt;RequestContext&lt;/code&gt; from &lt;code&gt;lamedh&lt;/code&gt; has been completely reorganized and supports the newer API Gateway v2 requests. At this point, being new to the code base, I wasn’t entirely sure what the &lt;code&gt;base_path&lt;/code&gt; method of &lt;code&gt;RequestExt&lt;/code&gt; was doing, so I just commented out most of the logic.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;h2&gt;
+  &lt;a href="#step-2-check-and-check-and-check" class="anchor"&gt;
+  &lt;/a&gt;
+  Step 2: Check and Check and Check
+&lt;/h2&gt;
+
+&lt;p&gt;I’ve now entered the stage where I’m repeatedly running &lt;code&gt;cargo check&lt;/code&gt; and fixing the errors I’ve found. I quickly came to a similar issue to the one I faced when implementing my own &lt;code&gt;Handler&lt;/code&gt; for &lt;code&gt;actix-web&lt;/code&gt;. Passing data to the &lt;code&gt;Future&lt;/code&gt; doing the actual handling requires some hoop-jumping. The code changes for Step 2 can be found &lt;a href="https://github.com/dbanty/rocket-lamb/commit/6a995b1b977675736fa32d96e1094ba3fcc05098"&gt;in this commit&lt;/a&gt;.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#step-21-solving-async-references" class="anchor"&gt;
+  &lt;/a&gt;
+  Step 2.1: Solving Async References
+&lt;/h3&gt;
+
+&lt;p&gt;The &lt;code&gt;Fut&lt;/code&gt; associated type on &lt;code&gt;Handler&lt;/code&gt; requires that any lifetimes be &lt;code&gt;’static&lt;/code&gt;, presumably so the &lt;code&gt;Future&lt;/code&gt; can live longer than the &lt;code&gt;Handler&lt;/code&gt; that spawned it (though I’m not sure why you’d want this). In any event, the &lt;code&gt;Handler&lt;/code&gt; code I inherited from the existing &lt;code&gt;rocket_lamb&lt;/code&gt; crate was passing &lt;code&gt;&amp;amp;mut self&lt;/code&gt; to the now-asynchronous code which left me a bunch of errors saying something about needing &lt;code&gt;’static&lt;/code&gt; lifetimes.&lt;/p&gt;
+
+&lt;p&gt;At this point I was thoroughly lost, if I needed to pass data to something, and some trait outside of my control was requiring it to be &lt;code&gt;'static&lt;/code&gt;, then I couldn’t pass references right? I didn’t want to clone all the data for every request, as doing so would be very inefficient. Even if I wanted to do that, some of the data I needed to pass was not &lt;code&gt;Clone&lt;/code&gt;. I decided to go out on a limb and ask for help. Asking questions in open source projects is always nerve-wracking, as some of the responders can be quite hostile. However, one of the contributors to the &lt;code&gt;lamedh_&lt;/code&gt; crates quickly dispelled my fears by coming through with a friendly answer!&lt;/p&gt;
+
+&lt;p&gt;I had heard of, though never used, &lt;code&gt;std::sync::Arc&lt;/code&gt; before. I’m not really qualified to explain how this works, but I’ll do my best to convey &lt;em&gt;my&lt;/em&gt; understanding. &lt;code&gt;std::rc::Rc&lt;/code&gt; effectively lets you have shared, read-only ownership of an object. If you do something like this:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight rust"&gt;&lt;code&gt;&lt;span class="k"&gt;use&lt;/span&gt; &lt;span class="nn"&gt;std&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;rc&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nb"&gt;Rc&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="k"&gt;let&lt;/span&gt; &lt;span class="n"&gt;original&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nn"&gt;String&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;from&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"blah"&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="k"&gt;let&lt;/span&gt; &lt;span class="n"&gt;first&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nn"&gt;Rc&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;new&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;original&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="k"&gt;let&lt;/span&gt; &lt;span class="n"&gt;second&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nn"&gt;Rc&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;clone&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;first&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Then you effectively end up with two different owned values &lt;code&gt;first&lt;/code&gt; and &lt;code&gt;second&lt;/code&gt; which can be dereferenced to read data as if it were &lt;code&gt;original&lt;/code&gt; (note that creating &lt;code&gt;first&lt;/code&gt; took ownership of &lt;code&gt;original&lt;/code&gt; so you can’t access that one anymore). Because the values are owned, you’re not passing references, and therefore don’t have to worry about lifetimes!&lt;/p&gt;
+
+&lt;p&gt;This isn’t magic, &lt;code&gt;Rc&lt;/code&gt; stands for “reference counting” which is a common way of handling memory in more dynamic languages (e.g. Python). Behind the scenes, Rust is keeping track of how many times &lt;code&gt;Rc::clone&lt;/code&gt; has been used for a given piece of data and once they’re &lt;em&gt;all&lt;/em&gt; dropped, it will free the memory. So even if &lt;code&gt;Handler&lt;/code&gt; goes out of scope and gets dropped with a &lt;code&gt;Future&lt;/code&gt; still on the loose, the data it was given is still perfectly valid!&lt;/p&gt;
+
+&lt;p&gt;“Wait a second, you said you were using &lt;code&gt;Arc&lt;/code&gt; though?!” Yep! &lt;code&gt;Arc&lt;/code&gt; is just the version of &lt;code&gt;Rc&lt;/code&gt; that is &lt;code&gt;Send&lt;/code&gt;, meaning it is safe in threaded contexts. Because we’re using Tokio and Tokio can use threads to execute &lt;code&gt;Future&lt;/code&gt;s, everything has to be &lt;code&gt;Send&lt;/code&gt; and therefore we use &lt;code&gt;Arc&lt;/code&gt;! And thus the problem of sharing data in Tokio futures is solved!&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#step-21-being-less-selfish" class="anchor"&gt;
+  &lt;/a&gt;
+  Step 2.1: Being Less Selfish
+&lt;/h3&gt;
+
+&lt;p&gt;In order to aid me with &lt;code&gt;Arc&lt;/code&gt;ing the codebase, I pulled out most of the methods on &lt;code&gt;RocketHandler&lt;/code&gt; into functions which took just the data they needed rather than the whole &lt;code&gt;self&lt;/code&gt;. This made it &lt;em&gt;way&lt;/em&gt; easier to reason about the code and make faster, more confident modifications. I prefer this style anyway because it makes it clear when you &lt;em&gt;call&lt;/em&gt; something exactly what that something is taking. An object-oriented “method” style hides whether something is just reading data, or mutating it, or outright consuming it until you jump to definition. Why not take full advantage of how explicit Rust is? Here's an example to illustrate my point:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight rust"&gt;&lt;code&gt;&lt;span class="c"&gt;// Method style&lt;/span&gt;
+&lt;span class="n"&gt;handler&lt;/span&gt;&lt;span class="nf"&gt;.ensure_client_ready&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;request&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+&lt;span class="c"&gt;// Function style&lt;/span&gt;
+&lt;span class="nf"&gt;ensure_client_ready&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="k"&gt;mut&lt;/span&gt; &lt;span class="n"&gt;handler&lt;/span&gt;&lt;span class="py"&gt;.client&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;handler&lt;/span&gt;&lt;span class="py"&gt;.config&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;request&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;p&gt;It's more verbose, but now I can clearly see that I need to &lt;code&gt;Arc&lt;/code&gt; the handler's config attribute to share it in this manner and that the &lt;code&gt;handler.client&lt;/code&gt; needs to be mutable, so I need some way to deal with that. Also, I'm not sure how I would go about &lt;code&gt;Arc&lt;/code&gt;ing the entire &lt;code&gt;RocketHandler&lt;/code&gt; anyway to pass it through to methods in a thread-safe manner, so I had to pick functional style whether I wanted to or not.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#step-22-disabling-a-feature" class="anchor"&gt;
+  &lt;/a&gt;
+  Step 2.2: Disabling a Feature
+&lt;/h3&gt;
+
+&lt;p&gt;That &lt;code&gt;ensure_client_ready&lt;/code&gt; function from before required mutability and was fairly dense code related to what I disabled in step 1.2.3. So for now, I just removed this feature as well, figuring I’d come back to it once I understood the code better.&lt;/p&gt;
+
+&lt;p&gt;And with that, &lt;code&gt;cargo check&lt;/code&gt; passed! Next it was on to &lt;code&gt;cargo test&lt;/code&gt; , which of course couldn’t even complete the compilation step to start with.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#step-3-testing" class="anchor"&gt;
+  &lt;/a&gt;
+  Step 3: Testing
+&lt;/h2&gt;
+
+&lt;p&gt;Automated tests in your project are primarily important for two reasons:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;If some hooligan comes along trying to refactor your entire project to work with different libraries, they can have some confidence of knowing they didn’t break anything once they’re done.&lt;/li&gt;
+&lt;li&gt;Tests serve as documentation that is often far more specific than is worth putting in comments. If you properly cover all the behavior of your code and do so with relatively readable tests, then a contributor can read the tests to discover what the code is supposed to be doing.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;h3&gt;
+  &lt;a href="#step-31-async-tests" class="anchor"&gt;
+  &lt;/a&gt;
+  Step 3.1: Async Tests
+&lt;/h3&gt;
+
+&lt;p&gt;Now that most of the code required async, the tests had to know how to handle async as well! Tokio provides a convenient &lt;code&gt;#[tokio::test]&lt;/code&gt; macro to replace the normal &lt;code&gt;#[test]&lt;/code&gt; with in order to allow your test functions to be &lt;code&gt;async&lt;/code&gt;. This, along with replacing some imports, was done by another contributor who’d been following my progress and wanted to help out! Isn’t the open source community amazing when people work together? You can see their work &lt;a href="https://github.com/dbanty/rocket-lamb/commit/6a995b1b977675736fa32d96e1094ba3fcc05098"&gt;here&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;Building on top of what they had, I did a bit more work to finish getting the tests to compile which mostly involved switching to the &lt;code&gt;asynchronous&lt;/code&gt; Rocket client and to stable Rust (!!!). You can see those changes &lt;a href="https://github.com/dbanty/rocket-lamb/commit/3f5ece7a610921f834323cc0e1461406eaa18f91"&gt;in this commit&lt;/a&gt;. I also had to make the doctests work with async which basically just involved wrapping any async code in the doc comments with &lt;code&gt;tokio_test::block_on()&lt;/code&gt; &lt;a href="https://github.com/dbanty/rocket-lamb/blob/92d3049fd9fdc9ec66866655b310cf51cac1fe05/src/builder.rs#L46"&gt;like this&lt;/a&gt;.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#step-32-making-tests-less-dry" class="anchor"&gt;
+  &lt;/a&gt;
+  Step 3.2: Making Tests Less DRY
+&lt;/h3&gt;
+
+&lt;p&gt;DRY is an acronym for a mantra that is often preached in software development: “Don’t Repeat Yourself”. This advice &lt;em&gt;can&lt;/em&gt; be beneficial, but only when not taken at face value. Personally I prefer my code like I prefer my food: MOIST. That is, “Maintain One Indisputable Source (of) Truth” (yes that is a &lt;a href="https://en.wikipedia.org/wiki/Backronym"&gt;backcronym&lt;/a&gt;, no I’m not sorry). The main reason to not repeat code is that it’s easy for multiple sources to get out of sync and thereby cause bugs. One should not remove duplicated code simply because it’s duplicated, but rather to keep the implementation in sync.&lt;/p&gt;
+
+&lt;p&gt;DRY becomes particularly painful when applied to tests. If tests are to serve as documentation for your code, someone must be able to easily understand what a test is doing. Using a macro to effectively &lt;a href="https://docs.pytest.org/en/stable/parametrize.html#parametrizing-fixtures-and-test-functions"&gt;parametrize&lt;/a&gt; a test means that:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;It’s not immediately clear where a test is defined when it fails to run or compile using &lt;code&gt;cargo test&lt;/code&gt;.&lt;/li&gt;
+&lt;li&gt;You have to read macro code to figure out what the test is doing, which is always more difficult than reading Rust code directly.&lt;/li&gt;
+&lt;li&gt;Failures/panics can be particularly hard to debug when they come from inside generated code.&lt;/li&gt;
+&lt;li&gt;Most tooling just doesn’t work as well. For example, using CLion, I cannot easily click to run a single test which is generated in a macro like I can with normal functions. I also can’t jump to definition of code defined within the macro.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;All of that was to say that &lt;code&gt;rocket_lamb&lt;/code&gt; had a file full of test cases, each of which was defined with a macro (presumably to reduce duplication) which were failing and hard to debug. Rather than continue to guess as to the problem, I rewrote the tests using standard Rust code instead of a macro, keeping some shared setup in a separate function so that if we change the way the &lt;code&gt;RocketHandler&lt;/code&gt; is built, for instance, there is a single location which defines that.&lt;/p&gt;
+
+&lt;p&gt;Refactoring into standard Rust code also made it completely obvious what the features I had removed were trying to do.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#step-33-mutation-and-arcs" class="anchor"&gt;
+  &lt;/a&gt;
+  Step 3.3: Mutation and Arcs
+&lt;/h3&gt;
+
+&lt;p&gt;As I had mentioned earlier, there were two related pieces of code that I had removed to skip while implementing the basic async conversion. The first piece was pulling information out of the raw lambda request. The second piece was mutating some shared data in order to modify the rocket &lt;code&gt;Client&lt;/code&gt; before using it. Reading the failing tests gave me the last bit of context I needed to reimplement these features.&lt;/p&gt;
+
+&lt;p&gt;API Gateway is the service often used to route requests to Lambda functions, and it allows you to modify the paths of these requests either to add a fixed base path (e.g. /v2/) or a stage (e.g. /QA/). The application will likely not be aware of these changes, since they’re probably specific to the deployment. There are a few approaches I see to solve this problem:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;Have a feature flag or something and compile the full path into the application at build time. This has the huge downside of not being able to promote a /canary/ instance to prod, for example, without rebuilding.&lt;/li&gt;
+&lt;li&gt;Erase any base path or stage before giving the request to the application. So a request with the path &lt;code&gt;/canary/v2/hello&lt;/code&gt; might just surface as &lt;code&gt;/hello&lt;/code&gt; to Rocket. This will work, but it means any response headers from Rocket won’t include the same path that the client attempted to reach, which could cause problems.&lt;/li&gt;
+&lt;li&gt;Update the Rocket application to use the full paths at runtime. Specifically, delay building the &lt;code&gt;Client&lt;/code&gt; which does request handling until after you receive the first request. From that request you can determine any base path and stage and rewrite the Rocket routes on the fly before generating a client. &lt;em&gt;This&lt;/em&gt; is what that feature was doing.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;So if we want to maintain this feature (which seems like a good idea because presumably people are using it), we have to be able to mutate some shared state in an asynchronous context. You’ll remember, however, that our shared data is now behind an &lt;code&gt;Arc&lt;/code&gt; and that &lt;code&gt;Arc&lt;/code&gt; only provides read access to consumers. So how do we mutate it? Well there are a few solutions provided in the standard library, but I went with &lt;code&gt;Mutex&lt;/code&gt; from a crate called &lt;code&gt;parking_lot&lt;/code&gt; which is just a bit easier to use than the one in &lt;code&gt;std&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;I went back to a similar pattern that &lt;code&gt;rocket_lamb&lt;/code&gt; had originally. It was using an enum that looked like this:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight rust"&gt;&lt;code&gt;&lt;span class="k"&gt;enum&lt;/span&gt; &lt;span class="n"&gt;LazyClient&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="n"&gt;Placeholder&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="nf"&gt;Uninitialized&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Rocket&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+    &lt;span class="nf"&gt;Ready&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Client&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The &lt;code&gt;LazyClient&lt;/code&gt; was shared directly with the handler code (safe because it wasn’t async). It was set to &lt;code&gt;Uninitialized&lt;/code&gt; with the original Rocket instance at startup. Upon receiving the first request, the handling code would use &lt;code&gt;mem::replace&lt;/code&gt; to get the owned Rocket and leave a &lt;code&gt;Placeholder&lt;/code&gt; in its place (again, safe because the code was blocking, so nothing will reach this same code once it became &lt;code&gt;Placeholder&lt;/code&gt;). Finally, it updated all the routes in the &lt;code&gt;Rocket&lt;/code&gt; instance with any base path or stage before transforming that &lt;code&gt;Rocket&lt;/code&gt; into a &lt;code&gt;Client&lt;/code&gt; and setting the state to &lt;code&gt;Ready&lt;/code&gt;. Future requests would simply see that it’s already &lt;code&gt;Ready&lt;/code&gt; and use the &lt;code&gt;Client&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;Because anything which is threaded is naturally harder to deal with safely, I had to make a bunch of changes here. This is my first real foray into dealing with these sorts of problems, so if you have suggestions for improvements let me know! My enum looks like this:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight rust"&gt;&lt;code&gt;&lt;span class="k"&gt;enum&lt;/span&gt; &lt;span class="n"&gt;LazyClient&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="nf"&gt;Uninitialized&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nb"&gt;Option&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;Rocket&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+    &lt;span class="nf"&gt;Ready&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nb"&gt;Arc&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;Client&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;p&gt;And I passed it to the handling &lt;code&gt;Future&lt;/code&gt; as an &lt;code&gt;Arc&amp;lt;Mutex&amp;lt;LazyClient&amp;gt;&amp;gt;&lt;/code&gt;. This way it’s safe to pass into the future without lifetime issues (because of the &lt;code&gt;Arc&lt;/code&gt; thing mentioned before) and safe to mutate because of the &lt;code&gt;Mutex&lt;/code&gt;. The only other difference is that I use an &lt;code&gt;Option&amp;lt;Rocket&amp;gt;&lt;/code&gt; so I can &lt;code&gt;.take()&lt;/code&gt; the owned &lt;code&gt;Rocket&lt;/code&gt; instead of using &lt;code&gt;mem::replace&lt;/code&gt; with another enum type (mostly because I had a lot of trouble getting this to work with the &lt;code&gt;Mutex&lt;/code&gt;).&lt;/p&gt;
+
+&lt;p&gt;The obvious problem I see with my new code is it will have significantly more overhead than the old version due to all the indirection and the hard lock. Hopefully it’s not slow enough to matter much, and hopefully someone with more experience can tune it up a bit. All of the changes required to get this feature working again (including test refactors) can be found &lt;a href="https://github.com/dbanty/rocket-lamb/commit/47671b79b102402ebcf82c715dcd866079a741f4"&gt;here&lt;/a&gt;.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#conclusion" class="anchor"&gt;
+  &lt;/a&gt;
+  Conclusion
+&lt;/h2&gt;
+
+&lt;p&gt;That’s it! &lt;a href="https://github.com/dbanty/rocket-lamb/tree/rocket-0.5"&gt;My fork of rocket_lamb&lt;/a&gt; now works with the development version of &lt;code&gt;rocket&lt;/code&gt; and the latest &lt;code&gt;tokio&lt;/code&gt;. I was even able to get &lt;a href="https://github.com/dbanty/rust-fastapi-experiments/tree/rocket-0.5"&gt;my rocket experiment&lt;/a&gt; working with the latest &lt;code&gt;rocket&lt;/code&gt; by combining my fork with &lt;a href="https://github.com/dbanty/okapi/tree/async2"&gt;a fork of okapi which has been updated&lt;/a&gt;. So what’s next? Well now that everything has been updated, in theory my endpoints can be async, which means I should finally be able to use &lt;a href="https://crates.io/crates/sqlx"&gt;SQLx&lt;/a&gt; with this project!&lt;/p&gt;
+
+
+
+
+&lt;p&gt;&lt;em&gt;Want to be notified when the next part of this series is released? Watch releases in &lt;a href="https://github.com/dbanty/dylananthony.com"&gt;the GitHub repo&lt;/a&gt;.&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;em&gt;Have an idea or request for a future blog topic? Drop it in the GitHub discussions under &lt;a href="https://github.com/dbanty/dylananthony.com/discussions/categories/ideas"&gt;ideas&lt;/a&gt;.&lt;/em&gt;&lt;/p&gt;
+
+</description>
+      <category>rust</category>
+      <category>webdev</category>
+      <category>serverless</category>
+    </item>
+    <item>
       <title>Make Your Tmux Status Bar 100% Better With Bash
 </title>
       <author>brandon_wallace</author>
@@ -1508,6 +1893,107 @@ main
       <category>programming</category>
     </item>
     <item>
+      <title>5 Tips for Learning to Code in Your Thirties</title>
+      <author>Taryn McMillan</author>
+      <pubDate>Sat, 20 Feb 2021 22:38:53 +0000</pubDate>
+      <link>https://dev.to/tarynmcmillan/5-tips-for-learning-to-code-in-your-thirties-38p3</link>
+      <guid>https://dev.to/tarynmcmillan/5-tips-for-learning-to-code-in-your-thirties-38p3</guid>
+      <description>&lt;p&gt;I’ve dabbled in coding since I was a teenager, but never took it seriously until last year when the pandemic hit. As a stay-at-home mom with a History degree I questioned whether I had the necessary background to become a developer. I knew I didn’t have tons of time each day to study, and I also knew I didn't want to spend a lot of money on an expensive boot camp (if I could avoid it).&lt;/p&gt;
+
+&lt;p&gt;Teaching yourself to code in your thirties can be really intimidating. Here are five strategies I use to make the experience easier.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#forget-your-age" class="anchor"&gt;
+  &lt;/a&gt;
+  Forget your age
+&lt;/h1&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--vMRPRmlZ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1613155824361/wfQd3d9S4.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--vMRPRmlZ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1613155824361/wfQd3d9S4.png" alt="undraw_career_progress_ivdb.png"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;I’m a member of several different discord and social media groups for programmers and the question “Am I too old for this?” gets asked on a regular basis. The answer from other group members is always a resounding no. I’ve seen experienced developers come out of the woodwork to tell their inspiring stories of how they came to the field later in life. Their message is that age is not really a factor, as long as you’re willing to put in the work to learn. &lt;/p&gt;
+
+&lt;p&gt;Don’t let you age distract you from learning. The only way you can become competitive (no matter how old you are) is through dedication and commitment.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#make-a-list-of-resources" class="anchor"&gt;
+  &lt;/a&gt;
+  Make a list of resources
+&lt;/h1&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--DjZqS6yp--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1613155867785/xD77exhA2.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--DjZqS6yp--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1613155867785/xD77exhA2.png" alt="undraw_book_lover_mkck.png"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Call me naive, but I was absolutely blown away when I discovered how many free (or very affordable) options there were for learning code online. I’d suggest making a list of resources as you come across them. To get you started, here are some of the sites I’ve used in my own learning;&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;p&gt;&lt;a href="https://www.freecodecamp.org/"&gt;freeCodeCamp&lt;/a&gt; &lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;&lt;a href="https://www.sololearn.com/"&gt;SoloLearn&lt;/a&gt; &lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;&lt;a href="https://www.codecademy.com/"&gt;Codeacademy&lt;/a&gt; &lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;&lt;a href="https://dev.toLink"&gt;Udemy&lt;/a&gt; &lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;&lt;a href="https://www.w3schools.com/"&gt;W3Schools&lt;/a&gt; &lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;&lt;a href="https://learn.unity.com/"&gt;Unity Learn&lt;/a&gt;  (specific to game development but also useful for C# documentation)&lt;/p&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;There will be times in your learning journey when you feel overwhelmed and aren’t sure where to turn next. Having a list of tried-and-true websites and tutorials makes this decision easier. If you need to pivot to another coding language, you’ll already have a library of familiar resources to choose from.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#write-down-daily-goals-as-well-as-longerterm-ones" class="anchor"&gt;
+  &lt;/a&gt;
+  Write down daily goals, as well as longer-term ones
+&lt;/h1&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--nmX4bOpr--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1613155924119/4l7MKNVKu.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--nmX4bOpr--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1613155924119/4l7MKNVKu.png" alt="undraw_checking_boxes_2ibd.png"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;One of the biggest mistakes I first made as a coding student was to only focus on my long-term goals. I knew I wanted to  &lt;a href="https://mystic-mill-games.itch.io/no-crooks-on-christmas"&gt;publish a game on Itch.io&lt;/a&gt; . I knew I wanted to build a console app with C# in Visual Studio. I knew I wanted to finish as many modules as I could on freeCodeCamp. &lt;/p&gt;
+
+&lt;p&gt;But those longer term goals only got me so far. I needed to break them down into smaller, achievable steps that I could do on a daily basis. Trying to take on too much early in your coding journey is a sure path to failure. Stick with bite-sized, manageable tasks and bit by bit, they’ll add up to a lot. &lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#connect-with-the-tech-community" class="anchor"&gt;
+  &lt;/a&gt;
+  Connect with the tech community
+&lt;/h1&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--qHrrPiWg--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1613155964982/5VYyeHMMo.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--qHrrPiWg--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1613155964982/5VYyeHMMo.png" alt="undraw_Messaging_re_pgx8.png"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;I am a big introvert so this was a hard one for me at first, but I’m now conversing with other coding students on a daily basis. I didn’t realize at first how friendly and collaborative the community was. It blew my mind that you could upload some code to Github or Stack Overflow and have others comment on it and improve it. But I’ve realized over time that this is one of the best ways to learn. &lt;/p&gt;
+
+&lt;p&gt;Don’t be shy about not knowing things or asking questions. In this field, the learning never ends and even the most experienced developers I know still consider themselves students.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#take-risks" class="anchor"&gt;
+  &lt;/a&gt;
+  Take risks
+&lt;/h1&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--1Jl799oC--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1613156058384/OJ275sH5e.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--1Jl799oC--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1613156058384/OJ275sH5e.png" alt="undraw_finish_line_katerina_limpitsouni_xy20.png"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;I wouldn’t be where I am in my journey today if I didn’t take risks. I took a risk pouring weeks into my first published game, feeling like I was going in circles at times. But I see now that the skills I was learning working on that project were totally worth it. &lt;/p&gt;
+
+&lt;p&gt;When everyone you know is going one way, it can be hard to go another way. Then again, there are a lot of people in their thirties going through a career transition. So while it seems sometimes that you are the only one taking risks in your professional life, remember that you are in good company.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#the-takeaway-dont-give-up" class="anchor"&gt;
+  &lt;/a&gt;
+  The takeaway: Don’t give up!
+&lt;/h1&gt;
+
+&lt;p&gt;I’m not one for cheesy quotes, but I really like this one from C.S. Lewis:&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;You are never too old to set another goal or to dream a new dream.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;No matter where you are in your coding journey-- beginner, intermediate, expert-- I hope you keep setting goals and dreaming dreams. The world will be richer for it.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--MGArY7Nr--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1613156188159/-jv7h4F7f.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--MGArY7Nr--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1613156188159/-jv7h4F7f.png" alt="undraw_dreamer_gxxi.png"&gt;&lt;/a&gt;&lt;/p&gt;
+
+</description>
+      <category>codenewbie</category>
+      <category>womenintech</category>
+      <category>career</category>
+      <category>learning</category>
+    </item>
+    <item>
       <title>Grid vs. Flexbox</title>
       <author>NadaYousry</author>
       <pubDate>Sat, 20 Feb 2021 21:52:37 +0000</pubDate>
@@ -2367,6 +2853,667 @@ App has not been deployed, creating a new deployment...
       <category>devops</category>
     </item>
     <item>
+      <title>Handling Unix Kill Signals in Rust</title>
+      <author>Tal</author>
+      <pubDate>Sat, 20 Feb 2021 20:27:39 +0000</pubDate>
+      <link>https://dev.to/talzvon/handling-unix-kill-signals-in-rust-55g6</link>
+      <guid>https://dev.to/talzvon/handling-unix-kill-signals-in-rust-55g6</guid>
+      <description>&lt;h2&gt;
+  &lt;a href="#intro" class="anchor"&gt;
+  &lt;/a&gt;
+  Intro
+&lt;/h2&gt;
+
+&lt;p&gt;Like many of you, I am a software developer. For the past few years, I've been working with Python, both at work, and writing small hobby projects at home.&lt;/p&gt;
+
+&lt;p&gt;One of the most common things I do with Python is write Linux services/daemons. A linux daemon is a program, in our case written in Python, that runs in a loop, usually by SystemD, and only exits when it receives a kill signal.&lt;/p&gt;
+
+&lt;p&gt;A few months ago, I decided to teach myself Rust, and after reading the &lt;a href="https://doc.rust-lang.org/book/title-page.html"&gt;Rust book&lt;/a&gt; (which I highly recommend), and watching lots of youtube videos, I tried to write a Rust Linux daemon.&lt;/p&gt;
+
+&lt;p&gt;Part of the process was figuring out how to handle kill signals in Rust, which is very different than how it is handled in Python. I expected this to be relatively easy, but found it to be rather difficult. In this article, we're going to take a look at the &lt;code&gt;signal_hook&lt;/code&gt; crate, and the different ways Rust allows us to react to a kill signal. Hopefully, my experience will help ease the journey for some of you.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#linux-kill-signals" class="anchor"&gt;
+  &lt;/a&gt;
+  Linux Kill Signals
+&lt;/h2&gt;
+
+&lt;p&gt;The 2 most common kill signals in Linux are SIGINT, which gets sent to your program when you run the program manually, and hit Ctrl+C in your terminal, or SIGTERM, which SystemD sends to your program when you run &lt;code&gt;systemctl stop my_program&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;Unlike Python, which throws an ugly traceback when it receives an unhandled kill signal, Rust quietly exits. If your Rust program does not need to do anything special when it terminates, you can probably get away with not doing any kill signal handling at all, but if you need to do any kind of cleanup, you'll likely need to catch these kill signals, and do your cleanup before exiting.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#crate-options" class="anchor"&gt;
+  &lt;/a&gt;
+  Crate Options
+&lt;/h2&gt;
+
+&lt;p&gt;Unlike Python, Rust doesn't have built-in kill signal handling. You'll need to use an external crate to add this functionality. There are 2 main crates that allow you to handle kill signals:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="https://docs.rs/ctrlc/3.1.7/ctrlc/"&gt;ctrlc&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://docs.rs/signal-hook/0.3.4/signal_hook/"&gt;signal_hook&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;The &lt;code&gt;ctrlc&lt;/code&gt; crate is fairly easy to use, but only supports a limited number of kill signals:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;SIGINT&lt;/li&gt;
+&lt;li&gt;SIGTERM (&lt;a href="https://docs.rs/ctrlc/3.1.7/ctrlc/#handling-sigterm"&gt;requires enabling the termination feature&lt;/a&gt;)&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Here, I'll be taking a look at the &lt;code&gt;signal_hook&lt;/code&gt; crate. Once we break down the &lt;code&gt;signal_hook&lt;/code&gt; crate, the &lt;code&gt;ctrlc&lt;/code&gt; crate becomes easy to understand and use as well.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#signal-hook" class="anchor"&gt;
+  &lt;/a&gt;
+  Signal Hook
+&lt;/h2&gt;
+
+&lt;p&gt;This may change, but as of now, the crate documentation has 2 examples on the front page - one that is &lt;a href="https://docs.rs/signal-hook/0.3.4/signal_hook/index.html#using-a-flag-to-terminate-a-loop-based-application"&gt;very simple&lt;/a&gt;, which we will take a closer look at below, and one that is &lt;a href="https://docs.rs/signal-hook/0.3.4/signal_hook/index.html#a-complex-signal-handling-with-a-background-thread"&gt;overly complex&lt;/a&gt;, which uses features that are unlikely to be commonly needed, and &lt;a href="https://github.com/vorner/signal-hook/issues/93"&gt;won't compile without enabling extra features&lt;/a&gt;. We'll slowly work our way from the simple example, to a more complex one that resembles the one in the documentation.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#cargotoml" class="anchor"&gt;
+  &lt;/a&gt;
+  Cargo.toml
+&lt;/h2&gt;
+
+&lt;p&gt;The first thing you'll want to do is add this to the dependencies section of your Cargo.toml file:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight toml"&gt;&lt;code&gt;&lt;span class="py"&gt;signal-hook&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="s"&gt;"0.3.4"&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;p&gt;While this will work for ALL of our examples, if you want to compile the &lt;a href="https://docs.rs/signal-hook/0.3.4/signal_hook/index.html#a-complex-signal-handling-with-a-background-thread"&gt;complex&lt;/a&gt; example from the documentation, you'll want your toml file to say this instead:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight toml"&gt;&lt;code&gt;&lt;span class="nn"&gt;signal-hook&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="py"&gt;version&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="s"&gt;"0.3.4"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="py"&gt;features&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="nn"&gt;["extended-siginfo"]&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#simple-example" class="anchor"&gt;
+  &lt;/a&gt;
+  Simple Example
+&lt;/h2&gt;
+
+&lt;p&gt;This is a slightly modified version of the simple example from the documentation:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight rust"&gt;&lt;code&gt;&lt;span class="k"&gt;use&lt;/span&gt; &lt;span class="nn"&gt;std&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;io&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="n"&gt;Error&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="k"&gt;use&lt;/span&gt; &lt;span class="nn"&gt;std&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;sync&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nb"&gt;Arc&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="k"&gt;use&lt;/span&gt; &lt;span class="nn"&gt;std&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;sync&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;atomic&lt;/span&gt;&lt;span class="p"&gt;::{&lt;/span&gt;&lt;span class="n"&gt;AtomicBool&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;Ordering&lt;/span&gt;&lt;span class="p"&gt;};&lt;/span&gt;
+&lt;span class="k"&gt;use&lt;/span&gt; &lt;span class="nn"&gt;std&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="n"&gt;thread&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="k"&gt;use&lt;/span&gt; &lt;span class="nn"&gt;std&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="n"&gt;time&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="k"&gt;use&lt;/span&gt; &lt;span class="nn"&gt;signal_hook&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="n"&gt;flag&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;main&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="k"&gt;-&amp;gt;&lt;/span&gt; &lt;span class="n"&gt;Result&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="p"&gt;(),&lt;/span&gt; &lt;span class="n"&gt;Error&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="c"&gt;// Declare bool, setting it to false&lt;/span&gt;
+    &lt;span class="k"&gt;let&lt;/span&gt; &lt;span class="n"&gt;term&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nn"&gt;Arc&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;new&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nn"&gt;AtomicBool&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;new&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="k"&gt;false&lt;/span&gt;&lt;span class="p"&gt;));&lt;/span&gt;
+
+    &lt;span class="c"&gt;// Ask signal_hook to set the term variable to true&lt;/span&gt;
+    &lt;span class="c"&gt;// when the program receives a SIGTERM kill signal&lt;/span&gt;
+    &lt;span class="nn"&gt;flag&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;register&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nn"&gt;signal_hook&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;consts&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="n"&gt;SIGTERM&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nn"&gt;Arc&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;clone&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;term&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;&lt;span class="o"&gt;?&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+    &lt;span class="c"&gt;// Do work until the term variable becomes true&lt;/span&gt;
+    &lt;span class="k"&gt;while&lt;/span&gt; &lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="n"&gt;term&lt;/span&gt;&lt;span class="nf"&gt;.load&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nn"&gt;Ordering&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="n"&gt;Relaxed&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="nd"&gt;println!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Doing work..."&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+        &lt;span class="nn"&gt;thread&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;sleep&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nn"&gt;time&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;Duration&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;from_secs&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;));&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+
+    &lt;span class="c"&gt;// Since our loop is basically an infinite loop,&lt;/span&gt;
+    &lt;span class="c"&gt;// that only ends when we receive SIGTERM, if&lt;/span&gt;
+    &lt;span class="c"&gt;// we got here, it's because the loop exited after&lt;/span&gt;
+    &lt;span class="c"&gt;// receiving SIGTERM&lt;/span&gt;
+    &lt;span class="nd"&gt;println!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Received SIGTERM kill signal. Exiting..."&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+
+    &lt;span class="nf"&gt;Ok&lt;/span&gt;&lt;span class="p"&gt;(())&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Lets have a look at the different parts. First, we have this:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight rust"&gt;&lt;code&gt;&lt;span class="k"&gt;let&lt;/span&gt; &lt;span class="n"&gt;term&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nn"&gt;Arc&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;new&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nn"&gt;AtomicBool&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;new&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="k"&gt;false&lt;/span&gt;&lt;span class="p"&gt;));&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This line creates a special boolean variable that can be used safely from different threads. It can be set in one thread, by the &lt;code&gt;signal_hook&lt;/code&gt; crate, and checked in your main thread.&lt;/p&gt;
+
+&lt;p&gt;Next, we have this line:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight rust"&gt;&lt;code&gt;&lt;span class="nn"&gt;flag&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;register&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nn"&gt;signal_hook&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;consts&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="n"&gt;SIGTERM&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nn"&gt;Arc&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;clone&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;term&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;&lt;span class="o"&gt;?&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This tells &lt;code&gt;signal_hook&lt;/code&gt; that we would like to register the SIGTERM kill signal to be monitored, and when we receive this kill signal, to have the &lt;code&gt;term&lt;/code&gt; boolean set to true.&lt;/p&gt;
+
+&lt;p&gt;Lastly, we have the main loop:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight rust"&gt;&lt;code&gt;&lt;span class="k"&gt;while&lt;/span&gt; &lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="n"&gt;term&lt;/span&gt;&lt;span class="nf"&gt;.load&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nn"&gt;Ordering&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="n"&gt;Relaxed&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="o"&gt;...&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The way we check if the special boolean we are using is true or false is slightly different than how we check regular booleans. We use the &lt;code&gt;.load()&lt;/code&gt; method on it. Because the loop starts out false, and we are waiting for it to turn true, and &lt;code&gt;while&lt;/code&gt; loops only run while something is true, we use &lt;code&gt;!&lt;/code&gt; here. All we are saying is that we want the loop to run until the boolean turns true.&lt;/p&gt;
+
+&lt;p&gt;To test this program, compile it, run it, and after a few seconds, run:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;killall &lt;span class="nt"&gt;-SIGTERM&lt;/span&gt; my_program
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;p&gt;where &lt;code&gt;my_program&lt;/code&gt; is the name of your program. That's the name you gave it when you ran &lt;code&gt;crate new my_program&lt;/code&gt;. It's also the name of your binary under &lt;code&gt;target/debug/&lt;/code&gt; of your project. This will send your program a SIGTERM signal, causing the boolean to get set to true, and the loop to exit. Simple.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#double-sigint" class="anchor"&gt;
+  &lt;/a&gt;
+  Double SIGINT
+&lt;/h2&gt;
+
+&lt;p&gt;This is a slightly more complex example. Here, if the user hits Ctrl+C (sending our program the SIGINT kill signal), our program will begin to clean up and try to exit. If the user hits Ctrl+C again, possibly because our cleanup procedure locked up, our program will terminate immediately.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight rust"&gt;&lt;code&gt;&lt;span class="k"&gt;use&lt;/span&gt; &lt;span class="nn"&gt;std&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;io&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="n"&gt;Error&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="k"&gt;use&lt;/span&gt; &lt;span class="nn"&gt;std&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;sync&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nb"&gt;Arc&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="k"&gt;use&lt;/span&gt; &lt;span class="nn"&gt;std&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;sync&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;atomic&lt;/span&gt;&lt;span class="p"&gt;::{&lt;/span&gt;&lt;span class="n"&gt;AtomicBool&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;Ordering&lt;/span&gt;&lt;span class="p"&gt;};&lt;/span&gt;
+&lt;span class="k"&gt;use&lt;/span&gt; &lt;span class="nn"&gt;std&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="n"&gt;thread&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="k"&gt;use&lt;/span&gt; &lt;span class="nn"&gt;std&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="n"&gt;time&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="c"&gt;// This is just a collection of ints that represent kill signals.&lt;/span&gt;
+&lt;span class="c"&gt;// More specifically, they are the common kill signals used to&lt;/span&gt;
+&lt;span class="c"&gt;// terminate a program&lt;/span&gt;
+&lt;span class="c"&gt;// You can do println!("{:?}", TERM_SIGNALS) to see them&lt;/span&gt;
+&lt;span class="c"&gt;// They are just SIGINT(2), SIGTERM(15) and SIGQUIT(3)&lt;/span&gt;
+&lt;span class="k"&gt;use&lt;/span&gt; &lt;span class="nn"&gt;signal_hook&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;consts&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="n"&gt;TERM_SIGNALS&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="c"&gt;// Module that sets boolean flags when kill signal is received&lt;/span&gt;
+&lt;span class="k"&gt;use&lt;/span&gt; &lt;span class="nn"&gt;signal_hook&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="n"&gt;flag&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;main&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="k"&gt;-&amp;gt;&lt;/span&gt; &lt;span class="n"&gt;Result&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="p"&gt;(),&lt;/span&gt; &lt;span class="n"&gt;Error&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="c"&gt;// A special boolean that can be used across threads&lt;/span&gt;
+    &lt;span class="c"&gt;// It will be passed to flag::register, which will&lt;/span&gt;
+    &lt;span class="c"&gt;// set it to true the first time a kill signal is received&lt;/span&gt;
+    &lt;span class="k"&gt;let&lt;/span&gt; &lt;span class="n"&gt;term_now&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nn"&gt;Arc&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;new&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nn"&gt;AtomicBool&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;new&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="k"&gt;false&lt;/span&gt;&lt;span class="p"&gt;));&lt;/span&gt;
+
+    &lt;span class="c"&gt;// Register all kill signals&lt;/span&gt;
+    &lt;span class="c"&gt;// Note: You COULD specify other, specific kill signals here&lt;/span&gt;
+    &lt;span class="c"&gt;// rather than the 3 in TERM_SIGNALS. You just need a vector&lt;/span&gt;
+    &lt;span class="c"&gt;// of constants from signal_hook::consts::signal&lt;/span&gt;
+    &lt;span class="k"&gt;for&lt;/span&gt; &lt;span class="n"&gt;sig&lt;/span&gt; &lt;span class="n"&gt;in&lt;/span&gt; &lt;span class="n"&gt;TERM_SIGNALS&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="c"&gt;// When terminated by a second term signal, exit with exit code 1.&lt;/span&gt;
+        &lt;span class="c"&gt;// This will do nothing the first time (because term_now is false).&lt;/span&gt;
+        &lt;span class="nn"&gt;flag&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;register_conditional_shutdown&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="n"&gt;sig&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nn"&gt;Arc&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;clone&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;term_now&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;&lt;span class="o"&gt;?&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+        &lt;span class="c"&gt;// But this will "arm" the above for the second time, by setting it to true.&lt;/span&gt;
+        &lt;span class="c"&gt;// The order of registering these is important, if you put this one first, it will&lt;/span&gt;
+        &lt;span class="c"&gt;// first arm and then terminate ‒ all in the first round.&lt;/span&gt;
+        &lt;span class="nn"&gt;flag&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;register&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="n"&gt;sig&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nn"&gt;Arc&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;clone&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;term_now&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;&lt;span class="o"&gt;?&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+
+    &lt;span class="c"&gt;// Main process that does work until term_now has been set&lt;/span&gt;
+    &lt;span class="c"&gt;// to true by flag::register&lt;/span&gt;
+    &lt;span class="k"&gt;while&lt;/span&gt; &lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="n"&gt;term_now&lt;/span&gt;&lt;span class="nf"&gt;.load&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nn"&gt;Ordering&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="n"&gt;Relaxed&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="nd"&gt;println!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Doing work..."&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+        &lt;span class="nn"&gt;thread&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;sleep&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nn"&gt;time&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;Duration&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;from_secs&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;));&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+
+    &lt;span class="c"&gt;// If we ended up here, the loop above exited because of a kill signal&lt;/span&gt;
+    &lt;span class="nd"&gt;println!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"&lt;/span&gt;&lt;span class="se"&gt;\n&lt;/span&gt;&lt;span class="s"&gt;Received kill signal. Wait 10 seconds, or hit Ctrl+C again to exit immediately."&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+
+    &lt;span class="c"&gt;// This simulates a long cleanup operation&lt;/span&gt;
+    &lt;span class="c"&gt;// If you wait this long, the program will exit&lt;/span&gt;
+    &lt;span class="c"&gt;// If you hit Ctrl+C again before this is done, flag::register_conditional_shutdown will kill&lt;/span&gt;
+    &lt;span class="c"&gt;// the process without waiting for it to finish. This means double Ctrl+C kills the process&lt;/span&gt;
+    &lt;span class="c"&gt;// immediately&lt;/span&gt;
+    &lt;span class="nn"&gt;thread&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;sleep&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nn"&gt;time&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;Duration&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;from_secs&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;10&lt;/span&gt;&lt;span class="p"&gt;));&lt;/span&gt;
+
+    &lt;span class="nd"&gt;println!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Exited cleanly"&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+
+    &lt;span class="nf"&gt;Ok&lt;/span&gt;&lt;span class="p"&gt;(())&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This code is actually very similar to the first example, but with one additional part. Now, the &lt;code&gt;term_now&lt;/code&gt; bool is used for 2 different purposes.&lt;/p&gt;
+
+&lt;p&gt;The first is defined here:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight rust"&gt;&lt;code&gt;&lt;span class="k"&gt;for&lt;/span&gt; &lt;span class="n"&gt;sig&lt;/span&gt; &lt;span class="n"&gt;in&lt;/span&gt; &lt;span class="n"&gt;TERM_SIGNALS&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="nn"&gt;flag&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;register_conditional_shutdown&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="n"&gt;sig&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nn"&gt;Arc&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;clone&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;term_now&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;&lt;span class="o"&gt;?&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+    &lt;span class="nn"&gt;flag&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;register&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="n"&gt;sig&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nn"&gt;Arc&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;clone&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;term_now&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;&lt;span class="o"&gt;?&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;p&gt;As before, the &lt;code&gt;register&lt;/code&gt; function will set &lt;code&gt;term_now&lt;/code&gt; to true when it receives a kill signal. The new &lt;code&gt;register_conditional_shutdown&lt;/code&gt; on the other hand will kill your program, but only if &lt;code&gt;term_now&lt;/code&gt; is set to true. &lt;/p&gt;
+
+&lt;p&gt;The first time you hit Ctrl+C, &lt;code&gt;register_conditional_shutdown&lt;/code&gt; will do nothing because &lt;code&gt;term_now&lt;/code&gt; will be false, but &lt;code&gt;register&lt;/code&gt; will set &lt;code&gt;term_now&lt;/code&gt; to true. The second time you hit Ctrl+C, &lt;code&gt;register_conditional_shutdown&lt;/code&gt; will terminate the program no matter what else the program might be working on.&lt;/p&gt;
+
+&lt;p&gt;These 2 lines in a &lt;code&gt;for&lt;/code&gt; loop will make the double-Ctrl+C work (terminate your program), but you still need your main code to watch for, and react to a kill signal to shut down your program gracefully. As before, we do this with a &lt;code&gt;while&lt;/code&gt; loop that runs until &lt;code&gt;term_now&lt;/code&gt; becomes true.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#complex-example" class="anchor"&gt;
+  &lt;/a&gt;
+  Complex Example
+&lt;/h2&gt;
+
+&lt;p&gt;Building on the previous examples, the following is a slightly more complex example that reacts differently to different kill signals:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight rust"&gt;&lt;code&gt;&lt;span class="k"&gt;use&lt;/span&gt; &lt;span class="nn"&gt;std&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;io&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="n"&gt;Error&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="k"&gt;use&lt;/span&gt; &lt;span class="nn"&gt;std&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;sync&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nb"&gt;Arc&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="k"&gt;use&lt;/span&gt; &lt;span class="nn"&gt;std&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;sync&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;atomic&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="n"&gt;AtomicBool&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="k"&gt;use&lt;/span&gt; &lt;span class="nn"&gt;std&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="n"&gt;thread&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="k"&gt;use&lt;/span&gt; &lt;span class="nn"&gt;std&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="n"&gt;time&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="k"&gt;use&lt;/span&gt; &lt;span class="nn"&gt;std&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;sync&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;atomic&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="n"&gt;Ordering&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="k"&gt;use&lt;/span&gt; &lt;span class="nn"&gt;signal_hook&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="n"&gt;flag&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="k"&gt;use&lt;/span&gt; &lt;span class="nn"&gt;signal_hook&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;consts&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;signal&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="k"&gt;use&lt;/span&gt; &lt;span class="nn"&gt;signal_hook&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;consts&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="n"&gt;TERM_SIGNALS&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="k"&gt;use&lt;/span&gt; &lt;span class="nn"&gt;signal_hook&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;iterator&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="n"&gt;Signals&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;main&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="k"&gt;-&amp;gt;&lt;/span&gt; &lt;span class="n"&gt;Result&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="p"&gt;(),&lt;/span&gt; &lt;span class="n"&gt;Error&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="c"&gt;// A special boolean that can be used across threads&lt;/span&gt;
+    &lt;span class="c"&gt;// The first time a kill signal is received, it will be set to&lt;/span&gt;
+    &lt;span class="c"&gt;// true by flag::register&lt;/span&gt;
+    &lt;span class="c"&gt;// The second time a kill signal is received, our process will&lt;/span&gt;
+    &lt;span class="c"&gt;// be killed by flag::register_conditional_shutdown&lt;/span&gt;
+    &lt;span class="k"&gt;let&lt;/span&gt; &lt;span class="n"&gt;term_now&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nn"&gt;Arc&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;new&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nn"&gt;AtomicBool&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;new&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="k"&gt;false&lt;/span&gt;&lt;span class="p"&gt;));&lt;/span&gt;
+
+    &lt;span class="k"&gt;for&lt;/span&gt; &lt;span class="n"&gt;sig&lt;/span&gt; &lt;span class="n"&gt;in&lt;/span&gt; &lt;span class="n"&gt;TERM_SIGNALS&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="c"&gt;// When terminated by a second term signal, exit with exit code 1.&lt;/span&gt;
+        &lt;span class="c"&gt;// This will do nothing the first time (because term_now is false).&lt;/span&gt;
+        &lt;span class="nn"&gt;flag&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;register_conditional_shutdown&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="n"&gt;sig&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nn"&gt;Arc&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;clone&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;term_now&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;&lt;span class="o"&gt;?&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+        &lt;span class="c"&gt;// But this will "arm" the above for the second time, by setting it to true.&lt;/span&gt;
+        &lt;span class="c"&gt;// The order of registering these is important, if you put this one first, it will&lt;/span&gt;
+        &lt;span class="c"&gt;// first arm and then terminate ‒ all in the first round.&lt;/span&gt;
+        &lt;span class="nn"&gt;flag&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;register&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="n"&gt;sig&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nn"&gt;Arc&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;clone&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;term_now&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;&lt;span class="o"&gt;?&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+
+    &lt;span class="c"&gt;// Our actual work thread&lt;/span&gt;
+    &lt;span class="k"&gt;let&lt;/span&gt; &lt;span class="n"&gt;t&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nn"&gt;thread&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;spawn&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="k"&gt;move&lt;/span&gt; &lt;span class="p"&gt;||&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="k"&gt;while&lt;/span&gt; &lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="n"&gt;term_now&lt;/span&gt;&lt;span class="nf"&gt;.load&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nn"&gt;Ordering&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="n"&gt;Relaxed&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+        &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="nd"&gt;println!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Doing work..."&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+            &lt;span class="nn"&gt;thread&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;sleep&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nn"&gt;time&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;Duration&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;from_secs&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;));&lt;/span&gt;
+        &lt;span class="p"&gt;}&lt;/span&gt;
+
+        &lt;span class="nd"&gt;println!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"&lt;/span&gt;&lt;span class="se"&gt;\n&lt;/span&gt;&lt;span class="s"&gt;Thread exiting..."&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="p"&gt;});&lt;/span&gt;
+
+    &lt;span class="c"&gt;// Create iterator over signals&lt;/span&gt;
+    &lt;span class="k"&gt;let&lt;/span&gt; &lt;span class="k"&gt;mut&lt;/span&gt; &lt;span class="n"&gt;signals&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nn"&gt;Signals&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;new&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;TERM_SIGNALS&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="o"&gt;?&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+    &lt;span class="c"&gt;// This loop runs forever, and blocks until a kill signal is received&lt;/span&gt;
+    &lt;span class="nv"&gt;'outer&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="k"&gt;loop&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="k"&gt;for&lt;/span&gt; &lt;span class="n"&gt;signal&lt;/span&gt; &lt;span class="n"&gt;in&lt;/span&gt; &lt;span class="n"&gt;signals&lt;/span&gt;&lt;span class="nf"&gt;.pending&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="k"&gt;match&lt;/span&gt; &lt;span class="n"&gt;signal&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+                &lt;span class="n"&gt;SIGINT&lt;/span&gt; &lt;span class="k"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+                    &lt;span class="nd"&gt;println!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"&lt;/span&gt;&lt;span class="se"&gt;\n&lt;/span&gt;&lt;span class="s"&gt;Got SIGINT"&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+                    &lt;span class="k"&gt;break&lt;/span&gt; &lt;span class="nv"&gt;'outer&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+                &lt;span class="p"&gt;},&lt;/span&gt;
+                &lt;span class="n"&gt;SIGTERM&lt;/span&gt; &lt;span class="k"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+                    &lt;span class="nd"&gt;println!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"&lt;/span&gt;&lt;span class="se"&gt;\n&lt;/span&gt;&lt;span class="s"&gt;Got SIGTERM"&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+                    &lt;span class="k"&gt;break&lt;/span&gt; &lt;span class="nv"&gt;'outer&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+                &lt;span class="p"&gt;},&lt;/span&gt;
+                &lt;span class="n"&gt;term_sig&lt;/span&gt; &lt;span class="k"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+                    &lt;span class="nd"&gt;println!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"&lt;/span&gt;&lt;span class="se"&gt;\n&lt;/span&gt;&lt;span class="s"&gt;Got {:?}"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;term_sig&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+                    &lt;span class="k"&gt;break&lt;/span&gt; &lt;span class="nv"&gt;'outer&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+                &lt;span class="p"&gt;},&lt;/span&gt;
+            &lt;span class="p"&gt;}&lt;/span&gt;
+        &lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+
+    &lt;span class="c"&gt;// Wait for thread to exit&lt;/span&gt;
+    &lt;span class="n"&gt;t&lt;/span&gt;&lt;span class="nf"&gt;.join&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="nf"&gt;.unwrap&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+
+    &lt;span class="c"&gt;// Cleanup code goes here&lt;/span&gt;
+    &lt;span class="nd"&gt;println!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"&lt;/span&gt;&lt;span class="se"&gt;\n&lt;/span&gt;&lt;span class="s"&gt;Received kill signal. Wait 10 seconds, or hit Ctrl+C again to exit immediately."&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="nn"&gt;thread&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;sleep&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nn"&gt;time&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;Duration&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;from_secs&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;10&lt;/span&gt;&lt;span class="p"&gt;));&lt;/span&gt;
+    &lt;span class="nd"&gt;println!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Exited cleanly"&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+
+    &lt;span class="nf"&gt;Ok&lt;/span&gt;&lt;span class="p"&gt;(())&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Here, a few things are going on that we are already familiar with. Just like before, we create a new bool that &lt;code&gt;signal_hook&lt;/code&gt; will set to true for us when it receives a kill signal.&lt;/p&gt;
+
+&lt;p&gt;We also, once again, use &lt;code&gt;flag::register_conditional_shutdown&lt;/code&gt; to make sure that a second SIGINT will kill our program immediately.&lt;/p&gt;
+
+&lt;p&gt;Something that's new here is this:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight rust"&gt;&lt;code&gt;&lt;span class="c"&gt;// Our actual work thread&lt;/span&gt;
+&lt;span class="k"&gt;let&lt;/span&gt; &lt;span class="n"&gt;t&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nn"&gt;thread&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;spawn&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="k"&gt;move&lt;/span&gt; &lt;span class="p"&gt;||&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="k"&gt;while&lt;/span&gt; &lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="n"&gt;term_now&lt;/span&gt;&lt;span class="nf"&gt;.load&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nn"&gt;Ordering&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="n"&gt;Relaxed&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="nd"&gt;println!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Doing work..."&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+        &lt;span class="nn"&gt;thread&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;sleep&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nn"&gt;time&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;Duration&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;from_secs&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;));&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+
+    &lt;span class="nd"&gt;println!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"&lt;/span&gt;&lt;span class="se"&gt;\n&lt;/span&gt;&lt;span class="s"&gt;Thread exiting..."&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="p"&gt;});&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Here, we are spawning a new worker thread where our actual work will be done, whatever that happens to be, and moving our &lt;code&gt;term_now&lt;/code&gt; variable to this thread, so that the worker thread can monitor the boolean, and know when it's time to exit (when we've received a kill signal).&lt;/p&gt;
+
+&lt;p&gt;The worker thread looks very similar to our previous examples' main thread - it runs an infinite while loop that only exits if the boolean &lt;code&gt;signal_hook&lt;/code&gt; will set for us becomes true. When it does exit, the statements following the while loop will be executed on its way out.&lt;/p&gt;
+
+&lt;p&gt;The next new code in this example is this:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight rust"&gt;&lt;code&gt;&lt;span class="k"&gt;let&lt;/span&gt; &lt;span class="k"&gt;mut&lt;/span&gt; &lt;span class="n"&gt;signals&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nn"&gt;Signals&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;new&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;TERM_SIGNALS&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="o"&gt;?&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This will let us use an iterator to iterate over any incoming signals.&lt;/p&gt;
+
+&lt;p&gt;The main example in the &lt;code&gt;signal_hook&lt;/code&gt; documentation uses &lt;code&gt;SignalsInfo&lt;/code&gt; instead. The main difference is that &lt;code&gt;Signals&lt;/code&gt; will simply return the kill signal received, whereas &lt;code&gt;SignalsInfo&lt;/code&gt; returns some additional info about every kill signal.&lt;/p&gt;
+
+&lt;p&gt;As stated above, using &lt;code&gt;Signals&lt;/code&gt; doesn't require anything special, while using &lt;code&gt;SignalsInfo&lt;/code&gt; requires the &lt;code&gt;extended-siginfo&lt;/code&gt; feature to be enabled in your Cargo.toml, so please be aware.&lt;/p&gt;
+
+&lt;p&gt;After that, we have this code:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight rust"&gt;&lt;code&gt;    &lt;span class="nv"&gt;'outer&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="k"&gt;loop&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="k"&gt;for&lt;/span&gt; &lt;span class="n"&gt;signal&lt;/span&gt; &lt;span class="n"&gt;in&lt;/span&gt; &lt;span class="n"&gt;signals&lt;/span&gt;&lt;span class="nf"&gt;.pending&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="k"&gt;match&lt;/span&gt; &lt;span class="n"&gt;signal&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+                &lt;span class="n"&gt;SIGINT&lt;/span&gt; &lt;span class="k"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+                    &lt;span class="nd"&gt;println!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"&lt;/span&gt;&lt;span class="se"&gt;\n&lt;/span&gt;&lt;span class="s"&gt;Got SIGINT"&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+                    &lt;span class="k"&gt;break&lt;/span&gt; &lt;span class="nv"&gt;'outer&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+                &lt;span class="p"&gt;},&lt;/span&gt;
+                &lt;span class="n"&gt;SIGTERM&lt;/span&gt; &lt;span class="k"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+                    &lt;span class="nd"&gt;println!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"&lt;/span&gt;&lt;span class="se"&gt;\n&lt;/span&gt;&lt;span class="s"&gt;Got SIGTERM"&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+                    &lt;span class="k"&gt;break&lt;/span&gt; &lt;span class="nv"&gt;'outer&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+                &lt;span class="p"&gt;},&lt;/span&gt;
+                &lt;span class="n"&gt;term_sig&lt;/span&gt; &lt;span class="k"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+                    &lt;span class="nd"&gt;println!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"&lt;/span&gt;&lt;span class="se"&gt;\n&lt;/span&gt;&lt;span class="s"&gt;Got {:?}"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;term_sig&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+                    &lt;span class="k"&gt;break&lt;/span&gt; &lt;span class="nv"&gt;'outer&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+                &lt;span class="p"&gt;},&lt;/span&gt;
+            &lt;span class="p"&gt;}&lt;/span&gt;
+        &lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This is a loop within a loop. The inner loop iterates over any kill signals in queue, while the outer loop is an infinite loop that keeps checking the queue.&lt;/p&gt;
+
+&lt;p&gt;When we do receive a kill signal, we can match it against the constants found in &lt;code&gt;signal_hook::consts::signal&lt;/code&gt;, like SIGINT and SIGTERM, take action, and break out of both loops.&lt;/p&gt;
+
+&lt;p&gt;In order to easily break out of both loops, we give the outer loop a name, and our break statement tells rust that we want to break out of the loop with the given name, rather than the first enclosing loop.&lt;/p&gt;
+
+&lt;p&gt;After we are out of the loop, we have this line:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight rust"&gt;&lt;code&gt;&lt;span class="n"&gt;t&lt;/span&gt;&lt;span class="nf"&gt;.join&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="nf"&gt;.unwrap&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Because the only way to get out of the loop is by receiving a kill signal, and our worker thread will also see this kill signal, we can assume at this point that our thread is terminating, so here, we simply wait for it to return (finish its cleanup).&lt;/p&gt;
+
+&lt;p&gt;Once the thread returns, we can do our own cleanup here:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight rust"&gt;&lt;code&gt;&lt;span class="nd"&gt;println!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"&lt;/span&gt;&lt;span class="se"&gt;\n&lt;/span&gt;&lt;span class="s"&gt;Received kill signal. Wait 10 seconds, or hit Ctrl+C again to exit immediately."&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="nn"&gt;thread&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;sleep&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nn"&gt;time&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;Duration&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;from_secs&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;10&lt;/span&gt;&lt;span class="p"&gt;));&lt;/span&gt;
+&lt;span class="nd"&gt;println!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Exited cleanly"&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This can be whatever you need to do before your program exits.&lt;/p&gt;
+
+&lt;p&gt;Because we used &lt;code&gt;flag::register_conditional_shutdown&lt;/code&gt; at the beginning, if this cleanup gets stuck, the user has the option of hitting Ctrl+C again in order to terminate our program.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#conclusion" class="anchor"&gt;
+  &lt;/a&gt;
+  Conclusion
+&lt;/h2&gt;
+
+&lt;p&gt;Now that we've slowly worked up from a basic example, to a complex example, hopefully you are ready to read, and understand the example in the &lt;code&gt;signal_hook&lt;/code&gt; documentation that uses &lt;code&gt;SignalsInfo&lt;/code&gt;, and a few extra features we haven't covered here.&lt;/p&gt;
+
+&lt;p&gt;It took me a few days to figure this out - I hope with this guide, you'll be able to get going faster.&lt;/p&gt;
+
+&lt;p&gt;If you have any questions, please let me know. I'm still learning Rust, and definitely don't know everything about the &lt;code&gt;signal_hook&lt;/code&gt; crate, but I'll try to answer them as best as I can.&lt;/p&gt;
+
+</description>
+      <category>rust</category>
+      <category>programming</category>
+      <category>linux</category>
+    </item>
+    <item>
       <title>How to use the rest operator in Javascript</title>
       <author>Arika</author>
       <pubDate>Sat, 20 Feb 2021 19:59:13 +0000</pubDate>
@@ -3015,773 +4162,6 @@ App has not been deployed, creating a new deployment...
       <category>node</category>
       <category>webdev</category>
       <category>tutorial</category>
-    </item>
-    <item>
-      <title>Domain-Driven Hexagon: Guide on Domain-Driven Design, Hexagonal architecture, best practices (TypeScript and NestJS examples)</title>
-      <author>Sairyss</author>
-      <pubDate>Sat, 20 Feb 2021 18:52:53 +0000</pubDate>
-      <link>https://dev.to/sairyss/domain-driven-hexagon-18g5</link>
-      <guid>https://dev.to/sairyss/domain-driven-hexagon-18g5</guid>
-      <description>&lt;p&gt;Few months ago I've created a repository to gather some architectural patterns and best practices I've been using for the last few years, both at work and for personal projects. At first It was a project for myself, but it grew and have reached a point that I can share it and hopefully more people can learn some useful practices from it.&lt;/p&gt;
-
-&lt;p&gt;Main emphasis of this project is to provide recommendations on how to design software applications. In this repository are presented some of the techniques, tools, best practices, architectural patterns and guidelines gathered from different sources.&lt;/p&gt;
-
-&lt;p&gt;Code examples are written using &lt;a href="https://nodejs.org/en/"&gt;NodeJS&lt;/a&gt;, &lt;a href="https://www.typescriptlang.org/"&gt;TypeScript&lt;/a&gt;, &lt;a href="https://docs.nestjs.com/"&gt;NestJS&lt;/a&gt; framework and &lt;a href="https://www.npmjs.com/package/typeorm"&gt;Typeorm&lt;/a&gt; for the database access.&lt;/p&gt;
-
-&lt;p&gt;Though patterns and principles presented in this repository are &lt;strong&gt;framework/language agnostic&lt;/strong&gt;, so above technologies can be easily replaced with any alternative. No matter what language or framework is used, any application can benefit from principles described in this repository.&lt;/p&gt;
-
-&lt;p&gt;This project's architecture is mainly based on:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Domain-Driven Design (DDD)&lt;/li&gt;
-&lt;li&gt;Hexagonal (Ports and Adapters) Architecture&lt;/li&gt;
-&lt;li&gt;Secure by Design&lt;/li&gt;
-&lt;li&gt;Clean Architecture&lt;/li&gt;
-&lt;li&gt;Onion Architecture&lt;/li&gt;
-&lt;li&gt;SOLID Principles&lt;/li&gt;
-&lt;li&gt;Software Design Patterns&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;And many other sources and best practices (links to additonal resources in every section).&lt;/p&gt;
-
-&lt;p&gt;Check out my repo to see full readme and code examples:&lt;br&gt;
-&lt;a href="https://github.com/Sairyss/domain-driven-hexagon"&gt;https://github.com/Sairyss/domain-driven-hexagon&lt;/a&gt;&lt;/p&gt;
-
-</description>
-      <category>architecture</category>
-      <category>webdev</category>
-      <category>javascript</category>
-      <category>node</category>
-    </item>
-    <item>
-      <title>Let's Make a Redux + Material UI + OAuth Starter template! Pt 3. Alerts &amp; Themes</title>
-      <author>Ethan Soo Hon</author>
-      <pubDate>Sat, 20 Feb 2021 18:52:34 +0000</pubDate>
-      <link>https://dev.to/ethanny2/let-s-make-a-redux-material-ui-oauth-starter-template-pt-3-alerts-themes-213l</link>
-      <guid>https://dev.to/ethanny2/let-s-make-a-redux-material-ui-oauth-starter-template-pt-3-alerts-themes-213l</guid>
-      <description>&lt;p&gt;In this part of the series we will examine how to build an alert and theme system controlled by the redux store that you can use across your entire app. Although our buttons do change (due to conditional rendering) if someone interacts with your site it's always a good idea to let the user know if their actions went through successfully or failed!&lt;br&gt;
-&lt;/p&gt;
-&lt;center&gt;
-&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--CU5pi4mi--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://miro.medium.com/max/6800/1%2AR4lNMpEdY0VOD96MtkLx4g%402x.png" alt="Different types of alerts"&gt; &lt;br&gt;
-&lt;em&gt;Different libraries have different names for them but they serve the same purpose&lt;/em&gt;&lt;br&gt;
-&lt;/center&gt;
-
-
-&lt;h2&gt;
-  &lt;a href="#snackbar" class="anchor"&gt;
-  &lt;/a&gt;
-  Snackbar
-&lt;/h2&gt;
-
-&lt;p&gt;In the case of the Material UI component library they named this component &lt;strong&gt;Snackbar&lt;/strong&gt;.&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--0ONwMS-F--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://i.gyazo.com/02137e499dd0e5e0681ce34abaa78022.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--0ONwMS-F--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://i.gyazo.com/02137e499dd0e5e0681ce34abaa78022.png" alt="Docs"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;All of the conditions listed in this description are achievable by passing in some props to the Snackbar component. Typically Snackbars are displayed on the bottom of the screen but through you can modify the position with the &lt;em&gt;anchorOrigin&lt;/em&gt; prop. See the &lt;a href="https://material-ui.com/api/snackbar/"&gt;Full API here&lt;/a&gt;. &lt;/p&gt;
-&lt;h3&gt;
-  &lt;a href="#api" class="anchor"&gt;
-  &lt;/a&gt;
-  API
-&lt;/h3&gt;
-
-&lt;p&gt;Looking at the API we can see that at the bare minimum we need to pass as props are the following...&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;open: bool //If true, Snackbar is open.
-message: string 
-// To put snackbar at top center
-anchorOrigin: { vertical: 'top', horizontal: 'center' }
-onClose: function 
-//Calls our onClose after time is up
-autoHideDuration: number (ms) 
-&lt;/code&gt;&lt;/pre&gt;
-&lt;div class="highlight__panel js-actions-panel"&gt;
-&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
-    Enter fullscreen mode
-    
-
-
-    Exit fullscreen mode
-    
-
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Because these props are the things that will customize any SnackBar/Alert it makes sense to set up our initial state (in our yet to be made reducer) as an object with the above key value pairs so we can easily spread the state object into the component. &lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#time-to-code" class="anchor"&gt;
-  &lt;/a&gt;
-  Time to Code
-&lt;/h3&gt;
-
-&lt;p&gt;Similarly we will begin setting up the our redux code to handle this Alert system. &lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;1) Types:&lt;/strong&gt; &lt;br&gt;
-Simple enough, we have one to set/show a message and one to clear/hide a message.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;export const SHOW_ALERT = 'SHOW_ALERT';
-export const CLEAR_ALERT = 'CLEAR_ALERT';
-&lt;/code&gt;&lt;/pre&gt;
-&lt;div class="highlight__panel js-actions-panel"&gt;
-&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
-    Enter fullscreen mode
-    
-
-
-    Exit fullscreen mode
-    
-
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-
-
-&lt;p&gt;&lt;strong&gt;2) Action Creators:&lt;/strong&gt; &lt;br&gt;
-showAlert returns an action object with a single key-value pair in its payload object; message.&lt;br&gt;
-clearAlert just returns an action object with the type since we use our &lt;em&gt;INITIAL_STATE&lt;/em&gt; object in the reducer file to reset it back to normal&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;export const showAlert = (
-    msgConfig = { message: 'default'}
-) =&amp;gt; ({ type: SHOW_ALERT, payload: { ...msgConfig } });
-
-export const clearAlert = () =&amp;gt; ({ type: CLEAR_ALERT });
-&lt;/code&gt;&lt;/pre&gt;
-&lt;div class="highlight__panel js-actions-panel"&gt;
-&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
-    Enter fullscreen mode
-    
-
-
-    Exit fullscreen mode
-    
-
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-
-
-&lt;p&gt;&lt;strong&gt;3) Reducers:&lt;/strong&gt; &lt;br&gt;
-Here's how we set up our INITIAL_STATE object with key-value pairs matching the props that will go into the Snackbar component.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;const INITIAL_STATE = {
-    open: false,
-    message: '',
-    anchorOrigin: { vertical: 'top', horizontal: 'center' },
-    autoHideDuration: 3500
-};
-&lt;/code&gt;&lt;/pre&gt;
-&lt;div class="highlight__panel js-actions-panel"&gt;
-&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
-    Enter fullscreen mode
-    
-
-
-    Exit fullscreen mode
-    
-
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-
-
-&lt;p&gt;In the actual code handling SHOW_ALERT we just spread the previous state object (to keep all the other properties), set open to true and spread the action.payload into the object as well to get the message property.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;const alertReducer = (state = INITIAL_STATE, action) =&amp;gt; {
-    switch (action.type) {
-        case SHOW_ALERT:
-            /*
-       action.payload looks like
-        {message:''}
-      */
-            return { ...state, open: true, ...action.payload };
-        case CLEAR_ALERT:
-            return { ...INITIAL_STATE };
-        default:
-            return state;
-    }
-};
-&lt;/code&gt;&lt;/pre&gt;
-&lt;div class="highlight__panel js-actions-panel"&gt;
-&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
-    Enter fullscreen mode
-    
-
-
-    Exit fullscreen mode
-    
-
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-
-
-&lt;p&gt;&lt;strong&gt;4) Components:&lt;/strong&gt; &lt;br&gt;
-I will name this component Alert.js but in the returned JSX we will utilize the Snackbar component.&lt;/p&gt;
-
-&lt;p&gt;&lt;em&gt;Note: Confusingly enough there is also a component in Material UI called Alert which we will not use&lt;/em&gt;&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;import { Snackbar, IconButton } from '@material-ui/core';
-import CloseIcon from '@material-ui/icons/Close';
-import { useDispatch, useSelector } from 'react-redux';
-import { clearAlert } from '../actions/alertActions';
-
-const Alert = () =&amp;gt; {
-    const alert = useSelector((state) =&amp;gt; state.alert);
-    const dispatch = useDispatch();
-    const handleClose = () =&amp;gt; dispatch(clearAlert());
-    return (
-        &amp;lt;Snackbar
-            {...alert}
-            onClose={handleClose}
-            action={
-                    &amp;lt;IconButton
-                        size='small'
-                        aria-label='close'
-                        color='inherit'
-                        onClick={handleClose}
-                    &amp;gt;
-                        &amp;lt;CloseIcon fontSize='small' /&amp;gt;
-                    &amp;lt;/IconButton&amp;gt;
-            }
-        /&amp;gt;
-    );
-};
-&lt;/code&gt;&lt;/pre&gt;
-&lt;div class="highlight__panel js-actions-panel"&gt;
-&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
-    Enter fullscreen mode
-    
-
-
-    Exit fullscreen mode
-    
-
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-
-
-&lt;p&gt;We use the useSelector hook to get the alert object out of state, we use useDispatch to grab the dispatch function then we spread all the properties from the alert object from state into the Snackbar. The action prop takes in some Components/JSX you can use to make the close button.  &lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#theming" class="anchor"&gt;
-  &lt;/a&gt;
-  Theming
-&lt;/h2&gt;
-
-&lt;p&gt;In addition to the makeStyles() hook we saw in part 2 Material UI also has a robust and customizable theme system that works by having a MuiThemeProvider component wrapped around your root component. Whatever created theme you passed in as a prop to that provider will be used whenever a makeStyles() hook is invoked&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;/*
-This theme variable is usually the
-default Material UI theme but if
-it detects a theme provider component
-wrapped around it, that theme will instead be used
-*/
-const useStyles = makeStyles((theme) =&amp;gt; ({
-    center: {
-        etc...
-                etc...
-    },
-}));
-&lt;/code&gt;&lt;/pre&gt;
-&lt;div class="highlight__panel js-actions-panel"&gt;
-&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
-    Enter fullscreen mode
-    
-
-
-    Exit fullscreen mode
-    
-
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-
-
-
-&lt;center&gt;
-&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Txiks82z--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://i.gyazo.com/9873f614d8361456c669a8c7d5d1ad02.png" alt="Theming detail page"&gt; &lt;br&gt;
-&lt;em&gt;How would we switch to dark mode?&lt;/em&gt;&lt;br&gt;
-&lt;/center&gt;
-&lt;br&gt;
-&lt;br&gt;
-
-&lt;p&gt;To create your own theme you need to leverage their API and use the createMuiTheme function. It takes in an object with key value pairs that can be set to colors (palette) font-sizes (via typography) and many more! &lt;/p&gt;
-
-&lt;p&gt;(*&lt;em&gt;Note&lt;/em&gt;: I encourage everyone to look into the default theme object to see what can be set. It looks intimidating at first but it is just a &lt;a href="https://material-ui.com/customization/default-theme/#default-theme"&gt;giant object&lt;/a&gt;)&lt;/p&gt;
-&lt;h3&gt;
-  &lt;a href="#dark-mode" class="anchor"&gt;
-  &lt;/a&gt;
-  Dark Mode
-&lt;/h3&gt;
-
-&lt;p&gt;This is such a common use case they have a whole section in the documentation devoted to this! In this case we just need to create a new theme and set the value of palette.type to 'dark' or 'light'.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;const darkTheme = createMuiTheme({
-  palette: {
-    type: 'dark',
-  },
-});
-&lt;/code&gt;&lt;/pre&gt;
-&lt;div class="highlight__panel js-actions-panel"&gt;
-&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
-    Enter fullscreen mode
-    
-
-
-    Exit fullscreen mode
-    
-
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-
-
-
-&lt;center&gt;   &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ja5iMF_l--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://i.gyazo.com/e38ae2c672c6b841ae5b99fd52b8e20f.png" alt="Dark mode differences"&gt; &lt;br&gt;
-&lt;em&gt;By default only these properties are changed when the mode is switched&lt;/em&gt;&lt;br&gt;
-&lt;/center&gt;
-&lt;br&gt;
-&lt;br&gt;
-
-&lt;p&gt;Unfortunately this only modifies certain properties of the theme NOT including the primary or secondary colors. If you recall from article 2 we styled the button in our login component like so...&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;const useStyles = makeStyles((theme) =&amp;gt; ({
-    button: {
-       etc...
-       backgroundColor: theme.palette.primary.main,
-         etc....
-}));
-
-&lt;/code&gt;&lt;/pre&gt;
-&lt;div class="highlight__panel js-actions-panel"&gt;
-&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
-    Enter fullscreen mode
-    
-
-
-    Exit fullscreen mode
-    
-
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Thus switching the type to 'dark' will not affect theme.palette.primary so the button will remain the same color. If you wanted your component to be darkened as well we'll have to set our own palette.primary color when creating our theme!&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#time-to-code" class="anchor"&gt;
-  &lt;/a&gt;
-  Time to Code
-&lt;/h3&gt;
-
-&lt;p&gt;For the sake of simplicity I will only have 2 themes to switch between; light and dark.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;1) Types&lt;/strong&gt;&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;export const TOGGLE_THEME = 'TOGGLE_THEME';
-
-&lt;/code&gt;&lt;/pre&gt;
-&lt;div class="highlight__panel js-actions-panel"&gt;
-&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
-    Enter fullscreen mode
-    
-
-
-    Exit fullscreen mode
-    
-
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-
-
-&lt;p&gt;&lt;strong&gt;2) Action Creators&lt;/strong&gt;&lt;br&gt;
-That's it! The defined light and dark mode objects/themes are pre-defined in the themeReducer file&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;export const toggleTheme = () =&amp;gt; ({ type: TOGGLE_THEME });
-&lt;/code&gt;&lt;/pre&gt;
-&lt;div class="highlight__panel js-actions-panel"&gt;
-&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
-    Enter fullscreen mode
-    
-
-
-    Exit fullscreen mode
-    
-
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-
-
-&lt;p&gt;&lt;strong&gt;3) Reducer&lt;/strong&gt;&lt;br&gt;
-Since we are managing the theme object directly through redux our state will just be whatever object is the result of us calling the createMuiTheme() function. We create two themes for light and dark mode with the only difference being the primary.main color.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;let INITIAL_STATE = {};
-const LIGHT_MODE_STATE = createMuiTheme({
-    palette: {
-        type: 'light',
-        primary: {
-            main: '#3f51b5', 
-            contrastText: '#fff'
-        }
-    }
-});
-const DARK_MODE_STATE = createMuiTheme({
-    palette: {
-        type: 'dark',
-        primary: {
-            main: '#000',
-            contrastText: '#fff'
-        }
-    }
-});
-&lt;/code&gt;&lt;/pre&gt;
-&lt;div class="highlight__panel js-actions-panel"&gt;
-&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
-    Enter fullscreen mode
-    
-
-
-    Exit fullscreen mode
-    
-
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-
-
-&lt;p&gt;*&lt;em&gt;Note: Any properties you don't set are inherited from the default theme so you can still use variables like typography, spacing etc... even though we didn't explicitly define it&lt;/em&gt;&lt;/p&gt;
-
-&lt;p&gt;We throw in a one-liner to detect the users theme preference from their computer via a function on the global window object.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;let matched = window.matchMedia('(prefers-color-scheme: dark)').matches;
-matched
-    ? (INITIAL_STATE = { ...DARK_MODE_STATE })
-    : (INITIAL_STATE = { ...LIGHT_MODE_STATE });
-&lt;/code&gt;&lt;/pre&gt;
-&lt;div class="highlight__panel js-actions-panel"&gt;
-&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
-    Enter fullscreen mode
-    
-
-
-    Exit fullscreen mode
-    
-
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Finally we write the reducer itself; very simple, we just toggle from light to dark.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;const themeReducer = (state = INITIAL_STATE, action) =&amp;gt; {
-    switch (action.type) {
-        case TOGGLE_THEME:
-            //There is no payload we just replace the theme obj/state with the
-            //opposite of whatever type is
-            return state.palette.type === 'light'
-                ? { ...DARK_MODE_STATE }
-                : { ...LIGHT_MODE_STATE };
-        default:
-            return state;
-    }
-};
-&lt;/code&gt;&lt;/pre&gt;
-&lt;div class="highlight__panel js-actions-panel"&gt;
-&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
-    Enter fullscreen mode
-    
-
-
-    Exit fullscreen mode
-    
-
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-
-
-&lt;p&gt;&lt;strong&gt;4) Provider and wrapping up&lt;/strong&gt;&lt;br&gt;
-Okay we have a theme, we have a light and dark mode in our redux store, now what? Now we need to funnel that theme object into the MuiThemeProvider component Material UI gives us. When the theme changes in the store it will be updated here as well. We take in children as props (using destructuring) so anything wrapped in this Provider still shows up on the screen.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;import { MuiThemeProvider } from '@material-ui/core/styles';
-import { useSelector } from 'react-redux';
-
-function Theme({ children }) {
-    const theme = useSelector((state) =&amp;gt; state.theme);
-    return &amp;lt;MuiThemeProvider theme={theme}&amp;gt;{children}&amp;lt;/MuiThemeProvider&amp;gt;;
-}
-
-export default Theme;
-&lt;/code&gt;&lt;/pre&gt;
-&lt;div class="highlight__panel js-actions-panel"&gt;
-&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
-    Enter fullscreen mode
-    
-
-
-    Exit fullscreen mode
-    
-
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Now we can wrap the theme provider at our root component (App.js or something). Also note we added our Alert component here so it always shows up if we trigger it.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;import { makeStyles } from '@material-ui/core/styles';
-import { useSelector } from 'react-redux';
-import Alert from './Alert';
-import Login from './Login';
-import Logout from './Logout';
-import ThemeProvider from './ThemeProvider';
-import CssBaseline from '@material-ui/core/CssBaseline';
-
-function App() {
-    const classes = useStyles();
-    const auth = useSelector((state) =&amp;gt; state.auth);
-    return (
-        &amp;lt;ThemeProvider&amp;gt;
-            &amp;lt;CssBaseline /&amp;gt;
-            &amp;lt;main &amp;gt;
-                &amp;lt;Alert /&amp;gt;
-                {auth.loggedIn ? &amp;lt;Logout /&amp;gt; : &amp;lt;Login /&amp;gt;}
-            &amp;lt;/main&amp;gt;
-        &amp;lt;/ThemeProvider&amp;gt;
-    );
-}
-&lt;/code&gt;&lt;/pre&gt;
-&lt;div class="highlight__panel js-actions-panel"&gt;
-&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
-    Enter fullscreen mode
-    
-
-
-    Exit fullscreen mode
-    
-
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Here we use a component called CSSBaseline also from Material UI (which they recommend to place at the root of your project) and it functions identically to &lt;a href="https://necolas.github.io/normalize.css/"&gt;Normalize CSS&lt;/a&gt; &lt;br&gt;
-(Provides good defaults, consistent styling, box-sizing:border-box and most importantly allows our theme switch from light to dark to also change the body background )&lt;/p&gt;
-&lt;h1&gt;
-  &lt;a href="#lets-test-the-alert" class="anchor"&gt;
-  &lt;/a&gt;
-  Let's test the Alert!
-&lt;/h1&gt;
-
-&lt;p&gt;We setup both the Alert system and the theme system through redux but we never actually dispatched any actions to use them. For the theme we will make a switch in the next article, but you can switch between the "LIGHT_MODE_STATE" and "DARK_MODE_STATE" objects in the themeReducer to see how it would look. We want to see the alerts when a login succeeds, a login fails, a logout succeeds and a logout fails. All we have to do is dispatch our Alert action creator at the right time.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;//Inside Login.js and Logout.js
-    const onSuccess = (res) =&amp;gt; {
-        dispatch(googleOAuthLogin(res));
-        dispatch(
-            showAlert({
-                message: 'Successfully logged in',
-            })
-        );
-    };
-    const onFailure = (res) =&amp;gt; {
-        dispatch(googleOAuthLogin(res));
-        dispatch(
-            showAlert({
-                message: 'Login failed ',
-            })
-        );
-    };
-&lt;/code&gt;&lt;/pre&gt;
-&lt;div class="highlight__panel js-actions-panel"&gt;
-&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
-    Enter fullscreen mode
-    
-
-
-    Exit fullscreen mode
-    
-
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-
-
-&lt;p&gt;&lt;iframe src="https://codesandbox.io/embed/nxxel"&gt;
-&lt;/iframe&gt;
-&lt;/p&gt;
-
-
-&lt;center&gt;
-&lt;em&gt;Yes, the button should do nothing until you plug in your client id from the first article&lt;/em&gt; &lt;/center&gt;
-&lt;br&gt;
-&lt;br&gt;
-
-&lt;p&gt;We're done setting up redux! In the last article we will make the mobile responsive navbar that displays the user's info when they're logged in and a we'll make a switch for dark mode!&lt;/p&gt;
-
-</description>
-      <category>redux</category>
-      <category>react</category>
-      <category>javascript</category>
-      <category>webdev</category>
-    </item>
-    <item>
-      <title>Code Multiplayer Games w/ Multiple Rooms! 🚀</title>
-      <author>Luke Garrigan</author>
-      <pubDate>Sat, 20 Feb 2021 18:41:55 +0000</pubDate>
-      <link>https://dev.to/lukegarrigan/code-multiplayer-games-with-multiple-rooms-214c</link>
-      <guid>https://dev.to/lukegarrigan/code-multiplayer-games-with-multiple-rooms-214c</guid>
-      <description>&lt;p&gt;Coding games using p5 is a tonne of fun, coding multiplayer games that you can get your mates to join in with, even better, coding multiplayer games where multiple rooms are required as it's so bloody popular, jackpot. &lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#where-to-start" class="anchor"&gt;
-  &lt;/a&gt;
-  Where to start
-&lt;/h1&gt;
-
-&lt;p&gt;So if you're interested in just creating multiplayer games using p5 then I recommend you check out my blog &lt;a href="https://codeheir.com/2019/05/11/how-to-code/"&gt;How to code multiplayer games with p5!&lt;/a&gt; However, if you want to code multiplayer games and need separate rooms as your game is so damn popular, as you were.&lt;/p&gt;
-
-&lt;p&gt;I've coded up a few multiplayer games now, and a couple using &lt;a href="https://p5js.org/"&gt;p5.js&lt;/a&gt; and find myself in the unfortunate position of writing the same code, over and over. This boiler-plate code I've compiled into a nice little kick-starter repository, the contents of which I will go over in this blog.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#what-is-p5multiplayergamestarterwithrooms" class="anchor"&gt;
-  &lt;/a&gt;
-  What is p5-multiplayer-game-starter-with-rooms
-&lt;/h1&gt;
-
-&lt;p&gt;The &lt;a href="https://github.com/LukeGarrigan/p5-multiplayer-game-starter-with-rooms"&gt;p5-multiplayer-game-starter-with-rooms&lt;/a&gt; is pretty much exactly what it claims to be, a repository to help you develop multiplayer games, it represents an opinionated approach to multiplayer game development using &lt;a href="https://expressjs.com/"&gt;express&lt;/a&gt;, socket.io and p5.js. &lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#how-to-use-this-magical-repository" class="anchor"&gt;
-  &lt;/a&gt;
-  How to use this magical repository?
-&lt;/h2&gt;
-
-&lt;ol&gt;
-&lt;li&gt; Clone the project&lt;/li&gt;
-&lt;li&gt; &lt;code&gt;npm install&lt;/code&gt; in the root directory&lt;/li&gt;
-&lt;li&gt; &lt;code&gt;npm start&lt;/code&gt; to get it running!&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;h2&gt;
-  &lt;a href="#what-does-it-do-for-me" class="anchor"&gt;
-  &lt;/a&gt;
-  What does it do for me?
-&lt;/h2&gt;
-
-&lt;p&gt;The project is pretty straightforward, it sets up a client &lt;code&gt;Player&lt;/code&gt; class and a server &lt;code&gt;Player&lt;/code&gt;.  When the server player is created, that player is put into a room, the room-placement logic is very simple: if there are two or more players in a room it'll create a new room and place the player in it. This image from socket.io explains how the rooms work:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--4c_26SAE--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://socket.io/images/rooms.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--4c_26SAE--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://socket.io/images/rooms.png" alt="Socket.io rooms explained"&gt;&lt;/a&gt;&lt;br&gt;
-So only information about players in the room the client is in will get returned. &lt;/p&gt;
-
-&lt;p&gt;Every 16ms the server emits the current state of the game — in that particular room — to the client. If a new client joins the server a new &lt;code&gt;Player&lt;/code&gt; will be added to the game, it also automatically removes players when they leave the game. These are the standard features I frequently have to reproduce when creating a new multiplayer game, so I hope you find this as useful as I do!&lt;/p&gt;
-
-&lt;p&gt;Each client will be a player of your game, they all communicate with the server. The server will control all the game state, such as the position and the colour of the player. This information will be emitted to all of the clients in that particular room so that each client can render said player using p5.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#how-the-game-looks-out-of-the-box" class="anchor"&gt;
-  &lt;/a&gt;
-  How the game looks out of the box
-&lt;/h2&gt;
-
-&lt;p&gt;&lt;strong&gt;Player 1 joins the game:&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--T5jwKKTJ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://i.imgur.com/lA9vbY4.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--T5jwKKTJ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://i.imgur.com/lA9vbY4.png" alt="https://i.imgur.com/lA9vbY4.png"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Player 2 joins the game:&lt;/strong&gt;&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--MXXfOznf--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://i.imgur.com/XuruA2G.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--MXXfOznf--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://i.imgur.com/XuruA2G.png" alt="https://i.imgur.com/XuruA2G.png"&gt;&lt;/a&gt;&lt;br&gt;
-&lt;strong&gt;Player 1 leaves:&lt;/strong&gt;&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--8P1kbZUD--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://i.imgur.com/vT0BDdi.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--8P1kbZUD--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://i.imgur.com/vT0BDdi.png" alt="https://i.imgur.com/vT0BDdi.png"&gt;&lt;/a&gt;&lt;br&gt;
-&lt;strong&gt;Player 3 joins:&lt;/strong&gt;&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--nG36dV3P--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://i.imgur.com/ogGumhW.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--nG36dV3P--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://i.imgur.com/ogGumhW.png" alt="https://i.imgur.com/ogGumhW.png"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Player 4 joins - a new room is created&lt;/strong&gt;&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--12ZXrqTp--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://i.imgur.com/NjCVI7Q.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--12ZXrqTp--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://i.imgur.com/NjCVI7Q.png" alt="https://i.imgur.com/NjCVI7Q.png"&gt;&lt;/a&gt;&lt;br&gt;
-So, referencing back to that image earlier, our game would look something like the following:&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--fz7T1qAs--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://i.imgur.com/tVbB2z2.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--fz7T1qAs--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://i.imgur.com/tVbB2z2.png" alt="https://i.imgur.com/tVbB2z2.png"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;And it's as simple as that, of course this is just very basic code to put you in the right direction, you'll likely need something a little more elaborate when your game starts to blow up!&lt;/p&gt;
-
-&lt;p&gt;So there we go, what I recommend you do is having a play around with the repository, add some basic physics, get some interaction with the clients. This should give you the very basic building blocks of your next IO hit!&lt;/p&gt;
-
-&lt;p&gt;Thank you, if you like my rambling check out my personal blogging site at &lt;a href="https://codeheir.com/"&gt;https://codeheir.com/&lt;/a&gt;&lt;/p&gt;
-
-</description>
-      <category>javascript</category>
     </item>
   </channel>
 </rss>
