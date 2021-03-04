@@ -7,6 +7,470 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>Beyond "Hello World": Zero-Downtime Deployments on Kubernetes</title>
+      <author>Nicolas Frankel</author>
+      <pubDate>Thu, 04 Mar 2021 16:07:21 +0000</pubDate>
+      <link>https://dev.to/hazelcast/beyond-hello-world-zero-downtime-deployments-on-kubernetes-162o</link>
+      <guid>https://dev.to/hazelcast/beyond-hello-world-zero-downtime-deployments-on-kubernetes-162o</guid>
+      <description>&lt;p&gt;Today, I'd like to offer an approach that will allow most organizations to proceed with zero-downtime deployments with help from the Hazelcast platform.&lt;/p&gt;
+
+&lt;h2&gt;Applications are not stateless!&lt;/h2&gt;
+
+&lt;p&gt;A couple of years ago, I became interested in Continuous Deployment as the natural extension of my deep interest in Continuous Integration. Among the CD patterns, &lt;a href="https://en.wikipedia.org/wiki/Blue-green_deployment"&gt;Blue-Green deployment&lt;/a&gt; was the first. Here's a sample architecture:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--bHUz-ohn--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://hazelcast.com/wp-content/uploads/2021/02/blue-green.jpg" class="article-body-image-wrapper"&gt;&lt;img class="aligncenter size-full wp-image-757067" src="https://res.cloudinary.com/practicaldev/image/fetch/s--bHUz-ohn--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://hazelcast.com/wp-content/uploads/2021/02/blue-green.jpg" alt="Blue Green deployment" width="762" height="331"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;The idea is that a router component directs the requests to one environment; by convention &lt;span&gt;&lt;strong&gt;blue&lt;/strong&gt;&lt;/span&gt;. This environment contains all the necessary components for the application to achieve its task. Meanwhile, Ops can deploy a new version of the application in the &lt;strong&gt;&lt;span&gt;green&lt;/span&gt;&lt;/strong&gt; environment. When all is ready, they can switch the router to direct all the requests to the new &lt;strong&gt;&lt;span&gt;green&lt;/span&gt;&lt;/strong&gt; environment.&lt;/p&gt;
+
+&lt;p&gt;Unfortunately, this ideal scenario suffers from several drawbacks, all related to the state. Though we would like our applications to be stateless, most of them are not. Let's chase the devil where it lies.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Sessions&lt;/strong&gt; (and cookies) are ubiquitous in nearly all web applications. In general, developers use sessions when data are both is small and required frequently. When that happens, fetching data from the database is too expensive. A simple use-case of session usage is to display the logged-in user's name on each screen in a web app.&lt;/p&gt;
+
+&lt;p&gt;Problems start to happen when the node which hosts the session dies. The data is lost. I believe this is a solved problem now, thanks to session replication. By the way, did you know that Hazelcast has many different session replication approaches: &lt;a href="https://github.com/hazelcast/hazelcast-jetty-sessionmanager"&gt;Jetty&lt;/a&gt;, &lt;a href="https://github.com/hazelcast/hazelcast-tomcat-sessionmanager"&gt;Tomcat&lt;/a&gt;, &lt;a href="https://github.com/hazelcast/hazelcast-wm"&gt;WebFilter-based&lt;/a&gt;, and even &lt;a href="https://spring.io/projects/spring-session-hazelcast"&gt;Spring Sessions&lt;/a&gt;?&lt;/p&gt;
+
+&lt;p&gt;You should store data that don't fit the session use-case in external &lt;strong&gt;databases&lt;/strong&gt;. It looks like it solves the issue from a bird's eye view, but it doesn't. You need to migrate data in the &lt;span&gt;&lt;strong&gt;blue&lt;/strong&gt;&lt;/span&gt; environment when you switch to the &lt;strong&gt;&lt;span&gt;green&lt;/span&gt;&lt;/strong&gt; environment. In real-world applications, it's bound to take time.&lt;/p&gt;
+
+&lt;p&gt;Imagine an e-commerce web application where we store users' carts in the database. When the switch from &lt;strong&gt;&lt;span&gt;blue&lt;/span&gt;&lt;/strong&gt; to &lt;span&gt;&lt;strong&gt;green&lt;/strong&gt;&lt;/span&gt; starts, we need to move users to the latter. Their session is migrated to the &lt;strong&gt;&lt;span&gt;green&lt;/span&gt;&lt;/strong&gt; application server, which uses the &lt;strong&gt;&lt;span&gt;green&lt;/span&gt;&lt;/strong&gt; database. We somehow need to migrate the data as well. Unfortunately, we face a quandary: we cannot redirect the user before migrating the data, but we cannot migrate the data while still using the &lt;strong&gt;&lt;span&gt;blue&lt;/span&gt;&lt;/strong&gt; environment.&lt;/p&gt;
+
+&lt;p&gt;The obvious escape route is to:&lt;/p&gt;
+
+&lt;ol&gt;
+    &lt;li&gt;Direct new users to the &lt;span&gt;&lt;strong&gt;green&lt;/strong&gt;&lt;/span&gt; environment&lt;/li&gt;
+    &lt;li&gt;Wait until an existing user has stopped using the application (by checking session expiries) and then move their data&lt;/li&gt;
+    &lt;li&gt;When all user sessions on &lt;strong&gt;&lt;span&gt;blue&lt;/span&gt;&lt;/strong&gt; have expired, transfer the remaining data&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;This process is lengthy and error-prone. It won't be feasible to migrate several times a day.&lt;/p&gt;
+
+&lt;h2&gt;A tentative solution, the shared database&lt;/h2&gt;
+
+&lt;p&gt;The most straightforward solution to cope with the above problem is not to migrate but to use a database (or cluster) shared between the two environments.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--w-WHhZx_--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://hazelcast.com/wp-content/uploads/2021/02/blue-green-shared.jpg" class="article-body-image-wrapper"&gt;&lt;img class="aligncenter size-full wp-image-757073" src="https://res.cloudinary.com/practicaldev/image/fetch/s--w-WHhZx_--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://hazelcast.com/wp-content/uploads/2021/02/blue-green-shared.jpg" alt="Blue Green deployment with a shared database" width="738" height="333"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;I wrote about &lt;a href="https://www.exoscale.com/syslog/kubernetes-zero-downtime-deployment/"&gt;this approach&lt;/a&gt; &lt;a href="https://www.exoscale.com/syslog/kubernetes-zero-downtime-with-spring-boot/"&gt;in the past&lt;/a&gt;. Please find here the abridged version.&lt;/p&gt;
+
+&lt;p&gt;The biggest downside of sharing the database is that some application deployments require a database schema change. But some changes are not backward-compatible. Hence, because we need to be able to roll back the deployment while keeping the data, we need to split a breaking change into a series of side-by-side compatible changes. This way, version x.0 of the application could still work with version x.1 of the database schema.&lt;/p&gt;
+
+&lt;p&gt;This holds whether the database enforces schema-on-write (as most SQL databases do) or the application needs to apply schema-on-read (&lt;em&gt;à la&lt;/em&gt; NoSQL).&lt;/p&gt;
+
+&lt;p&gt;The split of changes makes the deployment process manual and fragile. Moreover, we still need to migrate data from one form to another, even in the same database. We can achieve it through different channels: the application code that touches the data, triggers, etc.&lt;/p&gt;
+
+&lt;p&gt;The final nail in the coffin boils down to how our process manages. It manages the "hot" ones, but what about the "cold" ones? As in the previous approach, data that isn't touched during the migration process still needs to be migrated.&lt;/p&gt;
+
+&lt;h2&gt;Embracing data migration&lt;/h2&gt;
+
+&lt;p&gt;Whether we design the deployment architecture around a database in each environment or a single shared one, we still need to migrate the data anyway. Hence, it's much better to embrace migration instead of pushing it aside and treating it as a second-class problem.&lt;/p&gt;
+
+&lt;p&gt;The problem behind data migration is not the migration itself but how we manage it. Batch jobs are the standard way to implement data migration. From a very general perspective, one plans a batch to run at specified intervals, read data that meets specific criteria from a source, transform the data, and finally write the transformed data into a sink. When the job has finished its task, it stops.&lt;/p&gt;
+
+&lt;p&gt;Batches come with several drawbacks:&lt;/p&gt;
+
+&lt;ul&gt;
+    &lt;li&gt;What if data has not yet arrived when the job finishes?&lt;/li&gt;
+    &lt;li&gt;How to hold the whole data to process in memory?&lt;/li&gt;
+    &lt;li&gt;What if the batch fails mid-way?&lt;/li&gt;
+    &lt;li&gt;What if the batch runs so long it oversteps its next schedule, &lt;em&gt;e.g.&lt;/em&gt;, an hourly batch that takes more than 60 minutes?&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;The good thing is that the batch model has been with us so long that we have devised ways to cope with those drawbacks. For example, we can handle the data in chunks, keeping a cursor to the last processed chunk to restart from this point if we need to.&lt;/p&gt;
+
+&lt;p&gt;The only way to cope with the "data has not yet arrived" problem is to process it at the next run, which may be in the next hour. For data migration, this is not possible. We don't want to wait another hour to process the latecomers' data and finish the migration. The issue stems from the bounded nature of the batch model. It starts... and it ends.&lt;/p&gt;
+
+&lt;p&gt;What if we started a never-ending job and it would process data as soon as it comes in?&lt;/p&gt;
+
+&lt;h2&gt;Stream processing and Change-Data-Capture to the rescue&lt;/h2&gt;
+
+&lt;p&gt;This never-ending approach has a name: stream processing (or data streaming). Stream processing answers all of the previous drawbacks of the batch approach through an event-driven paradigm.&lt;/p&gt;
+
+&lt;ul&gt;
+    &lt;li&gt;What if data has not yet arrived when the job finishes: the job never completes; it processes data when they become available&lt;/li&gt;
+    &lt;li&gt;How to hold the whole data to process in memory: data arrive in small chunks, so the memory consumption of one data item is relatively small&lt;/li&gt;
+    &lt;li&gt;What if the batch fails mid-way: most stream processing engines, such as Hazelcast Jet, are distributed&lt;/li&gt;
+    &lt;li&gt;What if the batch runs so long it oversteps its next schedule: &lt;span&gt;one doesn't schedule stream processing jobs; they can run forever until you stop them&lt;/span&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;We need a way for the database to emit such data events. Fortunately, it exists through Change-Data-Capture and one of its implementation, Debezium. In short, Debezium works by reading the append-only log file that SQL databases leverage to provide fail-over. When the primary node receives a write statement, it writes it down into this append-only log. Both the primary and all secondary nodes read that file and apply the statement. This way, they always maintain the same state, and if the primary node fails, one of the secondary nodes can take over from the same state.&lt;/p&gt;
+
+&lt;p&gt;Hazelcast Jet leverages Debezium as a library to read the append-only log.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--tBi__5vm--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://hazelcast.com/wp-content/uploads/2021/02/hazelcast-jet-debezium.svg" class="article-body-image-wrapper"&gt;&lt;img class="aligncenter wp-image-757090 size-medium" src="https://res.cloudinary.com/practicaldev/image/fetch/s--tBi__5vm--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://hazelcast.com/wp-content/uploads/2021/02/hazelcast-jet-debezium.svg" alt="" width="600" height="600"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;To read more about the details on how Hazelcast Jet and Debezium, please refer to &lt;a href="https://jet-start.sh/docs/api/sources-sinks#change-data-capture-cdc"&gt;the documentation&lt;/a&gt;.&lt;/p&gt;
+
+&lt;h2&gt;A blue-green deployment on Kubernetes in 6 steps&lt;/h2&gt;
+
+&lt;p&gt;Now that we have all the pieces in place, we can finally start designing the solution. I'll be using Kubernetes because it's a pretty popular platform, but there's nothing Kubernetes specific about the solution. It could run on any infrastructure.&lt;/p&gt;
+
+&lt;p&gt;Note that when one reads about Kubernetes, it's easy to think that its rolling upgrade feature allows for seamless continuous deployment of containers. That's correct, up to a point. While it's a no-brainer to deploy stateless applications, it doesn't concern itself with the state. We are the ones to take care of it.&lt;/p&gt;
+
+&lt;ol&gt;
+    &lt;li&gt;The starting point for our blue-green deployment is an application in a Kubernetes &lt;code&gt;Deployment&lt;/code&gt; with a replica count of 3 and a &lt;code&gt;RollingUpdate&lt;/code&gt; strategy. They all use the same database pod located in the existing &lt;strong&gt;&lt;span&gt;blue&lt;/span&gt;&lt;/strong&gt; environment. We configure all application pods with &lt;strong&gt;session replication&lt;/strong&gt;.
+&lt;img class="aligncenter wp-image-757111 size-medium" src="https://res.cloudinary.com/practicaldev/image/fetch/s--QoyNZ-fH--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://hazelcast.com/wp-content/uploads/2021/02/step1.svg" alt="Blue Green deployment step 1" width="400" height="400"&gt;
+&lt;/li&gt;
+    &lt;li&gt;The next step is to schedule the new database pod in the now-empty &lt;strong&gt;&lt;span&gt;green&lt;/span&gt;&lt;/strong&gt; environment. It can take as long as necessary; the application pods won't use it until later.&lt;img class="aligncenter wp-image-757112 size-medium" src="https://res.cloudinary.com/practicaldev/image/fetch/s--Ytzn3Xxp--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://hazelcast.com/wp-content/uploads/2021/02/step2.svg" alt="Blue Green deployment step 2" width="400" height="400"&gt;
+&lt;/li&gt;
+    &lt;li&gt;This the critical step: we schedule the data migration job pod (labeled &lt;em&gt;forward&lt;/em&gt; in the next diagram). As soon as an application pod executes a write to the &lt;span&gt;&lt;strong&gt;blue&lt;/strong&gt;&lt;/span&gt; database pod, the &lt;em&gt;forward&lt;/em&gt; job captures it, reads its data, transforms them according to the new schema in the &lt;span&gt;&lt;strong&gt;green&lt;/strong&gt;&lt;/span&gt; database pod, and writes them there. Hence, while the &lt;span&gt;&lt;strong&gt;blue&lt;/strong&gt;&lt;/span&gt; database is the source of truth, you can consider the &lt;span&gt;&lt;strong&gt;green&lt;/strong&gt;&lt;/span&gt; one as derived data. Moreover, it's kept in sync with the former - not in real-time, as even light doesn't travel instantaneously, but close enough for our needs.&lt;a href="https://hazelcast.com/wp-content/uploads/2021/03/step3.svg"&gt;&lt;img class="aligncenter size-medium wp-image-757201" src="https://res.cloudinary.com/practicaldev/image/fetch/s--dtI74JW---/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://hazelcast.com/wp-content/uploads/2021/03/step3.svg" alt="Blue Green deployment step 3" width="400" height="400"&gt;&lt;/a&gt;
+&lt;/li&gt;
+    &lt;li&gt;Now is the time to schedule the new version of the application. We just tell Kubernetes about the new image in the &lt;code&gt;Deployment&lt;/code&gt;. It's its job to achieve that via the rolling update. With session replication and both databases closely in sync, &lt;span&gt;we can seamlessly move users &lt;/span&gt; from a &lt;em&gt;v1&lt;/em&gt; app pod that uses the &lt;strong&gt;&lt;span&gt;blue&lt;/span&gt;&lt;/strong&gt; database pod to a &lt;em&gt;v2&lt;/em&gt; app pod that uses the &lt;span&gt;&lt;strong&gt;green&lt;/strong&gt;&lt;/span&gt; database pod.
+&lt;a href="https://hazelcast.com/wp-content/uploads/2021/03/step4.svg"&gt;&lt;img class="aligncenter size-medium wp-image-757200" src="https://res.cloudinary.com/practicaldev/image/fetch/s--Fp7dq9hq--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://hazelcast.com/wp-content/uploads/2021/03/step4.svg" alt="Blue Green deployment step 4" width="400" height="400"&gt;&lt;/a&gt;
+&lt;/li&gt;
+    &lt;li&gt;At some point, all users will have migrated from the &lt;strong&gt;&lt;span&gt;blue&lt;/span&gt;&lt;/strong&gt; environment to the green environment. At this point, no writes happen in the &lt;strong&gt;&lt;span&gt;blue&lt;/span&gt;&lt;/strong&gt; environment. The &lt;span&gt;&lt;strong&gt;green&lt;/strong&gt;&lt;/span&gt; environment has become the active one.
+&lt;img class="aligncenter size-medium wp-image-757199" src="https://res.cloudinary.com/practicaldev/image/fetch/s--v_yhUHfj--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://hazelcast.com/wp-content/uploads/2021/03/step5.svg" alt="Blue Green deployment step 5" width="400" height="400"&gt;
+&lt;/li&gt;
+    &lt;li&gt;It's time to do some cleanup. We can stop the &lt;em&gt;forward&lt;/em&gt; job and unschedule its pod(s). Later, we can do the same with the &lt;span&gt;&lt;strong&gt;blue&lt;/strong&gt;&lt;/span&gt; database pod.
+&lt;img class="aligncenter size-medium wp-image-757116" src="https://res.cloudinary.com/practicaldev/image/fetch/s--mTii-2Eh--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://hazelcast.com/wp-content/uploads/2021/02/step6.svg" alt="Blue Green deployment step 6" width="400" height="400"&gt;
+&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;Note that for the sake of simplicity, we described only the nominal path. In real-world scenarios, you should prepare a &lt;em&gt;backward&lt;/em&gt; job that reads from the &lt;strong&gt;&lt;span&gt;green&lt;/span&gt;&lt;/strong&gt; database and writes back to the &lt;strong&gt;&lt;span&gt;blue&lt;/span&gt;&lt;/strong&gt; one. If you need to rollback, you'll stop the &lt;em&gt;forward&lt;/em&gt; job, schedule the &lt;em&gt;backward&lt;/em&gt; job, and downgrade your application pods again to move users back to the original &lt;strong&gt;&lt;span&gt;blue&lt;/span&gt;&lt;/strong&gt; environment.&lt;/p&gt;
+
+&lt;h2&gt;Conclusion&lt;/h2&gt;
+
+&lt;p&gt;In this post, I described the core problem of upgrading an application: state. The state is in two places, applications themselves with user sessions and databases. Session replication is a solved problem, database migration not so much.&lt;/p&gt;
+
+&lt;p&gt;With data streaming and Change-Data-Capture, we have a foolproof process to migrate data from databases to update an application while serving users at the same time.&lt;/p&gt;
+
+&lt;p&gt;Please find the associated Git repository that illustrates the post:&lt;/p&gt;
+
+
+&lt;div class="ltag-github-readme-tag"&gt;
+  &lt;div class="readme-overview"&gt;
+    &lt;h2&gt;
+      &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--i3JOwpme--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/github-logo-ba8488d21cd8ee1fee097b8410db9deaa41d0ca30b004c0c63de0a479114156f.svg" alt="GitHub logo"&gt;
+      &lt;a href="https://github.com/hazelcast-demos"&gt;
+        hazelcast-demos
+      &lt;/a&gt; / &lt;a href="https://github.com/hazelcast-demos/zerodowntime"&gt;
+        zerodowntime
+      &lt;/a&gt;
+    &lt;/h2&gt;
+    &lt;h3&gt;
+      
+    &lt;/h3&gt;
+  &lt;/div&gt;
+  &lt;div class="ltag-github-body"&gt;
+    
+&lt;div id="readme" class="adoc"&gt;&lt;div&gt;
+&lt;h2 id="user-content-demo-notes"&gt;
+Demo notes&lt;/h2&gt;
+&lt;div&gt;
+&lt;div&gt;
+&lt;h3 id="user-content-set-up"&gt;
+Set up&lt;/h3&gt;
+&lt;div&gt;
+&lt;dl&gt;
+&lt;dt&gt;Create a kind cluster with correct port mapping&lt;/dt&gt;
+&lt;/dl&gt;
+&lt;/div&gt;
+&lt;div&gt;
+&lt;div&gt;
+&lt;div class="highlight highlight-source-shell js-code-highlight"&gt;
+&lt;pre&gt;kind create cluster --config kind.yml&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;div&gt;
+&lt;dl&gt;
+&lt;dt&gt;Set the Kubernetes context&lt;/dt&gt;
+&lt;/dl&gt;
+&lt;/div&gt;
+&lt;div&gt;
+&lt;div&gt;
+&lt;div class="highlight highlight-source-shell js-code-highlight"&gt;
+&lt;pre&gt;kubectl config set-context --current --namespace=zerodowntime&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;div&gt;
+&lt;dl&gt;
+&lt;dt&gt;Get back to the v1 of the application&lt;/dt&gt;
+&lt;/dl&gt;
+&lt;/div&gt;
+&lt;div&gt;
+&lt;div&gt;
+&lt;div class="highlight highlight-source-shell js-code-highlight"&gt;
+&lt;pre&gt;git checkout 1.0&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;div&gt;
+&lt;dl&gt;
+&lt;dt&gt;Build the image&lt;/dt&gt;
+&lt;dd&gt;
+&lt;p&gt;The build will load the image to the Docker &lt;em&gt;daemon&lt;/em&gt;.&lt;/p&gt;
+&lt;/dd&gt;
+&lt;/dl&gt;
+&lt;/div&gt;
+&lt;div&gt;
+&lt;div&gt;
+&lt;div class="highlight highlight-source-shell js-code-highlight"&gt;
+&lt;pre&gt;./mvnw clean compile com.google.cloud.tools:jib-maven-plugin:dockerBuild&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;div&gt;
+&lt;p&gt;Load it into kind.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div&gt;
+&lt;div&gt;
+&lt;div class="highlight highlight-source-shell js-code-highlight"&gt;
+&lt;pre&gt;kind load docker-image hazelcast/hzshop:1.0&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;div&gt;
+&lt;dl&gt;
+&lt;dt&gt;Get to the v2 of the application&lt;/dt&gt;
+&lt;/dl&gt;
+&lt;/div&gt;
+&lt;div&gt;
+&lt;div&gt;
+&lt;div class="highlight highlight-source-shell js-code-highlight"&gt;
+&lt;pre&gt;git checkout master&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;div&gt;
+&lt;dl&gt;
+&lt;dt&gt;Build the image and load it to the Docker &lt;em&gt;daemon&lt;/em&gt;
+&lt;/dt&gt;
+&lt;/dl&gt;
+&lt;/div&gt;
+&lt;div&gt;
+&lt;div&gt;
+&lt;div class="highlight highlight-source-shell js-code-highlight"&gt;
+&lt;pre&gt;./mvnw clean compile com.google.cloud.tools:jib-maven-plugin:dockerBuild&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;div&gt;
+&lt;p&gt;Load it into kind.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div&gt;
+&lt;div&gt;
+&lt;div class="highlight highlight-source-shell js-code-highlight"&gt;
+&lt;pre&gt;kind load docker-image hazelcast/hzshop:2.0&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;div&gt;
+&lt;dl&gt;
+&lt;dt&gt;Load the remaining images in kind&lt;/dt&gt;
+&lt;/dl&gt;
+&lt;/div&gt;
+&lt;div&gt;
+&lt;div&gt;
+&lt;div class="highlight highlight-source-shell js-code-highlight"&gt;
+&lt;pre&gt;kind load docker-image mysql:8.0
+kind load docker-image hazelcast/forward:1.0&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;div&gt;
+&lt;h3 id="user-content-execution"&gt;
+Execution&lt;/h3&gt;
+&lt;div&gt;
+&lt;dl&gt;
+&lt;dt&gt;Schedule common parameters&lt;/dt&gt;
+&lt;/dl&gt;
+&lt;/div&gt;
+&lt;div&gt;
+&lt;div&gt;
+&lt;div class="highlight highlight-source-shell js-code-highlight"&gt;
+&lt;pre&gt;kubectl apply -f infrastructure/kube/parameters.yml&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;div&gt;
+&lt;dl&gt;
+&lt;dt&gt;Schedule the original database (&lt;em&gt;blue&lt;/em&gt;)&lt;/dt&gt;
+&lt;/dl&gt;
+&lt;/div&gt;
+&lt;div&gt;
+&lt;div&gt;
+&lt;div class="highlight highlight-source-shell js-code-highlight"&gt;
+&lt;pre&gt;kubectl apply -f infrastructure/kube/blue.yml&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;div&gt;
+&lt;dl&gt;
+&lt;dt&gt;Schedule the v1 version of the application&lt;/dt&gt;
+&lt;/dl&gt;
+&lt;/div&gt;
+&lt;div&gt;
+&lt;div&gt;
+&lt;div class="highlight highlight-source-shell js-code-highlight"&gt;
+&lt;pre&gt;kubectl apply -f infrastructure/kube/application.yml&lt;/pre&gt;
+&lt;div class="highlight__panel js-actions-panel"&gt;
+&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
+    Enter fullscreen mode
+    
+
+
+    Exit fullscreen mode
+    
+
+
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;div&gt;
+&lt;dl&gt;
+&lt;dt&gt;Use the application to add products to the cart of any…&lt;/dt&gt;
+&lt;/dl&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;/div&gt;
+  &lt;/div&gt;
+  &lt;div class="gh-btn-container"&gt;&lt;a class="gh-btn" href="https://github.com/hazelcast-demos/zerodowntime"&gt;View on GitHub&lt;/a&gt;&lt;/div&gt;
+&lt;/div&gt;
+
+
+</description>
+      <category>database</category>
+      <category>session</category>
+      <category>devops</category>
+      <category>kubernetes</category>
+    </item>
+    <item>
       <title>Getting started with React</title>
       <author>mrwolferinc</author>
       <pubDate>Thu, 04 Mar 2021 15:45:34 +0000</pubDate>
@@ -4761,521 +5225,6 @@ ANDROSS - "Only I have the brains to rule Lylat!"
       <category>python</category>
       <category>programming</category>
       <category>tutorial</category>
-    </item>
-    <item>
-      <title>Gradle Build Cache Node Replication in Android</title>
-      <author>Roger Taracha</author>
-      <pubDate>Thu, 04 Mar 2021 13:02:51 +0000</pubDate>
-      <link>https://dev.to/thedancercodes/gradle-build-cache-node-replication-in-android-14bc</link>
-      <guid>https://dev.to/thedancercodes/gradle-build-cache-node-replication-in-android-14bc</guid>
-      <description>&lt;p&gt;&lt;strong&gt;NOTE: To achieve build-cache node replication, you need to have an instance of Gradle Enterprise running.&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;In this post, I will share our experience at &lt;a href="https://www.premise.com/"&gt;Premise Data&lt;/a&gt; using build-cache node replication to serve our distributed teams across the globe. I will also share the inner workings of the Gradle build script solution for replicated node selection.&lt;/p&gt;
-
-&lt;p&gt;But before we delve into build-cache node replication, let us do a brief recap of the gradle build cache.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#gradle-build-cache" class="anchor"&gt;
-  &lt;/a&gt;
-  Gradle Build Cache
-&lt;/h3&gt;
-
-&lt;p&gt;The Gradle build cache is a caching mechanism that aims to save the developer's time by reusing outputs produced by other builds. &lt;br&gt;
-The build cache works by storing build outputs(&lt;em&gt;locally or remotely&lt;/em&gt;) and allowing builds to fetch these outputs from the cache when it is determined that inputs have not changed, avoiding the expensive work of regenerating them.&lt;/p&gt;
-
-&lt;p&gt;The Build Cache is a build acceleration technology that enhances build performance. The benefits of the build cache are as follows:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Faster build times lead to faster feedback&lt;/li&gt;
-&lt;li&gt;Faster feedback leads to better developer productivity &lt;/li&gt;
-&lt;li&gt;Better developer productivity ships features quicker&lt;/li&gt;
-&lt;/ul&gt;
-&lt;h3&gt;
-  &lt;a href="#build-cache-nodes" class="anchor"&gt;
-  &lt;/a&gt;
-  Build Cache Nodes
-&lt;/h3&gt;
-
-&lt;p&gt;The Gradle build-cache node software is a freely available HTTP remote cache server for Gradle’s build caching functionality.&lt;/p&gt;
-
-&lt;p&gt;The build-cache node can be used without a Gradle Enterprise installation with restricted functionality.&lt;/p&gt;
-
-&lt;p&gt;Build-cache nodes can &lt;em&gt;optionally&lt;/em&gt; be connected with Gradle Enterprise for centralized management and monitoring, and to enable replicating cache entries between multiple nodes.&lt;/p&gt;
-
-&lt;p&gt;By connecting remote nodes to a Gradle Enterprise instance, you are able to configure them centrally from Gradle Enterprise and have them replicate entries from the default built-in cache node.&lt;/p&gt;
-
-&lt;p&gt;The installation and operation of remote build cache nodes is documented in the &lt;a href="https://docs.gradle.com/build-cache-node/"&gt;Build Cache Node User Manual&lt;/a&gt; and the process of connection of the cache nodes to Gradle Enterprise is documented in &lt;a href="https://docs.gradle.com/enterprise/admin/current/#connecting_with_gradle_enterprise"&gt;Connecting with Gradle Enterprise&lt;/a&gt;.&lt;/p&gt;
-&lt;h3&gt;
-  &lt;a href="#replication" class="anchor"&gt;
-  &lt;/a&gt;
-  Replication
-&lt;/h3&gt;
-
-&lt;p&gt;Replication allows users to use a cache node that they have a better network link to, while reusing artifacts from the main cache node that is further away. This is particularly effective for geographically distributed teams.&lt;/p&gt;
-
-&lt;p&gt;In our case, the main cache node is located in &lt;strong&gt;US, Seattle&lt;/strong&gt; and we have replicated nodes to serve our developers in other places around the globe.&lt;/p&gt;
-
-&lt;p&gt;The graphic below shows our team distribution by highlighting the developer locations:&lt;/p&gt;
-
-
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--C9f4NHTc--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/lnw353gqx5rbr85tij9z.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--C9f4NHTc--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/lnw353gqx5rbr85tij9z.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
-
-
-
-&lt;p&gt;The replication settings for each node can be configured via the &lt;strong&gt;Nodes&lt;/strong&gt; configuration page in Gradle Enterprise. They can not be configured for remote nodes via the remote node’s user interface or configuration file.&lt;/p&gt;
-&lt;h4&gt;
-  &lt;a href="#tip-1" class="anchor"&gt;
-  &lt;/a&gt;
-  Tip #1
-&lt;/h4&gt;
-
-&lt;p&gt;A typical arrangement is to have continuous integration builds push to a default built-in cache node on a local network, and have other nodes used by developers in different locations,( &lt;em&gt;ideally on their local network&lt;/em&gt;), use it as their replication source.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--SfKwzIKD--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/5chbywpklrzu6u2fnmio.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--SfKwzIKD--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/5chbywpklrzu6u2fnmio.png" alt="Node Replication"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;The replication technology can be used to separate cache artifacts, distribute the load, and improve build performance by having a better network link between the developer's build and the node.&lt;/p&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;NOTE: The bandwidth and latency of the network link between a build and a build cache significantly affect build performance. &lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;h4&gt;
-  &lt;a href="#tip-2" class="anchor"&gt;
-  &lt;/a&gt;
-  Tip #2
-&lt;/h4&gt;
-
-&lt;p&gt;We keep an eye on the network bandwidth and latency using the &lt;a href="https://github.com/runningcode/gradle-doctor"&gt;Gradle Doctor plugin&lt;/a&gt; that outputs the &lt;a href="https://runningcode.github.io/gradle-doctor/remote-cache/"&gt;remote build-cache benchmark report&lt;/a&gt; whenever our builds run.&lt;/p&gt;
-&lt;h4&gt;
-  &lt;a href="#value-proposition" class="anchor"&gt;
-  &lt;/a&gt;
-  Value Proposition
-&lt;/h4&gt;
-
-&lt;p&gt;The main value proposition is that by replicating cache nodes, your developer's local build times will significantly be reduced. The effect will be faster feedback cycles &amp;amp; a highly satisfying developer experience.&lt;/p&gt;
-&lt;h3&gt;
-  &lt;a href="#connecting-to-gradle-enterprise" class="anchor"&gt;
-  &lt;/a&gt;
-  Connecting to Gradle Enterprise
-&lt;/h3&gt;
-
-&lt;p&gt;The process of connecting a remote cache node to your Gradle Enterprise installation is pretty straightforward.&lt;/p&gt;
-&lt;h4&gt;
-  &lt;a href="#1-create-a-record-for-the-node-in-gradle-enterprise" class="anchor"&gt;
-  &lt;/a&gt;
-  (1) Create a record for the node in Gradle Enterprise
-&lt;/h4&gt;
-
-&lt;p&gt;Visit &lt;code&gt;/cache-admin&lt;/code&gt; on your Gradle Enterprise dashboard, and select &lt;strong&gt;Nodes&lt;/strong&gt; from the left menu. In the &lt;strong&gt;Remote nodes &amp;gt; Create new node&lt;/strong&gt; section, enter the name for your node and click &lt;strong&gt;Create new node&lt;/strong&gt;.&lt;/p&gt;
-
-&lt;p&gt;In this example, we will assume we have a new engineer joining the team from Honduras.&lt;/p&gt;
-
-
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--X2pn0uIM--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/vtk7evkt80l8s952wwmg.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--X2pn0uIM--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/vtk7evkt80l8s952wwmg.png" alt="Create New Node"&gt;&lt;/a&gt;&lt;/p&gt;
-
-
-
-&lt;p&gt;The Honduras node will now be listed in the Existing nodes section. &lt;/p&gt;
-
-&lt;p&gt;Each node is assigned a &lt;code&gt;key&lt;/code&gt; and a &lt;code&gt;secret&lt;/code&gt;. The node needs to be configured with the key and secret.&lt;/p&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;The secret is only viewable for 5 minutes after node creation. If the node secret is lost, use the regenerate function to issue a new secret which will then be viewable for 5 minutes. &lt;br&gt;
-See screenshot below:&lt;/p&gt;
-&lt;/blockquote&gt;
-
-
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--JG7FLzbB--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/2nyla9zefi3je84k7qva.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--JG7FLzbB--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/2nyla9zefi3je84k7qva.png" alt="Existing Nodes"&gt;&lt;/a&gt;&lt;/p&gt;
-
-
-&lt;h4&gt;
-  &lt;a href="#2-gradle-enterprise-registration" class="anchor"&gt;
-  &lt;/a&gt;
-  (2) Gradle Enterprise Registration
-&lt;/h4&gt;
-
-&lt;p&gt;We will now proceed to register and connect the build-cache node with our Gradle Enterprise installation. This registration enables centralized monitoring and cache entry replication which are extra features. &lt;/p&gt;
-
-&lt;p&gt;The registration can be configured via the &lt;strong&gt;web interface&lt;/strong&gt; or via the &lt;strong&gt;config file&lt;/strong&gt;. In our case, we will configure it via the web interface.&lt;/p&gt;
-&lt;h5&gt;
-  &lt;a href="#i-web-interface-registration" class="anchor"&gt;
-  &lt;/a&gt;
-  (i) Web Interface Registration
-&lt;/h5&gt;
-
-&lt;p&gt;Open the web interface of your build cache node on your browser. Focus on the &lt;strong&gt;Gradle Enterprise&lt;/strong&gt; section on the web interface and expand the &lt;code&gt;Settings&lt;/code&gt; dropdown.&lt;/p&gt;
-
-&lt;p&gt;Configure your node with the details of the Gradle Enterprise server to connect with. They include the following:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;&lt;p&gt;&lt;strong&gt;Gradle Enterprise server&lt;/strong&gt; ~ The URL of the Gradle Enterprise instance we desire to connect to.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;&lt;strong&gt;My address&lt;/strong&gt; ~ The public address of this build-cache node.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;&lt;strong&gt;Key&lt;/strong&gt; ~ The identifying key of this node. This is obtained from Gradle Enterprise via the replication step above.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;&lt;strong&gt;Secret&lt;/strong&gt; ~ The secret value for this node. This is obtained from Gradle Enterprise via the replication step above.&lt;/p&gt;&lt;/li&gt;
-&lt;/ul&gt;
-
-
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--ZjsstVi1--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ptolwrpo1ytyijf4xo0q.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ZjsstVi1--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ptolwrpo1ytyijf4xo0q.png" alt="Gradle Registration"&gt;&lt;/a&gt;&lt;/p&gt;
-
-
-
-&lt;p&gt;Click the &lt;strong&gt;Save&lt;/strong&gt; button. If your setup is done correctly, your node should successfully connect to the Gradle Enterprise instance and should be available for replication.&lt;/p&gt;
-&lt;h3&gt;
-  &lt;a href="#gradle-build-script-solution-for-replicated-node-selection" class="anchor"&gt;
-  &lt;/a&gt;
-  Gradle Build Script Solution For Replicated Node Selection
-&lt;/h3&gt;
-
-&lt;p&gt;Now that we have our cache nodes setup, its time to explain our build script solution. The script enables a developer to use a cache node that they have a better network link to.&lt;/p&gt;
-
-&lt;p&gt;The script is available in this &lt;a href="https://github.com/TheDancerCodes/gradle-build-cache-node-replication"&gt;Android project repo&lt;/a&gt;. The project has been setup to generate &lt;em&gt;build scans&lt;/em&gt; and leverage the &lt;em&gt;build-cache&lt;/em&gt; technology.&lt;/p&gt;
-
-&lt;p&gt;The 3 main files to focus on are:&lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;&lt;strong&gt;build-cache-node-config.groovy&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;build.gradle(project level)&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;&lt;strong&gt;settings.gradle&lt;/strong&gt;&lt;/li&gt;
-&lt;/ol&gt;
-&lt;h6&gt;
-  &lt;a href="#i-buildcachenodeconfiggroovy" class="anchor"&gt;
-  &lt;/a&gt;
-  (i) build-cache-node-config.groovy
-&lt;/h6&gt;
-
-&lt;p&gt;This file contains the &lt;strong&gt;title&lt;/strong&gt; and &lt;strong&gt;URL&lt;/strong&gt; of all our build-cache nodes that are connected to our Gradle Enterprise instance.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;environments {
-    default_node {
-        nodeTitle = '# Default Build Cache Node'
-        nodeUrl = 'https://gradle-enterprise.your-domain.com/cache/'
-    }
-
-    east_africa_node {
-        nodeTitle = '# East Africa Build Cache Node'
-        nodeUrl = 'https://east.xx.yyy.zzz/cache/'
-    }
-
-    west_africa_node {
-        nodeTitle = '# West Africa Build Cache Node'
-        nodeUrl = 'https://west.xx.yyy.zzz/cache/'
-    }
-
-    us_west_node {
-        nodeTitle = '# US West Build Cache Node'
-        nodeUrl = 'https://us-west.xx.yyy.zzz/cache/'
-    }
-
-    honduras_node {
-        nodeTitle = '# Honduras Build Cache Node'
-        nodeUrl = 'https://honduras.xx.yyy.zzz/cache/'
-    }
-}
-&lt;/code&gt;&lt;/pre&gt;
-&lt;div class="highlight__panel js-actions-panel"&gt;
-&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
-    Enter fullscreen mode
-    
-
-
-    Exit fullscreen mode
-    
-
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Based on the node a user selects, the title and URL path will be output to a &lt;code&gt;build-cache-node-config.properties&lt;/code&gt; file that is created during the node selection process.&lt;/p&gt;
-
-&lt;h6&gt;
-  &lt;a href="#ii-buildgradle" class="anchor"&gt;
-  &lt;/a&gt;
-  (ii) build.gradle
-&lt;/h6&gt;
-
-&lt;p&gt;This is the project level gradle file. It contains a code region responsible for generating the &lt;code&gt;build-cache-node-config.properties&lt;/code&gt; that contains the build-cache node selected by the developer.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;// region Build Cache Node Replication Setup
-def loadBuildCacheNodes() {
-    def node_title = hasProperty('node') ? node: 'default_node'
-    println "Current Build Cache Node: " + node_title
-
-    def configFile = file('build-cache-node-config.groovy')
-    def config = new ConfigSlurper(node_title).parse(configFile.toURL())
-    project.ext.config = config
-}
-
-task setBuildCacheNode {
-    doLast {
-        if (project.hasProperty('node')) {
-            loadBuildCacheNodes()
-
-            new File(rootDir, "build-cache-node-config.properties").text =
-                    """ $config.nodeTitle \n replicated_build_cache_node=$config.nodeUrl"""
-
-            println "nodeTitle:  $config.nodeTitle"
-            println "nodeUrl:  $config.nodeUrl"
-
-        } else {
-            // empty
-        }
-    }
-}
-
-task setEastAfricaBuildCacheNode() {
-    group = "build setup"
-    description = "Configures the remote build cache url for devs in East Africa"
-
-    doFirst {
-        project.ext.set("node", "east_africa_node")
-    }
-    finalizedBy "setBuildCacheNode"
-}
-
-task setWestAfricaBuildCacheNode() {
-    group = "build setup"
-    description = "Configures the remote build cache url for devs in West Africa"
-
-    doFirst {
-        project.ext.set("node", "west_africa_node")
-    }
-    finalizedBy "setBuildCacheNode"
-}
-
-task setUSABuildCacheNode() {
-    group = "build setup"
-    description = "Configures the remote build cache url for devs in the United States"
-
-    doFirst {
-        project.ext.set("node", "us_west_node")
-    }
-    finalizedBy "setBuildCacheNode"
-}
-
-task setHondurasBuildCacheNode() {
-    group = "build setup"
-    description = "Configures the remote build cache url for devs in Honduras"
-
-    doFirst {
-        project.ext.set("node", "honduras_node")
-    }
-    finalizedBy "setBuildCacheNode"
-}
-
-//endregion
-&lt;/code&gt;&lt;/pre&gt;
-&lt;div class="highlight__panel js-actions-panel"&gt;
-&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
-    Enter fullscreen mode
-    
-
-
-    Exit fullscreen mode
-    
-
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-
-
-&lt;p&gt;&lt;strong&gt;loadBuildCacheNodes()&lt;/strong&gt; - This function loads the nodes available in the &lt;code&gt;build-cache-node-config.groovy&lt;/code&gt; file and passes it over to the &lt;code&gt;setBuildCacheNode&lt;/code&gt; task.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;setBuildCacheNode&lt;/strong&gt; - This task accepts the user's selected node as input and creates a new &lt;code&gt;build-cache-node-config.properties&lt;/code&gt; file containing the build cache node title and URL.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;setEastAfricaBuildCacheNode&lt;/strong&gt;, &lt;strong&gt;setWestAfricaBuildCacheNode&lt;/strong&gt;, &lt;strong&gt;setUSABuildCacheNode&lt;/strong&gt;, &lt;strong&gt;setHondurasBuildCacheNode&lt;/strong&gt; - These tasks set the required node as per the highlighted region and passes this node selection as input to the &lt;code&gt;setBuildCacheNode&lt;/code&gt; task.&lt;/p&gt;
-
-&lt;h6&gt;
-  &lt;a href="#iii-settingsgradle" class="anchor"&gt;
-  &lt;/a&gt;
-  (iii) settings.gradle
-&lt;/h6&gt;
-
-&lt;p&gt;In the &lt;code&gt;remote(HttpBuildCache)&lt;/code&gt; closure contained in this gradle file, we add some logic to determine the replicated cache node URL that our project will pull artifacts from.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;remote(HttpBuildCache) {
-
-        // Create a variable called buildCacheNodesPropertiesFile and initialize it to your
-        // build-cache-nodes.properties file, in the rootProject folder.
-        def buildCacheNodesPropertiesFile = new File("build-cache-node-config.properties")
-
-        if (!buildCacheNodesPropertiesFile.exists()) {
-            url = "https://gradle-enterprise.your-domain.com/cache/"
-        } else {
-            // Initialize a new Properties() object called buildCacheNodesProperties
-            def buildCacheNodesProperties = new Properties()
-
-            // Load the build-cache-nodes.properties file into the buildCacheNodesProperties object.
-            buildCacheNodesProperties.load(new FileInputStream(buildCacheNodesPropertiesFile))
-
-            if (buildCacheNodesProperties != null
-                    &amp;amp;&amp;amp; buildCacheNodesProperties.containsKey('replicated_build_cache_node')) {
-
-                // Set the dev specified build cache node url
-                url = buildCacheNodesProperties['replicated_build_cache_node']
-            } else{
-                // Set the default build cache node url
-                url = buildCacheNodesProperties['default_build_cache_node']
-            }
-        }
-...
-    }
-&lt;/code&gt;&lt;/pre&gt;
-&lt;div class="highlight__panel js-actions-panel"&gt;
-&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
-    Enter fullscreen mode
-    
-
-
-    Exit fullscreen mode
-    
-
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-
-
-&lt;p&gt;The above logic basically reads the contents of the &lt;code&gt;build-cache-node-config.properties&lt;/code&gt; file and determines whether our project leverages the &lt;strong&gt;selected replicated node&lt;/strong&gt; or whether it falls back to the &lt;strong&gt;default built-in cache node&lt;/strong&gt;.&lt;/p&gt;
-
-&lt;h4&gt;
-  &lt;a href="#build-cache-node-selection-process" class="anchor"&gt;
-  &lt;/a&gt;
-  Build Cache Node Selection Process
-&lt;/h4&gt;
-
-&lt;p&gt;Now that we have an understanding of Gradle Enterprise, Build Cache Node Replication, and the inner workings of our Gradle build script, we will now go through the build cache node selection process.&lt;/p&gt;
-
-&lt;p&gt;We will achieve this from our IDE. Our IDE of choice is Android Studio.&lt;/p&gt;
-
-&lt;p&gt;There are 4 build-cache nodes for the 4 main regions our developers are currently located in:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;&lt;p&gt;&lt;code&gt;east_africa_node&lt;/code&gt; for East Africa.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;&lt;code&gt;west_africa_node&lt;/code&gt; for West Africa.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;&lt;code&gt;us_west_node&lt;/code&gt; for US West Coast.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;&lt;code&gt;honduras_node&lt;/code&gt; for Honduras. (&lt;em&gt;The node we created in this blog post&lt;/em&gt;)&lt;/p&gt;&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;In Android Studio, select the &lt;strong&gt;Gradle&lt;/strong&gt; tab and open the &lt;code&gt;build setup&lt;/code&gt; group of tasks. This should display the build cache node tasks available per region.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--r5WAU3W0--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/je8wv58soa98ywizkdb4.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--r5WAU3W0--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/je8wv58soa98ywizkdb4.png" alt="Gradle Tab"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Click on your preferred gradle task (&lt;strong&gt;setHondurasBuildCacheNode&lt;/strong&gt;) and this action will result in the following output under the &lt;em&gt;Build&lt;/em&gt; tab in your IDE.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;4:19:56 PM: Executing task 'setHondurasBuildCacheNode'...
-
-Executing tasks: [setHondurasBuildCacheNode] in project /Projects/Android/gradle-build-cache-node-replication
-
-&amp;gt; Task :setHondurasBuildCacheNode
-
-&amp;gt; Task :setBuildCacheNode
-Current Build Cache Node: honduras_node
-nodeTitle:  # Honduras Build Cache Node
-nodeUrl:  https://honduras.xx.yyy.zzz/cache/
-
-BUILD SUCCESSFUL in 552ms
-2 actionable tasks: 2 executed
-
-Publishing build scan...
-https://gradle.com/s/s3x2bmklo2vjc
-
-4:19:58 PM: Task execution finished 'setHondurasBuildCacheNode'.
-&lt;/code&gt;&lt;/pre&gt;
-&lt;div class="highlight__panel js-actions-panel"&gt;
-&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
-    Enter fullscreen mode
-    
-
-
-    Exit fullscreen mode
-    
-
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-
-
-&lt;p&gt;This task action will generate a &lt;code&gt;build-cache-node-config.properties&lt;/code&gt; file at the root level of your project. &lt;/p&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;NOTE: Changes to this file are not tracked by source control.&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--mSlUsVR8--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/uw5cw4qkykq48xhyxi6b.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--mSlUsVR8--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/uw5cw4qkykq48xhyxi6b.png" alt="Honduras Build Cache Node"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Also, if you open the generated build scan in your browser, you will confirm that our project is leveraging the Honduras cache node.&lt;/p&gt;
-
-
-
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--WpLT4eRb--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/1rnnkkusluuxprvi2eig.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--WpLT4eRb--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/1rnnkkusluuxprvi2eig.png" alt="Honduras Build Scan"&gt;&lt;/a&gt;&lt;/p&gt;
-
-
-
-
-&lt;blockquote&gt;
-&lt;p&gt;NOTE: The 4 Gradle tasks can also be run directly from the command line:&lt;br&gt;
-&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;./gradlew setUSABuildCacheNode
-
-./gradlew setEastAfricaBuildCacheNode
-
-./gradlew setWestAfricaBuildCacheNode
-
-./gradlew setWestAfricaBuildCacheNode
-&lt;/code&gt;&lt;/pre&gt;
-&lt;div class="highlight__panel js-actions-panel"&gt;
-&lt;div class="highlight__panel-action js-fullscreen-code-action"&gt;
-    Enter fullscreen mode
-    
-
-
-    Exit fullscreen mode
-    
-
-
-&lt;/div&gt;
-&lt;/div&gt;
-&lt;/div&gt;
-
-
-
-&lt;h3&gt;
-  &lt;a href="#thats-all-folks" class="anchor"&gt;
-  &lt;/a&gt;
-  That's All Folks
-&lt;/h3&gt;
-
-&lt;p&gt;It is my hope that you found this useful. If there's anything specific I haven't mentioned above that you think other readers will benefit from, feel free to mention it in the comments section below.&lt;br&gt;
-Enjoy!&lt;/p&gt;
-
-</description>
-      <category>android</category>
-      <category>performance</category>
-      <category>productivity</category>
-      <category>gradle</category>
     </item>
   </channel>
 </rss>
