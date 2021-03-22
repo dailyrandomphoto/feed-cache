@@ -7,6 +7,811 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>Under-the-hood of Git</title>
+      <author>Craig Taub</author>
+      <pubDate>Mon, 22 Mar 2021 10:29:51 +0000</pubDate>
+      <link>https://dev.to/craigtaub/under-the-hood-of-git-309f</link>
+      <guid>https://dev.to/craigtaub/under-the-hood-of-git-309f</guid>
+      <description>&lt;p&gt;&lt;i&gt;Originally posted on &lt;a href="https://craigtaub.dev/under-the-hood-of-git"&gt;craigtaub.dev&lt;/a&gt;&lt;/i&gt;&lt;/p&gt;
+
+&lt;p&gt;For many years now Git has been the SCM (source control management aka version control) of choice. It offered many features which alternatives such as CVS did not, and combined with GitHub website created an entire CI pipeline which any teams Dev practices could be built around.&lt;/p&gt;
+
+&lt;p&gt;When I began reading about the mechanics of Git it was obvious that it's combination of many different techniques, all of which produce the "replicated versioned file system" know as Git, for example:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Linked lists,&lt;/li&gt;
+&lt;li&gt;File system objects database&lt;/li&gt;
+&lt;li&gt;Hashing (stat SHA-1 vs content SHA-1 vs content Deflate)&lt;/li&gt;
+&lt;li&gt;Differential encoding&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;So I decided to create a mini-working version with some of the core version control features. Thankfully there are many helpful books which break down how things work, so I have attempted to strip the internals down to its bare minimum.&lt;/p&gt;
+
+&lt;p&gt;This post will focus on:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;repositories,&lt;/li&gt;
+&lt;li&gt;working directories,&lt;/li&gt;
+&lt;li&gt;staging,&lt;/li&gt;
+&lt;li&gt;committing&lt;/li&gt;
+&lt;li&gt;status checks.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;I have omitted packfiles, deltas, branches, tags, merging and comparing staged chunks (diffing). I may do a follow up post/repository on those.&lt;/p&gt;
+
+&lt;p&gt;This is part of my &lt;a href="https://craigtaub.dev/introducing-my-under-the-hood-of-series"&gt;"under-the-hood of" series&lt;/a&gt;:&lt;/p&gt;
+
+&lt;p&gt;A video for this talk will soon be added to my "under-the-hood of" &lt;a href="https://www.youtube.com/channel/UCYi23MnKBKn0yLZKBrz5Bfw"&gt;YouTube series&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;The article today will be broken down into:&lt;/p&gt;
+
+&lt;p&gt;1) &lt;a href="#1-overview"&gt;Overview&lt;/a&gt;&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="#workflow"&gt;Workflow&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="#object-model"&gt;Object model&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="#components"&gt;Components&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="#additional-reading"&gt;Additional reading&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;2) &lt;a href="#2-building-our-own-git"&gt;Building our own Git&lt;/a&gt;&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="#our-git-code"&gt;Our git code&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="#testing-it-works"&gt;Testing it works&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;3) &lt;a href="#what-have-we-missed"&gt;What have we missed?&lt;/a&gt;&lt;/p&gt;
+
+
+
+
+&lt;h2&gt;
+  &lt;a href="#1-overview" class="anchor"&gt;
+  &lt;/a&gt;
+  1: Overview
+&lt;/h2&gt;
+
+&lt;p&gt;Git is described as a distributed version-control system, which tracks changes in any set of files. It was initially released 15 years ago (in 2005) and has grown in functionality and popularity massively since then. As any developer who uses Github knows (or an alternative e.g. BitBucket/GitLab) it has become a staple in the world of software as a best practice.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#workflow" class="anchor"&gt;
+  &lt;/a&gt;
+  Workflow
+&lt;/h3&gt;
+
+&lt;p&gt;I am not going to review how it is used but the basic workflow can be summarised by:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;initialise a new git repository&lt;/li&gt;
+&lt;li&gt;A file/s change is made locally and saved&lt;/li&gt;
+&lt;li&gt;The file/s is added to staging&lt;/li&gt;
+&lt;li&gt;The file/s in the staging area are comitted&lt;/li&gt;
+&lt;li&gt;The commit is pushed to a remote repository (pulling the latest before doing so).&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;We will break down each step, but before we do we need to review the mechanism at the core of Git, the "Object model".&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#object-model" class="anchor"&gt;
+  &lt;/a&gt;
+  Object model
+&lt;/h3&gt;
+
+&lt;p&gt;The object model is essentially an incredibly efficient versioned file system (with replication).&lt;/p&gt;
+
+&lt;p&gt;Each file in the repository exists in the file system and the object database. The object database is a hash of the contents.&lt;br&gt;
+A hash is an object, there are 4 types in total but today we will look at (excluding "tags"):&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;&lt;p&gt;Blob -&amp;gt; a sequence of bytes. A blob in Git will contain the same exact data as a file, it’s just that a blob is stored in the Git object database. Basically the file contents.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Tree -&amp;gt; corresponds to UNIX directory entries. Can contain blobs or sub trees (sub directory). The commit tree has the entire project in blob and trees at time of the commit. It can recreate the entire project from that tree. Always from root directory even if a sub directory file is being updated in the commit.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Commit -&amp;gt; single tree id and commits preceding it&lt;/p&gt;&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;Each tree node, commit and file have their own unique 40 character long SHA-1 representation. The filename is a hash of the contents. If the contents change, so does the hash. Each time it changes a new entry/hash is added but keeps the old ones.&lt;/p&gt;
+
+&lt;p&gt;Inside a git repository they are found under the &lt;code&gt;.git/objects&lt;/code&gt; folder.&lt;/p&gt;
+
+&lt;p&gt;This is my favourite image to describe the structure.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--ywAJ2uQK--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/dfn1opfv72m41utsh6hh.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ywAJ2uQK--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/dfn1opfv72m41utsh6hh.png" alt="object-model" width="500px"&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;h3&gt;
+  &lt;a href="#hash" class="anchor"&gt;
+  &lt;/a&gt;
+  Hash
+&lt;/h3&gt;
+
+&lt;p&gt;Within the object model, the filename is a 2-way SHA-1 encoding of the contents.&lt;/p&gt;
+
+&lt;p&gt;Git prefixes any Blob objects with &lt;code&gt;blob&lt;/code&gt;, followed by the length (as a human-readable integer), followed by a NUL character&lt;br&gt;
+Example:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="nv"&gt;s&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s1"&gt;'abc'&lt;/span&gt;
+&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="nb"&gt;printf&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$s&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt; | git hash-object &lt;span class="nt"&gt;--stdin&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Equivalent to&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="nb"&gt;printf&lt;/span&gt; &lt;span class="s2"&gt;"blob &lt;/span&gt;&lt;span class="si"&gt;$(&lt;/span&gt;&lt;span class="nb"&gt;printf&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$s&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt; | &lt;span class="nb"&gt;wc&lt;/span&gt; &lt;span class="nt"&gt;-c&lt;/span&gt;&lt;span class="si"&gt;)&lt;/span&gt;&lt;span class="se"&gt;\0&lt;/span&gt;&lt;span class="nv"&gt;$s&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt; | &lt;span class="nb"&gt;sha1sum&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Object file contents are compressed via DEFLATE zlib algorithm, it is less human readable or filename-friendly but a more efficient encoding.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#components" class="anchor"&gt;
+  &lt;/a&gt;
+  Components
+&lt;/h2&gt;
+
+&lt;p&gt;I will be covering the components we will be building in our mini-working version.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#working-directory" class="anchor"&gt;
+  &lt;/a&gt;
+  Working directory
+&lt;/h3&gt;
+
+&lt;p&gt;The current system folder with git repository in, also known as the working tree.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#head" class="anchor"&gt;
+  &lt;/a&gt;
+  HEAD
+&lt;/h3&gt;
+
+&lt;p&gt;A file holding a ref to current working branch. Basically the last checked out workspace.&lt;br&gt;
+It holds a reference to the parent commit, usually last branch checked out.&lt;/p&gt;
+
+&lt;p&gt;Found in the file &lt;code&gt;.git/HEAD&lt;/code&gt;.&lt;br&gt;
+Example&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="nb"&gt;ls&lt;/span&gt;  .git/HEAD
+
+ref: refs/heads/master
+
+&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="nb"&gt;ls&lt;/span&gt; .git/refs/heads/master
+
+2e1803ee08fa9aa36e4c5918220e283380a4c385
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#branches" class="anchor"&gt;
+  &lt;/a&gt;
+  Branches
+&lt;/h3&gt;
+
+&lt;p&gt;A branch is actually just a named pointer to specific snapshot.&lt;br&gt;
+When it is checked out&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;moves HEAD pointer to point to the feature ref (branch)&lt;/li&gt;
+&lt;li&gt;moves all content from the current branch repo into the index file, so it's easy to track changes.&lt;/li&gt;
+&lt;li&gt;Make working dir match content of commit pointing to (using tree and blob objects to update working dir contents)&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;h3&gt;
+  &lt;a href="#tags" class="anchor"&gt;
+  &lt;/a&gt;
+  Tags
+&lt;/h3&gt;
+
+&lt;p&gt;An alias for a commit id. The HEAD will point to the latest or predefined e.g. &lt;code&gt;.git/refs/heads/tags/&amp;lt;tag_name&amp;gt;&lt;/code&gt;&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#repository" class="anchor"&gt;
+  &lt;/a&gt;
+  Repository
+&lt;/h3&gt;
+
+&lt;p&gt;A git project stored on disk i.e. not in-memory. Essentially a collection of objects.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#staging" class="anchor"&gt;
+  &lt;/a&gt;
+  Staging
+&lt;/h3&gt;
+
+&lt;p&gt;Area between working directory and repository. All changes in staging will be in the next commit.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#index-file" class="anchor"&gt;
+  &lt;/a&gt;
+  Index file
+&lt;/h3&gt;
+
+&lt;p&gt;The index is a binary file, it does not hold objects (blobs/trees), it stores info about files in repository. It is a virtual working tree state.&lt;/p&gt;
+
+&lt;p&gt;The index file is located at &lt;code&gt;.git/index&lt;/code&gt;. You can see the status of the Index file via &lt;code&gt;&amp;gt; git ls-files --stage&lt;/code&gt;&lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#information-stored" class="anchor"&gt;
+  &lt;/a&gt;
+  Information stored
+&lt;/h4&gt;
+
+&lt;p&gt;For each file it stores&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;time of last update, name of file,&lt;/li&gt;
+&lt;li&gt;file version in working dir,&lt;/li&gt;
+&lt;li&gt;file version in index,&lt;/li&gt;
+&lt;li&gt;file version in repository&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;File versions are marked with checksums, a SHA-1 hash of &lt;code&gt;stat()&lt;/code&gt;, not a hash of the contents. This is more efficient.&lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#refresh" class="anchor"&gt;
+  &lt;/a&gt;
+  Refresh
+&lt;/h4&gt;
+
+&lt;p&gt;It is updated when you checkout a branch or the working directory is updated. Runs in the background automatically.&lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#hashing" class="anchor"&gt;
+  &lt;/a&gt;
+  Hashing
+&lt;/h4&gt;
+
+&lt;p&gt;It uses uses a filesystem &lt;code&gt;stat()&lt;/code&gt; to get the files information, to check quickly if the working tree file content has changed from version recorder in index file. Checks the file modification time under &lt;code&gt;st_mtime&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;The refresh literally calls &lt;code&gt;stat()&lt;/code&gt; for all files.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#additional-reading" class="anchor"&gt;
+  &lt;/a&gt;
+  Additional reading
+&lt;/h3&gt;
+
+&lt;p&gt;The main goal of this post is the mini-working version below so we have only just touched briefly on how git works. Here are websites which go into far more details&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="https://git-scm.com/docs"&gt;https://git-scm.com/docs&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://www.cs.fsu.edu/%7Ebaker/swe2/restricted/notes/gitintro1.pdf"&gt;https://www.cs.fsu.edu/~baker/swe2/restricted/notes/gitintro1.pdf&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+
+
+
+&lt;h2&gt;
+  &lt;a href="#2-building-our-own-git" class="anchor"&gt;
+  &lt;/a&gt;
+  2: Building our own Git
+&lt;/h2&gt;
+
+&lt;h3&gt;
+  &lt;a href="#our-git-code" class="anchor"&gt;
+  &lt;/a&gt;
+  our git code
+&lt;/h3&gt;
+
+&lt;p&gt;The code consists of 4 files, one for each command, plus a util.&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;code&gt;init.mjs&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;status.mjs&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;add.mjs&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;commit.mjs&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;util.mjs&lt;/code&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h4&gt;
+  &lt;a href="#initmjs" class="anchor"&gt;
+  &lt;/a&gt;
+  init.mjs
+&lt;/h4&gt;
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// imports excluded, see linked repo for details&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;init&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;workingDirectory&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;workingDir&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;files&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;glob&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;sync&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;**/*.txt&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;cwd&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;workingDirectory&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="c1"&gt;// (1)&lt;/span&gt;
+
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;indexData&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;files&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;reduce&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;acc&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="c1"&gt;// (2)&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;hash&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;hashFileStats&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="nx"&gt;acc&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="na"&gt;cwd&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;hash&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+      &lt;span class="na"&gt;staging&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;""&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+      &lt;span class="na"&gt;repository&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;""&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;acc&lt;/span&gt;
+  &lt;span class="p"&gt;},&lt;/span&gt; &lt;span class="p"&gt;{})&lt;/span&gt;
+
+  &lt;span class="nx"&gt;fs&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;mkdirSync&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;workingDirectory&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;/.repo`&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;// (3)&lt;/span&gt;
+  &lt;span class="nx"&gt;updateIndex&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;indexData&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="nx"&gt;fs&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;writeFileSync&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;workingDirectory&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;/.repo/HEAD`&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;// (4)&lt;/span&gt;
+  &lt;span class="nx"&gt;fs&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;mkdirSync&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;workingDirectory&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;/.repo/objects`&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;// (4)&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;(1) Grab all the files from the current working directory &lt;br&gt;
+(2) Build the index file using files stat() SHA-1 hash for each file&lt;br&gt;
+(3) Write a repository folder under &lt;code&gt;.repo&lt;/code&gt;&lt;br&gt;
+(4) Inside repository write a &lt;code&gt;HEAD&lt;/code&gt; file and &lt;code&gt;objects&lt;/code&gt; folder&lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#statusmjs" class="anchor"&gt;
+  &lt;/a&gt;
+  status.mjs
+&lt;/h4&gt;
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// imports excluded, see linked repo for details&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;status&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;indexData&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;getIndexData&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="c1"&gt;// (1)&lt;/span&gt;
+
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;notStaged&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[]&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;notComitted&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[]&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;updatedIndexData&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nb"&gt;Object&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;keys&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;indexData&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;reduce&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;acc&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="c1"&gt;// (2)&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;hash&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;hashFileStats&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;// (2a)&lt;/span&gt;
+    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;hash&lt;/span&gt; &lt;span class="o"&gt;!==&lt;/span&gt; &lt;span class="nx"&gt;indexData&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;].&lt;/span&gt;&lt;span class="nx"&gt;cwd&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="c1"&gt;// (2b)&lt;/span&gt;
+      &lt;span class="nx"&gt;acc&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="na"&gt;cwd&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;hash&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+        &lt;span class="na"&gt;staging&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;indexData&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;].&lt;/span&gt;&lt;span class="nx"&gt;staging&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+        &lt;span class="na"&gt;repository&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;indexData&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;].&lt;/span&gt;&lt;span class="nx"&gt;repository&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+      &lt;span class="p"&gt;}&lt;/span&gt;
+      &lt;span class="nx"&gt;notStaged&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;push&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;else&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;indexData&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;].&lt;/span&gt;&lt;span class="nx"&gt;cwd&lt;/span&gt; &lt;span class="o"&gt;!==&lt;/span&gt; &lt;span class="nx"&gt;indexData&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;].&lt;/span&gt;&lt;span class="nx"&gt;staging&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="nx"&gt;notStaged&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;push&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;// (2c)&lt;/span&gt;
+      &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;else&lt;/span&gt; &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;indexData&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;].&lt;/span&gt;&lt;span class="nx"&gt;staging&lt;/span&gt; &lt;span class="o"&gt;!==&lt;/span&gt; &lt;span class="nx"&gt;indexData&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;].&lt;/span&gt;&lt;span class="nx"&gt;repository&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="nx"&gt;notComitted&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;push&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;// (2d)&lt;/span&gt;
+      &lt;span class="p"&gt;}&lt;/span&gt;
+      &lt;span class="nx"&gt;acc&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;indexData&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;acc&lt;/span&gt;
+  &lt;span class="p"&gt;},&lt;/span&gt; &lt;span class="p"&gt;{})&lt;/span&gt;
+
+  &lt;span class="nx"&gt;updateIndex&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;updatedIndexData&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;// (3)&lt;/span&gt;
+
+  &lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="se"&gt;\n&lt;/span&gt;&lt;span class="s2"&gt;Changed locally but not staged:&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="nx"&gt;notStaged&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;map&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;message&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`- &lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;message&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt; &lt;span class="c1"&gt;// (4)&lt;/span&gt;
+  &lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="se"&gt;\n&lt;/span&gt;&lt;span class="s2"&gt;Staged but not comitted:&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="nx"&gt;notComitted&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;map&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;message&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`- &lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;message&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt; &lt;span class="c1"&gt;// (5)&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;(1) Grab the index data &lt;br&gt;
+(2) For each item in the index data &lt;br&gt;
+(2a) Grab files stat() SHA-1 hash &lt;br&gt;
+(2b) If doesnt match current working dir stored hash of file, flag as changed not staged &lt;br&gt;
+(2c) If does match above but doesnt match staged, flag as not staged &lt;br&gt;
+(2d) If does match staged but not repository, flag as not comitted &lt;br&gt;
+(3) Update index file &lt;br&gt;
+(4) Output local changes not staged &lt;br&gt;
+(5) Output staged changes not comitted &lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#addmjs" class="anchor"&gt;
+  &lt;/a&gt;
+  add.mjs
+&lt;/h4&gt;
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// imports excluded, see linked repo for details&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;add&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;workingDirectory&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;workingDir&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;files&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;process&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;argv&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;slice&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;// (1)&lt;/span&gt;
+
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;indexData&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;getIndexData&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+
+  &lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;[add] - write blob objects&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;updatedFiles&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;files&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;map&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;file&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;blobHash&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;hashBlobContentsInFile&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;file&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;// (2)&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;blobDir&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;blobHash&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;substring&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;blobObject&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;blobHash&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;substring&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+    &lt;span class="c1"&gt;// TODO - check exists first - for re-adding file with earlier contents&lt;/span&gt;
+    &lt;span class="nx"&gt;fs&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;mkdirSync&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;workingDirectory&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;/.repo/objects/&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;blobDir&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;blobCompressed&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;compressBlobContentsInFile&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;file&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;// (3)&lt;/span&gt;
+    &lt;span class="nx"&gt;fs&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;writeFileSync&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+      &lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;workingDirectory&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;/.repo/objects/&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;blobDir&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;/&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;blobObject&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+      &lt;span class="nx"&gt;blobCompressed&lt;/span&gt;
+    &lt;span class="p"&gt;)&lt;/span&gt;
+
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;hash&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;hashFileStats&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;file&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;// (4)&lt;/span&gt;
+
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="nx"&gt;file&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+      &lt;span class="nx"&gt;hash&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+  &lt;span class="p"&gt;})&lt;/span&gt;
+
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;updatedIndexData&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nb"&gt;Object&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;keys&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;indexData&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;reduce&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;acc&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="c1"&gt;// (5)&lt;/span&gt;
+    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="nx"&gt;updatedFiles&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;find&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;item&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;item&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;file&lt;/span&gt; &lt;span class="o"&gt;===&lt;/span&gt; &lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="c1"&gt;// (5a)&lt;/span&gt;
+      &lt;span class="nx"&gt;acc&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="na"&gt;cwd&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;indexData&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;].&lt;/span&gt;&lt;span class="nx"&gt;cwd&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+        &lt;span class="na"&gt;staging&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;indexData&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;].&lt;/span&gt;&lt;span class="nx"&gt;staging&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+        &lt;span class="na"&gt;repository&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;indexData&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;].&lt;/span&gt;&lt;span class="nx"&gt;repository&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+      &lt;span class="p"&gt;}&lt;/span&gt;
+      &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;acc&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="nx"&gt;acc&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="na"&gt;cwd&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;indexData&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;].&lt;/span&gt;&lt;span class="nx"&gt;cwd&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+      &lt;span class="na"&gt;staging&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;updatedFiles&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;find&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;item&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;item&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;file&lt;/span&gt; &lt;span class="o"&gt;===&lt;/span&gt; &lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;hash&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="c1"&gt;// (5b)&lt;/span&gt;
+      &lt;span class="na"&gt;repository&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;indexData&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;].&lt;/span&gt;&lt;span class="nx"&gt;repository&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;acc&lt;/span&gt;
+  &lt;span class="p"&gt;},&lt;/span&gt; &lt;span class="p"&gt;{})&lt;/span&gt;
+
+  &lt;span class="nx"&gt;updateIndex&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;updatedIndexData&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;// (6)&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;(1) Explicitly give files e.g. &lt;code&gt;one.txt&lt;/code&gt; and &lt;code&gt;two/three.txt&lt;/code&gt;&lt;br&gt;
+(2) For each file, get contents in SHA-1 and use for directory name and filename &lt;br&gt;
+(3) Get DEFLATED value and use for content &lt;br&gt;
+(4) Get SHA-1 value for files &lt;code&gt;stat()&lt;/code&gt; &lt;br&gt;
+(5) Update the index &lt;br&gt;
+(5a) If file was not touched, just proxy values &lt;br&gt;
+(5b) If file was touched, update staging for the file &lt;br&gt;
+(6) Override old index data with new index data &lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#commitmjs" class="anchor"&gt;
+  &lt;/a&gt;
+  commit.mjs
+&lt;/h4&gt;
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// imports excluded, see linked repo for details&lt;/span&gt;
+
+&lt;span class="c1"&gt;// array of dir (name) and files (children), ordered by bottom-up&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;_buildTree&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;paths&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;paths&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;reduce&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;parent&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;path&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;key&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="nx"&gt;path&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;split&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;/&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;reduce&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;r&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;name&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;i&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;length&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="nx"&gt;r&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;children&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+          &lt;span class="nx"&gt;r&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;children&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[]&lt;/span&gt;
+        &lt;span class="p"&gt;}&lt;/span&gt;
+        &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;temp&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;r&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;children&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;find&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;q&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;q&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;name&lt;/span&gt; &lt;span class="o"&gt;===&lt;/span&gt; &lt;span class="nx"&gt;name&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+        &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="nx"&gt;temp&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+          &lt;span class="nx"&gt;temp&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;name&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;
+          &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;i&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt; &lt;span class="o"&gt;===&lt;/span&gt; &lt;span class="nx"&gt;length&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="nx"&gt;temp&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;type&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;blob&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
+            &lt;span class="nx"&gt;temp&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;hash&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;hashBlobContentsInFile&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;path&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+          &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;else&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="nx"&gt;temp&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;type&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;tree&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
+          &lt;span class="p"&gt;}&lt;/span&gt;
+          &lt;span class="nx"&gt;r&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;children&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;push&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;temp&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+        &lt;span class="p"&gt;}&lt;/span&gt;
+        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;temp&lt;/span&gt;
+      &lt;span class="p"&gt;},&lt;/span&gt; &lt;span class="nx"&gt;parent&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+      &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;parent&lt;/span&gt;
+    &lt;span class="p"&gt;},&lt;/span&gt;
+    &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;children&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;[]&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;
+  &lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;children&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;commit&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;workingDirectory&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;workingDir&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;indexData&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;getIndexData&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+  &lt;span class="c1"&gt;// TODO - if comitted already then dont recreate tree?? PROB chek first&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;paths&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nb"&gt;Object&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;keys&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;indexData&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;filter&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt; &lt;span class="c1"&gt;// (1)&lt;/span&gt;
+    &lt;span class="nx"&gt;item&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;indexData&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;item&lt;/span&gt;&lt;span class="p"&gt;].&lt;/span&gt;&lt;span class="nx"&gt;staging&lt;/span&gt; &lt;span class="o"&gt;||&lt;/span&gt; &lt;span class="nx"&gt;indexData&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;item&lt;/span&gt;&lt;span class="p"&gt;].&lt;/span&gt;&lt;span class="nx"&gt;repository&lt;/span&gt;
+  &lt;span class="p"&gt;)&lt;/span&gt;
+
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;rootTrees&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;_buildTree&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;paths&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;// (2)&lt;/span&gt;
+
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;flattenedTrees&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;rootTrees&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;reverse&lt;/span&gt;&lt;span class="p"&gt;().&lt;/span&gt;&lt;span class="nx"&gt;reduce&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;acc&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;key&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="c1"&gt;// (3)&lt;/span&gt;
+    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;children&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;hash&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;createTreeObject&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;children&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;// (3a)&lt;/span&gt;
+      &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;clone&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nb"&gt;Object&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;assign&lt;/span&gt;&lt;span class="p"&gt;({},&lt;/span&gt; &lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+      &lt;span class="k"&gt;delete&lt;/span&gt; &lt;span class="nx"&gt;clone&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;children&lt;/span&gt;
+      &lt;span class="nx"&gt;clone&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;hash&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;hash&lt;/span&gt;
+      &lt;span class="nx"&gt;acc&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;push&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;children&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;// (3b)&lt;/span&gt;
+      &lt;span class="nx"&gt;acc&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;push&lt;/span&gt;&lt;span class="p"&gt;([&lt;/span&gt;&lt;span class="nx"&gt;clone&lt;/span&gt;&lt;span class="p"&gt;])&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;else&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="nx"&gt;acc&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;key&lt;/span&gt;&lt;span class="p"&gt;].&lt;/span&gt;&lt;span class="nx"&gt;push&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;// (3c)&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;acc&lt;/span&gt;
+  &lt;span class="p"&gt;},&lt;/span&gt; &lt;span class="p"&gt;[])&lt;/span&gt;
+
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;rootTree&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;flattenedTrees&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;reverse&lt;/span&gt;&lt;span class="p"&gt;()[&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;treeForCommit&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;createTreeObject&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;rootTree&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;// (4)&lt;/span&gt;
+
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;parent&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;getParentCommit&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;commit&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="c1"&gt;// (5)&lt;/span&gt;
+    &lt;span class="na"&gt;tree&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;treeForCommit&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="na"&gt;parent&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;parent&lt;/span&gt; &lt;span class="o"&gt;===&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;undefined&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt; &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="kc"&gt;null&lt;/span&gt; &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;parent&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="na"&gt;author&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;CRAIG&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="c1"&gt;// hardcoded for now&lt;/span&gt;
+    &lt;span class="na"&gt;committor&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;CRAIG&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="na"&gt;message&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Initial commit&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="p"&gt;}&lt;/span&gt;
+
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;commitHash&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;createCommitObject&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;commit&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;// (6)&lt;/span&gt;
+
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;updatedIndexData&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nb"&gt;Object&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;keys&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;indexData&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;reduce&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;acc&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="c1"&gt;// (7)&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;cwd&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;staging&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;repository&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;indexData&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+    &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;updatedRepo&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;repository&lt;/span&gt;
+    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;staging&lt;/span&gt; &lt;span class="o"&gt;!==&lt;/span&gt; &lt;span class="nx"&gt;repository&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="c1"&gt;// (7a)&lt;/span&gt;
+      &lt;span class="nx"&gt;updatedRepo&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;staging&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="nx"&gt;acc&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="na"&gt;cwd&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;indexData&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;].&lt;/span&gt;&lt;span class="nx"&gt;cwd&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+      &lt;span class="na"&gt;staging&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;indexData&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;curr&lt;/span&gt;&lt;span class="p"&gt;].&lt;/span&gt;&lt;span class="nx"&gt;staging&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+      &lt;span class="na"&gt;repository&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;updatedRepo&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;acc&lt;/span&gt;
+  &lt;span class="p"&gt;},&lt;/span&gt; &lt;span class="p"&gt;{})&lt;/span&gt;
+  &lt;span class="nx"&gt;updateIndex&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;updatedIndexData&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+  &lt;span class="nx"&gt;fs&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;writeFileSync&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;workingDirectory&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;/.repo/HEAD`&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;commitHash&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;// (8)&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;(1) Grab files of files to commit &lt;br&gt;
+(2) Build tree for files in staging or comitted, excluded working dir only &lt;br&gt;
+(3) Iterate items root "tree" into a flattened array of trees&lt;br&gt;
+(3a) If tree, create tree for children &lt;br&gt;
+(3b) Then add children to flattened tree&lt;br&gt;
+(3c) If not a tree, push with previous tree&lt;br&gt;
+(4) Create tree object for root &lt;br&gt;
+(5) Create commit object, using parent commit if exists and the tree hash &lt;br&gt;
+(6) From commit object get commit hash &lt;br&gt;
+(7) Update index file &lt;br&gt;
+(7a) If staging hash does not match repository hash then update. An existing file has been updated.&lt;br&gt;
+(8) Update HEAD with the latest commit &lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#utilsmjs" class="anchor"&gt;
+  &lt;/a&gt;
+  utils.mjs
+&lt;/h4&gt;
+
+&lt;p&gt;I have included the helper file but hopefully the names are pretty self-explanatory.&lt;/p&gt;
+
+&lt;p&gt;The largest is &lt;code&gt;createTreeObject&lt;/code&gt; and &lt;code&gt;createCommitObject&lt;/code&gt;. Both of which:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;Process given contents into a hash&lt;/li&gt;
+&lt;li&gt;Compress given contents&lt;/li&gt;
+&lt;li&gt;Writes compressed contents to the respective directory and file - The first 2 characters of a hash become the directory and the rest the filename.
+&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="nx"&gt;fs&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;fs&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
+&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="nx"&gt;crypto&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;crypto&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
+&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="nx"&gt;zlib&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;zlib&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
+
+&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;workingDir&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;cwd&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;process&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;cwd&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;cwd&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;/src&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;sha1&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;object&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;string&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;JSON&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;stringify&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;object&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;crypto&lt;/span&gt;
+    &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;createHash&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;sha1&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;update&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;string&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;digest&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;hex&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;getFilePath&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;file&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;workingDirectory&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;workingDir&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;workingDirectory&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;/&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;file&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;getContentsInFile&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;file&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;path&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;getFilePath&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;file&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;fs&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;readFileSync&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;path&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;encoding&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;utf-8&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;compressBlobContentsInFile&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;file&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;contents&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;getContentsInFile&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;file&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;zlib&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;deflateSync&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;contents&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="c1"&gt;// always same based on contents&lt;/span&gt;
+&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;hashBlobContentsInFile&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;file&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;contents&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;getContentsInFile&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;file&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;sha1&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="na"&gt;type&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;blob&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;contents&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="c1"&gt;// different based on midified time&lt;/span&gt;
+&lt;span class="c1"&gt;// remove atime + atimeMs which are different each stat() call&lt;/span&gt;
+&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;hashFileStats&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;file&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;path&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;getFilePath&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;file&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;contents&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;fs&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;statSync&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;path&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="k"&gt;delete&lt;/span&gt; &lt;span class="nx"&gt;contents&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;atime&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+  &lt;span class="k"&gt;delete&lt;/span&gt; &lt;span class="nx"&gt;contents&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;atimeMs&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;sha1&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;contents&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;getIndexData&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;workingDirectory&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;workingDir&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;JSON&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;parse&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="nx"&gt;fs&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;readFileSync&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;workingDirectory&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;/.repo/index`&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;encoding&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;utf-8&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt;
+  &lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;updateIndex&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;indexData&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;workingDirectory&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;workingDir&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+  &lt;span class="nx"&gt;fs&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;writeFileSync&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;workingDirectory&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;/.repo/index`&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;JSON&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;stringify&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;indexData&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="c1"&gt;// hash contents, create tree, return hash&lt;/span&gt;
+&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;createTreeObject&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;contents&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;contentsClone&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nb"&gt;Object&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;assign&lt;/span&gt;&lt;span class="p"&gt;([],&lt;/span&gt; &lt;span class="nx"&gt;contents&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;flatContents&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;contentsClone&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;map&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;item&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="k"&gt;delete&lt;/span&gt; &lt;span class="nx"&gt;item&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;children&lt;/span&gt; &lt;span class="c1"&gt;// dont need full children depth&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;item&lt;/span&gt;
+  &lt;span class="p"&gt;})&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;workingDirectory&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;workingDir&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;stringContents&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;JSON&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;stringify&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;flatContents&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;treeHash&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;sha1&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;stringContents&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;treeDir&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;treeHash&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;substring&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;treeObject&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;treeHash&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;substring&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;treeCompressed&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;zlib&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;deflateSync&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;stringContents&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="c1"&gt;// create tree object&lt;/span&gt;
+  &lt;span class="nx"&gt;fs&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;mkdirSync&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;workingDirectory&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;/.repo/objects/&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;treeDir&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="nx"&gt;fs&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;writeFileSync&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;workingDirectory&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;/.repo/objects/&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;treeDir&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;/&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;treeObject&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="nx"&gt;treeCompressed&lt;/span&gt;
+  &lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;treeHash&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;createCommitObject&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;contents&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;workingDirectory&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;workingDir&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;stringContents&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;JSON&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;stringify&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;contents&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;commitHash&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;sha1&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;stringContents&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;commitDir&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;commitHash&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;substring&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;commitObject&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;commitHash&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;substring&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;commitCompressed&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;zlib&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;deflateSync&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;stringContents&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="c1"&gt;// create commit object&lt;/span&gt;
+  &lt;span class="nx"&gt;fs&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;mkdirSync&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;workingDirectory&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;/.repo/objects/&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;commitDir&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="nx"&gt;fs&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;writeFileSync&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;workingDirectory&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;/.repo/objects/&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;commitDir&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;/&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;commitObject&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="nx"&gt;commitCompressed&lt;/span&gt;
+  &lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;commitHash&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;getParentCommit&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;workingDirectory&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;workingDir&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;fs&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;readFileSync&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;workingDirectory&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;/.repo/HEAD`&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="na"&gt;encoding&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;utf-8&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="p"&gt;})&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#testing-it-works" class="anchor"&gt;
+  &lt;/a&gt;
+  Testing it works
+&lt;/h3&gt;
+
+&lt;p&gt;I wrote a small project to test the version control. 3 files each with a line of text, 2 of which inside a folder.&lt;/p&gt;
+
+&lt;p&gt;The above scripts are found inside &lt;code&gt;bin/&lt;/code&gt;&lt;/p&gt;
+
+&lt;p&gt;A working directory / application is found in &lt;code&gt;src/&lt;/code&gt;&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;code&gt;one.txt&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;two/three.txt&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;two/four.txt&lt;/code&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Then I wrote some inegration tests (&lt;a href="https://github.com/craigtaub/our-own-git/blob/main/test/index.integration.spec.js"&gt;test/index.integration.spec.js&lt;/a&gt;) to help track what happens to our repository for a given command, the steps (and results) are:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;
+&lt;code&gt;repo:init&lt;/code&gt; =&amp;gt; created INDEX with current working directory files &lt;code&gt;stat()&lt;/code&gt; hash&lt;/li&gt;
+&lt;li&gt;
+&lt;code&gt;repo:status&lt;/code&gt; =&amp;gt; flag 3 new local changes not staged (those above)&lt;/li&gt;
+&lt;li&gt;
+&lt;code&gt;repo:add one.txt two/three.txt&lt;/code&gt; =&amp;gt;
+
+&lt;ul&gt;
+&lt;li&gt;should create blob objects, inside 2 character-long directories, with content compressed&lt;/li&gt;
+&lt;li&gt;should update INDEX, move items to staged&lt;/li&gt;
+&lt;/ul&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;code&gt;repo:status&lt;/code&gt; =&amp;gt; flag 1 new local changes not staged and 2 changes not comitted&lt;/li&gt;
+&lt;li&gt;Manually update &lt;code&gt;one.txt&lt;/code&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;code&gt;repo:status&lt;/code&gt; =&amp;gt; similar to previous except now flags &lt;code&gt;one.txt&lt;/code&gt; as locally changed&lt;/li&gt;
+&lt;li&gt;
+&lt;code&gt;repo:add one.txt&lt;/code&gt; =&amp;gt; re-add updated file &lt;code&gt;one.txt&lt;/code&gt; should update blob object&lt;/li&gt;
+&lt;li&gt;
+&lt;code&gt;repo:status&lt;/code&gt; =&amp;gt; re-added file should show with old added file&lt;/li&gt;
+&lt;li&gt;
+&lt;code&gt;repo:add two/four.txt&lt;/code&gt; =&amp;gt; add &lt;code&gt;two/four.txt&lt;/code&gt; so 2 items in tree object&lt;/li&gt;
+&lt;li&gt;
+&lt;code&gt;repo:commit&lt;/code&gt; =&amp;gt; should create tree and commit object and update HEAD and INDEX&lt;/li&gt;
+&lt;/ol&gt;
+
+
+
+
+&lt;h2&gt;
+  &lt;a href="#what-have-we-missed" class="anchor"&gt;
+  &lt;/a&gt;
+  What have we missed?
+&lt;/h2&gt;
+
+&lt;p&gt;As mentioned there are many additional parts to the real Git version control which we have omitted from our library. Some of those are:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Comparing change chunks (diffing)&lt;/li&gt;
+&lt;li&gt;Packfiles&lt;/li&gt;
+&lt;li&gt;Deltas&lt;/li&gt;
+&lt;li&gt;Branches&lt;/li&gt;
+&lt;li&gt;Tags&lt;/li&gt;
+&lt;li&gt;Merging&lt;/li&gt;
+&lt;/ul&gt;
+
+
+
+
+&lt;p&gt;Thanks so much for reading, I learnt a huge amount about Git from this research and I hope it was useful for you. You can find the repository for all this code &lt;a href="https://github.com/craigtaub/our-own-git"&gt;here&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;Thanks, Craig 😃&lt;/p&gt;
+
+</description>
+      <category>node</category>
+      <category>javascript</category>
+      <category>github</category>
+      <category>webdev</category>
+    </item>
+    <item>
       <title>What is React Helmet and Where To Use It</title>
       <author>Olena Drugalya</author>
       <pubDate>Mon, 22 Mar 2021 09:19:46 +0000</pubDate>
@@ -807,6 +1612,167 @@ For the "I" character, I used an all-white &lt;code&gt;linear-gradient()&lt;/cod
       <category>development</category>
     </item>
     <item>
+      <title>Ruby Shuffle Method</title>
+      <author>Glenn Tippett</author>
+      <pubDate>Mon, 22 Mar 2021 04:18:40 +0000</pubDate>
+      <link>https://dev.to/glenntippett/ruby-shuffle-method-5246</link>
+      <guid>https://dev.to/glenntippett/ruby-shuffle-method-5246</guid>
+      <description>&lt;p&gt;Ruby has a bunch of useful built-in methods for manipulating Arrays; here we are looking at the Shuffle method which takes an array and returns a new array with the order of elements shuffled. &lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--GObdnaMg--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/nnemgd69ssh4jpu6ctke.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--GObdnaMg--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/nnemgd69ssh4jpu6ctke.png" alt="array-shuffle"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Nice, done!&lt;/p&gt;
+
+&lt;p&gt;But what if we wanted to shuffle an array without this built-in method?&lt;br&gt;
+You know… because why not?&lt;br&gt;
+There are a few examples of this, such as the Fisher-Yates Shuffle, but what really needs to happen underneath the hood?&lt;/p&gt;
+
+&lt;p&gt;If I have 10 different coloured Lego blocks in a certain order which I want to randomise I could put them all into a box, shake the box, then pick out a random piece one at a time. &lt;/p&gt;
+
+&lt;p&gt;I wouldn’t then put those pieces back into the same box, I would put them in a new box (one that could keep them in a new order) so I don’t pick the same Lego block twice.&lt;br&gt;
+I would continue this until my original box is empty.&lt;/p&gt;
+
+&lt;p&gt;How could this look in Ruby?&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--lIQVsaaH--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/twn0d22o4eu89xxsdjbl.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--lIQVsaaH--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/twn0d22o4eu89xxsdjbl.png" alt="shuffle-method"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Here is our Lego example in Ruby.&lt;br&gt;
+An array is passed into the method, which is then duplicated so we’re not editing the original array – you could say we’re putting our Lego blocks into its first box.&lt;br&gt;
+We then initialise an empty array – this is our empty box to put the Lego blocks into. &lt;/p&gt;
+
+&lt;p&gt;One by one we close our eyes and choose a random index from the array, give the value from the index to the empty box (array_b) and delete it from the original array. &lt;/p&gt;
+
+&lt;p&gt;Notice we choose a random number between 0 and the original array length then save that number to its own variable. We then use that variable when pushing to array_b and deleting from array_a rather than generating another random number each time. &lt;/p&gt;
+
+&lt;p&gt;After deleting that index from array_a the length becomes 1 less so there are fewer options to choose a random number from on the next iteration.&lt;br&gt;
+Eventually, our original box is empty and the new box holds the same values in a randomised order, which is then returned on the last line of the method. &lt;/p&gt;
+
+&lt;p&gt;There are quite a few ways you could approach this problem including just using the built-in shuffle method, but now we know its secrets…&lt;/p&gt;
+
+</description>
+      <category>ruby</category>
+      <category>webdev</category>
+    </item>
+    <item>
+      <title>JavaScript in the Cloud</title>
+      <author>Melissa Houghton</author>
+      <pubDate>Mon, 22 Mar 2021 04:09:29 +0000</pubDate>
+      <link>https://dev.to/melissahoughton/javascript-in-the-cloud-b2d</link>
+      <guid>https://dev.to/melissahoughton/javascript-in-the-cloud-b2d</guid>
+      <description>&lt;p&gt;&lt;em&gt;A look at the history of JavaScript and the fun stuff you can do with &lt;strong&gt;JavaScript&lt;/strong&gt; in the &lt;strong&gt;cloud!&lt;/strong&gt;&lt;/em&gt; &lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#introduction" class="anchor"&gt;
+  &lt;/a&gt;
+  Introduction
+&lt;/h2&gt;
+
+&lt;p&gt;Traditionally, &lt;a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript"&gt;JavaScript&lt;/a&gt; is the language of the web, and it still is. But today, it's so much more. With the advent of server-side JavaScript and JavaScript support in major cloud platforms, JavaScript's power increased dramatically. Building, maintaining, optimising, and deploying end-to-end JavaScript applications is possible with JavaScript in the cloud.&lt;/p&gt;
+
+&lt;p&gt;Cloud platforms give us the tools, elasticity and scalability to create high performing applications without managing the physical infrastructure. You can take advantage of the cloud while using a language you already know: &lt;strong&gt;JavaScript!&lt;/strong&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#what-is-the-cloud" class="anchor"&gt;
+  &lt;/a&gt;
+  What is the Cloud?
+&lt;/h2&gt;
+
+&lt;p&gt;The &lt;a href="https://azure.microsoft.com/en-au/overview/what-is-the-cloud/"&gt;cloud&lt;/a&gt; refers to software and services that run on the Internet instead of locally on your computer. The cloud is a server somewhere else, usually in a big data centre. Cloud providers such as &lt;a href="https://azure.microsoft.com/"&gt;Azure&lt;/a&gt;, &lt;a href="https://aws.amazon.com/"&gt;AWS&lt;/a&gt;, &lt;a href="https://cloud.google.com/"&gt;Google Cloud&lt;/a&gt; allow you to rent space on a server and pay for what you use. They let you scale as your business needs change while they manage the physical infrastructure for you. Think of it as renting a house or renting a piece of land, providing different control levels over managing the property, depending on which type of cloud computing you are using.&lt;/p&gt;
+
+&lt;p&gt;So really, there is no cloud. It's just someone else's computer.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--txCj_nNt--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/5k4g60athpn87g7q4uj9.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--txCj_nNt--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/5k4g60athpn87g7q4uj9.png" alt="There is no cloud, it's just someone else's computer"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#what-is-javascript" class="anchor"&gt;
+  &lt;/a&gt;
+  What is JavaScript?
+&lt;/h2&gt;
+
+&lt;p&gt;JavaScript is a language that allows you to implement complex features on web pages.&lt;/p&gt;
+
+&lt;p&gt;It was created in &lt;a href="http://speakingjs.com/es5/ch04.html"&gt;1995 in just ten days&lt;/a&gt; by &lt;a href="https://brendaneich.com/"&gt;Brendan Eich&lt;/a&gt;, who worked for &lt;a href="https://isp.netscape.com/"&gt;Netscape&lt;/a&gt;. He created JavaScript as a scripting tool to manipulate web pages in the Netscape Navigator browser.&lt;/p&gt;
+
+&lt;p&gt;JavaScript took off to become the most popular client-side programming language. Today &lt;a href="https://w3techs.com/technologies/details/cp-javascript"&gt;97% of the web uses JavaScript&lt;/a&gt;!&lt;/p&gt;
+
+&lt;p&gt;However, JavaScript is much more than just a client-side programming language. &lt;a href="https://www.hanselman.com/"&gt;Scott Hanselman&lt;/a&gt;, a Partner Program Manager at Microsoft, even went so far as to say that he proposes &lt;a href="https://youtu.be/msPocYnU0N4?t=2532"&gt;JavaScript is an operating system&lt;/a&gt;. He based the comparison on the fact that JavaScript has the same characteristics as an operating system.&lt;/p&gt;
+
+&lt;p&gt;JavaScript is a flexible and robust language. Thus, it makes sense for us to use JavaScript in the cloud.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#javascript-in-the-cloud" class="anchor"&gt;
+  &lt;/a&gt;
+  JavaScript in the Cloud
+&lt;/h2&gt;
+
+&lt;p&gt;Initially, Eich wrote JavaScript as both a client and server-side language. However, it didn't become popular as a server-side language until later on with the &lt;a href="https://nodejs.dev/learn/a-brief-history-of-nodejs"&gt;creation of Node.js in 2009&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://nodejs.dev/"&gt;Node.js&lt;/a&gt; is an open-source, cross-platform, back-end JavaScript runtime environment that runs on the V8 engine and executes JavaScript code outside a web browser. With the advent of Node.js as a server-side JavaScript programming language, it opened up the ability to use JavaScript in the cloud.&lt;/p&gt;
+
+&lt;p&gt;Today, all the major cloud providers support JavaScript in the cloud.&lt;/p&gt;
+
+&lt;p&gt;And, in the words of &lt;a href="https://www.hanselman.com/"&gt;Scott Hanselman&lt;/a&gt;:&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;The cloud doesn't care about language choice.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;h2&gt;
+  &lt;a href="#tools-for-javascript-in-the-cloud" class="anchor"&gt;
+  &lt;/a&gt;
+  Tools for JavaScript in the Cloud
+&lt;/h2&gt;
+
+&lt;p&gt;If you are looking to develop JavaScript in the cloud, there are some excellent tools and guides out there to help you. JavaScript IDEs such as &lt;a href="https://code.visualstudio.com/"&gt;Visual Studio Code&lt;/a&gt; and &lt;a href="https://www.jetbrains.com/webstorm/"&gt;WebStorm&lt;/a&gt; have extensions that let you integrate with your favourite cloud providers, access quickstart templates, write, debug and deploy your cloud applications.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Qfw1-9Cx--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/p1pohbahyq1f7q2tblgv.gif" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Qfw1-9Cx--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/p1pohbahyq1f7q2tblgv.gif" alt="Creating an Azure Function in VS Code"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;All major providers have a suite of SDKs and client libraries in JavaScript to integrate with their services from your JavaScript application. These libraries allow you to:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Recognise and transcribe human speech with &lt;a href="https://docs.microsoft.com/en-us/azure/cognitive-services/speech-service/get-started-speech-to-text?tabs=windowsinstall&amp;amp;pivots=programming-language-browserjs"&gt;speech to text&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;Integrate into an &lt;a href="https://docs.microsoft.com/en-us/azure/digital-twins/overview"&gt;Azure Digital Twins&lt;/a&gt; solution&lt;/li&gt;
+&lt;li&gt;Add a rich &lt;a href="https://docs.microsoft.com/en-au/azure/search/search-what-is-azure-search"&gt;Cognitive Search&lt;/a&gt; to your web app&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;And much more!&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#power-of-javascript" class="anchor"&gt;
+  &lt;/a&gt;
+  Power of JavaScript
+&lt;/h2&gt;
+
+&lt;p&gt;JavaScript is a powerful language. We can use JavaScript for web, mobile, gaming, artificial intelligence, and so much more.&lt;/p&gt;
+
+&lt;p&gt;Watch Scott Hanselman's talk &lt;a href="https://youtu.be/msPocYnU0N4"&gt;JavaScript, The Cloud, and The Rise of the New Virtual Machine&lt;/a&gt; to see a demo of a complete implementation of Linux and Pentium processor implemented in JavaScript and some other crazy things you can do in JavaScript.&lt;/p&gt;
+
+&lt;p&gt;There is a concept called the &lt;a href="https://www.w3.org/2001/tag/doc/leastPower.html"&gt;Rule of Least Power&lt;/a&gt; from &lt;a href="https://www.w3.org/People/Berners-Lee/"&gt;Tim Berners-Lee&lt;/a&gt;, the creator of the web. The rule suggests choosing the least powerful language suitable for a given purpose.&lt;/p&gt;
+
+&lt;p&gt;As a &lt;a href="https://www.merriam-webster.com/dictionary/corollary"&gt;corollary&lt;/a&gt; to this rule, we get &lt;a href="https://blog.codinghorror.com/the-principle-of-least-power/"&gt;Atwood's Law&lt;/a&gt;.&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;Any application that &lt;em&gt;can&lt;/em&gt; be written in JavaScript, &lt;em&gt;will&lt;/em&gt; eventually be written in JavaScript.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;h2&gt;
+  &lt;a href="#summary" class="anchor"&gt;
+  &lt;/a&gt;
+  Summary
+&lt;/h2&gt;
+
+&lt;p&gt;In conclusion, I hope if you are not yet using JavaScript, you go out and learn it today. If you already are using JavaScript, I hope you start exploring what you can do with it.&lt;/p&gt;
+
+&lt;p&gt;Because the opportunities with JavaScript are endless, especially when paired with the power of the cloud.&lt;/p&gt;
+
+</description>
+      <category>javascript</category>
+      <category>cloud</category>
+      <category>node</category>
+      <category>azure</category>
+    </item>
+    <item>
       <title>CSS 101 - Flexbox</title>
       <author>Eric Chapman</author>
       <pubDate>Mon, 22 Mar 2021 02:13:35 +0000</pubDate>
@@ -1285,725 +2251,479 @@ You can follow me on &lt;a href="https://twitter.com/kritikasri27"&gt;Twitter&lt
       <category>javascript</category>
     </item>
     <item>
-      <title>How I got my first job in tech as a software engineer with no money and no degree</title>
-      <author>Maximilian</author>
-      <pubDate>Sun, 21 Mar 2021 19:08:19 +0000</pubDate>
-      <link>https://dev.to/kaxmoglan/how-i-got-my-first-job-in-tech-as-a-software-engineer-with-no-money-and-no-degree-3j30</link>
-      <guid>https://dev.to/kaxmoglan/how-i-got-my-first-job-in-tech-as-a-software-engineer-with-no-money-and-no-degree-3j30</guid>
-      <description>&lt;p&gt;This is the story of how I got my first job in tech as a software engineer in less than a year after my first ever git commit, without spending any money, without a degree and without applying to a single job.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Small print:&lt;/strong&gt; I already owned a MacBook Pro and I was living with my parents.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Preface:&lt;/strong&gt; I wrote my first ever blog post outlining exactly why I chose a career in tech, which you can read here: &lt;a href="https://dev.to/kaxmoglan/why-i-chose-a-career-in-tech-1mn8"&gt;Why I Chose A Career In Tech&lt;/a&gt;.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Mission:&lt;/strong&gt; To help someone find their own path, create their own roadmap and see what's possible to achieve in tech in a year.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#the-end" class="anchor"&gt;
+      <title>How to Build your own RC Car with Arduino - ArduCar</title>
+      <author>KowalewskiPawel</author>
+      <pubDate>Sun, 21 Mar 2021 19:55:16 +0000</pubDate>
+      <link>https://dev.to/pawel/how-to-build-your-own-rc-car-with-arduino-arducar-12ei</link>
+      <guid>https://dev.to/pawel/how-to-build-your-own-rc-car-with-arduino-arducar-12ei</guid>
+      <description>&lt;h1&gt;
+  &lt;a href="#electronics-and-programming-are-not-that-scary" class="anchor"&gt;
   &lt;/a&gt;
-  The End
-&lt;/h2&gt;
+  Electronics and Programming are not that Scary
+&lt;/h1&gt;
 
-&lt;p&gt;I'm always a fan of working backwards, so step one was inevitably answering the question: "where do I want to be and by when?". Although I was already aware of the kinds of jobs I was after and the salary range of a lot of positions, I needed to be specific.&lt;/p&gt;
+&lt;p&gt;Most of us here, write a lot of code and very rarely have any kind of interaction with electronics, which indeed run our codes. Another thing is a common myth that electronics are very difficult to understand and that we need at least an electronic engineer title to get started with it. As a technician, petrolhead and coding enthusiast, Arduino was always somewhere on my list. I also had an RC car when I was a kid and always wanted to buy another one in my adulthood, so now when I have started learning to code, got an Arduino kit, it was the best time to make this childhood dream come true.&lt;/p&gt;
 
-&lt;ol&gt;
-&lt;li&gt;&lt;p&gt;I want to be a full stack developer / software engineer, specialising in Javascript, but be language and framework agnostic. I.e. I want to develop the ability to work with multiple languages and multiple frameworks, but become an expert in full stack Javascript development.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;I want to be remote, but accept that I may have to be office based for my first role (or two) until I have some experience.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;I want to aim to enter the market as a mid-level developer. Worst case scenario, I'll be a strong junior.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;I want to work for a company I respect and whose mission I support (sorry JP Morgan).&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;I want to work for a company where I have the opportunity to learn and grow.&lt;/p&gt;&lt;/li&gt;
-&lt;/ol&gt;
+&lt;p&gt;Before and if you proceed to the next part I want to add a few more things. First of all, this is an old article that I have published before on some technical websites related to microcontrollers, so you can treat this one just as a remastered version. This tutorial is heavily based on the technical explanation, however, in the second part of the tutorial, I explain the code written in Arduino IDE. Last but not least, even though ArduCar is my own application written in Java, I have not provided the source code nor an explanation of it in this tutorial.&lt;/p&gt;
 
-&lt;h2&gt;
-  &lt;a href="#the-plan" class="anchor"&gt;
+&lt;h1&gt;
+  &lt;a href="#lets-have-some-fun" class="anchor"&gt;
   &lt;/a&gt;
-  The Plan
-&lt;/h2&gt;
+  Let's have some fun!
+&lt;/h1&gt;
 
-&lt;p&gt;Ok, so I have an end goal, but how the hell do I get there?&lt;/p&gt;
+&lt;p&gt;In this instruction, you will learn how to create an Arduino based RC car from a scratch. No prior programming, Arduino, or electronics experience needed. Even though having some previous experience in those fields can be helpful, everyone should be able to finish this project without any problems. You may also ask, why Power bank? These days, those devices are becoming more and more affordable, in some cases, they are even cheaper than batteries, many of us have them at our own houses, they can be reused, and recharged anytime we want. The project covers the basics principles of creating such a car, with a minimalistic approach on materials, and explains the code in details. Moreover, provided instructions can be also used in different projects, so let's start!&lt;/p&gt;
 
-&lt;p&gt;Well, like most things in life, it starts on Google and it ends with square eyes watching endless YouTube videos and reading countless blog posts, forums and articles. Eventually, I felt like I had a good idea as to how to achieve my goal. Enter my roadmap:&lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;&lt;p&gt;MDN Web Docs. The fundamentals.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;Free Code Camp (FCC). Learn code interactively. Build simple but solid projects for my portfolio.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;YouTube. Expand on things I learn on MDN &amp;amp; FCC. Use as a tool to help me understand things on MDN &amp;amp; FCC.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;Git. Sign up to GitHub. Push every bit of code I write. Get those green squares. 3 functions: learn git, help to track my progress, show potential employers I'm serious!&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;Portfolio. Comprised of FCC projects, 2 simple unique projects, 2 full stack projects and 2 freelance projects. Aim to show technical ability, creative ability and professional ability.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;Portfolio site. Create a portfolio site to showcase my portfolio. Design something sleek and modern that's technically advanced enough to showcase as a portfolio piece itself, and stands out from the crowd.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;Social media. Twitter, Instagram, start a blog, LinkedIn, CV.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;Job hunt.&lt;/p&gt;&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;p&gt;And finally, as an overarching point:&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Live, eat and breathe code.&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;I feel this kind of goes without saying, but in order to get good at anything, you have to put the time in - &lt;em&gt;especially&lt;/em&gt; if you've got a time limit!&lt;/p&gt;
-
-&lt;p&gt;Living, eating and breathing something means (to me) that aside from doing what you need to do to avoid burnout, you do the thing at every possible opportunity. This means that if you're drinking a coffee, you read about code. If you're playing Playstation, you listen to a podcast about code. If you're reading a book, you're reading a book about code. You get the point.&lt;/p&gt;
-
-&lt;p&gt;Personally speaking, my time off is normally exercising, so I always take 1 hour a day to remove myself from everything but the workout. Although, admittedly, sometimes I did use this time to listen to a YouTube video or podcast when I found something particularly difficult.&lt;/p&gt;
-
-&lt;p&gt;By the time I had finished researching and putting this plan together, it was around mid-February 2020. My target was to be 'job-ready' (not that I knew what this particularly meant) inside 2 years studying part-time, but then Covid hit, so with lockdown and no work firmly in place, I pushed this target to being job-ready by the end of the year, with a more ambitious target of getting my first job by the end of the year. (Spoiler alert: this didn't quite happen).&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#the-portfolio" class="anchor"&gt;
-  &lt;/a&gt;
-  The Portfolio
-&lt;/h2&gt;
-
-&lt;p&gt;I completed the FCC certificates, got a MongoDB certificate, created an obligitory to do list in React, made a full stack blogging app with Django, made a full stack social media app with React, Express, Redux and Firebase, got 2 freelance clients and designed and built a modern brochure site for one using Node.js, Gulp, Sass and Pug, and designed and built a custom e-commerce solution for the other using PHP, Node.js, Gulp, Sass and Wordpress. I also designed and built my portfolio site with React, Typescript, Gulp and Sass, complete with Dev.to API integration and a theme switcher. I also incorporated current design trends and made it as unique and interesting as I could - mainly thanks to illustratations by my brother which I animated with CSS.&lt;/p&gt;
-
-&lt;p&gt;It was now time to start the 'get out there' part of my journey, so I stopped the projects, stopped the tutorials and started making my CV, signed up to LinkedIn and bookmarked a load of tech-orientated recruitment companies to contact.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#so-what-happened" class="anchor"&gt;
-  &lt;/a&gt;
-  So what happened?
-&lt;/h2&gt;
-
-&lt;p&gt;I was fully prepared to be job hunting for months. In my head, I had set a target for a 3-month long job search, but in reality, I knew that even this was impossible to gauge. After all, I had no idea how good or bad my code was or how well suited I was to the tech industry! I had also never interviewed for a job in my life and had no qualifications to speak of, so there was that too.&lt;/p&gt;
-
-&lt;p&gt;Ok ok so what happened?!&lt;/p&gt;
-
-&lt;p&gt;Well...&lt;/p&gt;
-
-&lt;p&gt;I ran &lt;code&gt;npm run build&lt;/code&gt; on my portfolio project, published a few blog posts on Dev.to, made my CV, uploaded my CV to LinkedIn and set my profile to 'actively seeking work' or whatever the setting is. I also uploaded my CV to CV Library and then... I went to bed.&lt;/p&gt;
-
-&lt;p&gt;This was on Thursday 11th February 2021, 322 days after my first git commit.&lt;/p&gt;
-
-&lt;p&gt;I was going to give myself the weekend and begin my 8-hour a day job search on Monday.&lt;/p&gt;
-
-&lt;p&gt;However, on Friday 12th Feb, I had about 20 emails and my phone was ringing off the hook all day (literally) with recruiters wanting a chat. I hadn't sent a single email.&lt;/p&gt;
-
-&lt;p&gt;By the end of Friday, I had 4 interviews lined up for the following week.&lt;/p&gt;
-
-&lt;p&gt;By the end of the following week, I had 3 second-round interviews.&lt;/p&gt;
-
-&lt;p&gt;On the 26th Feb, I had a job offer.&lt;/p&gt;
-
-&lt;p&gt;I started my mid-level, remote software engineering role on 1st March 2021 for a start-up in London, building a platform that aims to help people.&lt;/p&gt;
-
-&lt;p&gt;Nearly 1 month on, I am still getting messages every day with job specs and interview requests from all kinds of different companies, large and small across a plethora of industries.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#isnt-this-abnormal-though" class="anchor"&gt;
-  &lt;/a&gt;
-  Isn't this abnormal though?
-&lt;/h2&gt;
-
-&lt;p&gt;The short answer is, I have no idea! Based on what I've seen, read and heard from other people, YES, this is a fairly unique position to be in and I am very grateful and feel very fortunate. However, it does show you what's possible and how in demand developers and engineers are right now.&lt;/p&gt;
-
-&lt;p&gt;This is by no means an "I'VE MADE IT!" post. This is much more an "I've got my foot in the door, and here's how you can do it too!" post. I still work evenings and weekends to get better at what I do, and to bring more value to whomever I work with or for and ultimately, create more value for myself.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#what-this-means-for-you" class="anchor"&gt;
-  &lt;/a&gt;
-  What this means for you
-&lt;/h2&gt;
-
-&lt;p&gt;I'm aiming to write another post about my first month in tech and all the things I've learned during this whole process as I think that will be of more value to new and aspiring devs, but for now, the key takeaways I have to help land your first position are:&lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;&lt;p&gt;Create a plan and stick to it.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;Do everything you can to show your passion: blog posts, social media and, most importantly, personal and unique projects.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;GitHub. Get those green squares. It's simple, easy to achieve and it's visual.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;Think like an engineer. Ultimately, this is what landed me my first role. Learning syntax in the grand scheme of things is easy. Thinking like an engineer is the biggest challenge and is ultimately invaluable.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;Focus your CV around your achievements in tech. Created a website for a client? Great! What did this mean for the business?&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;Develop a passion for the process of learning and even the process of finding a job. Enjoy the challenge of it all. It's no fun if you're not having fun.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;Lastly, you will struggle. You will feel dumb. You will feel like giving up. But, it's those who keep going that succeed. So....&lt;/p&gt;&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;p&gt;&lt;strong&gt;Keep going!&lt;/strong&gt;&lt;/p&gt;
-
-
-
-
-&lt;p&gt;&lt;em&gt;If you're interested, here's &lt;a href="https://www.maxcoghlan.com"&gt;a link to my portfolio&lt;/a&gt;.&lt;/em&gt;&lt;/p&gt;
-
-</description>
-      <category>career</category>
-      <category>motivation</category>
-      <category>beginners</category>
-      <category>productivity</category>
-    </item>
-    <item>
-      <title>[CSS] You Don't Know Margins</title>
-      <author>Carlos Augusto M. Filho</author>
-      <pubDate>Sun, 21 Mar 2021 18:10:18 +0000</pubDate>
-      <link>https://dev.to/camfilho/css-you-don-t-know-margins-3mh0</link>
-      <guid>https://dev.to/camfilho/css-you-don-t-know-margins-3mh0</guid>
-      <description>&lt;h2&gt;
-  &lt;a href="#introduction" class="anchor"&gt;
-  &lt;/a&gt;
-  Introduction
-&lt;/h2&gt;
-
-&lt;p&gt;Some of the challenges in developing a website are its layout, legibility, spacing. In those cases, one solution could possibly be a smart use of margin. But, do you really know how the property &lt;code&gt; margin &lt;/code&gt; works?&lt;/p&gt;
-
-&lt;p&gt;Before moving on, I have a challenge for you.&lt;/p&gt;
-
-&lt;p&gt;Liquid error: internal&lt;/p&gt;
-
-&lt;p&gt;The solution lies on margin collapse.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;This article is organized as follows:&lt;/strong&gt;&lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;Introduction&lt;/li&gt;
-&lt;li&gt;Definition&lt;/li&gt;
-&lt;li&gt;Why?&lt;/li&gt;
-&lt;li&gt;When?&lt;/li&gt;
-&lt;li&gt;When not?&lt;/li&gt;
-&lt;li&gt;Conclusion&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;h2&gt;
-  &lt;a href="#definition" class="anchor"&gt;
-  &lt;/a&gt;
-  Definition
-&lt;/h2&gt;
-
-&lt;p&gt;&lt;a href="https://duckduckgo.com/"&gt;DuckDuckGoing&lt;/a&gt; around about Margin Collapse, I have found some definitions about it, here I bring a summary of them.&lt;/p&gt;
-
-&lt;p&gt;Accordingly to W3.org, margin collapse is:&lt;/p&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;"The adjoining margins of two or more boxes can combine to form a single margin.[...] the resulting is called collapsing margin."&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;A more comprehensive definition is given by CSS-Tricks:&lt;/p&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;"Collapsing margins happens when two vertical margins come in contact with one another."&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;The final definition that I bring is given by MDN:&lt;/p&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;"The top and bottom margins of blocks are sometimes combined (collapsed) into a single margin whose size is the largest of the individual margins."&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;While those definitions do a good job in describing what margin collapse is, bellow I show some cases where this collapse happens.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#why" class="anchor"&gt;
-  &lt;/a&gt;
-  Why?
-&lt;/h2&gt;
-
-&lt;p&gt;Before moving on to the examples, I need to explain why it happens.&lt;/p&gt;
-
-&lt;p&gt;One of the reasons that CSS uses margin collapse I found on &lt;a href="https://medium.com/@YeshaS93/collapsing-margins-a9d7d3f7be6e"&gt;this article&lt;/a&gt;.&lt;/p&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;The concept of margin collapsing comes from graphic design. There, you have margins to title and subtitles, but when a subtitle comes just after the title you should not double the margins. This is why they developed the concept of collapsed margins and this is why it happens just on vertical margins.&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;Using the power of margin collapsing, it is easily possible to define &lt;br&gt;
-margins to sets of vertical content.&lt;/p&gt;
-
-&lt;p&gt;I explain, imagine we had a set of 3 paragraphs with this property.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight html"&gt;&lt;code&gt;p {
- margin-top: 10px;
-}
-
-&lt;span class="nt"&gt;&amp;lt;main&amp;gt;&lt;/span&gt;
-//10px margin
-  &lt;span class="nt"&gt;&amp;lt;p&amp;gt;&lt;/span&gt; My First Paragraph &lt;span class="nt"&gt;&amp;lt;/p&amp;gt;&lt;/span&gt;
-//10px margin
-  &lt;span class="nt"&gt;&amp;lt;p&amp;gt;&lt;/span&gt; My Second Paragraph &lt;span class="nt"&gt;&amp;lt;/p&amp;gt;&lt;/span&gt;
-//10px margin
-  &lt;span class="nt"&gt;&amp;lt;p&amp;gt;&lt;/span&gt; My Third Paragraph &lt;span class="nt"&gt;&amp;lt;/p&amp;gt;&lt;/span&gt;
-//0 margin
-&lt;span class="nt"&gt;&amp;lt;/main&amp;gt;&lt;/span&gt;
-
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;The spacing wouldn't be equally spaced. An easy solution to this lies on the margin collapse.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight html"&gt;&lt;code&gt;p {
- margin-top: 10px;
- margin-bottom: 10px;
-}
-
-&lt;span class="nt"&gt;&amp;lt;main&amp;gt;&lt;/span&gt;
-//10px margin
-  &lt;span class="nt"&gt;&amp;lt;p&amp;gt;&lt;/span&gt; My First Paragraph &lt;span class="nt"&gt;&amp;lt;/p&amp;gt;&lt;/span&gt;
-//10px margin (collapsed)
-  &lt;span class="nt"&gt;&amp;lt;p&amp;gt;&lt;/span&gt; My Second Paragraph &lt;span class="nt"&gt;&amp;lt;/p&amp;gt;&lt;/span&gt;
-//10px margin (collapsed)
-  &lt;span class="nt"&gt;&amp;lt;p&amp;gt;&lt;/span&gt; My Third Paragraph &lt;span class="nt"&gt;&amp;lt;/p&amp;gt;&lt;/span&gt;
-//10px margin
-&lt;span class="nt"&gt;&amp;lt;/main&amp;gt;&lt;/span&gt;
-
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#when" class="anchor"&gt;
-  &lt;/a&gt;
-  When?
-&lt;/h2&gt;
-
-&lt;p&gt;If there is one thing to remember when you leave this page is that &lt;strong&gt;collapsing only happens on vertical margins&lt;/strong&gt;.&lt;/p&gt;
-
-&lt;p&gt;The main scenarios are:&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#parent-and-descendants" class="anchor"&gt;
-  &lt;/a&gt;
-  Parent and Descendants
-&lt;/h3&gt;
-
-&lt;p&gt;If no border, padding, inline part or clearance separate the margin-top of a parent to his first child, then it is going to collapse.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--_FKZWZ-2--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://thepracticaldev.s3.amazonaws.com/i/3u6e6fgj1w796auccp5r.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--_FKZWZ-2--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://thepracticaldev.s3.amazonaws.com/i/3u6e6fgj1w796auccp5r.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;The same happens with the last child of the parent.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--VSsE-lsN--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://thepracticaldev.s3.amazonaws.com/i/4or2viiyxoy4562gduvv.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--VSsE-lsN--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://thepracticaldev.s3.amazonaws.com/i/4or2viiyxoy4562gduvv.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#adjacent-siblings" class="anchor"&gt;
-  &lt;/a&gt;
-  Adjacent Siblings
-&lt;/h3&gt;
-
-&lt;p&gt;When there are adjacent siblings, the margin-bottom of the top element collapses with the margin-top of the bottom element. The resulting size is the biggest between the two.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--rLLTbhLd--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://thepracticaldev.s3.amazonaws.com/i/fyhhl598dgjbp1h6q1hd.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--rLLTbhLd--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://thepracticaldev.s3.amazonaws.com/i/fyhhl598dgjbp1h6q1hd.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#empty-blocks" class="anchor"&gt;
-  &lt;/a&gt;
-  Empty Blocks
-&lt;/h3&gt;
-
-&lt;p&gt;The margin-top and margin-bottom of an empty block collapse if there are no padding, border, inline content avoiding it. Also, it does not collapse if the block does not have a height or min-height attribute.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--euSyoEVk--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://thepracticaldev.s3.amazonaws.com/i/sa87hszmhfou48svch8z.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--euSyoEVk--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://thepracticaldev.s3.amazonaws.com/i/sa87hszmhfou48svch8z.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#negative-margins" class="anchor"&gt;
-  &lt;/a&gt;
-  Negative Margins
-&lt;/h3&gt;
-
-&lt;p&gt;When it comes to negative margins, the resulting size depends on the signals involved.&lt;/p&gt;
-
-&lt;h4&gt;
-  &lt;a href="#negative-positive" class="anchor"&gt;
-  &lt;/a&gt;
-  Negative + Positive
-&lt;/h4&gt;
-
-&lt;p&gt;The resulting size of a negative margin and a positive margin is their algebric sum.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--aw47Awqx--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://thepracticaldev.s3.amazonaws.com/i/jm0texf4hh51tb5peywf.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--aw47Awqx--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://thepracticaldev.s3.amazonaws.com/i/jm0texf4hh51tb5peywf.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;h4&gt;
-  &lt;a href="#negative-negative" class="anchor"&gt;
-  &lt;/a&gt;
-  Negative + Negative
-&lt;/h4&gt;
-
-&lt;p&gt;When both margins are negative, the resulting size is similar when there are positive + positive. In this, the most negative one wins.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--6pLfcA6S--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://thepracticaldev.s3.amazonaws.com/i/gfrou7kk1ciqdgxbbhwm.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--6pLfcA6S--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://thepracticaldev.s3.amazonaws.com/i/gfrou7kk1ciqdgxbbhwm.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#when-not" class="anchor"&gt;
-  &lt;/a&gt;
-  When not?
-&lt;/h2&gt;
-
-&lt;p&gt;There are many exceptions to the collapsing rule that it would be hard to know it by heart. &lt;br&gt;
-Here I show some examples when the margins do not collapse.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#nonblocklevel-elements" class="anchor"&gt;
-  &lt;/a&gt;
-  Non-Block-Level Elements
-&lt;/h3&gt;
+&lt;p&gt;As a hobbyist, I didn't have many tools like soldering iron etc. So I have tried to make use of some old electronic things such as USB cable or power bank, that most of you may have somewhere at home. You may follow all of my instructions, but feel free to change some parts and be creative. Below, the list of the materials can be found:&lt;/p&gt;
 
 &lt;ul&gt;
-&lt;li&gt; &lt;code&gt; Flex Items&lt;/code&gt;
-&lt;/li&gt;
-&lt;li&gt; &lt;code&gt;Grid Items &lt;/code&gt;
-&lt;/li&gt;
-&lt;li&gt; &lt;code&gt; Absolutely positioned items&lt;/code&gt;
-&lt;/li&gt;
-&lt;li&gt; &lt;code&gt;Other non-block-elements &lt;/code&gt;
-&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Arduino UNO&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;car chassis, with wheels and motors, kit&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;male - male, and female - male jumper wires&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;electrical insulation tape&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Bluetooth module (HC-06 or HC-05)&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;DC motor controller (L298N)&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Power Bank with 2 USB outputs&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Piezo buzzer&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Android mobile phone&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;PC with Arudino IDE installed&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;&lt;a href="https://play.google.com/store/apps/details?id=practical.learning.arducar"&gt;ArduCar - Arduino RC Car Bluetooth Controller&lt;/a&gt;&lt;/p&gt;&lt;/li&gt;
 &lt;/ul&gt;
 
-&lt;h3&gt;
-  &lt;a href="#border-or-padding-property-on-the-parent-element" class="anchor"&gt;
+&lt;h1&gt;
+  &lt;a href="#step-1-chassis-assembly" class="anchor"&gt;
   &lt;/a&gt;
-  Border or Padding Property on the Parent Element
-&lt;/h3&gt;
+  Step 1: Chassis Assembly
+&lt;/h1&gt;
 
-&lt;p&gt;If there is a border-top or padding-top between the parent and the first-child.&lt;/p&gt;
+&lt;p&gt;First of all, we will need to assembly the chassis of our car. If you have a kit, most probably you also got the instructions with it, but just in case the steps can be found below:&lt;/p&gt;
 
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--L_yxCJFl--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://thepracticaldev.s3.amazonaws.com/i/8g2bj1sco8xs42ra4dwg.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--L_yxCJFl--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://thepracticaldev.s3.amazonaws.com/i/8g2bj1sco8xs42ra4dwg.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;&lt;p&gt;Prepare the main part of the chassis, 4 small plastic brackets which will mount motors on the chassis frame (2 for each), screws, brass spacers, nuts, motors, useless USB cable, and 4 cables/ jumper wires.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Connect one wire to each pin of a motor, you can solder them but if you don't have soldering iron, just try to "knot" the cables to each pin.&lt;/p&gt;&lt;/li&gt;
+&lt;/ol&gt;
 
-&lt;p&gt;The same happens if there is a border-bottom or padding-bottom between the parent and its last-child.&lt;/p&gt;
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--gI2BBv29--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://hackster.imgix.net/uploads/attachments/1139529/whatsapp_image_2020-06-12_at_15_18_59_R4J8mmaC1y.jpeg%3Fauto%3Dcompress%252Cformat%26w%3D1280%26h%3D960%26fit%3Dmax" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--gI2BBv29--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://hackster.imgix.net/uploads/attachments/1139529/whatsapp_image_2020-06-12_at_15_18_59_R4J8mmaC1y.jpeg%3Fauto%3Dcompress%252Cformat%26w%3D1280%26h%3D960%26fit%3Dmax" alt="ArduCar"&gt;&lt;/a&gt;&lt;/p&gt;
 
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Dvy1paYj--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://thepracticaldev.s3.amazonaws.com/i/755l2emdr2psof592bdb.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Dvy1paYj--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://thepracticaldev.s3.amazonaws.com/i/755l2emdr2psof592bdb.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;&lt;p&gt;Now take your old/spare USB cable, and cut it so there is around 20 cm of cable left.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Strip a few centimetres of cable covering so you can see the cables inside it; there should be 4/5 cables inside, but we are interested just in two cables, GND - black one, and Plus - Red one. Strip 2-4 cm of covering from both red and black cable. You can leave it like that, or to make it stronger just "knot" it or solder with longer, stronger cable/ jumper wires so that the connection is firm enough.&lt;/p&gt;&lt;/li&gt;
+&lt;/ol&gt;
 
-&lt;h3&gt;
-  &lt;a href="#horizontal-margins" class="anchor"&gt;
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--PdSCWrKz--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://hackster.imgix.net/uploads/attachments/1139530/usb_eaMFOClw95.png%3Fauto%3Dcompress%252Cformat%26w%3D1280%26h%3D960%26fit%3Dmax" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--PdSCWrKz--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://hackster.imgix.net/uploads/attachments/1139530/usb_eaMFOClw95.png%3Fauto%3Dcompress%252Cformat%26w%3D1280%26h%3D960%26fit%3Dmax" alt="ArduCar"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;Take the motor, and mount it to the chassis frame with plastic brackets (2 for each), using screws and nuts. Please note that, each motor has a small "dot" on one side, and that dot should face inward so that when two motors are on place, these dots face each other.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--EAJ7TPJn--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://hackster.imgix.net/uploads/attachments/1139531/whatsapp_image_2020-06-12_at_15_17_23_G96xfqBYqI.jpeg%3Fauto%3Dcompress%252Cformat%26w%3D1280%26h%3D960%26fit%3Dmax" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--EAJ7TPJn--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://hackster.imgix.net/uploads/attachments/1139531/whatsapp_image_2020-06-12_at_15_17_23_G96xfqBYqI.jpeg%3Fauto%3Dcompress%252Cformat%26w%3D1280%26h%3D960%26fit%3Dmax" alt="ArduCar"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;&lt;p&gt;Once the motors are on their place, it is time for the 3rd nylon supporting wheel. When you look at the end of the frame, there should be 4 small holes next to each other, looking like a square shape. Take the brass spacers and mount them to these holes with screws, so brass spacers are on the same side of the frame with motors.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Mount the nylon supporting wheel to the brass spacers with screws.&lt;/p&gt;&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--5dABCn30--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://hackster.imgix.net/uploads/attachments/1139532/whatsapp_image_2020-06-12_at_15_20_39_YXLQCoL93B.jpeg%3Fauto%3Dcompress%252Cformat%26w%3D680%26h%3D510%26fit%3Dmax" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--5dABCn30--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://hackster.imgix.net/uploads/attachments/1139532/whatsapp_image_2020-06-12_at_15_20_39_YXLQCoL93B.jpeg%3Fauto%3Dcompress%252Cformat%26w%3D680%26h%3D510%26fit%3Dmax" alt="ArduCar"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;&lt;p&gt;Install the wheel to each motor. Note that, there is a shape inside of the wheel hub so be sure to put it in the right place. Most probably there will be a huge resistance, but you have to be gentle with it and use some power at the same time.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;We are almost done with assembling the car, at this point you can install Arduino module and DC motor controller to the frame. I used 3 screws with nuts that were left from the kit and covered wires with electrical insulation tape where it was necessary.&lt;/p&gt;&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--8T_dZl2R--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://hackster.imgix.net/uploads/attachments/1139534/whatsapp_image_2020-06-12_at_15_21_51_F7zwPdEdr5.jpeg%3Fauto%3Dcompress%252Cformat%26w%3D680%26h%3D510%26fit%3Dmax" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--8T_dZl2R--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://hackster.imgix.net/uploads/attachments/1139534/whatsapp_image_2020-06-12_at_15_21_51_F7zwPdEdr5.jpeg%3Fauto%3Dcompress%252Cformat%26w%3D680%26h%3D510%26fit%3Dmax" alt="ArduCar"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#step-2-wiring" class="anchor"&gt;
   &lt;/a&gt;
-  Horizontal Margins
-&lt;/h3&gt;
+  Step 2: Wiring
+&lt;/h1&gt;
 
-&lt;p&gt;The horizontal margins never collapse.&lt;/p&gt;
+&lt;p&gt;Once we have our car assembled with both Arduino and DC motor controller onboard, it is time for wiring. Prepare the jumper wires, both male - male and female - male.&lt;/p&gt;
 
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--AuSExDHC--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://thepracticaldev.s3.amazonaws.com/i/urj7mr9n82mreso954dq.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--AuSExDHC--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://thepracticaldev.s3.amazonaws.com/i/urj7mr9n82mreso954dq.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;Take the cables that are connected to the motors and install them to the DC motor controller. Let's say that lower pins, the ones closer to the ground, are the plus pins, and the ones closer to the frame are minus (GND). The circuit should look like this:&lt;/li&gt;
+&lt;/ol&gt;
 
-&lt;h2&gt;
-  &lt;a href="#conclusion" class="anchor"&gt;
+&lt;p&gt;OUT1 - Left motor (-) GND cable&lt;/p&gt;
+
+&lt;p&gt;OUT2 - Left motor (+) cable&lt;/p&gt;
+
+&lt;p&gt;OUT3 - Right motor (+) cable&lt;/p&gt;
+
+&lt;p&gt;OUT4 - Right motor (-) GND cable&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--9dHVWApY--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://hackster.imgix.net/uploads/attachments/1139533/whatsapp_image_2020-06-12_at_15_23_26_AZmhprS8lE.jpeg%3Fauto%3Dcompress%252Cformat%26w%3D680%26h%3D510%26fit%3Dmax" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--9dHVWApY--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://hackster.imgix.net/uploads/attachments/1139533/whatsapp_image_2020-06-12_at_15_23_26_AZmhprS8lE.jpeg%3Fauto%3Dcompress%252Cformat%26w%3D680%26h%3D510%26fit%3Dmax" alt="ArduCar"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;Now let's connect Arduino to the DC motor controller, in order to do that, we will use pins with tiny names IN1, IN2, IN3, and IN4. Previous OUT1, 2, 3, 4 sockets were responsible for transferring the power to the electric motors, but with IN1, 2, 3, 4 pins, we will send commands to the controller from our Arduino device. This time you may need female - male wire jumpers, but if you don't have such a wire just try to modify male - male wire jumper or solder the wires to the pins.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;IN1 - DIGITAL 5&lt;/p&gt;
+
+&lt;p&gt;IN2 - DIGITAL 6&lt;/p&gt;
+
+&lt;p&gt;IN3 - DIGITAL 10&lt;/p&gt;
+
+&lt;p&gt;IN4 - DIGITAL 11&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;Bluetooth module is the last crucial thing we will need for our steering, when you look at the Bluetooth module it should have 4 pins and each pin is signed as follows VCC - POWER, GND - Ground (-), TXD - transfer data, RXD - receive data. Female - male jumper wires may be needed once again this time.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;VCC - POWER 5V&lt;/p&gt;
+
+&lt;p&gt;GND - POWER GND&lt;/p&gt;
+
+&lt;p&gt;TXD - DIGITAL 0 RXD&lt;/p&gt;
+
+&lt;p&gt;RXD - DIGITAL 1 TXD&lt;/p&gt;
+
+&lt;p&gt;As you can see, data will be exchanged between Arduino and our Bluetooth module, that is why data cables are connected in the opposite way.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Iv9rrVLn--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://hackster.imgix.net/uploads/attachments/1139537/whatsapp_image_2020-06-12_at_15_25_37_GGcFam68oc.jpeg%3Fauto%3Dcompress%252Cformat%26w%3D680%26h%3D510%26fit%3Dmax" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Iv9rrVLn--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://hackster.imgix.net/uploads/attachments/1139537/whatsapp_image_2020-06-12_at_15_25_37_GGcFam68oc.jpeg%3Fauto%3Dcompress%252Cformat%26w%3D680%26h%3D510%26fit%3Dmax" alt="ArduCar"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;Piezo buzzer has 2 legs, a longer one, Anode (+), and shorter one Cathode(-). It is recommended to use 330 Ohm resistor between piezo buzzer and Anode because it is a very sensitive and tiny instrument, but I didn't use one, as the resistor makes my piezo buzzer very silent. Note: Female - male wire jumpers may be helpful again.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;Anode(+) long leg - DIGITAL 3&lt;/p&gt;
+
+&lt;p&gt;Cathode(-) short leg - POWER GND&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--_mSzV2vh--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://hackster.imgix.net/uploads/attachments/1139538/whatsapp_image_2020-06-12_at_15_25_58_nsTMBhw1qN.jpeg%3Fauto%3Dcompress%252Cformat%26w%3D680%26h%3D510%26fit%3Dmax" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--_mSzV2vh--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://hackster.imgix.net/uploads/attachments/1139538/whatsapp_image_2020-06-12_at_15_25_58_nsTMBhw1qN.jpeg%3Fauto%3Dcompress%252Cformat%26w%3D680%26h%3D510%26fit%3Dmax" alt="ArduCar"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;We are almost there! Now we need to power our Arduino board and DC motor controller. Take the USB cable part that we have prepared in the previous part and connect those two cables; red and black to DC motor controller.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;Red cable (+) - 12 V&lt;/p&gt;
+
+&lt;p&gt;Black cable (-) - GND&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;The last step is to connect two USB cables, one to Power bank and Arduino board, and other one that connected to the DC motor controller, to Power bank as well. Last thing is to mount your Power bank on the frame, I used an electrical insulation tape to stick it to the frame, but there are many other ways to mount it. Note: some Power banks may have a switch or button on them, so to power the circuit you may need to switch the power on.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Oedu9ExD--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://hackster.imgix.net/uploads/attachments/1139539/circui_eVJqZaMloV.png%3Fauto%3Dcompress%252Cformat%26w%3D680%26h%3D510%26fit%3Dmax" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Oedu9ExD--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://hackster.imgix.net/uploads/attachments/1139539/circui_eVJqZaMloV.png%3Fauto%3Dcompress%252Cformat%26w%3D680%26h%3D510%26fit%3Dmax" alt="ArduCar"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;All of the parts and wiring are on its' place, but still there is no code in Arduino and no application on the mobile phone to control the car.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;h1&gt;
+  &lt;a href="#step-3-programming" class="anchor"&gt;
   &lt;/a&gt;
-  Conclusion
-&lt;/h2&gt;
+  Step 3: Programming
+&lt;/h1&gt;
 
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--5RAi9KCt--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://thepracticaldev.s3.amazonaws.com/i/7osydb3fqh1047zs3mmx.jpg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--5RAi9KCt--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://thepracticaldev.s3.amazonaws.com/i/7osydb3fqh1047zs3mmx.jpg" width="400px"&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;Now that we have our RC car ready, the last part is to upload the code to the Arduino board and download the application on an Android mobile phone. For this step, you will need the Arduino IDE program on your computer, which can be downloaded from the Arduino official website. Once you have it installed, there are two options that need to be set. Open the Arduino IDE program and you will see a few options on the upper bar, pick "Tools" and then you should see the list, find the option called "Board:" and pick your Arduino board from the list (most of the time it is Arduino UNO). Later, right under the "Board:" option, click on the "Port" option, if there are no USB devices connected to your PC, it may be greyed out/disabled, once you connect your Arduino board with a USB cable this option should become available, you may have to choose one port, for example in my case it is PORT 5. Even though I have 3 USB ports on my laptop, just one of them works as a PORT. You can try with different USB sockets on your computer till it works.&lt;/p&gt;
 
-&lt;p&gt;Even though it came with the idea of easing our lives, It can be really tricky to deal with margin collapse. This is mainly because of the many rules and exceptions has grown since the invention of it. One possible solution that it is easy to remember and understand is only applying margin-top to the elements. To read more about the possible solutions, &lt;a href="https://csswizardry.com/2012/06/single-direction-margin-declarations/"&gt;Harry Robert&lt;/a&gt; discuss more on his article.&lt;/p&gt;
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s---gxV05uL--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://hackster.imgix.net/uploads/attachments/1139540/arduinoide_xYdgHjA4Mc.png%3Fauto%3Dcompress%252Cformat%26w%3D680%26h%3D510%26fit%3Dmax" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s---gxV05uL--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://hackster.imgix.net/uploads/attachments/1139540/arduinoide_xYdgHjA4Mc.png%3Fauto%3Dcompress%252Cformat%26w%3D680%26h%3D510%26fit%3Dmax" alt="ArduCarIDE"&gt;&lt;/a&gt;&lt;/p&gt;
 
-&lt;p&gt;Follow me on &lt;a href="https://twitter.com/camfilho"&gt;Twitter&lt;/a&gt; and comment down below your thoughts on this.&lt;/p&gt;
+&lt;p&gt;Before we move on to uploading the code to Arduino, you have two options:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;&lt;p&gt;Just download the attached file, open it with Arduino IDE program and simply upload it.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Go to Arduino IDE program, click on File - New, copy the code from here, and click on the "Upload" icon. Remember that while uploading your code Arduino board should be connected to your PC via the right USB socket, on which the port is set.&lt;/p&gt;&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;Note: &lt;strong&gt;While uploading the code to Arduino, DIGITAL 0 RX, DIGITAL 1 TX sockets should be unplugged&lt;/strong&gt;, when those sockets are connected to the Bluetooth module, Arduino may not accept the incoming data from your PC and the program may freeze at "uploading" state.&lt;/p&gt;
+
+&lt;p&gt;Below you can find the code with explanations.&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;After uploading the code to the Arduino board, it is time to reconnect DIGITAL 0 RX and DIGITAL 1 TX pins to the Bluetooth module and reconnect the USB cable (Arduino - Power bank) to the Power bank.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;4.The last step to make your RC car work, is to download the Android application from Google Play Store, and start having fun! &lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--R4eHVjBR--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://play.google.com/store/apps/details%3Fid%3Dpractical.learning.arducar" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--R4eHVjBR--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://play.google.com/store/apps/details%3Fid%3Dpractical.learning.arducar" alt="ArduCar - Arduino RC Car Bluetooth Controller Android Application"&gt;&lt;/a&gt; You may also download different applications, as long as they send the matching serial codes, or even create your own mobile application.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s---m0kEw1o--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://hackster.imgix.net/uploads/attachments/1139541/horizontal_zchLc5ullN.jpeg%3Fauto%3Dcompress%252Cformat%26w%3D680%26h%3D510%26fit%3Dmax" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s---m0kEw1o--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://hackster.imgix.net/uploads/attachments/1139541/horizontal_zchLc5ullN.jpeg%3Fauto%3Dcompress%252Cformat%26w%3D680%26h%3D510%26fit%3Dmax" alt="ArduCar"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Thank you for your attention, and wish you have a lot of fun with it. In case of any questions or suggestions, please let me know about it down below in the comments section.&lt;/p&gt;
+
+&lt;p&gt;...&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#define-in1-5" class="anchor"&gt;
+  &lt;/a&gt;
+  define in1 5
+&lt;/h1&gt;
+
+&lt;h1&gt;
+  &lt;a href="#define-in2-6" class="anchor"&gt;
+  &lt;/a&gt;
+  define in2 6
+&lt;/h1&gt;
+
+&lt;h1&gt;
+  &lt;a href="#define-in3-10" class="anchor"&gt;
+  &lt;/a&gt;
+  define in3 10
+&lt;/h1&gt;
+
+&lt;h1&gt;
+  &lt;a href="#define-in4-11" class="anchor"&gt;
+  &lt;/a&gt;
+  define in4 11
+&lt;/h1&gt;
+
+&lt;p&gt;int state;&lt;br&gt;
+int piezo = 3; &lt;br&gt;
+void setup() {&lt;br&gt;
+  pinMode(in1, OUTPUT);&lt;br&gt;
+  pinMode(in2, OUTPUT);&lt;br&gt;
+  pinMode(in3, OUTPUT);&lt;br&gt;
+  pinMode(in4, OUTPUT);&lt;br&gt;
+  pinMode(piezo,OUTPUT);&lt;br&gt;
+  Serial.begin(9600);&lt;br&gt;
+}&lt;br&gt;
+void loop() {&lt;br&gt;
+  if (Serial.available() &amp;gt; 0) {&lt;br&gt;
+    state = Serial.read();&lt;br&gt;
+    Stop();&lt;br&gt;
+    switch (state) {&lt;br&gt;
+      case 'F':&lt;br&gt;
+        forward();&lt;br&gt;
+        soundFX(3000.0,30+400*(1+sin(millis()/5000)));&lt;br&gt;
+        break;&lt;br&gt;
+      case 'G':&lt;br&gt;
+        forwardleft();&lt;br&gt;
+        soundFX(3000.0,60);&lt;br&gt;
+        break;&lt;br&gt;&lt;br&gt;
+      case 'D':&lt;br&gt;
+        forwardright();&lt;br&gt;
+        soundFX(3000.0,60);&lt;br&gt;
+        break;&lt;br&gt;&lt;br&gt;
+      case 'N':&lt;br&gt;
+        backright();&lt;br&gt;
+        soundFX(3000.0,30+100*(1+sin(millis()/2500)));&lt;br&gt;
+        break;&lt;br&gt;
+      case 'C':&lt;br&gt;
+        backleft();&lt;br&gt;
+        soundFX(3000.0,30+100*(1+sin(millis()/2500)));&lt;br&gt;
+        soundFX(3000.0,30+100*(1+sin(millis()/2500)));&lt;br&gt;
+        soundFX(3000.0,30+100*(1+sin(millis()/2500)));&lt;br&gt;
+        soundFX(3000.0,30+100*(1+sin(millis()/2500)));&lt;br&gt;
+        break;&lt;br&gt;
+      case 'B':&lt;br&gt;
+        back();&lt;br&gt;
+        soundFX(3000.0,30+200*(1+sin(millis()/2500)));&lt;br&gt;
+        soundFX(3000.0,30+200*(1+sin(millis()/2500)));&lt;br&gt;
+        soundFX(3000.0,30+200*(1+sin(millis()/2500)));&lt;br&gt;
+        soundFX(3000.0,30+200*(1+sin(millis()/2500)));&lt;br&gt;
+        break;&lt;br&gt;
+      case 'L':&lt;br&gt;
+        left();&lt;br&gt;
+        soundFX(3000.0,60);&lt;br&gt;
+        soundFX(3000.0,60);&lt;br&gt;
+        soundFX(3000.0,60);&lt;br&gt;
+        soundFX(3000.0,60);&lt;br&gt;
+        break;&lt;br&gt;
+      case 'R':&lt;br&gt;
+        right();&lt;br&gt;
+        soundFX(3000.0,60);&lt;br&gt;
+        soundFX(3000.0,60);&lt;br&gt;
+        soundFX(3000.0,60);&lt;br&gt;
+        soundFX(3000.0,60);&lt;br&gt;
+        break;&lt;br&gt;
+      case 'H':&lt;br&gt;
+        soundFX(3000.0,30+200*(1+sin(millis()/2500)));&lt;br&gt;
+        soundFX(3000.0,60);&lt;br&gt;
+        soundFX(3000.0,30+200*(1+sin(millis()/2500)));&lt;br&gt;
+        soundFX(3000.0,60);&lt;br&gt;
+    }&lt;/p&gt;
+
+&lt;p&gt;}&lt;br&gt;
+}&lt;br&gt;
+void forward() {&lt;br&gt;
+  analogWrite(in1, 255);&lt;br&gt;
+  analogWrite(in3, 255);&lt;br&gt;
+}&lt;br&gt;
+void forwardleft() {&lt;br&gt;
+  analogWrite(in1, 50);&lt;br&gt;
+  analogWrite(in3, 255);&lt;br&gt;
+}&lt;br&gt;
+void forwardright() {&lt;br&gt;
+  analogWrite(in1, 255);&lt;br&gt;
+  analogWrite(in3, 50);&lt;br&gt;
+}&lt;br&gt;
+void back() {&lt;br&gt;
+  analogWrite(in2, 255);&lt;br&gt;
+  analogWrite(in4, 255);&lt;br&gt;
+}&lt;br&gt;
+void backright() {&lt;br&gt;
+  analogWrite(in2, 50);&lt;br&gt;
+  analogWrite(in4, 255);&lt;br&gt;
+}&lt;br&gt;
+void backleft() {&lt;br&gt;
+  analogWrite(in2, 255);&lt;br&gt;
+  analogWrite(in4, 50);&lt;br&gt;
+}&lt;br&gt;
+void left() {&lt;br&gt;
+  analogWrite(in4, 255);&lt;br&gt;
+  analogWrite(in1, 255);&lt;br&gt;
+}&lt;br&gt;
+void right() {&lt;br&gt;
+  analogWrite(in3, 255);&lt;br&gt;
+  analogWrite(in2, 255);&lt;br&gt;
+}&lt;br&gt;
+void Stop() {&lt;br&gt;
+  analogWrite(in1, 0);&lt;br&gt;
+  analogWrite(in2, 0);&lt;br&gt;
+  analogWrite(in3, 0);&lt;br&gt;
+  analogWrite(in4, 0);&lt;br&gt;
+}&lt;br&gt;
+void soundFX(float amplitude,float period){&lt;br&gt;
+ int uDelay=2+amplitude+amplitude*sin(millis()/period);&lt;br&gt;
+ for(int i=0;i&amp;lt;5;i++){&lt;br&gt;
+   digitalWrite(piezo,HIGH);&lt;br&gt;
+   delayMicroseconds(uDelay);&lt;br&gt;
+   digitalWrite(piezo,LOW);&lt;br&gt;
+   delayMicroseconds(uDelay);&lt;br&gt;
+ }&lt;br&gt;
+} &lt;/p&gt;
+
+&lt;p&gt;...&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#step-4-arduino-code-explanation-and-bluetooth-module-configuration-optional" class="anchor"&gt;
+  &lt;/a&gt;
+  Step 4: Arduino Code Explanation and Bluetooth Module Configuration (Optional)
+&lt;/h1&gt;
+
+&lt;p&gt;For the curious ones, I have decided to add an Arduino code explanation, so it may help some of you understand the mechanics and logic behind this RC car even better. I also want to add that it is not entirely my code, it is very similar to the codes that are available in different projects, I just simplified some parts and added the chunks for the Piezo buzzer sound.&lt;/p&gt;
+
+&lt;p&gt;Arduino IDE program uses a kind of a simplified hybrid version of C and C++ programming languages, so it can remind you of those programming languages if you are familiar with them, but if not it is also OK. The code will be divided into a few chunks to help you understand it better.&lt;/p&gt;
+
+&lt;p&gt;Each Arduino program is composed of two basic parts:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;
+&lt;code&gt;void setup() { }&lt;/code&gt; - where we set a function for each of the Arduino's pin. This is something that is read by the Arduino just once, gets the information, and stores it for the rest part of the program.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;In our case it looks like that:&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;void setup() {pinMode(in1, OUTPUT);&lt;/code&gt; pinMode means that we will set a mode for the given pin, inside the brackets, there are two values, first one - in1, is the name of the pin that we are referring to, and the second value - OUTPUT means that we will send some data from Arduino to the target. If there is INPUT written, it means that the given pin would receive a data from a sensor etc.&lt;/p&gt;
+
+&lt;p&gt;...&lt;/p&gt;
+
+&lt;p&gt;pinMode(in2, OUTPUT);&lt;/p&gt;
+
+&lt;p&gt;pinMode(in3, OUTPUT);&lt;/p&gt;
+
+&lt;p&gt;pinMode(in4, OUTPUT);&lt;/p&gt;
+
+&lt;p&gt;pinMode(piezo, OUTPUT);&lt;/p&gt;
+
+&lt;p&gt;...&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;Serial.begin(9600);&lt;/code&gt; Serial is the port that can be used for sending and receiving the data, do you remember those DIGITAL 0 RX and DIGITAL 1 TX pins that we were connecting the Bluetooth module to? It is about their setting. It means that we will open a channel through which data will be exchanged. The number inside the brackets (9600) means that in one second up to 9600 characters can be sent. It is the most frequently used baud rate, as it is the most stable one, the higher the number is, the faster it is, but also more prone to being disturbed by the noise it is. That is why just leave it at 9600. Note: Bluetooth modules are generally set to baud rate 9600 by default, but sometimes you may have to configure it before - check the Bluetooth configuration section.&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;&lt;p&gt;&lt;code&gt;void loop() { }&lt;/code&gt; - As you can guess from the name, it is the part of the program in which everything written inside the curly brackets, will be repeated again and again. That is all, that is needed for any Arduino program to run. Rest is just your own imagination. Before I move to the details in loop and functions, there is one more part that is located at the beginning of our code, right before &lt;code&gt;void setup() { }&lt;/code&gt;&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;In the &lt;code&gt;void setup() { }&lt;/code&gt; part we have named Arduino pins as in and piezo, but those are not their real names, those are just names that we gave them, and the program will always relate to those names while executing the program. Because of that, at the beginning of each Arduino program we can initialize some names for the pins and variables. Let's have a look at our example:&lt;/p&gt;&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;&lt;code&gt;#define in1 5&lt;/code&gt;  When you want to define a name for some pin on the Arduino board you can use &lt;code&gt;#define&lt;/code&gt; word, and then write the name after space. In our case, it's in1, as it is the name of the DC motor controller pin that we are going to control. The next space is followed by the number of the given pin. In this case, it is 5 as the in1 pin is connected to the socket number 5 on the Arduino board.#define in2 6&lt;/p&gt;
+
+&lt;p&gt;...&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#define-in3-10" class="anchor"&gt;
+  &lt;/a&gt;
+  define in3 10
+&lt;/h1&gt;
+
+&lt;h1&gt;
+  &lt;a href="#define-in4-11" class="anchor"&gt;
+  &lt;/a&gt;
+  define in4 11
+&lt;/h1&gt;
+
+&lt;p&gt;int state; // We can also initialize names of the pin as variables int (integer), and variables itself.&lt;/p&gt;
+
+&lt;p&gt;int piezo = 3;&lt;/p&gt;
+
+&lt;p&gt;...&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;Now let's move back to the loop part.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;&lt;code&gt;void loop() {if (Serial.available() &amp;gt; 0) {&lt;/code&gt;  First statement in the loop starts with if, inside the brackets we can see a condition, it says &lt;code&gt;Serial.available() &amp;gt; 0)&lt;/code&gt; - simply it means, if Serial, in our case Bluetooth module, is available, greater than 0, remember the binary code 1 - true, 0 - false, do the following { } - everything in those curly braces will be executed.&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;state = Serial.read();&lt;/code&gt; Remember that state variable at the beginning of the code? This is the time when we assign the value to that variable ( = ) so our state variable now is equal to &lt;code&gt;Serial.read()&lt;/code&gt;, which means that the variable will change according to what is read from the Bluetooth module.&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;Stop();&lt;/code&gt; Those two brackets () after a name indicates that it is a function, and it has to be explained somewhere in the code. The same with this one, the first function to be executed in this code is the function named Stop, which will just literary cut off the power from the wheels and make our RC car stop.&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;switch (state)&lt;/code&gt; Right after the Stop function, we have another one, this time it is the global function, that exist in nearly every programming language, and it is called switch - what literary means that there will be few functions inside, and we will just switch between them. This time you can see that inside the brackets () we have a condition, and the condition is a variable called state, which value was assigned to everything that is received from the Bluetooth module.&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;case 'F':&lt;/code&gt; As you can see, each possible function inside the switch, will be marked as "case" and in the single quotations we can see the possible value of the state variable. In this case, if the state equals 'F' - such a character is sent to the Bluetooth module via the mobile application, some functions will be executed.&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;forward();&lt;/code&gt; The first function to be executed&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;soundFX(3000.0, 30+400*(1+sin(millis()/5000)));&lt;/code&gt; The second function to be executed, this time with some conditions inside the brackets.&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;break;&lt;/code&gt; break means to stop executing this case, you always have to finish each case with &lt;code&gt;break;&lt;/code&gt; statement.&lt;/p&gt;
+
+&lt;p&gt;...&lt;/p&gt;
+
+&lt;p&gt;case 'G':&lt;/p&gt;
+
+&lt;p&gt;forwardleft();&lt;/p&gt;
+
+&lt;p&gt;soundFX(3000.0, 60);&lt;/p&gt;
+
+&lt;p&gt;break;&lt;/p&gt;
+
+&lt;p&gt;...&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;Almost everything is explained now, but there were some functions like forward(), soundFX() etc. in the code, but they were not explained in the void setup() { }, nor in the void loop() { } part of the code. If there are such functions in the code, they should be explained at the end of the code. Below you can see an example.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;&lt;code&gt;void forward()&lt;/code&gt;  Again, in order to call a function firstly void should be written, and after a space, name of the function should be written, for example forward(). Inside the curly brackets we can see the explanation of the function.analogWrite(in1, 255); analogWrite means that we are sending a signal, in case we were receiving, it should be written as analogRead. Inside the brackets there are two values (in1 - the name of the pin that we are referring to, and 255 - the value of the electrical wave frequency, that can range from 0 to 255 - 0 means 0%, and 255 means 100%. It can be also written as LOW - 0, HIGH - 255. As you can see, this is the place where you can change the speed of each electric motor.&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;analogWrite(in3, 255);&lt;/code&gt; In this way, we can say that by changing pins in1, 2, 3, 4, and values, we can control the side from which the electricity will enter the motors, what will be the voltage, and as a result the speed and direction.&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;void soundFX(float amplitude, float period)&lt;/code&gt; This is the part that I have found on Arduino official forums, on the topic of SciFi sounds for the Piezo buzzer. You can find this code in the last post, for further explanations you can go to the link below.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://forum.arduino.cc/index.php?topic=118757.0"&gt;https://forum.arduino.cc/index.php?topic=118757.0&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;...&lt;/p&gt;
+
+&lt;p&gt;int uDelay=2+amplitude+amplitude*sin(millis()/period);&lt;/p&gt;
+
+&lt;p&gt;for(int i=0;i&amp;lt;5;i++){&lt;/p&gt;
+
+&lt;p&gt;digitalWrite(piezo, HIGH);&lt;/p&gt;
+
+&lt;p&gt;delayMicroseconds(uDelay);&lt;/p&gt;
+
+&lt;p&gt;digitalWrite(piezo, LOW);&lt;/p&gt;
+
+&lt;p&gt;delayMicroseconds(uDelay);&lt;/p&gt;
+
+&lt;p&gt;} }&lt;/p&gt;
+
+&lt;p&gt;...&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;It is how it works. From now on, hopefully you can also make your own contribution to the code, change something, add some new functions, or rewrite it in your own way.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;Bluetooth Configuration&lt;/p&gt;
+
+&lt;p&gt;At the last, but not least, there is one more important thing to mention. HC-05 and HC-06 Bluetooth modules generally come up with default settings, such as baud rate, name, password etc. But if you would like to configure your Bluetooth module, you can use Arduino IDE program for this purpose. However, you may need to change the pins that Bluetooth module is connected to, and change Arduino code for the configuration time. Moreover, it is recommended to use resistors, in order to protect the Bluetooth module, as the data pins work at 3.3V, while the default output voltage of Arduino is 5V. Please keep all of those things in mind, I won't go throughout the whole process here, but there are plenty of tutorials available, just simply google it. If there are any suggestions, or questions please let me know in the comments' section below.&lt;/p&gt;
+
+&lt;p&gt;Thank you for your attention once again, and don't forget to share your own projects below!&lt;/p&gt;
 
 </description>
-      <category>html</category>
-      <category>css</category>
-      <category>frontend</category>
-    </item>
-    <item>
-      <title>How I Made an Inaccessible Site Accessible for Myself with UserCSS</title>
-      <author>Eevis (she/her)</author>
-      <pubDate>Sun, 21 Mar 2021 16:26:43 +0000</pubDate>
-      <link>https://dev.to/eevajonnapanula/how-i-made-an-inaccessible-site-accessible-for-myself-with-usercss-53f3</link>
-      <guid>https://dev.to/eevajonnapanula/how-i-made-an-inaccessible-site-accessible-for-myself-with-usercss-53f3</guid>
-      <description>&lt;p&gt;As mentioned in the &lt;a href="https://dev.to/eevajonnapanula/you-make-my-head-spin-reducing-the-motion-on-web-328b"&gt;blog post about reducing motion&lt;/a&gt;, I'm sensitive to certain types of movement on the web. For a long time, I've been wondering if there is a way to access and change websites' styles and modify them to not include that kind of movement. &lt;/p&gt;
-
-&lt;p&gt;A few weeks ago, my colleague &lt;a href="https://twitter.com/isfotis"&gt;Fotis&lt;/a&gt; demonstrated how to do this with user styles. I finally found the missing piece - I already knew how to remove or change the problematic things, but didn't know how to inject new styles into the pages.&lt;/p&gt;
-
-&lt;p&gt;In this blog post, I share how I wrote some simple enhancements for &lt;a href="https://mimmitkoodaa.ohjelmistoebusiness.fi/"&gt;Mimmit Koodaa&lt;/a&gt;'s (a Finnish initiative for getting more women to tech) webpage. They have some animations and auto-playing videos as background. As those animations can make me a bit dizzy and nauseous, and videos that automatically play are just distracting, I wanted to remove these factors from the website. &lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#stylus" class="anchor"&gt;
-  &lt;/a&gt;
-  Stylus
-&lt;/h2&gt;
-
-&lt;p&gt;For injecting the user styles to the site, I'm using the Stylus Chrome extension. If you want to read more, here's their repository:&lt;/p&gt;
-
-
-&lt;div class="ltag-github-readme-tag"&gt;
-  &lt;div class="readme-overview"&gt;
-    &lt;h2&gt;
-      &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--i3JOwpme--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/github-logo-ba8488d21cd8ee1fee097b8410db9deaa41d0ca30b004c0c63de0a479114156f.svg" alt="GitHub logo"&gt;
-      &lt;a href="https://github.com/openstyles"&gt;
-        openstyles
-      &lt;/a&gt; / &lt;a href="https://github.com/openstyles/stylus"&gt;
-        stylus
-      &lt;/a&gt;
-    &lt;/h2&gt;
-    &lt;h3&gt;
-      Stylus - Userstyles Manager
-    &lt;/h3&gt;
-  &lt;/div&gt;
-&lt;/div&gt;
-
-
-&lt;p&gt;The basic idea with the Stylus extension is that users can use, edit and save user styles from either userstyles.org or self-hosted user styles (with postfixes &lt;code&gt;.user.css&lt;/code&gt; and &lt;code&gt;.user.styl&lt;/code&gt;). I'm self-hosting my code on Github, and you can find the link to the repository at the end of the blog post. &lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#writing-the-styles" class="anchor"&gt;
-  &lt;/a&gt;
-  Writing the styles
-&lt;/h2&gt;
-
-&lt;p&gt;As mentioned, I'm writing the styles with UserCSS. If you're interested in the syntax, or UserCSS in general, head to &lt;a href="https://github.com/openstyles/stylus/wiki/Writing-UserCSS"&gt;Stylus' docs about UserCSS&lt;/a&gt;. &lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#animation" class="anchor"&gt;
-  &lt;/a&gt;
-  Animation
-&lt;/h3&gt;
-
-&lt;p&gt;On the website, &lt;a href="https://mimmitkoodaa.ohjelmistoebusiness.fi/thisisnotawebinar/"&gt;on the page for this spring's launch event&lt;/a&gt;,  there are animations behind the headings that shift horizontally when scrolling vertically. It's especially problematic for me, so that is one thing I wanted to get rid of.  &lt;/p&gt;
-
-&lt;p&gt;I've fiddled with many websites to try to turn their animations off, and I've seen many different solutions. I was a bit afraid of what I would find. This time, animations were done with good old transitions, and I was happy. That is easy to fix.&lt;/p&gt;
-
-&lt;p&gt;I decided to go with the "remove motion"-solution for this instead of just reducing motion. All of the headings have a class of &lt;code&gt;elementor-motion-effects-container&lt;/code&gt;, which wraps the heading-element and the image behind the header. That image is the one that transitions. Thus it's possible to target all the elements inside the container and set transition to none. Targeting all the child elements is done just in case if there ever appears something else that moves.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="nc"&gt;.elementor-motion-effects-container&lt;/span&gt; &lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;transform&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;none&lt;/span&gt; &lt;span class="cp"&gt;!important&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-&lt;p&gt;Another problem on the launch website was the image gallery. I wanted to remove the animation from when images appear. They slide in, and it was a bit distracting.&lt;/p&gt;
-
-&lt;p&gt;Finding the correct class to set the properties wasn't easy. I went through multiple classes having different transformations and finally found the correct element.&lt;/p&gt;
-
-&lt;p&gt;Here's how I removed the animation:&lt;br&gt;
-&lt;/p&gt;
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="nc"&gt;.elementor-gallery-item__image.e-gallery-image&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;transition-duration&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0s&lt;/span&gt; &lt;span class="cp"&gt;!important&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;transition-property&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;none&lt;/span&gt; &lt;span class="cp"&gt;!important&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
- &lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-&lt;h3&gt;
-  &lt;a href="#video" class="anchor"&gt;
-  &lt;/a&gt;
-  Video
-&lt;/h3&gt;
-
-&lt;p&gt;On the same page, there is an auto-playing video behind the hero/banner. As it's impossible to fiddle with the auto-playing attribute or pause the video with css, I decided to just remove the video. Luckily, there is actually a static background image behind the video, so the layout doesn't get messed up when removing something.&lt;br&gt;
-&lt;/p&gt;
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="nt"&gt;video&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="nl"&gt;display&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;none&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-&lt;h2&gt;
-  &lt;a href="#complete-styles" class="anchor"&gt;
-  &lt;/a&gt;
-  Complete Styles
-&lt;/h2&gt;
-
-&lt;p&gt;You can find the complete styles and instructions on how to install them from the repository:&lt;/p&gt;
-
-
-&lt;div class="ltag-github-readme-tag"&gt;
-  &lt;div class="readme-overview"&gt;
-    &lt;h2&gt;
-      &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--i3JOwpme--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/github-logo-ba8488d21cd8ee1fee097b8410db9deaa41d0ca30b004c0c63de0a479114156f.svg" alt="GitHub logo"&gt;
-      &lt;a href="https://github.com/eevajonnapanula"&gt;
-        eevajonnapanula
-      &lt;/a&gt; / &lt;a href="https://github.com/eevajonnapanula/mimmit-koodaa-motion-safer-css"&gt;
-        mimmit-koodaa-motion-safer-css
-      &lt;/a&gt;
-    &lt;/h2&gt;
-    &lt;h3&gt;
-      A Motion safe UserCSS for Mimmit Koodaa-website
-    &lt;/h3&gt;
-  &lt;/div&gt;
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#wrapping-up" class="anchor"&gt;
-  &lt;/a&gt;
-  Wrapping Up
-&lt;/h2&gt;
-
-&lt;p&gt;I'm thrilled that I've found the tools to make the web more usable for myself by modifying the websites' styles. Of course, there are a ton of other use cases for UserCSS, and I can't wait to explore them. &lt;/p&gt;
-
-&lt;p&gt;However, this does not mean that the responsibility of making the web usable and accessible is on the users - accessibility is definitely a thing developers should learn and be concerned with when creating user interfaces. Even if I have the tools to modify the site for myself, it doesn't mean that most people have.&lt;/p&gt;
-
-&lt;p&gt;Have you ever tried out UserCSS or similar solutions? &lt;/p&gt;
-
-&lt;p&gt;&lt;em&gt;Cover photo by &lt;a href="https://unsplash.com/@epicantus"&gt;Daria Nepriakhina&lt;/a&gt; on &lt;a href="https://unsplash.com/"&gt;Unsplash&lt;/a&gt;&lt;/em&gt;&lt;/p&gt;
-
-</description>
-      <category>css</category>
-      <category>a11y</category>
-      <category>webdev</category>
-      <category>ux</category>
-    </item>
-    <item>
-      <title>Python Asterisks</title>
-      <author>Siddharth Chandra</author>
-      <pubDate>Sun, 21 Mar 2021 15:39:56 +0000</pubDate>
-      <link>https://dev.to/siddharth2016/python-asterisks-2j6i</link>
-      <guid>https://dev.to/siddharth2016/python-asterisks-2j6i</guid>
-      <description>&lt;p&gt;Asterisk, we all know is a little star symbol (*), used in programming languages for multiplication and other tasks like pointer declaration!&lt;/p&gt;
-
-&lt;p&gt;In Python, there is no pointer concept, but still, asterisks carry some amazing abilities to ease the life of a programmer.&lt;/p&gt;
-
-&lt;p&gt;In this article, we are going to see some of the most used use-cases of the asterisk symbol!&lt;/p&gt;
-
-&lt;p&gt;Then, let's get started 😎&lt;/p&gt;
-
-
-
-
-&lt;h3&gt;
-  &lt;a href="#multiplication-and-exponentiation" class="anchor"&gt;
-  &lt;/a&gt;
-  Multiplication and Exponentiation
-&lt;/h3&gt;
-
-&lt;p&gt;Asterisk symbol most common use case is for accomplishing multiplication tasks (that we all know) and in python, it provides yet another much-needed task of exponentiation with the help of using 2 asterisks instead of 1 (amazing, right !).&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight python"&gt;&lt;code&gt;
-&lt;span class="n"&gt;a&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="mi"&gt;4&lt;/span&gt;     &lt;span class="c1"&gt;# 8
-&lt;/span&gt;&lt;span class="n"&gt;b&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="o"&gt;**&lt;/span&gt;&lt;span class="mi"&gt;3&lt;/span&gt;    &lt;span class="c1"&gt;# 8, exponentiation
-&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h3&gt;
-  &lt;a href="#unpacking-iterable-objects" class="anchor"&gt;
-  &lt;/a&gt;
-  Unpacking Iterable Objects
-&lt;/h3&gt;
-
-&lt;p&gt;Asterisks can be used to unpack a list or any iterable data type. Simple, just put an asterisk in front of the variable that contains iterable needed to be unpacked and voila, you get your unpacked data!&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight python"&gt;&lt;code&gt;
-&lt;span class="n"&gt;alist&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;3&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
-&lt;span class="n"&gt;blist&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="mi"&gt;4&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;5&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;6&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
-&lt;span class="n"&gt;ctuple&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;7&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;8&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;9&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-
-&lt;span class="n"&gt;combined&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;alist&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="n"&gt;blist&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="nb"&gt;list&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;ctuple&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;     &lt;span class="c1"&gt;# tedious, less pythonic
-&lt;/span&gt;
-&lt;span class="n"&gt;unpacked&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="n"&gt;alist&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="n"&gt;blist&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="n"&gt;ctuple&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;        &lt;span class="c1"&gt;# hmm, cool, right ? more pythonic
-&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;We can use this kind of unpacking to assign some values to a variable. For example, we need the first element of the list in a variable and all other elements in another variable, then something like this will do the trick:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight python"&gt;&lt;code&gt;
-&lt;span class="n"&gt;a&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;3&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;4&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
-
-&lt;span class="n"&gt;b&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="n"&gt;c&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;a&lt;/span&gt;       &lt;span class="c1"&gt;# b = 1 and c = [2, 3, 4]
-&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h3&gt;
-  &lt;a href="#restrict-functions-to-keyword-only-arguments" class="anchor"&gt;
-  &lt;/a&gt;
-  Restrict Functions to Keyword Only Arguments
-&lt;/h3&gt;
-
-&lt;p&gt;Asterisks in python can be used to restrict a function so that it can take only keyword arguments, but how? let's look at an example below:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight python"&gt;&lt;code&gt;
-&lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;someFunc&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;firstarg&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;secondarg&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;
-    &lt;span class="k"&gt;pass&lt;/span&gt;
-
-&lt;span class="n"&gt;someFunc&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;      &lt;span class="c1"&gt;# Raises Exception - TypeError: someFunc takes 0 positional arguments, but 2 were given
-&lt;/span&gt;
-&lt;span class="n"&gt;someFunc&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;firstarg&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;secondarg&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="mi"&gt;3&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;   &lt;span class="c1"&gt;# Works like magic !
-&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;To restrict the function to take keyword arguments only, place an asterisk symbol before the arguments you want to be restricted.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight python"&gt;&lt;code&gt;
-&lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;someFunc&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;zerotharg&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;firstarg&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;secondarg&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;
-    &lt;span class="k"&gt;pass&lt;/span&gt;
-
-&lt;span class="c1"&gt;# Here, zerotharg is a positional argument (which we can use as a keyword also, but not restricted to it) and firstarg and secondarg (after the asterisk) are keyword-only (restricted) arguments.
-&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h3&gt;
-  &lt;a href="#unpack-multiple-arguments" class="anchor"&gt;
-  &lt;/a&gt;
-  Unpack Multiple Arguments
-&lt;/h3&gt;
-
-&lt;p&gt;Using an asterisk to get multiple arguments in a function is no less than magic in itself. Even, we can get multiple keyword arguments, that's insane!&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight python"&gt;&lt;code&gt;
-&lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;someFunc&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="n"&gt;args&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="o"&gt;**&lt;/span&gt;&lt;span class="n"&gt;kwargs&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;
-    &lt;span class="k"&gt;pass&lt;/span&gt;
-
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;&lt;code&gt;*args&lt;/code&gt; will take multiple positional arguments, unpacking them as a tuple (can be accessed using indices) and &lt;code&gt;**kwargs&lt;/code&gt; will take multiple keyword arguments, unpacking them as a dictionary (can be accessed as a dict key-value).&lt;/p&gt;
-
-
-
-
-&lt;p&gt;That's it from me!&lt;/p&gt;
-
-&lt;p&gt;I hope you enjoyed reading the article and if you have reached to this point, then what are you waiting for, hit follow button, share this with your friends and let others know the beauty of the python programming language!&lt;/p&gt;
-
-
-
-
-&lt;p&gt;Just starting your Open Source Journey? Don't forget to check &lt;a href="https://github.com/siddharth2016/hello-open-source"&gt;Hello Open Source&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Want to make a simple and awesome game from scratch? Check out &lt;a href="https://github.com/siddharth2016/PongPong"&gt;PongPong&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Want to &lt;code&gt;++&lt;/code&gt; your GitHub Profile README? Check out &lt;a href="https://github.com/marketplace/actions/quote-readme"&gt;Quote - README&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Till next time!&lt;/p&gt;
-
-&lt;p&gt;Namaste 🙏&lt;/p&gt;
-
-</description>
-      <category>python</category>
-      <category>programming</category>
-      <category>codenewbie</category>
-      <category>opensource</category>
+      <category>arduino</category>
+      <category>android</category>
+      <category>cpp</category>
+      <category>java</category>
     </item>
   </channel>
 </rss>
