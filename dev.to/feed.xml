@@ -7,6 +7,363 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>Understanding Atomics and Memory Ordering</title>
+      <author>protty</author>
+      <pubDate>Fri, 09 Apr 2021 00:33:25 +0000</pubDate>
+      <link>https://dev.to/kprotty/understanding-atomics-and-memory-ordering-2mom</link>
+      <guid>https://dev.to/kprotty/understanding-atomics-and-memory-ordering-2mom</guid>
+      <description>&lt;p&gt;Atomics and Memory Ordering always feel like an unapproachable topic. In the sea of poor explanations, I wish to add another by describing how I reason about all of this mess. This is only my understanding so if you need a better/formal explanation, I recommend reading through the memory model for your given programming language. In this case, it would be the C11 Memory Model described at &lt;a href="https://en.cppreference.com/w/cpp/atomic/memory_order"&gt;cppreference.com&lt;/a&gt;. &lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#shared-memory"&gt;
+  &lt;/a&gt;
+  Shared Memory
+&lt;/h1&gt;
+
+&lt;p&gt;Software and hardware is getting closer to the limits of performance when it comes to single-threaded execution of code. In order to continue scaling compute performance, a popular solution is to introduce multiple single-threaded execution units - or multi-threading. This form of computation manifests itself at different abstraction levels from multiple cores in a CPU to multiple CPUs in a machine and even multiple machines across a network. This post will be focusing more on cores in a CPU, referring to them as “threads”.&lt;/p&gt;
+
+&lt;p&gt;For some workloads, the tasks can be divided cleanly and split off to the threads for execution. Such tasks are known as &lt;a href="https://en.wikipedia.org/wiki/Embarrassingly_parallel"&gt;embarrassingly parallel&lt;/a&gt; and need not communicate with each other. This is the ideal that multithreaded algorithms should strive for since it takes advantage of all the existing optimizations available for single-threaded execution. However this isn't always possible and it's sometimes necessary for tasks to communicate and coordinate with each other, which is why we need to share memory between threads.&lt;/p&gt;
+
+&lt;p&gt;Communication is hard when your code is running in a preemptive scheduling setting. Such an environment means that, at any point, your code can be interrupted in order for other code to run. In applications, the operating system kernel can decide to switch from running your program to run another. In the kernel, hardware can switch from running kernel code to running interrupt handler code. Switching tasks around like this is known as concurrency and in order to synchronize/communicate, we need a way to exclude that concurrency for a small time frame or we risk operating with incomplete/partial data.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#atomics"&gt;
+  &lt;/a&gt;
+  Atomics
+&lt;/h1&gt;
+
+&lt;p&gt;Fortunately, CPUs supply software with special instructions to operate on shared memory which can't be interrupted. These are known as atomic memory operations and fit into three categories: Loads, Stores, and ReadModifyWrites (RMW). The first two are self explanatory. RMW is also pretty descriptive: it allows you to load data from memory, operate on the data, and store the result back into memory - all atomically. You may know RMW operations as atomic &lt;a href="https://docs.microsoft.com/en-us/windows/win32/api/winnt/nf-winnt-interlockedincrement"&gt;increment&lt;/a&gt;, &lt;a href="https://en.cppreference.com/w/cpp/atomic/atomic/exchange"&gt;swap&lt;/a&gt;, or &lt;a href="https://en.wikipedia.org/wiki/Compare-and-swap"&gt;compare and swap&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;To do something "atomically" means that it must happen (or be observed to happen) in its entirety or not at all. This implies that it cannot be interrupted. When something is "atomic", tearing (i.e. partial completion) of the operation cannot be observed. Atomic operations allow us to write code that can work with shared memory in a way that's safe against concurrent interruption.&lt;/p&gt;
+
+&lt;p&gt;Another thing about atomics is that they're the only sound (i.e. correctly defined) way to interact with shared memory when there's at least one writer and possibly multiple readers/writers to the shared memory. Trying to do so without atomics is considered a &lt;a href="https://en.wikipedia.org/wiki/Race_condition#Data_race"&gt;data race&lt;/a&gt; which is &lt;a href="https://en.cppreference.com/w/cpp/language/ub"&gt;undefined behavior&lt;/a&gt; (UB). UB is the act of relying on an assumption outside of your target program model (in our case, the C11 memory model). Doing so is unreliable as the compiler or cpu is allowed to do anything outside of its model.&lt;/p&gt;
+
+&lt;p&gt;Data races and the UB it implies isn’t just a theoretical issue. One of the single-threaded optimizations I mentioned earlier involves either the CPU or the compiler caching memory reads and writes. If you don’t use atomic operations, the operation itself could be ellided and replaced with its cached result which could break the logic of your code fairly easily:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="c1"&gt;# should be an atomic_load() but its data race
+&lt;/span&gt;&lt;span class="k"&gt;while&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="ow"&gt;not&lt;/span&gt; &lt;span class="n"&gt;load&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nb"&gt;bool&lt;/span&gt;&lt;span class="p"&gt;)):&lt;/span&gt;
+    &lt;span class="k"&gt;continue&lt;/span&gt;
+
+&lt;span class="c1"&gt;# a potential single-threaded optimization
+&lt;/span&gt;&lt;span class="n"&gt;cached&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;load&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nb"&gt;bool&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="k"&gt;while&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="ow"&gt;not&lt;/span&gt; &lt;span class="n"&gt;cached&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt; &lt;span class="c1"&gt;# possibly infinite loop!
+&lt;/span&gt;    &lt;span class="k"&gt;continue&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h1&gt;
+  &lt;a href="#reordering"&gt;
+  &lt;/a&gt;
+  Reordering
+&lt;/h1&gt;
+
+&lt;p&gt;Atomics solve communication only on atomically accessed memory; but not all memory being communicated can be accessed atomically. CPUs generally expose atomic operations for memory that's at most a few bytes large. Trying to do any other sort of general purpose memory communication means we need a way to make this memory available to threads with other means.&lt;/p&gt;
+
+&lt;p&gt;Making memory available to other threads is actually trickier than it sounds. Let's check out this code example:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="n"&gt;data&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="bp"&gt;None&lt;/span&gt;
+&lt;span class="n"&gt;has_data&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="bp"&gt;False&lt;/span&gt;
+
+&lt;span class="c1"&gt;# Thread 1
+&lt;/span&gt;&lt;span class="n"&gt;write&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;data&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;"hello"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="n"&gt;atomic_store&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;has_data&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="bp"&gt;True&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+&lt;span class="c1"&gt;# Thread 2
+&lt;/span&gt;&lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="n"&gt;atomic_load&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;has_data&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;
+    &lt;span class="n"&gt;d&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;read&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;data&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="k"&gt;assert&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;d&lt;/span&gt; &lt;span class="o"&gt;==&lt;/span&gt; &lt;span class="s"&gt;"hello"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;At first glance, this looks like it would work. Even if each thread were preempted between each instruction (line of code here), it seems the assert() should always succeed. Based on my wording, you've probably caught on that this assert() can actually fail! The reason for this is due to another single-threaded optimization called reordering.&lt;/p&gt;
+
+&lt;p&gt;Hardware (CPU) or software (the compiler as well) can decide to move around (i.e. “reorder”) your code and instructions any way they please as long as the end result is the same as the source code’s intent. This sort of “instruction scheduling” freedom allows for a variety of optimizations to take place.&lt;/p&gt;
+
+&lt;p&gt;One example of reordering is via speculative execution. This is when the CPU starts executing code that hasn't been reached yet, in the opportunistic chance that the results can be ready when that code is eventually reached. This is an amazing single-threaded throughput optimization, but it means that the &lt;code&gt;atomic_store()&lt;/code&gt; can be started before the &lt;code&gt;write()&lt;/code&gt;, or the &lt;code&gt;read()&lt;/code&gt; can be started before the &lt;code&gt;atomic_load()&lt;/code&gt;; both of which could make the assert() fail.&lt;/p&gt;
+
+&lt;p&gt;Another example of reordering is by CPU caches. CPUs don't read/write directly to shared memory since that's &lt;a href="https://gist.github.com/jboner/2841832"&gt;relatively slow&lt;/a&gt;. Instead, each CPU core has its own fast-access, local memory called cache. Most memory operations are performed on a CPU's cache and eventually flushed to / refreshed from to other caches in a process called &lt;a href="https://en.wikipedia.org/wiki/Cache_coherence"&gt;Cache Coherency&lt;/a&gt;. In our example, the &lt;code&gt;atomic_store()&lt;/code&gt; could have flushed from cache to shared memory before the &lt;code&gt;write()&lt;/code&gt; does (e.g. if flushing is done LIFO), or the &lt;code&gt;atomic_load()&lt;/code&gt; could refresh in cache before the &lt;code&gt;read()&lt;/code&gt; is; both of which could make the assert() to fail.&lt;/p&gt;
+
+&lt;p&gt;Even the compiler can reorder instructions, but only those without relationships called &lt;em&gt;dependencies&lt;/em&gt;. One instruction (line of code) is said to "depend" on a previous instruction if it uses the result from the previous one or if the previous one is a &lt;a href="https://en.wikipedia.org/wiki/Side_effect_(computer_science)"&gt;side effect&lt;/a&gt;. The compiler is free to reorder instructions anywhere before their dependency, but not after. This means &lt;code&gt;a = 5; b = 10;&lt;/code&gt; can be reordered to &lt;code&gt;b = 10; a = 5;&lt;/code&gt; which keeps the same semantics (achieving the same thing) since "a" and "b" don't share a dependency with each other. If it were instead &lt;code&gt;a = 5; b = a + 1;&lt;/code&gt; then "a" can't be moved after "b" since it wouldn't make logical sense as "b" has a dependency on "a". In our example, &lt;code&gt;atomic_store()&lt;/code&gt; doesn't have a dependency on &lt;code&gt;write()&lt;/code&gt; so it can be moved around which can make the assert() to fail.&lt;/p&gt;
+
+&lt;p&gt;At this point it should be clear that instruction reordering is a thing and, when interacting with shared memory, you have to be aware of it. The problem is that &lt;strong&gt;atomic operations on their own don't prevent reordering&lt;/strong&gt;. We need an additional concept for atomics to do this. In C11, atomic operations take in another parameter called "memory ordering" which helps solve this problem.&lt;/p&gt;
+
+&lt;p&gt;In our previous code example, there were two main issues: one of reordering and one of visibility. Memory orderings solve them by preventing code from being reordered around atomic operations and ensures that certain data or operations become visible or get conceptually "flushed/reloaded from cache". Lets see what this looks like.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#release-and-acquire"&gt;
+  &lt;/a&gt;
+  Release and Acquire
+&lt;/h1&gt;
+
+&lt;p&gt;We'll introduce two types of memory orderings for now: &lt;a href="https://en.cppreference.com/w/cpp/atomic/memory_order#Release-Acquire_ordering"&gt;Acquire and Release&lt;/a&gt;. Release goes on atomic stores and ensures that all memory operations declared before it actually happen before it. Acquire goes on atomic loads and ensures all memory operations declared after actually happen after it. This solves the reordering problem.&lt;/p&gt;
+
+&lt;p&gt;We then declare one more constraint: All memory operations before a given Release can be observed to &lt;a href="https://en.wikipedia.org/wiki/Happened-before"&gt;happen-before&lt;/a&gt; a matching Acquire. You could think of it as changes from the Release becoming visible in a &lt;code&gt;git push&lt;/code&gt; manner to the Acquire which does a sort of &lt;code&gt;git pull&lt;/code&gt;. This solves the visibility problem.&lt;/p&gt;
+
+&lt;p&gt;Let's add these to our code example:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="n"&gt;data&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="bp"&gt;None&lt;/span&gt;
+&lt;span class="n"&gt;has_data&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="bp"&gt;False&lt;/span&gt;
+
+&lt;span class="c1"&gt;# Thread 1
+&lt;/span&gt;&lt;span class="n"&gt;write&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;data&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;"hello"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="n"&gt;atomic_store&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;has_data&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="bp"&gt;True&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;Release&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+&lt;span class="c1"&gt;# Thread 2
+&lt;/span&gt;&lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="n"&gt;atomic_load&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;has_data&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;Acquire&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;
+    &lt;span class="n"&gt;d&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;read&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;data&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="k"&gt;assert&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;d&lt;/span&gt; &lt;span class="o"&gt;==&lt;/span&gt; &lt;span class="s"&gt;"hello"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Note that &lt;strong&gt;Release and Acquire don't do any sort of "waiting" or "blocking" for the data to become ready&lt;/strong&gt;. They aren't replacements for known synchronization primitives. Instead, they ensure that &lt;em&gt;if&lt;/em&gt; our atomic_load() sees &lt;code&gt;has_data&lt;/code&gt; to be True, &lt;em&gt;then&lt;/em&gt; it’s also guaranteed to see &lt;code&gt;write(&amp;amp;data, "hello")&lt;/code&gt; thanks to the matching Acquire and Release barriers so our assert should never fail.&lt;/p&gt;
+
+&lt;p&gt;For ReadModifyWrite (RMW) atomic instructions, they can also take in a memory ordering called &lt;code&gt;AcqRel&lt;/code&gt;. Given RMW operations conceptually do both an atomic load and an atomic store, &lt;code&gt;AcqRel&lt;/code&gt; makes both operations Acquire and Release respectively. This is useful when you want an atomic operation which both 1) makes memory available to other threads via Release and 2) sees memory made available by other threads via Acquire.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#fences-and-variables"&gt;
+  &lt;/a&gt;
+  Fences and Variables
+&lt;/h2&gt;
+
+&lt;p&gt;You'll notice that i've been saying &lt;em&gt;"matching Acquire/Release"&lt;/em&gt;. For our examples, the matching is from the load and store using the same "atomic variable' (&lt;code&gt;&amp;amp;has_data&lt;/code&gt;). Release and Acquires on different atomic variables don't synchronize with each other, it has to be the same atomic variable.&lt;/p&gt;
+
+&lt;p&gt;There's an exception to the rule which manifests itself as fences. Fences are a way to establish memory orderings of normal and atomic memory operations without necessarily associating with one given memory op.&lt;/p&gt;
+
+&lt;p&gt;Fences are a bit tricky for me as I have a hard time describing them, but they essentially create the happens-before relationship to surround atomics in a way that corresponds to the memory ordering being used:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;A &lt;code&gt;fence(Release)&lt;/code&gt; creates a happens-before relationship with another &lt;code&gt;fence(Acquire)&lt;/code&gt;
+&lt;/li&gt;
+&lt;li&gt;A &lt;code&gt;fence(Release)&lt;/code&gt; makes subsequent non-Release atomic stores into Release if they have a matching Acquire atomic load or matching &lt;code&gt;fence(Acquire)&lt;/code&gt;
+&lt;/li&gt;
+&lt;li&gt;A &lt;code&gt;fence(Acquire)&lt;/code&gt; makes previous non-Acquire atomic loads into Acquire if they have a matching Release atomic store or matching &lt;code&gt;fence(Release)&lt;/code&gt;.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Here's an example of how we could substitute the per-operation memory orderings with fences:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="n"&gt;data&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="bp"&gt;None&lt;/span&gt;
+&lt;span class="n"&gt;has_data&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="bp"&gt;False&lt;/span&gt;
+
+&lt;span class="c1"&gt;# Thread 1
+&lt;/span&gt;&lt;span class="n"&gt;write&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;data&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;"hello"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="n"&gt;fence&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Release&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="n"&gt;atomic_store&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;has_data&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="bp"&gt;True&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+&lt;span class="c1"&gt;# Thread 2
+&lt;/span&gt;&lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="n"&gt;atomic_load&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;has_data&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;
+    &lt;span class="n"&gt;fence&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Acquire&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="n"&gt;d&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;read&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;data&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="k"&gt;assert&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;d&lt;/span&gt; &lt;span class="o"&gt;==&lt;/span&gt; &lt;span class="s"&gt;"hello"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#case-study-mutex"&gt;
+  &lt;/a&gt;
+  Case Study: Mutex
+&lt;/h2&gt;
+
+&lt;p&gt;You may have also noticed that this section is called "Release and Acquire" instead of "Acquire and Release". This is done intentionally as having Acquire first often construdes the happens-before relationship. Instead of thinking about lock(Acquire) and unlock(Release), it should instead be thought about unlock(Release) making critical section changes available to lock(Acquire):&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="n"&gt;mutex&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;Mutex&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+&lt;span class="n"&gt;data&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="bp"&gt;None&lt;/span&gt;
+
+&lt;span class="c1"&gt;# Thread 1 (assume locked)
+&lt;/span&gt;    &lt;span class="n"&gt;data&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s"&gt;"hello"&lt;/span&gt;
+    &lt;span class="n"&gt;fence&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Release&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="n"&gt;mutex&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;unlock&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+
+&lt;span class="c1"&gt;# Thread 2 (assume unlocked)
+&lt;/span&gt;    &lt;span class="n"&gt;mutex&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;lock&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+    &lt;span class="n"&gt;fence&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Acquire&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="k"&gt;assert&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;data&lt;/span&gt; &lt;span class="o"&gt;==&lt;/span&gt; &lt;span class="s"&gt;"hello"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The Release ordering for a mutex only serves to "Release" the changes to the next mutex locker, who "Acquires" the previously released changes by the last mutex unlocker. The canonically backwards relationship better demonstrates the happens-before relationship between Release and Acquire compared to just saying &lt;em&gt;"lock() acquires and unlock() releases"&lt;/em&gt;.&lt;/p&gt;
+
+&lt;p&gt;What we have created here is called a Partial Ordering. It's an ordering between two sets of (memory) operations. The reason it's "partial" is because it orders between sets instead of the individual operations themselves: The operations before a Release don't need to be observed happening in the order they were described for an Acquire, they just need to be observed to have happened &lt;em&gt;at all&lt;/em&gt;.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#sequential-consistency"&gt;
+  &lt;/a&gt;
+  Sequential Consistency
+&lt;/h1&gt;
+
+&lt;p&gt;There are cases when you need certain atomic operations to be observed in a given order between each other. What we need now is a Total Ordering. This ensures there's some defined ordering between the operations themselves rather than a set of operations and is what the &lt;code&gt;SeqCst&lt;/code&gt; memory ordering is used for.&lt;/p&gt;
+
+&lt;p&gt;Let's see another code example:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="n"&gt;head&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt;
+&lt;span class="n"&gt;tail&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt;
+&lt;span class="n"&gt;buf&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[...]&lt;/span&gt;
+
+&lt;span class="c1"&gt;# Thread 1
+&lt;/span&gt;&lt;span class="n"&gt;steal&lt;/span&gt;&lt;span class="p"&gt;():&lt;/span&gt;
+    &lt;span class="n"&gt;h&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;atomic_load&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;head&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="n"&gt;t&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;atomic_load&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;tail&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="n"&gt;t&lt;/span&gt; &lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="n"&gt;h&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+        &lt;span class="n"&gt;item&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;buf&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;h&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+        &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="n"&gt;atomic_cas&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;head&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;h&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;h&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;
+            &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="n"&gt;item&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="bp"&gt;None&lt;/span&gt;
+
+&lt;span class="c1"&gt;# Thread 2
+&lt;/span&gt;&lt;span class="n"&gt;pop&lt;/span&gt;&lt;span class="p"&gt;():&lt;/span&gt;
+    &lt;span class="n"&gt;t&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;tail&lt;/span&gt;
+    &lt;span class="n"&gt;atomic_store&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;tail&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;t&lt;/span&gt; &lt;span class="o"&gt;-&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="n"&gt;h&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;atomic_load&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;head&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="n"&gt;t&lt;/span&gt; &lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="n"&gt;h&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; 
+        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="n"&gt;buf&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;t&lt;/span&gt; &lt;span class="o"&gt;-&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="n"&gt;t&lt;/span&gt; &lt;span class="o"&gt;==&lt;/span&gt; &lt;span class="n"&gt;h&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt; &lt;span class="ow"&gt;and&lt;/span&gt; &lt;span class="n"&gt;atomic_cas&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;head&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;h&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;t&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;
+        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="n"&gt;buf&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;t&lt;/span&gt; &lt;span class="o"&gt;-&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+    &lt;span class="n"&gt;atomic_store&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;tail&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;t&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="bp"&gt;None&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This is code taken from the implementation of a &lt;a href="https://fzn.fr/readings/ppopp13.pdf"&gt;LIFO Deque by Chase. Lev&lt;/a&gt;. What it does isn't necessarily important but it serves as a nice example when &lt;code&gt;SeqCst&lt;/code&gt; is actually needed. &lt;/p&gt;
+
+&lt;p&gt;For pop(), we want to ensure that the store to &lt;code&gt;tail&lt;/code&gt; is observed to happen before the load to &lt;code&gt;head&lt;/code&gt;. If not, pop() may not see the items removed from steal(). Lets try to apply Acquire and Release to pop():&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="n"&gt;atomic_store&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;tail&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;t&lt;/span&gt; &lt;span class="o"&gt;-&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;Release&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="n"&gt;h&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;atomic_load&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;head&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;Acquire&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This doesn't exactly do what we want: Release prevents stuff &lt;em&gt;before&lt;/em&gt; the store() being reordered after, and Acquire prevents stuff &lt;em&gt;after&lt;/em&gt; the load() being reordered before it. There's no guarantee that the store() and load() &lt;em&gt;themselves&lt;/em&gt; can't be reordered before/after each other.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;        other memory operations
+    ^       |            
+    |       X     store release----
+    |                             |
+    ----load acquire    X         |
+                        |         v
+        other memory operations
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;In order to ensure that the atomic store() and load() stay in their declared order we either need an Acquire barrier on the store(), which we can semantically achieve using an RMW operation with AcqRel (&lt;code&gt;atomic_swap(&amp;amp;tail, t - 1, AcqRel)&lt;/code&gt;), or we need &lt;code&gt;SeqCst&lt;/code&gt;.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="n"&gt;atomic_store&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;tail&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;t&lt;/span&gt; &lt;span class="o"&gt;-&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;SeqCst&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="n"&gt;h&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;atomic_load&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;head&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;SeqCst&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;SeqCst does two things here: It acts as a Release for stores / Acquire for loads as before, but it also ensures a total-ordering between all SeqCst operations. The total-ordering ensures that the store will be seen before the load for other totally-ordered operations. Because total-ordering only applies to other SeqCst ops, we need to apply SeqCst to everything that relies on the total-ordering. This includes the atomic load/cas in pop() as well as the atomic loads/cas in steal(). The total-ordering property also extends to &lt;code&gt;fence(SeqCst)&lt;/code&gt; so we can use those to achieve the same reordering effects:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="n"&gt;steal&lt;/span&gt;&lt;span class="p"&gt;():&lt;/span&gt;
+  &lt;span class="n"&gt;t&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;atomic_load&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;tail&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="n"&gt;fence&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;SeqCst&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="n"&gt;h&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;atomic_load&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;head&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="p"&gt;...&lt;/span&gt;
+
+&lt;span class="n"&gt;pop&lt;/span&gt;&lt;span class="p"&gt;():&lt;/span&gt;
+  &lt;span class="n"&gt;atomic_store&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;tail&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;t&lt;/span&gt; &lt;span class="o"&gt;-&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="n"&gt;fence&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;SeqCst&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="n"&gt;h&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;atomic_load&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;head&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;To be clear, &lt;code&gt;SeqCst&lt;/code&gt; shouldn't be used to somehow gain Acquire on stores or Release on loads. That can lead to incorrect usage: &lt;code&gt;store(SeqCst); load(Acquire)&lt;/code&gt; doesn't ensure that the store will not be reordered after the load() since the load() isn't a part of its total-ordering (it's not SeqCst as well).&lt;/p&gt;
+
+&lt;p&gt;It should be used instead to enforce a total-ordering between multiple atomic variables and introduce partial ordering (Acquire/Release as before) which together can achieve the same effect. More emphasis that &lt;strong&gt;total ordering only applies to other SeqCst atomic operations&lt;/strong&gt; or to surrounding ops in relation to &lt;code&gt;fence(SeqCst)&lt;/code&gt;. See &lt;a href="https://github.com/rust-lang/nomicon/issues/166"&gt;this issue&lt;/a&gt; for more warnings.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#weak-orderings"&gt;
+  &lt;/a&gt;
+  Weak orderings
+&lt;/h1&gt;
+
+&lt;p&gt;In most cases you probably don't need total-ordering on operations for multiple atomic variables. Having the requirement for &lt;code&gt;SeqCst&lt;/code&gt; is pretty rare. In practice, &lt;code&gt;SeqCst&lt;/code&gt; is unfortunately often overused and a problematic sign that the programmer wasn't sure what memory ordering to use... Anyway, when you don't want total-ordering over different atomic variables and don't need partial ordering, you should reach for the &lt;a href="https://en.cppreference.com/w/cpp/atomic/memory_order#Relaxed_ordering"&gt;Relaxed&lt;/a&gt; memory ordering (also known as Monotonic under LLVM).&lt;/p&gt;
+
+&lt;p&gt;All this does is ensure a total-order between all atomic operations &lt;strong&gt;to the same atomic variable&lt;/strong&gt;. In other words, other memory operations not on the same memory location can be reordered around it. So &lt;code&gt;store(X); load(Y)&lt;/code&gt; can be reordered around each other but &lt;code&gt;store(Y); load(Y)&lt;/code&gt; can't.&lt;/p&gt;
+
+&lt;p&gt;All other memory orderings (Acquire/Release/AcqRel/SeqCst) inherit the Relaxed property of "single variable total-ordering" and are known to be "stronger" than it. Relaxed is useful for things like counters or generic single-atomic data that you just read, update, and check out. You cannot use this to synchronize other normal &lt;em&gt;or&lt;/em&gt; atomic memory operations.&lt;/p&gt;
+
+&lt;p&gt;There are even cases where you don't need the total-ordering on the same atomic variable itself and just want to perform some memory operation atomically (i.e. to be free of data-races). For this, you would use the LLVM's &lt;a href="https://llvm.org/docs/Atomics.html#unordered"&gt;Unordered&lt;/a&gt; memory ordering. The need for this ordering is even more rare than the need for &lt;code&gt;SeqCst&lt;/code&gt;. Unordered also isn't even present in the C11 memory model (it only gets as "weak" as Relaxed).&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#hardware-quirks"&gt;
+  &lt;/a&gt;
+  Hardware Quirks
+&lt;/h1&gt;
+
+&lt;p&gt;On modern CPU instruction set architectures (ISA), normal memory operations are atomic by default. The upside is that you don't pay a price for Relaxed/Unordered memory orderings or atomic loads/stores vs normal operations. The downside is that data-races don't exist for the ISA so it's harder to know if you have one or not. Fortunately there are tools which can instrument your memory accesses to detect data races like LLVM's &lt;a href="https://clang.llvm.org/docs/ThreadSanitizer.html"&gt;ThreadSanitizer&lt;/a&gt; (TSAN).&lt;/p&gt;
+
+&lt;p&gt;Certain CPU ISAs are known to have Total-Store-Ordering (TSO). This includes things like x86 and SPARC. Here, upon normal memory operations being atomic, they also get partial ordering for free. This means loads are Acquire by default and stores are Release by default. As before, you get the benefit of Release/Acquire operations having no overhead (besides inhibiting compiler optimizations) but it also has its downsides. In this case, it lets you be pretty free with orderings so your Relaxed code that should be Release/Acquire will work there but break on other architectures making it easy to write code with incorrect memory orderings.&lt;/p&gt;
+
+&lt;p&gt;The "other" architectures mentioned are called Weakly-Ordered ISAs. This includes things like ARM, AARCH64, POWERPC, RISCV, MIPS, etc. Here, loads and stores are still atomic by default but they're only Relaxed and you pay prices for Acquire/Release. This means that getting ordering wrong gives you a higher chance of observing incorrect behavior. The weaker default orderings theoretically allow for more reordering opportunities by the CPU but this doesn't appear to matter in practice given how much better modern x86 CPUs are for cross-core communication in the general case.&lt;/p&gt;
+
+&lt;p&gt;When it comes to Sequential Consistency however, there aren't really any platforms where you get this for free. &lt;code&gt;fence(SeqCst)&lt;/code&gt; in particular is generally the most costly since it often requires a full barrier to implement which prevents all forms of reordering. On x86, it's achieved with &lt;code&gt;mfence&lt;/code&gt; although &lt;a href="https://stackoverflow.com/a/50279772"&gt;it can be done cheaper&lt;/a&gt; using &lt;code&gt;lock&lt;/code&gt; prefixed instructions if you're not synchronizing write-combined memory instructions. SeqCst loads/stores often require either promotion to RMW ops or Acquire/Release barriers to keep their semantics. This may be why SeqCst operations are rumored to be "slow" (they really aren't).&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#conclusion"&gt;
+  &lt;/a&gt;
+  Conclusion
+&lt;/h1&gt;
+
+&lt;p&gt;Working with atomic operations requires reasoning about memory very differently than you would normally. You have to take into account both concurrency for the validity of your atomic algorithm, and reordering/visibility for the validity of your algorithm's memory access. It's no wonder that it's considered a challenging topic to tackle.&lt;/p&gt;
+
+&lt;p&gt;Hopefully you have Acquired some of this Released information in a way which gives you more visibility into how all of this stuff works. There's more to discuss with atomics than presented here such as how to build correct atomic data structures, handling concurrent memory reclamation, and reducing synchronization. These are all interesting in their own right, but should be saved for another time.&lt;/p&gt;
+
+</description>
+      <category>cpp</category>
+      <category>atomic</category>
+      <category>llvm</category>
+      <category>optimization</category>
+    </item>
+    <item>
       <title>Introducing the GitHub Security Overview | GitHub Security Center</title>
       <author>Davide Benvegnù</author>
       <pubDate>Fri, 09 Apr 2021 00:03:35 +0000</pubDate>
@@ -55,6 +412,220 @@
       <category>security</category>
       <category>devops</category>
       <category>devsecops</category>
+    </item>
+    <item>
+      <title>Challenge of Serverless: Database Connections</title>
+      <author>Noah</author>
+      <pubDate>Fri, 09 Apr 2021 00:00:15 +0000</pubDate>
+      <link>https://dev.to/noahfschr/challenge-of-serverless-database-connections-21pk</link>
+      <guid>https://dev.to/noahfschr/challenge-of-serverless-database-connections-21pk</guid>
+      <description>&lt;p&gt;Designing a database for serverless, the biggest challenge in our mind was to build an infrastructure which supports per request pricing in a profitable way. We believe Upstash has achieved this. After we launched the product, we saw that there was another major challenge: Database connections!&lt;/p&gt;
+
+&lt;p&gt;As you know, Serverless Functions scale from 0 to infinity. This means when your functions get a lot of traffic, the cloud provider creates new containers (lambda functions) in parallel and scales out your backend. If you create a new database connection within the function then you can rapidly reach the connection limit of your database.&lt;/p&gt;
+
+&lt;p&gt;If you try to cache the connection outside the lambda functions then another problem occurs. When AWS freezes your Lambda function, it does not close the connection. So you may end up with many idle/zombie connections which can still threaten.&lt;/p&gt;
+
+&lt;p&gt;This problem is not specific to Redis, it applies to all databases which rely on TCP connections (Mysql, Postgre, MongoDB etc). You can see the serverless community is creating solutions like &lt;a href="https://github.com/jeremydaly/serverless-mysql"&gt;serverless-mysql&lt;/a&gt;. These are client-side solutions. As Upstash, we have the advantage of implementing and maintaining the server-side. So we decided to mitigate the problem by monitoring the connections and evicting the idle ones. So here the algorithm: As max-concurrent-connection, we have two limits for a database, soft-limit and hard-limit. When a database reaches the soft-limit we start to terminate the idle connections. We continue to accept new connection requests until the hard-limit is reached. If the database reaches the hard limit then we start rejecting new connections.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#connection-eviction-algorithm"&gt;
+  &lt;/a&gt;
+  Connection Eviction Algorithm
+&lt;/h3&gt;
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;if( current_connection_count &amp;lt; SOFT_LIMIT ) {
+    ACCEPT_NEW_CONNECTIONS
+}
+
+if( current_connection_count &amp;gt; SOFT_LIMIT &amp;amp;&amp;amp; current_connection_count &amp;lt; HARD_LIMIT ) {
+    ACCEPT_NEW_CONNECTIONS
+    START_EVICTING_IDLE_CONNECTIONS
+}
+
+if( current_connection_count &amp;gt; HARD_LIMIT ) {
+    REJECT_NEW_CONNECTIONS
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Note that the max concurrent connection limits listed in the &lt;a href="https://docs.upstash.com/overall/databasetypes"&gt;Upstash docs&lt;/a&gt; are the soft limits.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#ephemeral-connections"&gt;
+  &lt;/a&gt;
+  Ephemeral Connections
+&lt;/h3&gt;
+
+&lt;p&gt;After deploying the above algorithm, we have seen a great decrease in the number of rejected connections in all regions. But still if you want to be on the safe side, you can solve the problem on your side too. Instead of reusing the connection, you can  open the Redis connection inside the function but also close them whenever you are done with Redis as below:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="nx"&gt;exports&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;handler&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;event&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;client&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;Redis&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;process&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;env&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;REDIS_URL&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="cm"&gt;/*
+    do stuff with redis
+    */&lt;/span&gt;
+    &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;client&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;quit&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+    &lt;span class="cm"&gt;/*
+    do other stuff
+    */&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="na"&gt;response&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;response&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
+    &lt;span class="p"&gt;};&lt;/span&gt;
+&lt;span class="p"&gt;};&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The above code helps you to minimize the concurrent connection count. People ask about the latency overhead of new connections. Redis connections are known to be very lightweight.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#are-redis-connections-really-lightweight"&gt;
+  &lt;/a&gt;
+  Are Redis Connections Really Lightweight?
+&lt;/h3&gt;
+
+&lt;p&gt;We have run a benchmark test to see how lightweight the Redis connections are. In this test we compare the latency numbers of two approaches:&lt;/p&gt;
+
+&lt;p&gt;1- EPHEMERAL CONNECTIONS: We do not reuse the connection. Instead we create a new connection for each command and close the connection immediately. We record the latency of client creation, ping() and client.quit() together. See the &lt;code&gt;benchEphemeral()&lt;/code&gt; method in the code section below.&lt;/p&gt;
+
+&lt;p&gt;2- REUSE CONNECTIONS: We create a connection once and reuse the same connection for all commands. Here, we record the latency of &lt;code&gt;ping()&lt;/code&gt; operation. See the &lt;code&gt;benchReuse()&lt;/code&gt; method below.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;benchReuse&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;client&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;Redis&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;options&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;hist&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;hdr&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;build&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+    &lt;span class="k"&gt;for&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;index&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; &lt;span class="nx"&gt;index&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt; &lt;span class="nx"&gt;total&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; &lt;span class="nx"&gt;index&lt;/span&gt;&lt;span class="o"&gt;++&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;start&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;performance&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;now&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt; &lt;span class="mi"&gt;1000&lt;/span&gt; &lt;span class="c1"&gt;// to μs&lt;/span&gt;
+        &lt;span class="nx"&gt;client&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;ping&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+        &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;end&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;performance&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;now&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt; &lt;span class="mi"&gt;1000&lt;/span&gt; &lt;span class="c1"&gt;// to μs&lt;/span&gt;
+        &lt;span class="nx"&gt;hist&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;recordValue&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;end&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="nx"&gt;start&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+        &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;delay&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;10&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="nx"&gt;client&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;quit&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+    &lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;hist&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;outputPercentileDistribution&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;));&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;benchEphemeral&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;hist&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;hdr&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;build&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+    &lt;span class="k"&gt;for&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;index&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; &lt;span class="nx"&gt;index&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt; &lt;span class="nx"&gt;total&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; &lt;span class="nx"&gt;index&lt;/span&gt;&lt;span class="o"&gt;++&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;start&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;performance&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;now&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt; &lt;span class="mi"&gt;1000&lt;/span&gt; &lt;span class="c1"&gt;// to μs&lt;/span&gt;
+        &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;client&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;Redis&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;options&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+        &lt;span class="nx"&gt;client&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;ping&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+        &lt;span class="nx"&gt;client&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;quit&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+        &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;end&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;performance&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;now&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt; &lt;span class="mi"&gt;1000&lt;/span&gt; &lt;span class="c1"&gt;// to μs&lt;/span&gt;
+        &lt;span class="nx"&gt;hist&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;recordValue&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;end&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="nx"&gt;start&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+        &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;delay&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;10&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;hist&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;outputPercentileDistribution&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;));&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;See &lt;a href="https://github.com/upstash/redis-connection-benchmark"&gt;the repo&lt;/a&gt;, if you want to run the benchmark yourself.&lt;/p&gt;
+
+&lt;p&gt;We ran this benchmark code in AWS EU-WEST-1 region in two different setups. The first setup is SAME ZONE where the client and database are in the same availability zone. The second setup is INTER ZONE where the client runs in a different availability zone than the database. We have used Upstash Standard type as database servers.&lt;/p&gt;
+
+&lt;p&gt;We have seen the overhead of creating and closing a new connection (ephemeral approach) is only 75 microseconds (99th percentile). The overhead is very similar in the interzone setup (80 microseconds).&lt;/p&gt;
+
+&lt;p&gt;Then we decided to repeat the same test inside AWS Lambda functions. The results were different. Especially when we set the memory of Lambda function low (128Mb), we have seen bigger overhead of Redis connections. We have seen latency overhead up to 6-7 msec inside AWS Lambda functions.&lt;/p&gt;
+
+&lt;p&gt;Our conclusions about the Redis connections:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Redis connections are really lightweight on a system with a reasonable amount of CPU power. Even on t2.micro.&lt;/li&gt;
+&lt;li&gt;CPU power with the default AWS Lambda configuration is very poor, which significantly increases the cost of TCP connections with respect to total execution time of the Lambda function.&lt;/li&gt;
+&lt;li&gt;If you use Lambda functions with the default/minimum memory, then you would better cache the Redis connection outside the function.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3&gt;
+  &lt;a href="#frozen-container-gt-zombie-connection"&gt;
+  &lt;/a&gt;
+  Frozen Container =&amp;gt; Zombie Connection
+&lt;/h3&gt;
+
+&lt;p&gt;After realizing that connection can have notable overhead in some AWS Lambda setups, we decided to make further tests on &lt;code&gt;reusing connection&lt;/code&gt; in AWS Lambda. We have detected another issue. This was an edge case no one has reported yet.&lt;/p&gt;
+
+&lt;p&gt;Here the timeline how it happens:&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;STEP1 - timer-0sec:&lt;/strong&gt; We send a request, caching the connection outside the lambda function.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="k"&gt;typeof&lt;/span&gt; &lt;span class="nx"&gt;client&lt;/span&gt; &lt;span class="o"&gt;===&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;undefined&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;var&lt;/span&gt; &lt;span class="nx"&gt;client&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;Redis&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;REDIS_URL&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="nx"&gt;module&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;exports&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;hello&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;async&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;event&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;response&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;client&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="kd"&gt;get&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;foo&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="na"&gt;response&lt;/span&gt; &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;response&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;-&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="nx"&gt;time&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;};&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;strong&gt;STEP2 - timer-5sec:&lt;/strong&gt; AWS freezes the container after a short time.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;STEP3 - time-60sec:&lt;/strong&gt; Upstash has a timeout of 60 seconds for idle connections. So it kills the connection, but can not get ACK from the client as it is frozen. So server connection goes into state &lt;a href="https://kb.iu.edu/d/ajmi"&gt;FIN_WAIT_2&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;STEP4 - time-90sec:&lt;/strong&gt; Upstash server kills the connection completely, exiting from FIN_WAIT_2 state.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;STEP5 - time-95sec:&lt;/strong&gt; Client sends the same request and gets ETIMEDOUT exception. Because the client assumes the connection is open but it is not.  🤦🏻 🤦🏻 🤦🏻&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;STEP6 - time-396sec:&lt;/strong&gt; 5 minutes after the last request, AWS kills the container completely.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;STEP7 - time-400sec:&lt;/strong&gt; Client sends the same request this time it works well because the container is created from scratch so the initialization step is not skipped. A new connection is created.&lt;/p&gt;
+
+&lt;p&gt;As you can see above, AWS thaws a container and reuses the connection. But the connection has been closed from the server side and it could not be communicated because the function was frozen. So there is a synchronization problem between Upstash evicting an idle connection and AWS handling an idle function. So if we kill an idle connection only after AWS terminates a function then there will not be any issue.&lt;/p&gt;
+
+&lt;p&gt;We changed Upstash connection timeout to 310 seconds assuming that AWS terminates an idle function in 300 seconds. After this change, the problem disappeared. The problem here is AWS is not transparent when they terminate idle functions. So we need to continue testing and try to detect if the issue happens again.&lt;/p&gt;
+
+&lt;p&gt;This issue is quite similar to &lt;a href="https://github.com/jeremydaly/serverless-mysql/issues/57#issuecomment-580144732"&gt;the issue&lt;/a&gt; seen on serverless-mysql library. In the comments, it has been suggested to retry the request upon the ETIMEDOUT exception. But retrying has two drawbacks. First you may retry a write request which might have been processed and timed out with a real network problem. The second problem is the extra latency of the failed request.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#graphql-helps-too"&gt;
+  &lt;/a&gt;
+  GraphQL Helps Too
+&lt;/h3&gt;
+
+&lt;p&gt;One way to get rid of connection issues to have connectionless API. Upstash supports &lt;a href="https://docs.upstash.com/graphql/aboutgraphqlapi"&gt;GraphQL API&lt;/a&gt; in addition to Redis protocol. GraphQL is HTTP based so it does not have the connection limit issue. Check the docs for supported commands. Beware that GraphQL API has a latency overhead (about 5msec) over Redis protocol.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#conclusion"&gt;
+  &lt;/a&gt;
+  Conclusion
+&lt;/h3&gt;
+
+&lt;p&gt;We customize Upstash databases for a smooth experience for serverless applications. Our new server-side algorithm removes inactive connections that AWS Lambda creates in abundance. You can minimize the number of connections by opening/closing your Redis client inside the Lambda function but this can have latency overhead if your function memory is less than 1GB.&lt;/p&gt;
+
+&lt;p&gt;As a conclusion, our recommendation for the serverless use cases:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;If your use case is latency sensitive (e.g. 6msec is big for you) then reuse the Redis client.&lt;/li&gt;
+&lt;li&gt;If you experience a very high number of concurrent clients (over 1000) then reuse the Redis client.&lt;/li&gt;
+&lt;li&gt;If your use case is not latency sensitive then open/close the Redis client inside the function.&lt;/li&gt;
+&lt;li&gt;If your function has at least 1GB memory then open/close the Redis client inside the function.&lt;/li&gt;
+&lt;/ul&gt;
+
+</description>
+      <category>serverless</category>
+      <category>database</category>
+      <category>redis</category>
+      <category>aws</category>
     </item>
     <item>
       <title>Bookmarklets - The Ultimate Web Tools - What they are and how to make them.</title>
@@ -1304,221 +1875,6 @@ yarn add v1.22.5
       <category>cli</category>
       <category>typescript</category>
       <category>nestjs</category>
-    </item>
-    <item>
-      <title>PostgreSQL Interview Questions</title>
-      <author>Kpeale Legbara</author>
-      <pubDate>Thu, 08 Apr 2021 20:22:02 +0000</pubDate>
-      <link>https://dev.to/arctype/postgresql-interview-questions-1cjo</link>
-      <guid>https://dev.to/arctype/postgresql-interview-questions-1cjo</guid>
-      <description>&lt;p&gt;If you’re interviewing for a position in which you’ll have to work with a PostgreSQL database; there are some fundamental things that you should know. In this article, I have prepared some important PostgreSQL interview questions and answers which will help you succeed in your interview.&lt;/p&gt;
-
-&lt;p&gt;See if you can read through the list below and answer every question. If you can - you are going to crush this interview! If not, read on below for the answers and explanations.&lt;/p&gt;
-
-&lt;h4&gt;
-  &lt;a href="#question-list"&gt;
-  &lt;/a&gt;
-  Question List
-&lt;/h4&gt;
-
-&lt;ol&gt;
-&lt;li&gt;What are the languages which PostgreSQL supports?&lt;/li&gt;
-&lt;li&gt;What are the main features of PostgreSQL?&lt;/li&gt;
-&lt;li&gt;What is a non-clustered index?&lt;/li&gt;
-&lt;li&gt;How can you store binary data?&lt;/li&gt;
-&lt;li&gt;Explain what a Function is&lt;/li&gt;
-&lt;li&gt;How can we change the column data type in SQL?&lt;/li&gt;
-&lt;li&gt;Explain Write-Ahead Logging&lt;/li&gt;
-&lt;li&gt;What is multi-version concurrency control?&lt;/li&gt;
-&lt;li&gt;What are tokens?&lt;/li&gt;
-&lt;li&gt;Explain how to Enable Debugging&lt;/li&gt;
-&lt;li&gt;What is the purpose of Array_To_String in PostgreSQL?&lt;/li&gt;
-&lt;li&gt;What is a CTID?&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;h2&gt;
-  &lt;a href="#what-are-the-languages-which-postgresql-supports"&gt;
-  &lt;/a&gt;
-  What are the languages which PostgreSQL supports?
-&lt;/h2&gt;
-
-&lt;p&gt;It supports a language of its own, PL/pgSQL and it supports internal procedural languages - Python, Perl, and Tcl.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#what-are-the-main-features-of-postgresql"&gt;
-  &lt;/a&gt;
-  What are the main features of PostgreSQL?
-&lt;/h2&gt;
-
-&lt;ul&gt;
-&lt;li&gt;MVCC (Multi Version Concurrency Control), and procedural languages&lt;/li&gt;
-&lt;li&gt;Flexible API and data validation&lt;/li&gt;
-&lt;li&gt;Support and extensibility for SQL
-We covered more of the key features of &lt;a href="https://arctype.com/blog/mysqlvspostgres/"&gt;Postgres compared to MySQL in a previous blog post&lt;/a&gt;. &lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h2&gt;
-  &lt;a href="#what-is-a-nonclustered-index"&gt;
-  &lt;/a&gt;
-  What is a non-clustered index?
-&lt;/h2&gt;
-
-&lt;p&gt;A non-clustered index is a type of index where the order of the rows does not match the order of the actual data.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#how-can-you-store-binary-data-in-postgresql"&gt;
-  &lt;/a&gt;
-  How can you store binary data in PostgreSQL?
-&lt;/h2&gt;
-
-&lt;p&gt;PostgreSQL provides two distinct methods for storing binary data:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;The first is by storing the binary data in a table using the data type &lt;code&gt;bytea&lt;/code&gt;.&lt;/li&gt;
-&lt;li&gt;The second method is by using the Large Object feature, which stores the binary data in a separate table in a special format and refers to that table by storing a value of type &lt;code&gt;oid&lt;/code&gt; in your table. 
-The &lt;code&gt;bytea&lt;/code&gt; data type is not well suited for storing very large amounts of data, while the Large Object method for storing binary data is better suited for storing very large values. &lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h2&gt;
-  &lt;a href="#explain-functions-in-postgresql"&gt;
-  &lt;/a&gt;
-  Explain functions in PostgreSQL
-&lt;/h2&gt;
-
-&lt;p&gt;Functions in PostgreSQL are also known as stored procedures. They are used to store commands, declarations, assignments, etc. This makes it easy to perform operations that would generally take thousands of lines of code to write. &lt;br&gt;
-PostgreSQL functions can be created in several languages such as SQL, PL/pgSQL, C, Python, etc.&lt;/p&gt;
-&lt;h2&gt;
-  &lt;a href="#how-can-we-change-the-column-data-type-in-sql"&gt;
-  &lt;/a&gt;
-  How can we change the column data type in SQL?
-&lt;/h2&gt;
-
-&lt;p&gt;Columns data-type in PostgreSQL are changed using the &lt;code&gt;ALTER TABLE&lt;/code&gt; statement combined with the &lt;code&gt;ALTER COLUMN&lt;/code&gt; statement.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight sql"&gt;&lt;code&gt;&lt;span class="k"&gt;ALTER&lt;/span&gt; &lt;span class="k"&gt;TABLE&lt;/span&gt; &lt;span class="k"&gt;table_name&lt;/span&gt; &lt;span class="k"&gt;ALTER&lt;/span&gt; &lt;span class="k"&gt;COLUMN&lt;/span&gt; &lt;span class="k"&gt;column_name&lt;/span&gt; &lt;span class="k"&gt;SET&lt;/span&gt; &lt;span class="k"&gt;DATA&lt;/span&gt; &lt;span class="k"&gt;TYPE&lt;/span&gt; &lt;span class="n"&gt;new_data_type&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#explain-writeahead-logging"&gt;
-  &lt;/a&gt;
-  Explain Write-Ahead Logging
-&lt;/h2&gt;
-
-&lt;p&gt;This feature provides a log of a database in case of a database crash by logging changes before any changes or updates are made to the database.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#what-is-multiversion-concurrency-control-in-postgresql"&gt;
-  &lt;/a&gt;
-  What is multi-version concurrency control in PostgreSQL?
-&lt;/h2&gt;
-
-&lt;p&gt;It is a method commonly used to provide concurrent access to the database, and in programming languages to implement transactional memory. It avoids unnecessary locking of the database - removing the time lag for the user to log into the database.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#what-are-tokens"&gt;
-  &lt;/a&gt;
-  What are tokens?
-&lt;/h2&gt;
-
-&lt;p&gt;Answer: Tokens are the building blocks of any line of source code. A token can be a keyword, an identifier, a quoted identifier, a constant, etc. Tokens which are keywords consist of predefined SQL commands, while identifiers are used to represent variable names like columns and tables.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#explain-how-to-enable-debugging-in-postgresql"&gt;
-  &lt;/a&gt;
-  Explain how to enable debugging in PostgreSQL
-&lt;/h2&gt;
-
-&lt;p&gt;This command is used for enabling the compilation of all libraries and applications. This process slows down the system and at the same time increases the binary file size. It can be turned on by &lt;a href="https://gist.github.com/eneldoserrata/6633963a1dbb63001b2e3c4a6a5e9bba"&gt;installing the pldbgapi extension&lt;/a&gt; and running the command:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;CREATE EXTENSION pldbgapi
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#what-is-the-purpose-of-raw-arraytostring-endraw-in-postgresql"&gt;
-  &lt;/a&gt;
-  What is the purpose of &lt;code&gt;Array_To_String&lt;/code&gt; in PostgreSQL?
-&lt;/h2&gt;
-
-&lt;p&gt;The &lt;code&gt;Array_To_String&lt;/code&gt; function concatenates array elements to a string using a &lt;code&gt;provide&lt;/code&gt; delimiter.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#what-is-a-ctid"&gt;
-  &lt;/a&gt;
-  What is a CTID?
-&lt;/h2&gt;
-
-&lt;p&gt;This is a field that exists in every PostgreSQL table. It is a hidden and unique record for each table in PostgreSQL that easily denotes the location of a tuple and is known to identify certain physical rows according to their block and offset positions within a particular table. A logical row’s ctid changes when it is updated, so the ctid cannot be used as a long term identifier.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#benefits-of-studying-database-systems"&gt;
-  &lt;/a&gt;
-  Benefits of studying Database Systems
-&lt;/h3&gt;
-
-&lt;p&gt;Most interviews will not focus on specific technologies too much. But if you list familiarity with Postgres you can expect to get some questions about how Postgres works and its features. Asking and &lt;a href="https://discord.gg/FMZejv5eF3"&gt;answering questions on Discord servers&lt;/a&gt; dedicated to SQL and data is a good idea too. Of course the best way to learn Postgres is to use it and other databases in practice to build projects and apps.&lt;/p&gt;
-
-</description>
-      <category>postgres</category>
-      <category>career</category>
-      <category>beginners</category>
-      <category>database</category>
-    </item>
-    <item>
-      <title>Arch Linux (April 2021) - A NEW guided installer is included</title>
-      <author>Michael Crump</author>
-      <pubDate>Thu, 08 Apr 2021 20:17:21 +0000</pubDate>
-      <link>https://dev.to/mbcrump/arch-linux-april-2021-a-new-guided-installer-is-included-3h1a</link>
-      <guid>https://dev.to/mbcrump/arch-linux-april-2021-a-new-guided-installer-is-included-3h1a</guid>
-      <description>&lt;p&gt;Hello everyone, &lt;/p&gt;
-
-&lt;p&gt;I wanted to share a new video that I recently created geared towards beginners that are looking to learn how to install Arch Linux from scratch without all the messy configuration in previous builds though a guide installer (which now ships with the April 2021 release). &lt;/p&gt;
-
-&lt;p&gt;What is Arch Linux?&lt;/p&gt;
-
-&lt;p&gt;Arch Linux is a Linux distribution for computers with x86-64 processors. Arch Linux is focused on simplicity, modernity, pragmatism, user centrality, and versatility. In practice, this means the project attempts to have minimal distribution-specific changes, and therefore minimal breakage with updates, and be pragmatic over ideological design choices and focus on customizability rather than user-friendliness.&lt;/p&gt;
-
-&lt;p&gt;With the April 2021 release, the new installer streamlines some of the most common aspects associated with the installation of a new operating system, including:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Selecting a disk to install to, optionally adding encryption&lt;/li&gt;
-&lt;li&gt;Format disk and mount it for you&lt;/li&gt;
-&lt;li&gt;Installs some standard packages, but gives you the ability to add more&lt;/li&gt;
-&lt;li&gt;Includes the option to install several different windows managers such as (awesome window manager, GNOME, XFCE, etc.)&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;Since this is such a big release, I have created a video to show you how to install it step-by-step by using the new guided installer. &lt;/p&gt;
-
-&lt;p&gt;Video (14 mins)&lt;/p&gt;
-
-&lt;p&gt;&lt;iframe width="710" height="399" src="https://www.youtube.com/embed/3ks2hwE7k14"&gt;
-&lt;/iframe&gt;
-&lt;/p&gt;
-
-&lt;p&gt;Conclusion&lt;/p&gt;
-
-&lt;p&gt;Stay tuned for &lt;a href="https://twitch.tv/mbcrump"&gt;future Twitch streams&lt;/a&gt; as we learn about security and app development or you can watch the condensed version of all of my streams by subscribing to my &lt;a href="https://youtube.com/mbcrump"&gt;YouTube&lt;/a&gt;. &lt;/p&gt;
-
-&lt;p&gt;Stay connected with me on social platforms for daily software development news.&lt;/p&gt;
-
-&lt;p&gt;-&lt;a href="https://twitter.com/intent/follow?screen_name=mbcrump"&gt;Twitter&lt;/a&gt; | &lt;a href="https://twitch.tv/mbcrump"&gt;Twitch&lt;/a&gt; | &lt;a href="https://instagram.com/mbcrump"&gt;Instagram&lt;/a&gt; | &lt;a href="https://youtube.com/mbcrump"&gt;YouTube&lt;/a&gt; | &lt;a href="https://github.com/mbcrump"&gt;GitHub&lt;/a&gt; | &lt;a href="https://www.michaelcrump.net"&gt;Website&lt;/a&gt;&lt;/p&gt;
-
-</description>
-      <category>linux</category>
-      <category>productivity</category>
-      <category>opensource</category>
-      <category>beginners</category>
     </item>
   </channel>
 </rss>
