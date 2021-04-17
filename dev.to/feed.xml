@@ -7,6 +7,554 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>AWS GuardDuty Combine With Security Hub And Slack</title>
+      <author>Vu Dao</author>
+      <pubDate>Sat, 17 Apr 2021 04:25:23 +0000</pubDate>
+      <link>https://dev.to/vumdao/aws-guardduty-combine-with-security-hub-and-slack-17eh</link>
+      <guid>https://dev.to/vumdao/aws-guardduty-combine-with-security-hub-and-slack-17eh</guid>
+      <description>&lt;h3&gt;
+  &lt;a href="#-this-post-bases-on-the-blog-automatically-block-suspicious-traffic-with-aws-network-firewall-and-amazon-guardduty-but-also-send-all-medium-and-high-findings-to-slack"&gt;
+  &lt;/a&gt;
+  - &lt;strong&gt;This post bases on the blog &lt;a href="https://aws.amazon.com/blogs/security/automatically-block-suspicious-traffic-with-aws-network-firewall-and-amazon-guardduty"&gt;Automatically block suspicious traffic with AWS Network Firewall and Amazon GuardDuty&lt;/a&gt; but also send all MEDIUM and HIGH findings to slack&lt;/strong&gt;
+&lt;/h3&gt;
+
+&lt;h3&gt;
+  &lt;a href="#-build-completely-this-infrastructure-using-aws-cdk"&gt;
+  &lt;/a&gt;
+  - &lt;strong&gt;Build completely this infrastructure using AWS CDK&lt;/strong&gt;
+&lt;/h3&gt;
+
+
+
+
+&lt;h2&gt;
+  &lt;a href="#whats-in-this-document"&gt;
+  &lt;/a&gt;
+  What’s In This Document
+&lt;/h2&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="#-Write-Lambda-function-to-block-an-IP-address,-update-dynamodb-table-and-network-firewall-then-notify-to-slack"&gt;Write Lambda function to block an IP address, update dynamodb table and network firewall then notify to slack&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="#-Write-Lambda-function-to-notify-finding-from-Security-hub"&gt;Write Lambda function to notify finding from Security hub&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="#-Create-Network-Firewall-rule-groups"&gt;Create Network Firewall rule groups&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="#-Step-function-and-state-machine-for-catching-IPv4"&gt;Step function and state machine for catching IPv4&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="#-Cloudwatch-Event-Rule-for-Security-Hub---GuardDuty-findings-with-remote-IP"&gt;Cloudwatch Event Rule for Security Hub - GuardDuty findings with remote IP&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="#-Step-function-and-state-machine-for-finding-others"&gt;Step function and state machine for finding others&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="#-Cloudwatch-Event-Rule-for-Security-Hub---GuardDuty-findings-others"&gt;Cloudwatch Event Rule for Security Hub - GuardDuty findings others&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="#-Test-by-execute-step-function-with-sample-finding"&gt;Test by execute step function with sample finding&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+
+
+
+&lt;h3&gt;
+  &lt;a href="#write-lambda-function-to-block-an-ip-address"&gt;
+  &lt;/a&gt;
+  🚀 &lt;strong&gt;&lt;a href="#-Write-Lambda-function-to-block-an-IP-address"&gt;Write Lambda function to block an IP address&lt;/a&gt;&lt;/strong&gt;
+&lt;/h3&gt;
+
+&lt;ul&gt;
+&lt;li&gt;
+&lt;p&gt;There are two lambda functon here both handle input from cloudwatch event where catching the IPv4&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Update the IPv4 to dynamodb for keep track and/or prune the IP later
+&lt;/li&gt;
+&lt;/ul&gt;
+
+
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;import json
+import os
+import boto3
+import dateutil.parser
+
+
+ACLMETATABLE = os.environ['ACLMETATABLE']
+ddb = boto3.resource('dynamodb')
+table = ddb.Table(ACLMETATABLE)
+
+
+def convert_to_epoch(timestamp):
+    parsed_t = dateutil.parser.parse(timestamp)
+    t_in_seconds = parsed_t.strftime('%s')
+    print(t_in_seconds)
+    return t_in_seconds
+
+
+def create_ddb_rule(record):
+    response = table.put_item(
+        Item=record,
+        ReturnValues='ALL_OLD'
+    )
+    if response['ResponseMetadata']['HTTPStatusCode'] == 200:
+        if 'Attributes' in response:
+            print("updated existing record, no new IP")
+            return False
+        else:
+            print("log -- successfully added DDB state entry %s" % (record))
+            return True
+    else:
+        print("log -- error adding DDB state entry for %s" % (record))
+        print(response)
+        raise
+
+
+def getAllIPs():
+    IPList = []
+    try:
+        response = table.scan()
+        if response['Items']:
+            print("log -- found records")
+            for item in response['Items']:
+                print("HostIp %s" %item['HostIp'])
+                IPList.append({"IP": item['HostIp']})
+        else:
+            print("log -- no entries found.")
+    except Exception as e:
+        print('something went wrong')
+        raise
+    return IPList
+
+
+def handler(event, context):
+    print("log -- Event: %s " % json.dumps(event))
+    epoch_time = convert_to_epoch(str(event['Timestamp']))
+    record = {
+        'HostIp': str(event['HostIp']),
+        'Timestamp': str(event['Timestamp']),
+        'CreatedAt': int(epoch_time),
+        'FindingId': str(event['FindingId']),
+        'AccountId': str(event['AccountId']),
+        'Region': str(event['Region'])
+        }
+    result = create_ddb_rule(record)
+    if result:
+        record['IPList'] = getAllIPs()
+        record['NewIP'] = True
+    else:
+        record['NewIP'] = False
+    return record
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;ul&gt;
+&lt;li&gt;Update network firewall
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;import os
+import json
+import boto3
+
+
+RuleGroupArn = os.environ['FIREWALLRULEGROUP']
+RuleGroupPriority = os.environ['RULEGROUPPRI']
+CustomActionName = os.environ['CUSTOMACTIONNAME']
+CustomActionValue = os.environ['CUSTOMACTIONVALUE']
+
+client = boto3.client('network-firewall')
+
+
+def create_sources(block_list):
+    response = list()
+    for i in block_list:
+        response.append({'AddressDefinition': str(i['IP']) + '/32'})
+    return response
+
+
+def get_rg_config():
+    response = client.describe_rule_group(
+        RuleGroupArn=RuleGroupArn,
+        Type='STATELESS'
+    )
+    return response
+
+
+def update_rg_config(block_list):
+    cur_rg_config = get_rg_config()
+    rg_priority_dst = int(RuleGroupPriority) + 100
+
+    """ Create new rule from dictionary of IPs CIDRS to block """
+    new_rules = [
+        {
+            'RuleDefinition': {
+                'MatchAttributes': {
+                    'Sources': create_sources(block_list)
+                },
+                'Actions': [
+                    'aws:drop',
+                    CustomActionName
+                ]
+            },
+            'Priority': int(RuleGroupPriority)
+        },
+        {
+            'RuleDefinition': {
+                'MatchAttributes': {
+                    'Destinations': create_sources(block_list)
+                },
+                'Actions': [
+                    'aws:drop',
+                    CustomActionName
+                ]
+            },
+            'Priority': int(rg_priority_dst)
+        }
+    ]
+    # Custom Actions provide CloudWatch metrics
+    custom_actions = [
+        {
+            'ActionName': CustomActionName,
+            'ActionDefinition': {
+                'PublishMetricAction': {
+                    'Dimensions': [
+                        {
+                            'Value': CustomActionValue
+                        }
+                    ]
+                }
+            }
+        }
+    ]
+    # Preserve current rules not used here in rule group by appending to new rule
+    new_rg_config = cur_rg_config['RuleGroup']['RulesSource']['StatelessRulesAndCustomActions']['StatelessRules']
+    try:
+        for r in new_rg_config:
+            if int(r['Priority']) not in [int(RuleGroupPriority), int(rg_priority_dst)]:
+                new_rules.append(r)
+
+        """ Update the rule group """
+        print(f"Update Rule Group ARN, {RuleGroupArn}.")
+        response = client.update_rule_group(
+            UpdateToken=cur_rg_config['UpdateToken'],
+            RuleGroupArn=RuleGroupArn,
+            RuleGroup={
+                'RulesSource': {
+                    'StatelessRulesAndCustomActions': {
+                        'StatelessRules':
+                            new_rules,
+                        'CustomActions':
+                            custom_actions
+                    }
+                }
+            },
+            Type='STATELESS',
+            Description='GD2NFW Blog Sample',
+            DryRun=False
+        )
+    except Exception as e:
+        print('something went wrong')
+        raise
+
+
+def handler(event, context):
+    print("log -- Event: %s " % json.dumps(event))
+    # Retrieve a list of IPs delivered from the previous step in the State Machine
+    block_list = event['IPList']
+    # If empty, provide a fake entry - rule group update requires at least one entry
+    if len(block_list) == 0:
+        block_list = [{'IP': '127.0.0.1'}]
+    # update the AWS Network Firewall Rule Group
+    # replace with the updated list of IPs
+    update_rg_config(block_list)
+    #
+    # check if the function was called for blocking or pruning
+    if 'HostIp' in event:
+        # blocking completed, pass the data on to the next step
+        record = {
+            'HostIp': str(event['HostIp']),
+            'Timestamp': str(event['Timestamp']),
+            'FindingId': str(event['FindingId']),
+            'AccountId': str(event['AccountId']),
+            'Region': str(event['Region']),
+            'Result': True
+        }
+        return record
+    else:
+        # this was a pruning action
+        return {
+          "PruningSuccessful": True
+        }
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;ul&gt;
+&lt;li&gt;Notify block IP to slack
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;import requests
+from datetime import datetime
+import json
+
+
+def send_slack(region, messageId):
+    """ Send payload to slack """
+    webhook_url = "https://hooks.slack.com/services/TSLACKIPD/BWEBHOOKTOKERN"
+    footer_icon = 'https://howtofightnow.com/wp-content/uploads/2018/11/cartoon-firewall-hi.png'
+    color = '#E01E5A'
+    level = ':boom: ALERT :boom:'
+    curr_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    message = f"Finding new IP {messageId}"
+    console_url = 'https://console.aws.amazon.com/securityhub'
+    fallback = f"finding - {console_url}/home?region={region}#/findings?search=id%3D${messageId}"
+    payload = {"username": "SecurityHub",
+               "attachments": [{"fallback": fallback,
+                                "pretext": level,
+                                "color": color,
+                                "text": f"AWS SecurityHub finding in {region} {message}",
+                                "footer": f"{curr_time}\n{fallback}",
+                                "footer_icon": footer_icon}]}
+    requests.post(webhook_url, data=json.dumps(payload), headers={'Content-Type': 'application/json'})
+
+
+def handler(event, context):
+    message_id = event['HostIp']
+    region = event['Region']
+    send_slack(region, message_id)
+    return {"Status": "Ok"}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#write-lambda-function-to-notify-finding-from-security-hub"&gt;
+  &lt;/a&gt;
+  🚀 &lt;strong&gt;&lt;a href="#-Write-Lambda-function-to-notify-finding-from-Security-hub"&gt;Write Lambda function to notify finding from Security hub&lt;/a&gt;&lt;/strong&gt;
+&lt;/h3&gt;
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;import requests
+from datetime import datetime
+import json
+
+
+def send_slack(region, f_id, msg):
+    """ Send payload to slack """
+    webhook_url = "https://hooks.slack.com/services/TSLACKID/BSLACKWEBHOOKTOKEN"
+    footer_icon = 'https://howtofightnow.com/wp-content/uploads/2018/11/cartoon-firewall-hi.png'
+    color = '#E01E5A'
+    level = ':boom: ALERT :boom:'
+    curr_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    console_url = 'https://console.aws.amazon.com/securityhub'
+    fallback = f"finding - {console_url}/home?region={region}#/findings?search=id%3D${f_id}"
+    payload = {"username": "SecurityHub",
+               "attachments": [{"fallback": fallback,
+                                "pretext": level,
+                                "color": color,
+                                "text": f"AWS SecurityHub finding in {region} {msg}",
+                                "footer": f"{curr_time}\n{fallback}",
+                                "footer_icon": footer_icon}]}
+    requests.post(webhook_url, data=json.dumps(payload), headers={'Content-Type': 'application/json'})
+
+
+def handler(event, context):
+    finding_id = event['Finding_ID']
+    finding_desc = event['Finding_description']
+    region = event['Region']
+    severity = event['severity']
+    finding_type = event['Finding_Type']
+    msg = f"Finding new detection: severity {severity}, type: {finding_type} - {finding_desc}"
+    send_slack(region, finding_id, msg)
+    return {"Status": "Ok"}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#create-network-firewall-rule-groups"&gt;
+  &lt;/a&gt;
+  🚀 &lt;strong&gt;&lt;a href="#-Create-Network-Firewall-rule-groups"&gt;Create Network Firewall rule groups&lt;/a&gt;&lt;/strong&gt;
+&lt;/h3&gt;
+
+&lt;ul&gt;
+&lt;li&gt;This is the new service and only applied to some regions
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;        rg_property = network_fw.CfnRuleGroup.RuleGroupProperty(
+            rule_variables=None,
+            rules_source=network_fw.CfnRuleGroup.RulesSourceProperty(
+                stateless_rules_and_custom_actions=network_fw.CfnRuleGroup.StatelessRulesAndCustomActionsProperty(
+                    stateless_rules=[
+                        network_fw.CfnRuleGroup.StatelessRuleProperty(
+                            priority=10,
+                            rule_definition=network_fw.CfnRuleGroup.RuleDefinitionProperty(
+                                actions=["aws:drop"],
+                                match_attributes=network_fw.CfnRuleGroup.MatchAttributesProperty(
+                                    destinations=[
+                                        network_fw.CfnRuleGroup.AddressProperty(
+                                            address_definition="127.0.0.1/32"
+                                        )
+                                    ]
+                                )
+                            )
+                        )
+                    ]
+                )
+            )
+        )
+
+        nf_rule_group = network_fw.CfnRuleGroup(
+            scope=self, id='GuardDutyNetworkFireWallRuleGroup',
+            capacity=100,
+            rule_group_name='guardduty-network-firewall',
+            type='STATELESS',
+            description='Guard Duty network firewall rule group',
+            tags=[core.CfnTag(key='Name', value='cfn.rule-group.stack')],
+            rule_group=rg_property
+        )
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--AY0Iczwc--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://github.com/vumdao/aws-guardduty-to-slack/blob/master/networkFirewallRuleGroup.png%3Fraw%3Dtrue" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--AY0Iczwc--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://github.com/vumdao/aws-guardduty-to-slack/blob/master/networkFirewallRuleGroup.png%3Fraw%3Dtrue" alt="Alt-Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#step-function-and-state-machine-for-catching-ipv4"&gt;
+  &lt;/a&gt;
+  🚀 &lt;strong&gt;&lt;a href="#-Step-function-and-state-machine-for-catching-IPv4"&gt;Step function and state machine for catching IPv4&lt;/a&gt;&lt;/strong&gt;
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--xJcRkcYt--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://github.com/vumdao/aws-guardduty-to-slack/blob/master/stepfunctions_guardDuty.png%3Fraw%3Dtrue" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--xJcRkcYt--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://github.com/vumdao/aws-guardduty-to-slack/blob/master/stepfunctions_guardDuty.png%3Fraw%3Dtrue" alt="Alt-Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#cloudwatch-event-rule-for-security-hub-guardduty-findings-with-remote-ip"&gt;
+  &lt;/a&gt;
+  🚀 &lt;strong&gt;&lt;a href="#-Cloudwatch-Event-Rule-for-Security-Hub---GuardDuty-findings-with-remote-IP"&gt;Cloudwatch Event Rule for Security Hub - GuardDuty findings with remote IP&lt;/a&gt;&lt;/strong&gt;
+&lt;/h3&gt;
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;{
+  "detail-type": [
+    "GuardDuty Finding"
+  ],
+  "detail": {
+    "findings": {
+      "ProductFields": {
+        "aws/guardduty/service/action/networkConnectionAction/remoteIpDetails/ipAddressV4": [
+          {
+            "exists": true
+          }
+        ]
+      }
+    }
+  },
+  "source": [
+    "aws.securityhub"
+  ],
+  "account": [
+    "123456789012"
+  ]
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#step-function-and-state-machine-for-finding-others"&gt;
+  &lt;/a&gt;
+  🚀 &lt;strong&gt;&lt;a href="#-Step-function-and-state-machine-for-finding-others"&gt;Step function and state machine for finding others&lt;/a&gt;&lt;/strong&gt;
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Q8tFpWdn--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://github.com/vumdao/aws-guardduty-to-slack/blob/master/stepfunctions_sechub.png%3Fraw%3Dtrue" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Q8tFpWdn--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://github.com/vumdao/aws-guardduty-to-slack/blob/master/stepfunctions_sechub.png%3Fraw%3Dtrue" alt="Alt-Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#cloudwatch-event-rule-for-security-hub-guardduty-findings-others"&gt;
+  &lt;/a&gt;
+  🚀 &lt;strong&gt;&lt;a href="#-Cloudwatch-Event-Rule-for-Security-Hub---GuardDuty-findings-others"&gt;Cloudwatch Event Rule for Security Hub - GuardDuty findings others&lt;/a&gt;&lt;/strong&gt;
+&lt;/h3&gt;
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;{
+  "detail-type": [
+    "Security Hub Findings - Imported"
+  ],
+  "detail": {
+    "severity": [
+      5,
+      8
+    ]
+  },
+  "source": [
+    "aws.securityhub"
+  ],
+  "account": [
+    "661798210997"
+  ]
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#test-by-execute-step-function-with-sample-finding"&gt;
+  &lt;/a&gt;
+  🚀 &lt;strong&gt;&lt;a href="#-Test-by-execute-step-function-with-sample-finding"&gt;Test by execute step function with sample finding&lt;/a&gt;&lt;/strong&gt;
+&lt;/h3&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;p&gt;Start execution of step function using &lt;a href="https://raw.githubusercontent.com/aws-samples/aws-networkfirewall-guardduty/main/tests/securityhub-testevent.json"&gt;Finding Sample&lt;/a&gt;&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Test&lt;/p&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--M2gw2jEF--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://github.com/vumdao/aws-guardduty-to-slack/blob/master/test_slack.png%3Fraw%3Dtrue" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--M2gw2jEF--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://github.com/vumdao/aws-guardduty-to-slack/blob/master/test_slack.png%3Fraw%3Dtrue" alt="Alt-test"&gt;&lt;/a&gt;&lt;/p&gt;
+
+
+
+
+&lt;h3&gt;
+  &lt;a href="https://dev.to/vumdao"&gt;🌠 Blog&lt;/a&gt;
+  &lt;span&gt; · &lt;/span&gt;
+  &lt;a href="https://github.com/vumdao/"&gt;Github&lt;/a&gt;
+  &lt;span&gt; · &lt;/span&gt;
+  &lt;a href="https://stackoverflow.com/users/11430272/vumdao"&gt;Web&lt;/a&gt;
+  &lt;span&gt; · &lt;/span&gt;
+  &lt;a href="https://www.linkedin.com/in/vu-dao-9280ab43/"&gt;Linkedin&lt;/a&gt;
+  &lt;span&gt; · &lt;/span&gt;
+  &lt;a href="https://www.linkedin.com/groups/12488649/"&gt;Group&lt;/a&gt;
+  &lt;span&gt; · &lt;/span&gt;
+  &lt;a href="https://www.facebook.com/CloudOpz-104917804863956"&gt;Page&lt;/a&gt;
+  &lt;span&gt; · &lt;/span&gt;
+  &lt;a href="https://twitter.com/VuDao81124667"&gt;Twitter 🌠&lt;/a&gt;
+&lt;/h3&gt;
+
+</description>
+      <category>aws</category>
+      <category>cloudopz</category>
+      <category>guardduty</category>
+      <category>devops</category>
+    </item>
+    <item>
       <title>40 Amazing Chrome Extensions for Web Developers and Designers</title>
       <author>Savio Martin</author>
       <pubDate>Sat, 17 Apr 2021 03:52:01 +0000</pubDate>
@@ -1853,6 +2401,98 @@ in fastlane/Fastfile &lt;code&gt;build_number: DateTime.now.strftime("%Y%m%d%H%M
       <category>beer</category>
     </item>
     <item>
+      <title>The Best Way To Learn Algorithms and Data Structures</title>
+      <author>SalarC123</author>
+      <pubDate>Sat, 17 Apr 2021 00:45:11 +0000</pubDate>
+      <link>https://dev.to/salarc123/the-best-way-to-learn-algorithms-and-data-structures-24cn</link>
+      <guid>https://dev.to/salarc123/the-best-way-to-learn-algorithms-and-data-structures-24cn</guid>
+      <description>&lt;h1&gt;
+  &lt;a href="#leetcode"&gt;
+  &lt;/a&gt;
+  Leetcode? 💀
+&lt;/h1&gt;
+
+&lt;p&gt;When you hear the phrase, "algorithms and data structures," your first thought is likely &lt;a href="https://leetcode.com"&gt;Leetcode&lt;/a&gt;, but what if I told you that there was a more enjoyable and beneficial alternative to grinding Leetcode problems. I'm not claiming that Leetcode is useless because I know that it has helped millions of people pass interviews, but I just don't think that it's the most fun way to prepare for an interview. By doing Leetcode problems, your goal is to learn algorithms and develop better problem solving skills, so you shouldn't limit yourself to solely Leetcode when there are so many other options that fulfill the same goal. Breaking out of this narrow perspective can help you become more open minded and better at real world problem solving. &lt;/p&gt;
+
+&lt;p&gt;Sorry for the lengthy build up, but my solution is... &lt;em&gt;competitive programming&lt;/em&gt;.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#what-is-competitive-programming"&gt;
+  &lt;/a&gt;
+  What Is Competitive Programming? 💪
+&lt;/h1&gt;
+
+&lt;p&gt;Leetcode is useful but it's not that fun, so why not try competitive programming which is both. Competitive programming is the use of algorithms and data structures to efficiently solve coding problems. It provides you the opportunity to learn and even &lt;em&gt;APPLY&lt;/em&gt; algorithms. If you get into competitive programming, you will be motivated to improve because you know that you can win competitions and get rewards, especially considering how many beginner competitions there are. You can develop an algorithmic sense of thinking that will carry over to interview prep, but even if you're not looking for a job, competitive programming is very helpful for developing problem solving skills in general. &lt;/p&gt;
+
+&lt;p&gt;Competitive programming does require a lot of time and effort to master, but it's all worth it because of the skills you acquire and the fun that you have while competing and learning. If you're really passionate about computer science, then you might not need as much motivation to learn algorithms and data structures, but you can get a leg up by starting to code competitively. According to &lt;em&gt;Confucius&lt;/em&gt;, “Choose a job you &lt;strong&gt;love&lt;/strong&gt;, and you will &lt;strong&gt;never&lt;/strong&gt; have to work a day in your life,” so if you really think that competitive programming is for you, then you'll truly have fun while getting experience and developing real world skills at the same time.&lt;/p&gt;
+
+&lt;p&gt;The standard coding interview nowadays consists of a technical interview where you need to apply an algorithm to solve a challenging problem but with only a whiteboard and your mind. Thus, learning when to use algorithms, how to apply them to random problems, and how to articulate how they work is extremely important to learn, and competitive programming is the best way to achieve these goals, so let me tell you how to get started.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#how-to-get-started"&gt;
+  &lt;/a&gt;
+  How To Get Started 🚀
+&lt;/h1&gt;
+
+&lt;p&gt;I propose that you learn C++ for competitive programming even if you already know Python or Java (which are both used pretty frequently in CP) because it's much faster and allows you to directly allocate memory, so you don't need to worry about the typical time and storage constraints of each problem when you’re starting out. For example, &lt;a href="https://codeforces.com/problemset/problem/615/E"&gt;this&lt;/a&gt; problem inputs a number, n, that could be 10&lt;sup&gt;18&lt;/sup&gt; which would  be very slow for a language like Python to work with. C++ is also the most popular language for competitive programming, so naturally, there should be more resources available to you. For instance, you can start with the very well written and free &lt;a href="https://cses.fi/book/book.pdf"&gt;Competitive Programmer's Handbook&lt;/a&gt; as well as &lt;a href="https://darrenyao.com/usacobook/cpp.pdf"&gt;Darren Yao's book&lt;/a&gt; (specifically for the high school United States Computing Olympiad). And if you've attempted to learn C++ before but gotten stuck because there were too many concepts to learn, don't worry. When using C++ for competitive programming, you can ignore most of the standard best practices like using header files or object oriented programming because you'll usually be working in one file with a few functions.&lt;/p&gt;
+
+&lt;p&gt;Once you've learned the syntax of C++, you can start working on problems, preferably with &lt;a href="https://www.topcoder.com/tc?module=ProblemArchive"&gt;TopCoder&lt;/a&gt; and &lt;a href="https://www.codeforces.com"&gt;CodeForces&lt;/a&gt; or you can try old &lt;a href="http://usaco.org/index.php?page=contests"&gt;USACO Contests&lt;/a&gt; (the USACO competitions are only for high schoolers, but the problems are still really good. These are the difficulty levels in increasing order: bronze, silver, gold, platinum). Just remember that consistency is key, so you should try to work for at least one hour a day on competitive programming. Some problems might just take you that long, and if they do, don't look at solutions unless you've tried solutions for an hour. If you have no idea where to start, you can look at a solution, but make sure to note down somewhere how the problem was approached and what you can learn in order to approach it the same way. It's important that you practice everyday. Keep doing this until you feel comfortable enough to try out some beginner competitions.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#problem-solving-strategies"&gt;
+  &lt;/a&gt;
+  Problem Solving Strategies 💥
+&lt;/h1&gt;
+
+&lt;p&gt;What I typically do to solve each problem is start by thinking of a solution and then testing it with paper and pencil. I have a notebook next to my computer so that I can write down notes for improvement and new tips that I learn as well as to document strategies for each problem type (rectangle geometry problems, for example, can be simplified by creating a Rect class with four variables as coordinates representing the bottom left and top right of a rectangle and an area method. This prevents messy code and lets you focus on the solution rather than debugging or creating tons of variables). When mapping out the solution on paper, also ensure that your strategy works for &lt;a href="https://en.wikipedia.org/wiki/Edge_case"&gt;edge cases&lt;/a&gt; so that you can avoid implementing convoluted &lt;strong&gt;if statements&lt;/strong&gt;. If you can't solve a problem (and even if you do), you should try to watch live solves on Youtube to see how the best competitive programmers approach the same problems.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#helpful-resources"&gt;
+  &lt;/a&gt;
+  Helpful Resources 🔥
+&lt;/h1&gt;
+
+&lt;h3&gt;
+  &lt;a href="#websites"&gt;
+  &lt;/a&gt;
+  Websites
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;a href="https://github.com/lnishan/awesome-competitive-programming"&gt;Complete Resource List&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://usaco.guide"&gt;USACO Guide&lt;/a&gt;&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#youtubers-playlists-videos"&gt;
+  &lt;/a&gt;
+  Youtubers / Playlists / Videos
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;a href="https://www.youtube.com/playlist?list=PLtLxhThTxJMVQtFQj-dgzNgIsrWuFz08G"&gt;Carrara&lt;/a&gt; - really good live solves with C++, Python, and Java&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://www.youtube.com/channel/UCBr_Fu6q9iHYQCh13jmpbrg"&gt;Errichto&lt;/a&gt; - I haven't watched many of his videos, but he makes solution videos and gives general competitive programming tips&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://www.youtube.com/playlist?list=PLz4C07Cc_cunpeCSSGibS6Nyceuv7-l89"&gt;William Lin&lt;/a&gt; - he has some introductory videos which you can use as a roadmap&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://www.youtube.com/watch?v=Uq8sGebGQfk"&gt;Competitive programming tips other than "practice"&lt;/a&gt; - I thought this was pretty insightful because if you ever ask for help on Reddit for what you can do to improve, the only response you'll get is to practice more&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#conclusion"&gt;
+  &lt;/a&gt;
+  Conclusion ✨
+&lt;/h1&gt;
+
+&lt;p&gt;To wrap things up, you should, at a minimum, make sure that you're having fun. The career benefits are amazing, but they shouldn't be your main focus if you're really passionate about competitive programming. Don't worry if you're too old either because it's never too late to start competitive programming. So, just give it a try. If you don't have any motivation right now, push through until you can start competing in beginner contests because from there, you won't lose motivation again. Good luck!&lt;/p&gt;
+
+&lt;p&gt;&lt;em&gt;If you have any other resources, comment them below!&lt;/em&gt;&lt;/p&gt;
+
+</description>
+      <category>beginners</category>
+      <category>productivity</category>
+      <category>cpp</category>
+      <category>career</category>
+    </item>
+    <item>
       <title>How to stream a local file into a real-time video call</title>
       <author>Kimberlee Johnson </author>
       <pubDate>Fri, 16 Apr 2021 21:41:39 +0000</pubDate>
@@ -2093,416 +2733,6 @@ in fastlane/Fastfile &lt;code&gt;build_number: DateTime.now.strftime("%Y%m%d%H%M
       <category>javascript</category>
       <category>lesson</category>
       <category>devjournal</category>
-    </item>
-    <item>
-      <title>Create a Glowing Loader in CSS and HTML</title>
-      <author>Hieu Nguyen</author>
-      <pubDate>Fri, 16 Apr 2021 20:52:57 +0000</pubDate>
-      <link>https://dev.to/hieussr/create-a-glowing-loader-in-css-and-html-3omd</link>
-      <guid>https://dev.to/hieussr/create-a-glowing-loader-in-css-and-html-3omd</guid>
-      <description>&lt;p&gt;We want our products to leave a good impression on first-time users. So whenever we build something, we make it possible first, then ask if it can be a little unique. And the glowing loader is one of those attempts.&lt;/p&gt;
-
-&lt;p&gt;Here is Hieu's original version on &lt;a href="https://jsfiddle.net/hieunc229/wyk0qg9L/33/"&gt;jsfiddle (33 changes)&lt;/a&gt;.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#create-your-own-loader-in-html-and-css"&gt;
-  &lt;/a&gt;
-  Create your own loader in HTML and CSS
-&lt;/h2&gt;
-
-&lt;p&gt;The loader design has a container and 3 elements: the background button, glowing spinner, and the logo. While the button and the spinner are all overlay layers (use absolute positioning). &lt;/p&gt;
-
-&lt;p&gt;Let's start with a straigt forward HTML markup as following:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;div&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"logo-container"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-  &lt;span class="nt"&gt;&amp;lt;span&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"spinner"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&amp;lt;/span&amp;gt;&lt;/span&gt;
-  &lt;span class="nt"&gt;&amp;lt;span&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"background"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&amp;lt;/span&amp;gt;&lt;/span&gt;
-  &lt;span class="nt"&gt;&amp;lt;img&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"logo"&lt;/span&gt; &lt;span class="na"&gt;src=&lt;/span&gt;&lt;span class="s"&gt;"yourlogo.svg"&lt;/span&gt; &lt;span class="na"&gt;height=&lt;/span&gt;&lt;span class="s"&gt;"28"&lt;/span&gt; &lt;span class="nt"&gt;/&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;/div&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-
-
-&lt;h3&gt;
-  &lt;a href="#1-the-container"&gt;
-  &lt;/a&gt;
-  1. The container
-&lt;/h3&gt;
-
-&lt;p&gt;The main point of the container is to groups the elements together, and positioning its children &lt;code&gt;logo&lt;/code&gt; in the center. Let's use &lt;code&gt;flex&lt;/code&gt; in this example.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="nc"&gt;.logo-container&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="c"&gt;/* align children in the center */&lt;/span&gt;
-  &lt;span class="nl"&gt;display&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;flex&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;align-items&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;center&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;justify-content&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;center&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;position&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;relative&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-
-  &lt;span class="c"&gt;/* a circle with 60x60 pixels */&lt;/span&gt;
-  &lt;span class="nl"&gt;width&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;60px&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;height&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;60px&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;border-radius&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;50%&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Now we have a plain logo.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--XKG1IYls--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://wilson.inverr.com/media/glowing-spinner-1.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--XKG1IYls--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://wilson.inverr.com/media/glowing-spinner-1.png" alt=""&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Before going into the button background and the spinner. We need to make sure they are overlay layers, by applying absolute positioning as following.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="nc"&gt;.background&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt;
-&lt;span class="nc"&gt;.spinner&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="nl"&gt;position&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;absolute&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;display&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;inline-block&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;height&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;100%&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;width&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;100%&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-
-
-&lt;h3&gt;
-  &lt;a href="#2-the-button-background"&gt;
-  &lt;/a&gt;
-  2. The button background
-&lt;/h3&gt;
-
-&lt;p&gt;The button background is a circle, with a matte-ish gradient and shadows. Here's one way to do it&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="c"&gt;/* The button background layer */&lt;/span&gt;
-&lt;span class="nc"&gt;.background&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="nl"&gt;border-radius&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;50%&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;background-image&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;linear-gradient&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="m"&gt;0deg&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="m"&gt;#0f1013&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="m"&gt;#252730&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-  &lt;span class="nl"&gt;box-shadow&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0&lt;/span&gt; &lt;span class="m"&gt;4px&lt;/span&gt; &lt;span class="m"&gt;4px&lt;/span&gt; &lt;span class="m"&gt;-1px&lt;/span&gt; &lt;span class="n"&gt;rgba&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="m"&gt;0&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="m"&gt;0&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="m"&gt;0&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="m"&gt;0.6&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
-    &lt;span class="m"&gt;0&lt;/span&gt; &lt;span class="m"&gt;4px&lt;/span&gt; &lt;span class="m"&gt;6px&lt;/span&gt; &lt;span class="m"&gt;1px&lt;/span&gt; &lt;span class="n"&gt;rgba&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="m"&gt;0&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="m"&gt;0&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="m"&gt;0&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="m"&gt;0.3&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
-    &lt;span class="m"&gt;0&lt;/span&gt; &lt;span class="m"&gt;1px&lt;/span&gt; &lt;span class="m"&gt;2px&lt;/span&gt; &lt;span class="m"&gt;1px&lt;/span&gt; &lt;span class="n"&gt;rgba&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="m"&gt;0&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="m"&gt;0&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="m"&gt;0&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="m"&gt;0&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="nb"&gt;inset&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="m"&gt;0&lt;/span&gt; &lt;span class="m"&gt;18px&lt;/span&gt; &lt;span class="m"&gt;32px&lt;/span&gt; &lt;span class="m"&gt;-2px&lt;/span&gt; &lt;span class="n"&gt;rgba&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="m"&gt;255&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="m"&gt;255&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="m"&gt;255&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="m"&gt;0.1&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="nb"&gt;inset&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;It'll look like this now:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--EbmgmiUP--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://wilson.inverr.com/media/glowing-spinner-2.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--EbmgmiUP--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://wilson.inverr.com/media/glowing-spinner-2.png" alt=""&gt;&lt;/a&gt;&lt;/p&gt;
-
-
-
-
-&lt;h3&gt;
-  &lt;a href="#3-bring-logo-to-front"&gt;
-  &lt;/a&gt;
-  3. Bring logo to front
-&lt;/h3&gt;
-
-&lt;p&gt;In case you can't see your logo, you will need to use &lt;code&gt;z-index&lt;/code&gt; to bring the &lt;code&gt;logo&lt;/code&gt; on top. Simple as the following CSS:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="nc"&gt;.logo&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="nl"&gt;z-index&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;2&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-
-
-&lt;h3&gt;
-  &lt;a href="#4-glowing-spinner"&gt;
-  &lt;/a&gt;
-  4. Glowing spinner
-&lt;/h3&gt;
-
-&lt;p&gt;Glowing spinner layer use a &lt;code&gt;top-border&lt;/code&gt; attribute, with shadow to add the glowing effect. It can be done as following:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="nc"&gt;.spinner&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="nl"&gt;border-radius&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;50%&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;border-top&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;2px&lt;/span&gt; &lt;span class="nb"&gt;solid&lt;/span&gt; &lt;span class="m"&gt;#ae34db&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-
-  &lt;span class="c"&gt;/* glowing with shadow (30% of #ae34db) */&lt;/span&gt;
-  &lt;span class="nl"&gt;box-shadow&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0&lt;/span&gt; &lt;span class="m"&gt;-5px&lt;/span&gt; &lt;span class="m"&gt;5px&lt;/span&gt; &lt;span class="m"&gt;#ae34db4&lt;/span&gt;&lt;span class="n"&gt;d&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-
-  &lt;span class="c"&gt;/* add spin animation */&lt;/span&gt;
-  &lt;span class="nl"&gt;animation&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;spin&lt;/span&gt; &lt;span class="m"&gt;1s&lt;/span&gt; &lt;span class="n"&gt;linear&lt;/span&gt; &lt;span class="n"&gt;infinite&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Then add the animation keyframes. It's basically a keyframe that rotate the light spinner in a 360 degree circle&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="k"&gt;@keyframes&lt;/span&gt; &lt;span class="n"&gt;spin&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="err"&gt;0&lt;/span&gt;&lt;span class="o"&gt;%&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;transform&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;rotate&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="m"&gt;0deg&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-  &lt;span class="p"&gt;}&lt;/span&gt;
-  &lt;span class="err"&gt;100&lt;/span&gt;&lt;span class="o"&gt;%&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;transform&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;rotate&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="m"&gt;360deg&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-  &lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;You should see a glowing spinner with your logo inside. Here is our final result.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--yzr9qd1c--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://wilson.inverr.com/media/glowing-spinner-3.gif" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--yzr9qd1c--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://wilson.inverr.com/media/glowing-spinner-3.gif" alt=""&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;You can play with the &lt;code&gt;spin&lt;/code&gt; keyframe to change the glowing colors, or spread the shadow more to make it like a siren light.&lt;/p&gt;
-
-
-
-
-&lt;p&gt;Now you know how to create a glowing loader. It contains a matte-ish gradient background, with a glowing spinner. You can check out the final result &lt;a href="https://jsfiddle.net/m52jdu3e/"&gt;on jsfiddle&lt;/a&gt;;&lt;/p&gt;
-
-&lt;p&gt;Let us know &lt;a href="https://inverr.com/contact"&gt;what you think&lt;/a&gt; and thanks for the support.&lt;/p&gt;
-
-</description>
-      <category>css</category>
-      <category>html</category>
-      <category>animate</category>
-      <category>loader</category>
-    </item>
-    <item>
-      <title>Top 5 DEV Comments of the Past Week</title>
-      <author>Gracie Gregory (she/her)</author>
-      <pubDate>Fri, 16 Apr 2021 20:07:18 +0000</pubDate>
-      <link>https://dev.to/devteam/top-5-dev-comments-of-the-past-week-4jpb</link>
-      <guid>https://dev.to/devteam/top-5-dev-comments-of-the-past-week-4jpb</guid>
-      <description>&lt;p&gt;This is a weekly roundup of awesome DEV comments that you may have missed.  You are welcome and encouraged to boost posts and comments yourself using the &lt;strong&gt;&lt;a href="https://dev.to/t/bestofdev"&gt;#bestofdev&lt;/a&gt;&lt;/strong&gt; tag.&lt;/p&gt;
-
-&lt;p&gt;&lt;a class="mentioned-user" href="https://dev.to/technoglot"&gt;@technoglot&lt;/a&gt;
- had some &lt;a href="https://dev.to/devteam/what-was-your-win-this-week-1jd5"&gt;amazing wins&lt;/a&gt; this week! Keep the good work coming!&lt;/p&gt;
-
-
-&lt;div class="liquid-comment"&gt;
-    &lt;div class="details"&gt;
-      &lt;a href="/technoglot"&gt;
-        &lt;img class="profile-pic" src="https://res.cloudinary.com/practicaldev/image/fetch/s--t1s7673F--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://res.cloudinary.com/practicaldev/image/fetch/s--dh0H24sF--/c_fill%2Cf_auto%2Cfl_progressive%2Ch_50%2Cq_auto%2Cw_50/https://dev-to-uploads.s3.amazonaws.com/uploads/user/profile_image/430182/bd897f8a-247e-44b6-bac8-db79fbe1a55b.jpeg" alt="technoglot profile image"&gt;
-      &lt;/a&gt;
-      &lt;a href="/technoglot"&gt;
-        &lt;span class="comment-username"&gt;Amelia Vieira Rosado&lt;/span&gt;
-      &lt;/a&gt;
-      &lt;span class="color-base-30 px-2"&gt;•&lt;/span&gt;
-
-&lt;a href="https://dev.to/technoglot/comment/1d9ce" class="comment-date crayons-link crayons-link--secondary fs-s"&gt;
-  &lt;time&gt;
-    Apr  9
-  &lt;/time&gt;
-
-&lt;/a&gt;
-
-    &lt;/div&gt;
-    &lt;div class="body"&gt;
-      &lt;p&gt;Let's see...This week was great for me! &lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;I made progress on a small game I'm working on (college stuffs) 🕹&lt;/li&gt;
-&lt;li&gt;I got my 4 week streak shiny badge. Consistency for the win! 😁&lt;/li&gt;
-&lt;li&gt;My posts on productivity did really well too 😊 (Feel free to check them out, no pressure)&lt;/li&gt;
-&lt;/ul&gt;
-
-
-    &lt;/div&gt;
-&lt;/div&gt;
- 
-
-&lt;p&gt;Take a look at this &lt;a href="https://dev.to/alvaromontoro/bezos-calculator-4b7h"&gt;brilliant yet sobering calculator&lt;/a&gt; and you'll see what &lt;a class="mentioned-user" href="https://dev.to/crfries"&gt;@crfries&lt;/a&gt;
- means. &lt;/p&gt;
-
-
-&lt;div class="liquid-comment"&gt;
-    &lt;div class="details"&gt;
-      &lt;a href="/crfries"&gt;
-        &lt;img class="profile-pic" src="https://res.cloudinary.com/practicaldev/image/fetch/s--lmiwuuwb--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://res.cloudinary.com/practicaldev/image/fetch/s--o_7lsoTK--/c_fill%2Cf_auto%2Cfl_progressive%2Ch_50%2Cq_auto%2Cw_50/https://dev-to-uploads.s3.amazonaws.com/uploads/user/profile_image/519865/10f72ebb-4176-45be-82ad-8d2cf7b92b50.png" alt="crfries profile image"&gt;
-      &lt;/a&gt;
-      &lt;a href="/crfries"&gt;
-        &lt;span class="comment-username"&gt;crfries&lt;/span&gt;
-      &lt;/a&gt;
-      &lt;span class="color-base-30 px-2"&gt;•&lt;/span&gt;
-
-&lt;a href="https://dev.to/crfries/comment/1dcbk" class="comment-date crayons-link crayons-link--secondary fs-s"&gt;
-  &lt;time&gt;
-    Apr 13
-  &lt;/time&gt;
-
-&lt;/a&gt;
-
-    &lt;/div&gt;
-    &lt;div class="body"&gt;
-      &lt;p&gt;This is amazing and depressing at the same time. &lt;/p&gt;
-
-
-    &lt;/div&gt;
-&lt;/div&gt;
-
-
-&lt;p&gt;Sometimes, all we need is a little advice from others to get our &lt;a href="https://dev.to/crfries/portfolio-advice-4m1o"&gt;portfolios in shape&lt;/a&gt;. This is a helpful adjustment, &lt;a class="mentioned-user" href="https://dev.to/peterlunch"&gt;@peterlunch&lt;/a&gt;
-.&lt;/p&gt;
-
-
-&lt;div class="liquid-comment"&gt;
-    &lt;div class="details"&gt;
-      &lt;a href="/peterlunch"&gt;
-        &lt;img class="profile-pic" src="https://res.cloudinary.com/practicaldev/image/fetch/s--GPZ-yvdb--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://res.cloudinary.com/practicaldev/image/fetch/s--thyPdIOK--/c_fill%2Cf_auto%2Cfl_progressive%2Ch_50%2Cq_auto%2Cw_50/https://dev-to-uploads.s3.amazonaws.com/uploads/user/profile_image/358832/da87fb8f-ff37-491a-b1a6-54bef42f0eb7.jpeg" alt="peterlunch profile image"&gt;
-      &lt;/a&gt;
-      &lt;a href="/peterlunch"&gt;
-        &lt;span class="comment-username"&gt;Peter&lt;/span&gt;
-      &lt;/a&gt;
-      &lt;span class="color-base-30 px-2"&gt;•&lt;/span&gt;
-
-&lt;a href="https://dev.to/peterlunch/comment/1dblb" class="comment-date crayons-link crayons-link--secondary fs-s"&gt;
-  &lt;time&gt;
-    Apr 12
-  &lt;/time&gt;
-
-&lt;/a&gt;
-
-    &lt;/div&gt;
-    &lt;div class="body"&gt;
-      &lt;p&gt;On your intro you say - "I am currently seeking a position at a company to grow and expand my abilities."&lt;/p&gt;
-
-&lt;p&gt;I'd personally adjust to "I am currently seeking a position at a company where I can contribute with my x, y, z skills while I learn and grow from other developers."&lt;/p&gt;
-
-&lt;p&gt;It's always good to say explicitly what you are offering the organization.  &lt;/p&gt;
-
-
-    &lt;/div&gt;
-&lt;/div&gt;
-
-
-&lt;p&gt;Choosing your &lt;a href="https://dev.to/bobbyiliev/what-is-your-linux-distribution-of-choice-and-why-2ijf"&gt;Linux distribution&lt;/a&gt; can be a tricky decision to make. Thanks for stating your case and making that choice easier, &lt;a class="mentioned-user" href="https://dev.to/cmuralisree"&gt;@cmuralisree&lt;/a&gt;
-.&lt;/p&gt;
-
-
-&lt;div class="liquid-comment"&gt;
-    &lt;div class="details"&gt;
-      &lt;a href="/cmuralisree"&gt;
-        &lt;img class="profile-pic" src="https://res.cloudinary.com/practicaldev/image/fetch/s--V6ek2QQR--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://res.cloudinary.com/practicaldev/image/fetch/s--jyGkl1dJ--/c_fill%2Cf_auto%2Cfl_progressive%2Ch_50%2Cq_auto%2Cw_50/https://dev-to-uploads.s3.amazonaws.com/uploads/user/profile_image/554716/b30ee849-0d7c-4245-9b00-1c585cb101db.jpg" alt="cmuralisree profile image"&gt;
-      &lt;/a&gt;
-      &lt;a href="/cmuralisree"&gt;
-        &lt;span class="comment-username"&gt;Chittoji Murali Sree Krishna&lt;/span&gt;
-      &lt;/a&gt;
-      &lt;span class="color-base-30 px-2"&gt;•&lt;/span&gt;
-
-&lt;a href="https://dev.to/cmuralisree/comment/1d88k" class="comment-date crayons-link crayons-link--secondary fs-s"&gt;
-  &lt;time&gt;
-    Apr  8
-  &lt;/time&gt;
-
-&lt;/a&gt;
-
-    &lt;/div&gt;
-    &lt;div class="body"&gt;
-      &lt;h1&gt;
-  &lt;a href="#i-use-vanilla-arch"&gt;
-  &lt;/a&gt;
-  I use Vanilla arch
-&lt;/h1&gt;
-
-&lt;p&gt;I love it, bcz&lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;It's extremely lightweight,&lt;/li&gt;
-&lt;li&gt;You are building your own system, so it will be solid stable&lt;/li&gt;
-&lt;li&gt;Pacman and AUR,&lt;/li&gt;
-&lt;li&gt;Availability of software&lt;/li&gt;
-&lt;li&gt;Infamous archwiki,&lt;/li&gt;
-&lt;/ol&gt;
-
-
-    &lt;/div&gt;
-&lt;/div&gt;
-
-
-&lt;p&gt;In so many ways, &lt;a href="https://dev.to/jordienr/4-books-that-are-not-about-computers-that-made-me-a-good-software-developer-2hac"&gt;reading can make you a better Software Developer&lt;/a&gt;, and these suggestions are heading to the top of the list, for sure. Thanks for choosing our next reads, &lt;a class="mentioned-user" href="https://dev.to/eljayadobe"&gt;@eljayadobe&lt;/a&gt;
-!&lt;/p&gt;
-
-
-&lt;div class="liquid-comment"&gt;
-    &lt;div class="details"&gt;
-      &lt;a href="/eljayadobe"&gt;
-        &lt;img class="profile-pic" src="https://res.cloudinary.com/practicaldev/image/fetch/s--Dyh0m08q--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://res.cloudinary.com/practicaldev/image/fetch/s--J6Pjmr4x--/c_fill%2Cf_auto%2Cfl_progressive%2Ch_50%2Cq_auto%2Cw_50/https://dev-to-uploads.s3.amazonaws.com/uploads/user/profile_image/16481/7c9b8fa1-9004-4b63-94e9-c282f821bf24.png" alt="eljayadobe profile image"&gt;
-      &lt;/a&gt;
-      &lt;a href="/eljayadobe"&gt;
-        &lt;span class="comment-username"&gt;Eljay-Adobe&lt;/span&gt;
-      &lt;/a&gt;
-      &lt;span class="color-base-30 px-2"&gt;•&lt;/span&gt;
-
-&lt;a href="https://dev.to/eljayadobe/comment/1db4l" class="comment-date crayons-link crayons-link--secondary fs-s"&gt;
-  &lt;time&gt;
-    Apr 11
-  &lt;/time&gt;
-
-    • Edited
-    &lt;span class="hidden m:inline-block"&gt;
-      on &lt;time&gt;
-      Apr 11&lt;/time&gt;
-    &lt;/span&gt;
-&lt;/a&gt;
-
-    &lt;/div&gt;
-    &lt;div class="body"&gt;
-      &lt;p&gt;I wasn't even aware of any of those books.  They're on my book queue now!&lt;/p&gt;
-
-&lt;p&gt;Here's my four non-computer books that I have helped my programming:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;
-&lt;strong&gt;The Goal&lt;/strong&gt; by Eliyahu M. Goldratt&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;The Design of Everyday Things&lt;/strong&gt; by Don Norman&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;Advanced Dungeons &amp;amp; Dragons&lt;/strong&gt; (1st edition) by Gary Gygax, et al&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;To Do Doing Done&lt;/strong&gt; by Snead &amp;amp; Wycoff&lt;/li&gt;
-&lt;/ul&gt;
-
-
-    &lt;/div&gt;
-&lt;/div&gt;
-
-
-&lt;p&gt;See you next week for more great comments ✌&lt;/p&gt;
-
-</description>
-      <category>bestofdev</category>
     </item>
   </channel>
 </rss>
