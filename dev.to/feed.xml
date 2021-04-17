@@ -7,6 +7,402 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>Launch A Multi-node Kubernetes Cluster Using Vagrant And KVM</title>
+      <author>Vu Dao</author>
+      <pubDate>Sat, 17 Apr 2021 14:49:01 +0000</pubDate>
+      <link>https://dev.to/vumdao/launch-a-multi-node-kubernetes-cluster-using-vagrant-and-kvm-2pm</link>
+      <guid>https://dev.to/vumdao/launch-a-multi-node-kubernetes-cluster-using-vagrant-and-kvm-2pm</guid>
+      <description>&lt;h2&gt;
+  &lt;a href="#whats-in-this-document"&gt;
+  &lt;/a&gt;
+  What’s In This Document
+&lt;/h2&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="#-Create-Vagrantfile"&gt;Create Vagrantfile&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="#-Bootstrap-script-for-master-and-worker-nodes"&gt;Bootstrap script for master and worker nodes&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="#-Bootstrap-a-Kubernetes-cluster-using-Kubeadm"&gt;Bootstrap a Kubernetes cluster using Kubeadm&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="#-Join-nodes-to-Kubernetes-cluster"&gt;Join nodes to Kubernetes cluster&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="#-Vagrant-up-and-check-result"&gt;Vagrant up and check result&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+
+
+
+&lt;h3&gt;
+  &lt;a href="#create-vagrantfile"&gt;
+  &lt;/a&gt;
+  🚀 &lt;strong&gt;&lt;a href="#-Create-Vagrantfile"&gt;Create Vagrantfile&lt;/a&gt;&lt;/strong&gt;
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;strong&gt;Following is to create 1 master + 2 slaves (libvirt driver KVM)&lt;/strong&gt;&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+VAGRANTFILE_API_VERSION = "2"
+
+Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
+    config.vm.provider :libvirt do |libvirt|
+        libvirt.driver = "kvm"
+    end
+    config.vm.synced_folder './shared', '/vagrant', type: '9p', disabled: false, accessmode: "mapped"
+    config.vm.box = "generic/ubuntu2004"
+    config.vm.box_version = "3.0.6"
+    config.vm.network "forwarded_port", guest: 5432, host: 5432
+    config.vm.provision:shell, inline: &amp;lt;&amp;lt;-SHELL
+        echo "root:rootroot" | sudo chpasswd
+        sudo timedatectl set-timezone Asia/Ho_Chi_Minh
+    SHELL
+
+    config.vm.define "kube1" do |kube1|
+        kube1.vm.hostname = "kube1"
+        kube1.vm.network "private_network", ip: "192.168.121.211"
+        kube1.vm.provision:shell, inline: &amp;lt;&amp;lt;-SHELL
+            sudo echo -e "192.168.121.211\tkube1" &amp;gt;&amp;gt; /etc/hosts
+        SHELL
+        kube1.vm.provision:shell, path: "kube-bootstrap.sh"
+    end
+
+    config.vm.define "kube2" do |kube2|
+        kube2.vm.hostname = "kube2"
+        kube2.vm.network "private_network", ip: "192.168.121.212"
+        kube2.vm.provision:shell, inline: &amp;lt;&amp;lt;-SHELL
+            sudo echo -e "192.168.121.212\tkube2" &amp;gt;&amp;gt; /etc/hosts
+        SHELL
+        kube2.vm.provision:shell, path: "kube-bootstrap.sh"
+    end
+
+    config.vm.define "master" do |master|
+        master.vm.hostname = "master"
+        master.vm.network "private_network", ip: "192.168.121.210"
+        master.vm.provision:shell, inline: &amp;lt;&amp;lt;-SHELL
+            sudo sed -i 's/127\.0\.1\.1.*master//' /etc/hosts
+            sudo echo -e "192.168.121.210\tmaster" &amp;gt;&amp;gt; /etc/hosts
+        SHELL
+        master.vm.provision:shell, path: "kube-bootstrap.sh"
+        master.vm.provision:shell, path: "kubeadm_reinstall.sh"
+    end
+end
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;ul&gt;
+&lt;li&gt;You can configure as many masters and slaves as you like.
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;# master
+kube1.vm.network "private_network", ip: "192.168.121.210"
+
+# kube1
+kube1.vm.network "private_network", ip: "192.168.121.211"
+
+# kube2
+kube2.vm.network "private_network", ip: "192.168.121.212"
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#bootstrap-script-for-master-and-worker-nodes"&gt;
+  &lt;/a&gt;
+  🚀 &lt;strong&gt;&lt;a href="#-Bootstrap-script-for-master-and-worker-nodes"&gt;Bootstrap script for master and worker nodes&lt;/a&gt;&lt;/strong&gt;
+&lt;/h3&gt;
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;#!/bin/bash
+# Bootstrap machine
+
+ensure_netplan_apply() {
+    # First node up assign dhcp IP for eth1, not base on netplan yml
+    sleep 5
+    sudo netplan apply
+}
+
+step=1
+step() {
+    echo "Step $step $1"
+    step=$((step+1))
+}
+
+resolve_dns() {
+    step "===== Create symlink to /run/systemd/resolve/resolv.conf ====="
+    sudo rm /etc/resolv.conf
+    sudo ln -s /run/systemd/resolve/resolv.conf /etc/resolv.conf
+}
+
+install_docker() {
+    step "===== Installing docker ====="
+    sudo apt update
+    sudo apt install -y apt-transport-https ca-certificates curl gnupg-agent software-properties-common
+    sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+    sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+    sudo apt update
+    sudo apt install -y docker-ce docker-ce-cli containerd.io
+    sudo groupadd docker
+    sudo gpasswd -a $USER docker
+    sudo chmod 777 /var/run/docker.sock
+}
+
+install_kube() {
+    step "===== Installing kube ====="
+    sudo apt-add-repository "deb http://apt.kubernetes.io/ kubernetes-xenial main"
+    sudo apt update
+    sudo curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key add
+    sudo apt install -y kubeadm
+    sudo swapoff -a
+    sudo echo "source &amp;lt;(kubectl completion bash)" &amp;gt;&amp;gt; /home/vagrant/.bashrc
+    sudo echo "source &amp;lt;(kubeadm completion bash)" &amp;gt;&amp;gt; /home/vagrant/.bashrc
+}
+
+setup_root_login() {
+    step "===== Setup root login ====="
+    sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+    sudo systemctl restart ssh
+    sudo echo "root:rootroot" | chpasswd
+}
+
+setup_welcome_msg() {
+    step "===== Bash ====="
+    sudo apt -y install cowsay
+    sudo echo -e "\necho \"Welcome to Vagrant Kube Ubuntu 18.04\" | cowsay\n" &amp;gt;&amp;gt; /home/vagrant/.bashrc
+    sudo ln -s /usr/games/cowsay /usr/local/bin/cowsay
+    sudo apt install -y tcl expect net-tools
+}
+
+main() {
+    ensure_netplan_apply
+    resolve_dns
+    install_docker
+    install_kube
+    setup_root_login
+    setup_welcome_msg
+}
+
+main
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#bootstrap-a-kubernetes-cluster-using-kubeadm"&gt;
+  &lt;/a&gt;
+  🚀 &lt;strong&gt;&lt;a href="#-Bootstrap-a-Kubernetes-cluster-using-Kubeadm"&gt;Bootstrap a Kubernetes cluster using Kubeadm&lt;/a&gt;&lt;/strong&gt;
+&lt;/h3&gt;
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;#!/bin/bash
+# Reset and start kubeadm
+
+echo "Enter password:"
+read -s PASSWORD
+
+sudo_expect() {
+    command="sudo $1"
+    cat &amp;gt; /tmp/tmp.exp &amp;lt;&amp;lt;EOF
+#!/usr/bin/expect
+set password [lindex \$argv 0]
+set cmd [lrange \$argv 1 end]
+
+spawn {*}\$cmd
+
+expect {
+    "password" {
+        send "\$password\r"
+        exp_continue
+    }
+    "Are you sure you want to proceed?" {
+        send "y\r"
+        exp_continue
+    }
+    eof {
+        exit
+    }
+}
+
+interact
+EOF
+
+    expect /tmp/tmp.exp $PASSWORD $command
+}
+
+resestKubeadm() {
+    sudo_expect "kubeadm reset -f"
+    sudo_expect "iptables -F"
+}
+
+initKubeadm() {
+    sudo_expect "swapoff -a"
+    if [ "$(hostname)" != "master" ]; then
+        sudo_expect "hostname master"
+    fi
+    sudo_expect "rm -rf /var/lib/etcd/member"
+    sudo_expect "kubeadm init --node-name master --apiserver-advertise-address $(hostname -i)"
+    mkdir -p $HOME/.kube
+    rm -f $HOME/.kube/config
+    sudo_expect "cp -i /etc/kubernetes/admin.conf $HOME/.kube/config"
+    sudo_expect "chown $(id -u):$(id -g) $HOME/.kube/config"
+    sudo_expect "chmod +wr /etc/kubernetes/admin.conf"
+}
+
+kubeAddOn() {
+    kubectl apply -f "https://cloud.weave.works/k8s/net?k8s-version=$(kubectl version | base64 | tr -d '\n')"
+}
+
+resestKubeadm
+initKubeadm
+kubeAddOn
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#join-nodes-to-kubernetes-cluster"&gt;
+  &lt;/a&gt;
+  🚀 &lt;strong&gt;&lt;a href="#-Join-nodes-to-Kubernetes-cluster"&gt;Join nodes to Kubernetes cluster&lt;/a&gt;&lt;/strong&gt;
+&lt;/h3&gt;
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;#!/bin/bash
+# Join remote node to kubernetes cluster
+
+ip=$1
+PASSWORD="rootroot"
+
+ssh_expect() {
+    command="$1"
+    cat &amp;gt; /tmp/tmp.exp &amp;lt;&amp;lt;EOF
+#!/usr/bin/expect
+set password [lindex \$argv 0]
+set cmd [lrange \$argv 1 end]
+
+spawn {*}\$cmd
+
+expect {
+    "password" {
+        send "\$password\r"
+        exp_continue
+    }
+    "Are you sure you want to proceed?" {
+        send "y\r"
+        exp_continue
+    }
+    eof {
+        exit
+    }
+}
+
+interact
+EOF
+
+    expect /tmp/tmp.exp $PASSWORD $command
+}
+
+# Get token-ca-cert-hash
+sha=$(openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt | openssl rsa -pubin -outform der 2&amp;gt;/dev/null | \
+        openssl dgst -sha256 -hex | sed 's/^.* //')
+
+# Get token of master node by creating new one
+token=$(kubeadm token create)
+
+# Join the remote node
+cluster_ip=$(kubectl get node master -o jsonpath="{.status.addresses[0].address}")
+ssh_expect "ssh root@$ip kubeadm reset"
+ssh_expect "ssh root@$ip swapoff -a"
+ssh_expect "ssh root@$ip kubeadm join ${cluster_ip}:6443 --token ${token} --discovery-token-ca-cert-hash sha256:${sha}"
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#vagrant-up-and-check-result"&gt;
+  &lt;/a&gt;
+  🚀 &lt;strong&gt;&lt;a href="#-Vagrant-up-and-check-result"&gt;Vagrant up and check result&lt;/a&gt;&lt;/strong&gt;
+&lt;/h3&gt;
+
+&lt;ul&gt;
+&lt;li&gt;UP
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;vagrant up
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;ul&gt;
+&lt;li&gt;Get nodes
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;vagrant@master:/vagrant$ kubectl get node
+NAME     STATUS   ROLES                  AGE    VERSION
+kube1    Ready    &amp;lt;none&amp;gt;                 2d1h   v1.21.0
+kube2    Ready    &amp;lt;none&amp;gt;                 2d1h   v1.21.0
+master   Ready    control-plane,master   2d1h   v1.21.0
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;ul&gt;
+&lt;li&gt;KVM&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--R3uEsfhx--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://github.com/vumdao/vagrant/blob/master/kube/k8s_cluster.png%3Fraw%3Dtrue" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--R3uEsfhx--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://github.com/vumdao/vagrant/blob/master/kube/k8s_cluster.png%3Fraw%3Dtrue" alt="Alt-Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+
+
+
+&lt;h3&gt;
+  &lt;a href="https://dev.to/vumdao"&gt;🌠 Blog&lt;/a&gt;
+  &lt;span&gt; · &lt;/span&gt;
+  &lt;a href="https://github.com/vumdao/"&gt;Github&lt;/a&gt;
+  &lt;span&gt; · &lt;/span&gt;
+  &lt;a href="https://stackoverflow.com/users/11430272/vumdao"&gt;Web&lt;/a&gt;
+  &lt;span&gt; · &lt;/span&gt;
+  &lt;a href="https://www.linkedin.com/in/vu-dao-9280ab43/"&gt;Linkedin&lt;/a&gt;
+  &lt;span&gt; · &lt;/span&gt;
+  &lt;a href="https://www.linkedin.com/groups/12488649/"&gt;Group&lt;/a&gt;
+  &lt;span&gt; · &lt;/span&gt;
+  &lt;a href="https://www.facebook.com/CloudOpz-104917804863956"&gt;Page&lt;/a&gt;
+  &lt;span&gt; · &lt;/span&gt;
+  &lt;a href="https://twitter.com/VuDao81124667"&gt;Twitter 🌠&lt;/a&gt;
+&lt;/h3&gt;
+
+</description>
+      <category>k8s</category>
+      <category>devops</category>
+      <category>cloudopz</category>
+      <category>kvm</category>
+    </item>
+    <item>
       <title>Boat 441 TWS Ear-Bud - 2021 review</title>
       <author>Web_Codr</author>
       <pubDate>Sat, 17 Apr 2021 14:33:06 +0000</pubDate>
@@ -60,6 +456,116 @@ Follow me!: &lt;a href="https://twitter.com/justericchapman?ref_src=twsrc%5Etfw"
 </description>
       <category>rails</category>
       <category>ruby</category>
+      <category>beginners</category>
+    </item>
+    <item>
+      <title>Intro to web app using AWS Serverless Architecture</title>
+      <author>dev0928</author>
+      <pubDate>Sat, 17 Apr 2021 13:54:26 +0000</pubDate>
+      <link>https://dev.to/dev0928/intro-to-web-app-using-aws-serverless-architecture-f91</link>
+      <guid>https://dev.to/dev0928/intro-to-web-app-using-aws-serverless-architecture-f91</guid>
+      <description>&lt;p&gt;Serverless architecture comprises a group of technologies working together as a single unit to deliver a solution. In this write-up, let’s review the involved technologies along with their high level purpose to build a web application.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--D_WUGfhb--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/b94wkskjehhaahhsisko.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--D_WUGfhb--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/b94wkskjehhaahhsisko.png" alt="High level serverless architecture"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h3&gt;Backend&lt;/h3&gt;
+
+&lt;p&gt;Backend is a stand-alone service comprising three main components - Data store, Lambda functions used as a compute service and API Gateway acting as a main backend interface.&lt;/p&gt;
+
+&lt;h4&gt;Data Store / Database&lt;/h4&gt;
+
+&lt;p&gt;Aurora Serverless (PostgreSQL) is one of the options. There are few other serverless database options available to choose from. Data store choice purely depends on the type of data stored within the application.&lt;/p&gt;
+
+&lt;h4&gt;Lambda Functions&lt;/h4&gt; 
+
+&lt;p&gt;Lambda functions with Python could be used on the backend. AWS Lambda supports many other options such as Node.js, Java, .NET Core, PHP.&lt;/p&gt;
+
+&lt;h4&gt;API Gateway&lt;/h4&gt;
+
+&lt;p&gt;API Gateway serves as a gatekeeper to the backend service. API endpoints can be secured and served through the API Gateway. API Gateway leverages lambda functions to perform necessary data processing to serve requests made to the API endpoint. Frontend applications or any other service requiring data can call these API endpoints with required security token to obtain necessary data. &lt;/p&gt;
+
+&lt;h3&gt;Frontend&lt;/h3&gt; 
+
+&lt;p&gt;Frontend framework such as Angular, Vue, React or any other framework could be used to build the frontend website. During deployment, front-end code is built and deployed to &lt;strong&gt;AWS CloudFront&lt;/strong&gt; CDN and served to the end users’ browsers upon request. &lt;/p&gt;
+
+&lt;h3&gt;Security&lt;/h3&gt;
+
+&lt;p&gt;&lt;strong&gt;AWS Cognito&lt;/strong&gt; is an Amazon authentication and authorization service. This service also has support for SAML / OAuth2 / Open ID authentication through major Identify providers such as Facebook, Google, Okta.  &lt;/p&gt;
+
+&lt;h3&gt;Supporting Services&lt;/h3&gt;
+
+&lt;p&gt;Besides above mentioned core services, there are many other supporting services involved in the serverless application architecture. Let’s review the purpose of these supporting services.&lt;/p&gt;
+
+&lt;h4&gt;Serverless Framework&lt;/h4&gt; 
+
+&lt;p&gt;Serverless Framework helps develop and deploy serverless applications along with the required infrastructure resources they require. It's a CLI that offers structure, automation and best practices out-of-the-box and helps build sophisticated, event-driven, serverless architecture applications. Framework itself is built with Node.js but it can support multiple languages (Node.js, Python, Java, and more). This framework is cloud-agnostic meaning one can use this framework to develop serverless applications for any cloud provider. &lt;/p&gt;
+
+&lt;p&gt;AWS Serverless Application Model is an alternative option to serverless framework but it is specific to AWS.&lt;/p&gt;
+
+&lt;h4&gt;AWS CloudFormation&lt;/h4&gt;
+
+&lt;p&gt;AWS CloudFormation gives an easy way to model a collection of related AWS resources, provision them quickly and consistently across different environments, and manage them throughout their life cycles, by treating infrastructure as code. Serverless framework’s configuration files describe all of the services that need to be provisioned for a given application.&lt;/p&gt;
+
+&lt;h4&gt;AWS S3&lt;/h4&gt; 
+
+&lt;p&gt;Simple Storage Service(S3) can be used as an intermediate storage for transferring and processing data from external systems. S3 can also be used for storing artifacts during the build and deployment process. &lt;/p&gt;
+
+&lt;h4&gt;IAM&lt;/h4&gt;
+
+&lt;p&gt;Identity and Access Management Service is one of the important services in this solution. This service is mainly used for providing granular access permissions among various services used within the AWS serverless environment.&lt;/p&gt;
+
+&lt;h4&gt;Route 53&lt;/h4&gt;
+
+&lt;p&gt;This service is used for domain registration so deployed applications could be accessed using a user-friendly URL.&lt;/p&gt;
+
+&lt;h4&gt;AWS CloudWatch&lt;/h4&gt;
+
+&lt;p&gt;AWS CloudWatch is a logging service used by other services to log messages within the serverless solution. Messages logged in the service can be used for setting up alerts in case there are errors/issues within the application.   &lt;/p&gt;
+
+&lt;h4&gt;Source Control&lt;/h4&gt; 
+
+&lt;p&gt;&lt;strong&gt;AWS CodeCommit&lt;/strong&gt; is AWS provided solution for source control. Other third party source control solutions such as &lt;strong&gt;Github&lt;/strong&gt; can also be used for source code management.&lt;/p&gt;
+
+&lt;h4&gt;Code Pipeline&lt;/h4&gt;
+
+&lt;p&gt;This AWS solution enables automation of continuous build and deployment of applications.&lt;/p&gt;
+
+&lt;h4&gt;Amazon SNS&lt;/h4&gt;
+
+&lt;p&gt;Simple Notification Service used for event messaging. Events could be notified to multiple interested systems enabling microservices / distributed processing.&lt;/p&gt;
+
+&lt;h4&gt;Amazon SQS&lt;/h4&gt;
+
+&lt;p&gt;Simple Queue Service is a messaging service used for processing events sequentially. This service can scale well and also has facilities for guaranteed delivery of sequenced messages.&lt;/p&gt;
+
+&lt;h4&gt;AWS Systems Manager&lt;/h4&gt;
+
+&lt;p&gt;Systems Manager Parameter Store is used for application’s configuration and secrets management.&lt;/p&gt;
+
+&lt;h4&gt;VPC&lt;/h4&gt;
+
+&lt;p&gt;All of the services configured for the serverless solution would be deployed within the application’s secure Virtual Private Cloud environment. VPC should be configured properly to avoid security holes.&lt;/p&gt;
+
+&lt;h3&gt;Benefits&lt;/h3&gt;
+
+&lt;p&gt;Here are some of the benefits of using serverless architecture:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;This architecture scales well from few users to thousands of concurrent users.&lt;/li&gt;
+&lt;li&gt;As there are no dedicated hardware resources provisioned as part of this solution, there is no infrastructure cost around server maintenance and upgrades.&lt;/li&gt;
+&lt;li&gt;Also, the services involved in this solution are charged based on usage. This solution could be cost effective if configured properly.
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3&gt;Further Learning&lt;/h3&gt;
+
+&lt;p&gt;&lt;a href="https://aws.amazon.com/getting-started/deep-dive-serverless/"&gt;https://aws.amazon.com/getting-started/deep-dive-serverless/&lt;/a&gt;&lt;br&gt;
+&lt;a href="https://www.serverless.com/learn/"&gt;https://www.serverless.com/learn/&lt;/a&gt;&lt;/p&gt;
+
+</description>
+      <category>aws</category>
+      <category>serverless</category>
+      <category>webdev</category>
       <category>beginners</category>
     </item>
     <item>
@@ -969,173 +1475,6 @@ As easy because it is to urge fixated on the new, fancy sounding skills you’ll
       <category>javascript</category>
       <category>career</category>
       <category>html</category>
-    </item>
-    <item>
-      <title>Introducing: The Appwrite Gang of Four (and new ways to get swags)</title>
-      <author>Eldad A. Fux</author>
-      <pubDate>Sat, 17 Apr 2021 11:05:56 +0000</pubDate>
-      <link>https://dev.to/eldadfux/introducing-the-appwrite-gang-of-four-and-new-ways-to-get-swags-1jo9</link>
-      <guid>https://dev.to/eldadfux/introducing-the-appwrite-gang-of-four-and-new-ways-to-get-swags-1jo9</guid>
-      <description>&lt;p&gt;We're happy to introduce you to the new Appwrite gang of four (yeh, like the book, but not really), a set of four TODO example applications built using all popular JS frameworks, including React, Vue, Angular and Svelte. The new examples are designed to demonstrate how you can utilize Appwrite in your favorite set of technologies.&lt;/p&gt;
-
-&lt;p&gt;At Appwrite, we believe backend as a service should be as simple and most intuitive to use. Following that believe we designed the new examples to be as simple and straightforward but still give you an excellent idea of how to start using Appwrite and scale and grow with it.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#new-to-appwrite"&gt;
-  &lt;/a&gt;
-  New to Appwrite?
-&lt;/h2&gt;
-
-&lt;p&gt;Appwrite is an open-source, end-to-end development platform designed to abstract the most complex and repetitive processes involved in building a modern app. Appwrite is a self-hosted solution you can host on any infrastructure and provides you all the core APIs and tools required to create any persistent modern application. You can learn more on our &lt;a href="https://appwrite.io"&gt;website&lt;/a&gt; or &lt;a href="https://github.com/appwrite/appwrite"&gt;Github repository&lt;/a&gt;.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#go-and-test-our-new-demos"&gt;
-  &lt;/a&gt;
-  Go and Test Our New Demos!
-&lt;/h2&gt;
-
-&lt;p&gt;All the new demos are already available on Github and offer a one-click-deployment setup to your favorite hosting service, including &lt;a href="https://vercel.com/"&gt;Vercel&lt;/a&gt;, &lt;a href="https://www.netlify.com/"&gt;Netlify&lt;/a&gt;, and &lt;a href="https://digitalocean.com/"&gt;DigitalOcean&lt;/a&gt;.&lt;/p&gt;
-
-&lt;p&gt;💙 React TODO: &lt;a href="https://github.com/appwrite/todo-with-react"&gt;https://github.com/appwrite/todo-with-react&lt;/a&gt;&lt;br&gt;
-💚 Vue TODO: &lt;a href="https://github.com/appwrite/todo-with-vue"&gt;https://github.com/appwrite/todo-with-vue&lt;/a&gt;&lt;br&gt;
-❤️ Angular TODO: &lt;a href="https://github.com/appwrite/todo-with-angular"&gt;https://github.com/appwrite/todo-with-angular&lt;/a&gt;&lt;br&gt;
-🧡 Svelte TODO: &lt;a href="https://github.com/appwrite/todo-with-svelte"&gt;https://github.com/appwrite/todo-with-svelte&lt;/a&gt;&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#we-have-some-hidden-swags-waiting-for-you"&gt;
-  &lt;/a&gt;
-  We Have Some Hidden Swags Waiting For You!
-&lt;/h2&gt;
-
-&lt;p&gt;Our access credentials were recently "compromised", and someone tried to ruin our new and shiny demos 😉. They decided to leave behind 15 easter eggs 🥚 for you to discover. If you find them, submit a PR cleaning up that section of the code to claim some cool Appwrite Swag 🤩 (One PR per person across all the repos). You can track the number of claimed Easter Eggs using the badge at the top.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#whats-next"&gt;
-  &lt;/a&gt;
-  What’s Next?
-&lt;/h2&gt;
-
-&lt;p&gt;You can learn more about the different Appwrite features or check out some of our latest Feature Spotlights:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;  &lt;a href="https://appwrite.io/docs/functions"&gt;Cloud Functions&lt;/a&gt;
-&lt;/li&gt;
-&lt;li&gt;  &lt;a href="https://appwrite.io/docs/command-line"&gt;Appwrite CLI&lt;/a&gt;
-&lt;/li&gt;
-&lt;li&gt;  &lt;a href="https://eldadfux.medium.com/appwrite-0-7-introducing-the-doctor-cli-to-help-you-debug-your-server-health-889e9806fe85"&gt;Appwrite Doctor&lt;/a&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;If you’re new to Appwrite, you can try and &lt;a href="https://appwrite.io/docs/installation"&gt;install it&lt;/a&gt;. It will take you only 2.5 minutes. After you got yourself a copy of the Appwrite server, you can check some of our getting started guides for &lt;a href="https://appwrite.io/docs/getting-started-for-web"&gt;Web&lt;/a&gt;, &lt;a href="https://appwrite.io/docs/getting-started-for-flutter"&gt;Flutter&lt;/a&gt;, or &lt;a href="https://appwrite.io/docs/getting-started-for-server"&gt;Server&lt;/a&gt;, and visit our &lt;a href="https://appwrite.io/discord"&gt;Discord community&lt;/a&gt; where we chat about Appwrite non-stop.&lt;/p&gt;
-
-&lt;p&gt;We really love our Github Stargazers 🤩. If you like what we're doing, head over to our &lt;a href="https://github.com/appwrite/appwrite"&gt;Github repo&lt;/a&gt; and drop us a ⭐️&lt;/p&gt;
-
-</description>
-      <category>angular</category>
-      <category>vue</category>
-      <category>svelte</category>
-      <category>react</category>
-    </item>
-    <item>
-      <title>Manage all your home 🏡chores with this Notion Template🔥</title>
-      <author>Manpreet virk</author>
-      <pubDate>Sat, 17 Apr 2021 11:02:16 +0000</pubDate>
-      <link>https://dev.to/xenoxdev/manage-all-your-home-chores-with-this-notion-template-15hf</link>
-      <guid>https://dev.to/xenoxdev/manage-all-your-home-chores-with-this-notion-template-15hf</guid>
-      <description>&lt;p&gt;Hey folks 👋🏼.&lt;br&gt;
-Just launched another Product on the Product hunt. It's a template that helps you optimize your housework 🏠 + your life ♥️ &lt;/p&gt;
-&lt;h3&gt;
-  &lt;a href="#home-chore-manager"&gt;
-  &lt;/a&gt;
-  Home Chore Manager
-&lt;/h3&gt;
-
-&lt;p&gt;It's hard to make a new list for a task that repeats every day - introducing a feature that lets you set recurring tasks so that it updates on its own and relieves you of that work entirely. So now, check that task off, and be more productive! Make a proper chore list that is recurring and you'll be able to efficiently track it in the template.&lt;/p&gt;
-
-&lt;p&gt;&lt;iframe width="710" height="399" src="https://www.youtube.com/embed/LevS9LS4ZWw"&gt;
-&lt;/iframe&gt;
-&lt;/p&gt;
-
-&lt;p&gt;In this template, you'll get the following features -&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#add-chores"&gt;
-  &lt;/a&gt;
-  Add Chores
-&lt;/h3&gt;
-
-&lt;p&gt;Add household chores you want to track and fill out these Properties&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;
-&lt;strong&gt;Frequency&lt;/strong&gt;: How often the chore should be repeated (Daily, Weekly, Bi-Weekly, Monthly, Seasonally, Semi-Annually, Annually)&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;Last Done&lt;/strong&gt;: An initial date for when you last did this chore&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;Assigned To&lt;/strong&gt;: For easily tracking chores for a household. Easy to  filter the tasks on a personal page to show only things assigned to yourself&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;Rooms&lt;/strong&gt;: Good to reference what room to do the chore in, especially useful if you want to have the same chore separated into different rooms
-&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ji4_MDYl--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/0bkset6v3hlodoz69jd8.png" alt="Alt Text"&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h3&gt;
-  &lt;a href="#update-status"&gt;
-  &lt;/a&gt;
-  Update Status
-&lt;/h3&gt;
-
-&lt;p&gt;When you complete a chore, simply update the date in the Last Done&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;The Do Next column will update automatically based on the frequency&lt;/li&gt;
-&lt;li&gt;The Status will change to display Done&lt;/li&gt;
-&lt;li&gt;The status will automatically update to let you know when the task is Due in # days, Due today, or Overdue.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h3&gt;
-  &lt;a href="#calendar-view"&gt;
-  &lt;/a&gt;
-  Calendar View
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--MthG8CZP--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/oty667cmihd8hzaoi3r6.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--MthG8CZP--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/oty667cmihd8hzaoi3r6.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;br&gt;
-Chores will be shown in the calendar view according to their Do next date. Users can use this section to keep a track of the present and upcoming day chores.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#board-view"&gt;
-  &lt;/a&gt;
-  Board view
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--LeclU56N--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/2b0ubso7th7m6ym4892e.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--LeclU56N--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/2b0ubso7th7m6ym4892e.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;br&gt;
-A board view of added chores makes it easy to move a task from one frequency to other just like those Kanban boards.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#timeline-view"&gt;
-  &lt;/a&gt;
-  Timeline View
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--mNsEZLgm--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/j6yby6z4cwtiyq1zjiu5.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--mNsEZLgm--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/j6yby6z4cwtiyq1zjiu5.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;br&gt;
-The timeline view lists down all the added chores. The view can be arranged for a week/month/quarter to keep track of chores.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#want-one"&gt;
-  &lt;/a&gt;
-  Want One?
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;a href="https://i.giphy.com/media/2tRkw3A5ifszb1Wb3q/giphy.gif" class="article-body-image-wrapper"&gt;&lt;img src="https://i.giphy.com/media/2tRkw3A5ifszb1Wb3q/giphy.gif" alt=""&gt;&lt;/a&gt;&lt;br&gt;
-&lt;strong&gt;&lt;em&gt;Here is your link&lt;/em&gt;&lt;/strong&gt; 👉 &lt;a href="https://prototion.com/notion-for/home-chores-manager"&gt;&lt;strong&gt;&lt;em&gt;Home Chore Manager&lt;/em&gt;&lt;/strong&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;We are on Producthunt today. Go show some love here.&lt;br&gt;
-&lt;a href="https://www.producthunt.com/posts/notion-home-chores"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s---84xg0JF--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/73ulk3v29tdsb4lb0ie7.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
-
-</description>
-      <category>productivity</category>
-      <category>watercooler</category>
-      <category>showdev</category>
     </item>
   </channel>
 </rss>
