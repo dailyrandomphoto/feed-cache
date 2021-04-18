@@ -860,6 +860,866 @@ Terry Threatt&lt;/p&gt;
       <category>webdev</category>
     </item>
     <item>
+      <title>Terraform v15.0 with AWS (EKS deployment) just</title>
+      <author>cosckoya</author>
+      <pubDate>Sat, 17 Apr 2021 22:14:50 +0000</pubDate>
+      <link>https://dev.to/cosckoya/terraform-v15-0-with-aws-eks-deployment-42hh</link>
+      <guid>https://dev.to/cosckoya/terraform-v15-0-with-aws-eks-deployment-42hh</guid>
+      <description>&lt;p&gt;&lt;a href="https://github.com/hashicorp/terraform/releases/tag/v0.15.0"&gt;Terraform v15 was released on April 14th&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;On this post I will use the following resources:&lt;/p&gt;
+
+&lt;p&gt;· &lt;a href="https://learn.hashicorp.com/tutorials/terraform/eks"&gt;Provision an EKS Cluster (AWS)&lt;/a&gt;&lt;br&gt;
+· &lt;a href="https://github.com/hashicorp/terraform/releases/tag/v0.15.0"&gt;Terraform v15.0&lt;/a&gt;&lt;br&gt;
+· &lt;a href="https://registry.terraform.io"&gt;Terraform Registry&lt;/a&gt;&lt;br&gt;
+· &lt;a href="https://pre-commit.com"&gt;Pre-Commit&lt;/a&gt;&lt;br&gt;
+· &lt;a href="https://github.com/antonbabenko/pre-commit-terraform"&gt;Terraform Pre-commit&lt;/a&gt;&lt;br&gt;
+· &lt;a href="https://github.com/terraform-docs/terraform-docs"&gt;Terraform-docs&lt;/a&gt;&lt;br&gt;
+· &lt;a href="https://github.com/terraform-linters/tflint"&gt;Tflint&lt;/a&gt;&lt;br&gt;
+· &lt;a href="https://github.com/tfsec/tfsec"&gt;Tfsec&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;This is based in the &lt;a href="https://learn.hashicorp.com/tutorials/terraform/eks"&gt;Provision an EKS Cluster (AWS)&lt;/a&gt; where it tweak it a little bit setting up some variables, breaking the .tf files and setting up some new providers and modules. Also I will test a bunch of features, like terraform-docs, tflint and tfsec with a pre-commit git-hook. Let's start!&lt;/p&gt;
+
+&lt;p&gt;Before start we should check the needed AWS resources for this task:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;1 x Amazon VPC
+6 x Amazon Subnet (3 x Public + 3 x Private)
+3 x Amazon EC2
+1 x Amazon EKS
+1 x Kubernetes AWS-Auth policy
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Because some AWS modules are not available yet, I will create my own modules in my deployment.&lt;/p&gt;
+
+&lt;p&gt;First of all I will generate my project folder:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;CMD&amp;gt; mdkir terraform-aws
+CMD&amp;gt; &lt;span class="nb"&gt;cd &lt;/span&gt;terraform-aws
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Then I will create some base terraform files:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;CMD&amp;gt; touch {main,outputs,variables,versions}.tf
+CMD&amp;gt; ls -l
+total 16
+-rw-rw-r-- 1 cosckoya cosckoya 0 abr 17 22:01 main.tf
+-rw-rw-r-- 1 cosckoya cosckoya 0 abr 17 22:01 outputs.tf
+-rw-rw-r-- 1 cosckoya cosckoya 0 abr 17 22:16 variables.tf
+-rw-rw-r-- 1 cosckoya cosckoya 0 abr 17 22:17 versions.tf
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;And enable the pre-commit in the project:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;CMD&amp;gt; echo 'repos:
+- repo: git://github.com/antonbabenko/pre-commit-terraform
+  rev: master
+  hooks:
+  - id: terraform_fmt
+  - id: terraform_validate
+  - id: terraform_docs
+  - id: terraform_docs_without_aggregate_type_defaults
+  - id: terraform_tflint
+    args:
+    - 'args=--enable-rule=terraform_documented_variables'
+  - id: terraform_tfsec
+- repo: https://github.com/pre-commit/pre-commit-hooks
+  rev: master
+  hooks:
+  - id: check-merge-conflict
+  - id: end-of-file-fixer' &amp;gt; .pre-commit-config.yaml
+
+CMD&amp;gt; pre-commit install
+pre-commit installed at .git/hooks/pre-commit
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Let's start setting up "versions.tf" file, that will contain our relative provider versions:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="c1"&gt;# Providers version&lt;/span&gt;
+&lt;span class="c1"&gt;# Ref. https://www.terraform.io/docs/configuration/providers.html&lt;/span&gt;
+
+&lt;span class="s"&gt;terraform {&lt;/span&gt;
+  &lt;span class="s"&gt;required_version = "~&amp;gt;0.15"&lt;/span&gt;
+  &lt;span class="s"&gt;required_providers {&lt;/span&gt;
+    &lt;span class="s"&gt;# Base Providers&lt;/span&gt;
+    &lt;span class="s"&gt;random = {&lt;/span&gt;
+      &lt;span class="s"&gt;source  = "hashicorp/random"&lt;/span&gt;
+      &lt;span class="s"&gt;version = "3.1.0"&lt;/span&gt;
+    &lt;span class="s"&gt;}&lt;/span&gt;
+    &lt;span class="no"&gt;null&lt;/span&gt;&lt;span class="s"&gt; = {&lt;/span&gt;
+      &lt;span class="s"&gt;source  = "hashicorp/null"&lt;/span&gt;
+      &lt;span class="s"&gt;version = "3.1.0"&lt;/span&gt;
+    &lt;span class="s"&gt;}&lt;/span&gt;
+    &lt;span class="s"&gt;local = {&lt;/span&gt;
+      &lt;span class="s"&gt;source = "hashicorp/local"&lt;/span&gt;
+      &lt;span class="s"&gt;version = "2.1.0"&lt;/span&gt;
+    &lt;span class="s"&gt;}&lt;/span&gt;
+    &lt;span class="s"&gt;template = {&lt;/span&gt;
+      &lt;span class="s"&gt;source = "hashicorp/template"&lt;/span&gt;
+      &lt;span class="s"&gt;version = "2.2.0"&lt;/span&gt;
+    &lt;span class="s"&gt;}&lt;/span&gt;
+    &lt;span class="s"&gt;# AWS Provider&lt;/span&gt;
+    &lt;span class="s"&gt;aws = {&lt;/span&gt;
+      &lt;span class="s"&gt;source  = "hashicorp/aws"&lt;/span&gt;
+      &lt;span class="s"&gt;version = "3.37.0"&lt;/span&gt;
+    &lt;span class="s"&gt;}&lt;/span&gt;
+    &lt;span class="s"&gt;# Kubernetes Provider&lt;/span&gt;
+    &lt;span class="s"&gt;kubernetes = {&lt;/span&gt;
+      &lt;span class="s"&gt;source  = "hashicorp/kubernetes"&lt;/span&gt;
+      &lt;span class="s"&gt;version = "2.1.0"&lt;/span&gt;
+    &lt;span class="s"&gt;}&lt;/span&gt;    
+  &lt;span class="s"&gt;}&lt;/span&gt;
+&lt;span class="err"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Then I manage to set some variables for the project:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;# Common
+variable "project" {
+  default     = "cosckoya"
+  description = "Project name"
+}
+
+variable "environment" {
+  default     = "laboratory"
+  description = "Environment name"
+}
+
+# Amazon
+variable "region" {
+  default     = "us-east-1"
+  description = "AWS region"
+}
+
+variable "vpc_cidr" {
+  type        = string
+  default     = "10.0.0.0/16"
+  description = "AWS VPC CIDR"
+}
+
+variable "public_subnets_cidr" {
+  type        = list(any)
+  default     = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
+  description = "AWS Public Subnets"
+}
+
+variable "private_subnets_cidr" {
+  type        = list(any)
+  default     = ["10.0.4.0/24", "10.0.5.0/24", "10.0.6.0/24"]
+  description = "AWS Private Subnets"
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This is my main.tf file. Here I changed the "locals" to set some tags as a "tomap(..)" function, update d the modules to the last version, also updated the Kubernetes version to 1.19... just to test and have fun.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;provider "aws" {
+  profile    = "default"
+  region     = var.region
+  access_key = "AKIA.."
+  secret_key = "&amp;lt;SECRET-KEY-HERE"
+}
+
+data "aws_availability_zones" "available" {}
+
+locals {
+  cluster_name = "${var.project}-${var.environment}-eks"
+  tags = tomap({"Environment" = var.environment, "project" = var.project})
+}
+
+resource "random_string" "suffix" {
+  length  = 8
+  special = false
+}
+
+## Amazon Networking
+module "vpc" {
+  source = "terraform-aws-modules/vpc/aws"
+  version = "2.78.0"
+
+  name                 = "${var.project}-${var.environment}-vpc"
+  cidr                 = var.vpc_cidr
+  azs                  = data.aws_availability_zones.available.names
+  private_subnets      = var.public_subnets_cidr
+  public_subnets       = var.private_subnets_cidr
+  enable_nat_gateway   = true
+  single_nat_gateway   = true
+  enable_dns_hostnames = true
+
+  tags = {
+    "kubernetes.io/cluster/${local.cluster_name}" = "shared"
+  }
+
+  public_subnet_tags = {
+    "kubernetes.io/cluster/${local.cluster_name}" = "shared"
+    "kubernetes.io/role/elb"                      = "1"
+  }
+
+  private_subnet_tags = {
+    "kubernetes.io/cluster/${local.cluster_name}" = "shared"
+    "kubernetes.io/role/internal-elb"             = "1"
+  }
+}
+
+## Amazon EKS
+module "eks" {
+  source          = "terraform-aws-modules/eks/aws"
+  cluster_name    = local.cluster_name
+  cluster_version = "1.19"
+  subnets         = module.vpc.private_subnets
+
+  tags = local.tags
+
+  vpc_id = module.vpc.vpc_id
+
+  workers_group_defaults = {
+    root_volume_type = "gp2"
+  }
+
+  worker_groups = [
+    {
+      name                          = "worker-group-1"
+      instance_type                 = "t2.small"
+      additional_userdata           = "echo foo bar"
+      asg_desired_capacity          = 2
+      additional_security_group_ids = [aws_security_group.worker_group_mgmt_one.id]
+    },
+    {
+      name                          = "worker-group-2"
+      instance_type                 = "t2.medium"
+      additional_userdata           = "echo foo bar"
+      additional_security_group_ids = [aws_security_group.worker_group_mgmt_two.id]
+      asg_desired_capacity          = 1
+    },
+  ]
+}
+
+data "aws_eks_cluster" "cluster" {
+  name = module.eks.cluster_id
+}
+
+data "aws_eks_cluster_auth" "cluster" {
+  name = module.eks.cluster_id
+}
+
+## Amazon Security Groups
+resource "aws_security_group" "worker_group_mgmt_one" {
+  name_prefix = "worker_group_mgmt_one"
+  vpc_id      = module.vpc.vpc_id
+
+  ingress {
+    from_port = 22
+    to_port   = 22
+    protocol  = "tcp"
+
+    cidr_blocks = [
+      "10.0.0.0/8",
+    ]
+  }
+}
+
+resource "aws_security_group" "worker_group_mgmt_two" {
+  name_prefix = "worker_group_mgmt_two"
+  vpc_id      = module.vpc.vpc_id
+
+  ingress {
+    from_port = 22
+    to_port   = 22
+    protocol  = "tcp"
+
+    cidr_blocks = [
+      "192.168.0.0/16",
+    ]
+  }
+}
+
+resource "aws_security_group" "all_worker_mgmt" {
+  name_prefix = "all_worker_management"
+  vpc_id      = module.vpc.vpc_id
+
+  ingress {
+    from_port = 22
+    to_port   = 22
+    protocol  = "tcp"
+
+    cidr_blocks = [
+      "10.0.0.0/8",
+      "172.16.0.0/12",
+      "192.168.0.0/16",
+    ]
+  }
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;These outputs are the "default" outputs in the samples.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;output "cluster_id" {
+  description = "EKS cluster ID."
+  value       = module.eks.cluster_id
+}
+
+output "cluster_endpoint" {
+  description = "Endpoint for EKS control plane."
+  value       = module.eks.cluster_endpoint
+}
+
+output "cluster_security_group_id" {
+  description = "Security group ids attached to the cluster control plane."
+  value       = module.eks.cluster_security_group_id
+}
+
+output "kubectl_config" {
+  description = "kubectl config as generated by the module."
+  value       = module.eks.kubeconfig
+}
+
+output "config_map_aws_auth" {
+  description = "A kubernetes configuration to authenticate to this EKS cluster."
+  value       = module.eks.config_map_aws_auth
+}
+
+output "region" {
+  description = "AWS region"
+  value       = var.region
+}
+
+output "cluster_name" {
+  description = "Kubernetes Cluster Name"
+  value       = local.cluster_name
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Time to have fun now. Let's play with this:&lt;/p&gt;
+
+&lt;p&gt;· Initialize the project&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;CMD&amp;gt; terraform init
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;In here we should test the pre-commit rules that we setted up, take note of every Tfsec error about the security compliance. Try to resolve each or comment them with this &lt;a href="https://tfsec.dev/docs/home"&gt;docs&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Also create a README.md file with the following lines:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;&amp;lt;!-- BEGINNING OF PRE-COMMIT-TERRAFORM DOCS HOOK --&amp;gt;
+&amp;lt;!-- END OF PRE-COMMIT-TERRAFORM DOCS HOOK --&amp;gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This will generate some information relative to the project.&lt;br&gt;
+Run pre-commit with&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;CMD&amp;gt; pre-commit run -a
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#check-readmefile-it-should-look-like-this"&gt;
+  &lt;/a&gt;
+  Check README.file it should look like this:
+&lt;/h2&gt;
+
+&lt;h2&gt;
+  &lt;a href="#requirements"&gt;
+  &lt;/a&gt;
+  Requirements
+&lt;/h2&gt;
+
+&lt;div class="table-wrapper-paragraph"&gt;&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;Name&lt;/th&gt;
+&lt;th&gt;Version&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;
+&lt;a&gt;&lt;/a&gt; &lt;a href="#requirement_terraform"&gt;terraform&lt;/a&gt;
+&lt;/td&gt;
+&lt;td&gt;~&amp;gt;0.15&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;
+&lt;a&gt;&lt;/a&gt; &lt;a href="#requirement_aws"&gt;aws&lt;/a&gt;
+&lt;/td&gt;
+&lt;td&gt;3.37.0&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;
+&lt;a&gt;&lt;/a&gt; &lt;a href="#requirement_kubernetes"&gt;kubernetes&lt;/a&gt;
+&lt;/td&gt;
+&lt;td&gt;2.1.0&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;
+&lt;a&gt;&lt;/a&gt; &lt;a href="#requirement_local"&gt;local&lt;/a&gt;
+&lt;/td&gt;
+&lt;td&gt;2.1.0&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;
+&lt;a&gt;&lt;/a&gt; &lt;a href="#requirement_null"&gt;null&lt;/a&gt;
+&lt;/td&gt;
+&lt;td&gt;3.1.0&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;
+&lt;a&gt;&lt;/a&gt; &lt;a href="#requirement_random"&gt;random&lt;/a&gt;
+&lt;/td&gt;
+&lt;td&gt;3.1.0&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;
+&lt;a&gt;&lt;/a&gt; &lt;a href="#requirement_template"&gt;template&lt;/a&gt;
+&lt;/td&gt;
+&lt;td&gt;2.2.0&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;&lt;/div&gt;
+
+&lt;h2&gt;
+  &lt;a href="#providers"&gt;
+  &lt;/a&gt;
+  Providers
+&lt;/h2&gt;
+
+&lt;div class="table-wrapper-paragraph"&gt;&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;Name&lt;/th&gt;
+&lt;th&gt;Version&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;
+&lt;a&gt;&lt;/a&gt; &lt;a href="#provider_aws"&gt;aws&lt;/a&gt;
+&lt;/td&gt;
+&lt;td&gt;3.37.0&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;
+&lt;a&gt;&lt;/a&gt; &lt;a href="#provider_random"&gt;random&lt;/a&gt;
+&lt;/td&gt;
+&lt;td&gt;3.1.0&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;&lt;/div&gt;
+
+&lt;h2&gt;
+  &lt;a href="#modules"&gt;
+  &lt;/a&gt;
+  Modules
+&lt;/h2&gt;
+
+&lt;div class="table-wrapper-paragraph"&gt;&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;Name&lt;/th&gt;
+&lt;th&gt;Source&lt;/th&gt;
+&lt;th&gt;Version&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;
+&lt;a&gt;&lt;/a&gt; &lt;a href="#module_eks"&gt;eks&lt;/a&gt;
+&lt;/td&gt;
+&lt;td&gt;terraform-aws-modules/eks/aws&lt;/td&gt;
+&lt;td&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;
+&lt;a&gt;&lt;/a&gt; &lt;a href="#module_vpc"&gt;vpc&lt;/a&gt;
+&lt;/td&gt;
+&lt;td&gt;terraform-aws-modules/vpc/aws&lt;/td&gt;
+&lt;td&gt;2.78.0&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;&lt;/div&gt;
+
+&lt;h2&gt;
+  &lt;a href="#resources"&gt;
+  &lt;/a&gt;
+  Resources
+&lt;/h2&gt;
+
+&lt;div class="table-wrapper-paragraph"&gt;&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;Name&lt;/th&gt;
+&lt;th&gt;Type&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;[aws_security_group.all_worker_mgmt](&lt;a href="https://registry.terraform.io/providers/hashicorp/aws/3.37.0/docs/resources/secur"&gt;https://registry.terraform.io/providers/hashicorp/aws/3.37.0/docs/resources/secur&lt;/a&gt;
+&lt;/td&gt;
+&lt;td&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;ity_group)&lt;/td&gt;
+&lt;td&gt;resource&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;[aws_security_group.worker_group_mgmt_one](&lt;a href="https://registry.terraform.io/providers/hashicorp/aws/3.37.0/docs/resources"&gt;https://registry.terraform.io/providers/hashicorp/aws/3.37.0/docs/resources&lt;/a&gt;
+&lt;/td&gt;
+&lt;td&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;/security_group)&lt;/td&gt;
+&lt;td&gt;resource&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;[aws_security_group.worker_group_mgmt_two](&lt;a href="https://registry.terraform.io/providers/hashicorp/aws/3.37.0/docs/resources"&gt;https://registry.terraform.io/providers/hashicorp/aws/3.37.0/docs/resources&lt;/a&gt;
+&lt;/td&gt;
+&lt;td&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;/security_group)&lt;/td&gt;
+&lt;td&gt;resource&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;a href="https://registry.terraform.io/providers/hashicorp/random/3.1.0/docs/resources/string"&gt;random_string.suffix&lt;/a&gt;&lt;/td&gt;
+&lt;td&gt;resourc&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;e&lt;/td&gt;
+&lt;td&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;[aws_availability_zones.available](&lt;a href="https://registry.terraform.io/providers/hashicorp/aws/3.37.0/docs/data-sources/avai"&gt;https://registry.terraform.io/providers/hashicorp/aws/3.37.0/docs/data-sources/avai&lt;/a&gt;
+&lt;/td&gt;
+&lt;td&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;lability_zones)&lt;/td&gt;
+&lt;td&gt;data source&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;a href="https://registry.terraform.io/providers/hashicorp/aws/3.37.0/docs/data-sources/eks_cluster"&gt;aws_eks_cluster.cluster&lt;/a&gt;&lt;/td&gt;
+&lt;td&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;data source&lt;/td&gt;
+&lt;td&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;[aws_eks_cluster_auth.cluster](&lt;a href="https://registry.terraform.io/providers/hashicorp/aws/3.37.0/docs/data-sources/eks_clus"&gt;https://registry.terraform.io/providers/hashicorp/aws/3.37.0/docs/data-sources/eks_clus&lt;/a&gt;
+&lt;/td&gt;
+&lt;td&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;ter_auth)&lt;/td&gt;
+&lt;td&gt;data source&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;&lt;/div&gt;
+
+&lt;h2&gt;
+  &lt;a href="#inputs"&gt;
+  &lt;/a&gt;
+  Inputs
+&lt;/h2&gt;
+
+&lt;div class="table-wrapper-paragraph"&gt;&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;Name&lt;/th&gt;
+&lt;th&gt;Description&lt;/th&gt;
+&lt;th&gt;Type&lt;/th&gt;
+&lt;th&gt;Default&lt;/th&gt;
+&lt;th&gt;Required&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;
+&lt;a&gt;&lt;/a&gt; &lt;a href="#input_environment"&gt;environment&lt;/a&gt;
+&lt;/td&gt;
+&lt;td&gt;Environment name&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;string&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;"laboratory"&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;n&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;o&lt;/td&gt;
+&lt;td&gt;&lt;/td&gt;
+&lt;td&gt;&lt;/td&gt;
+&lt;td&gt;&lt;/td&gt;
+&lt;td&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;
+&lt;a&gt;&lt;/a&gt; &lt;a href="#input_private_subnets_cidr"&gt;private_subnets_cidr&lt;/a&gt;
+&lt;/td&gt;
+&lt;td&gt;AWS Private Subne&lt;/td&gt;
+&lt;td&gt;&lt;/td&gt;
+&lt;td&gt;&lt;/td&gt;
+&lt;td&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;ts&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;list(any)&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;&lt;pre&gt;[&lt;br&gt;  "10.0.4.0/24",&lt;br&gt;  "10.0.5.0/24",&lt;br&gt;  "10.0.6.0/24"&lt;br&gt;]&lt;/pre&gt;&lt;/td&gt;
+&lt;td&gt;no&lt;/td&gt;
+&lt;td&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;
+&lt;a&gt;&lt;/a&gt; &lt;a href="#input_project"&gt;project&lt;/a&gt;
+&lt;/td&gt;
+&lt;td&gt;Project name&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;string&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;"cosckoya"&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;no&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;
+&lt;a&gt;&lt;/a&gt; &lt;a href="#input_public_subnets_cidr"&gt;public_subnets_cidr&lt;/a&gt;
+&lt;/td&gt;
+&lt;td&gt;AWS Public Subnets&lt;/td&gt;
+&lt;td&gt;&lt;/td&gt;
+&lt;td&gt;&lt;/td&gt;
+&lt;td&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;list(any)&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;&lt;pre&gt;[&lt;br&gt;  "10.0.1.0/24",&lt;br&gt;  "10.0.2.0/24",&lt;br&gt;  "10.0.3.0/24"&lt;br&gt;]&lt;/pre&gt;&lt;/td&gt;
+&lt;td&gt;no&lt;/td&gt;
+&lt;td&gt;&lt;/td&gt;
+&lt;td&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;
+&lt;a&gt;&lt;/a&gt; &lt;a href="#input_region"&gt;region&lt;/a&gt;
+&lt;/td&gt;
+&lt;td&gt;AWS region&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;string&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;"us-east-1"&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;no&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;
+&lt;a&gt;&lt;/a&gt; &lt;a href="#input_vpc_cidr"&gt;vpc_cidr&lt;/a&gt;
+&lt;/td&gt;
+&lt;td&gt;AWS VPC CIDR&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;string&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;"10.0.0.0/16"&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;no&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;&lt;/div&gt;
+
+&lt;h2&gt;
+  &lt;a href="#outputs"&gt;
+  &lt;/a&gt;
+  Outputs
+&lt;/h2&gt;
+
+&lt;div class="table-wrapper-paragraph"&gt;&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;Name&lt;/th&gt;
+&lt;th&gt;Description&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;
+&lt;a&gt;&lt;/a&gt; &lt;a href="#output_cluster_endpoint"&gt;cluster_endpoint&lt;/a&gt;
+&lt;/td&gt;
+&lt;td&gt;Endpoint for EKS control plan&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;e.&lt;/td&gt;
+&lt;td&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;
+&lt;a&gt;&lt;/a&gt; &lt;a href="#output_cluster_id"&gt;cluster_id&lt;/a&gt;
+&lt;/td&gt;
+&lt;td&gt;EKS cluster ID.&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;
+&lt;a&gt;&lt;/a&gt; &lt;a href="#output_cluster_name"&gt;cluster_name&lt;/a&gt;
+&lt;/td&gt;
+&lt;td&gt;Kubernetes Cluster Name&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;
+&lt;a&gt;&lt;/a&gt; &lt;a href="#output_cluster_security_group_id"&gt;cluster_security_group_id&lt;/a&gt;
+&lt;/td&gt;
+&lt;td&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;Security group ids attached to the cluster control plane.&lt;/td&gt;
+&lt;td&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;
+&lt;a&gt;&lt;/a&gt; &lt;a href="#output_config_map_aws_auth"&gt;config_map_aws_auth&lt;/a&gt;
+&lt;/td&gt;
+&lt;td&gt;A kubernetes con&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;figuration to authenticate to this EKS cluster.&lt;/td&gt;
+&lt;td&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;
+&lt;a&gt;&lt;/a&gt; &lt;a href="#output_kubectl_config"&gt;kubectl_config&lt;/a&gt;
+&lt;/td&gt;
+&lt;td&gt;kubectl config as generated by the&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;module.&lt;/td&gt;
+&lt;td&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;
+&lt;a&gt;&lt;/a&gt; &lt;a href="#output_region"&gt;region&lt;/a&gt;
+&lt;/td&gt;
+&lt;td&gt;AWS region&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;&lt;/div&gt;
+
+
+
+
+&lt;p&gt;[...] Let's continue with the Terraform project. Now it's time to deploy!&lt;br&gt;
+· Plan the project&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;CMD&amp;gt; terraform plan
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;· Deploy the project&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;CMD&amp;gt; terraform apply 
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;· Connect to the cluster and enjoy!&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;CMD&amp;gt; aws eks --region $(terraform output -raw region) update-kubeconfig --name $(terraform output -raw cluster_name)
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Running some basic commands we can see that the cluster is up and running:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;CMD&amp;gt; kubectl cluster-info
+
+Kubernetes control plane is running at https://&amp;lt;SOME-BIG-HASH&amp;gt;.us-east-1.eks.amazonaws.com
+CoreDNS is running at https://&amp;lt;SOME-BIG-HASH&amp;gt;.us-east-1.eks.amazonaws.com/api/v1/namespaces/kube-system/services/kube-dns:dns/proxy
+
+CMD&amp;gt; kubectl get nodes
+
+NAME                         STATUS   ROLES    AGE   VERSION
+ip-10-0-2-138.ec2.internal   Ready    &amp;lt;none&amp;gt;   26m   v1.18.9-eks-d1db3c
+ip-10-0-2-88.ec2.internal    Ready    &amp;lt;none&amp;gt;   26m   v1.18.9-eks-d1db3c
+ip-10-0-3-68.ec2.internal    Ready    &amp;lt;none&amp;gt;   26m   v1.18.9-eks-d1db3c
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;And this it. Enjoy!&lt;/p&gt;
+
+&lt;p&gt;Ps. As you could see this is so similar to the AWS Terraform Learn page. Little tweaks to test some changes between versions.&lt;/p&gt;
+
+&lt;p&gt;I'm a very big fan of &lt;a class="mentioned-user" href="https://dev.to/antonbabenko"&gt;@antonbabenko&lt;/a&gt;
+ work. I recommend everyone to follow him.&lt;/p&gt;
+
+</description>
+      <category>terraform</category>
+      <category>devops</category>
+      <category>kubernetes</category>
+      <category>aws</category>
+    </item>
+    <item>
       <title>7 Ways to Iterate Over Arrays and When To Use Each</title>
       <author>christine-contreras</author>
       <pubDate>Sat, 17 Apr 2021 21:52:12 +0000</pubDate>
@@ -1316,7 +2176,7 @@ console.log(arr[3][0][1]); //displays 11
   introducción
 &lt;/h1&gt;
 
-&lt;p&gt;Tu navegador es, lo que te conecta con gran parte de Internet, tiene que ser rápido, fácil de usar, seguro, que mantenga tu privacidad y que, tenga un buen soporte, y desde mi punto de vista, sería bueno una buena Store/Tienda con extensiones y plugins. Chrome a tenido una trayectoria, que le sitúa en los primeros puestos, es de Google, el mayor y más efectivo motor de búsqueda, tiene unas muy buenas APIs, y tiene bajo su dominio marcas y empresas enteras. Pero, ¿ qué pasa entonces? ¿ por qué no vence a todos de una vez? Hay un problema, luego de algunos años, los usuarios se dieron cuenta que había muchos anuncios, y lo peor llegó cuando se dio a conocer que miles de datos personales fueron filtrados. De ahí la gente empezó a reflexionar y pensar más en su privacidad y seguridad.&lt;/p&gt;
+&lt;p&gt;Tu navegador es, lo que te conecta con gran parte de Internet, tiene que ser rápido, fácil de usar, seguro, que mantenga tu privacidad y que, tenga un buen soporte, y desde mi punto de vista, sería bueno una buena Store/Tienda con extensiones y plugins. Chrome ha tenido una trayectoria, que le sitúa en los primeros puestos, es de Google, el mayor y más efectivo motor de búsqueda, tiene unas muy buenas APIs, y tiene bajo su dominio marcas y empresas enteras. Pero, ¿ qué pasa entonces? ¿ por qué no vence a todos de una vez? Hay un problema, luego de algunos años, los usuarios se dieron cuenta que había muchos anuncios, y lo peor llegó cuando se dio a conocer que miles de datos personales fueron filtrados. De ahí la gente empezó a reflexionar y pensar más en su privacidad y seguridad.&lt;/p&gt;
 
 &lt;p&gt;Ahora,  ¿Cuál será el mejor navegador entonces? Tu navegador tiene que ser seguro, sobre todo tiene que suplir tus necesidades. Ahora, comparemos a éstos titanes de acero.&lt;/p&gt;
 
@@ -1330,7 +2190,7 @@ console.log(arr[3][0][1]); //displays 11
 
 &lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--plm8SUXy--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/mdrtd3986qtlcxch1fhy.jpg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--plm8SUXy--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/mdrtd3986qtlcxch1fhy.jpg" alt="gráfica se seguridad de los navegadores"&gt;&lt;/a&gt;&lt;/p&gt;
 
-&lt;p&gt;La seguridad es una de las cualidades esenciales de un navegador. Porque, siendo honestos, hay muchas páginas web maliciosas, los usuarios deben estar alertas tanto como introducir información personal en páginas no seguras como descargar malware accidentalmente. Gracias a los a algunos navegadores como firefox, Chrome, Brave y opera, podemos saber cuando una página es segura, y cuando no.&lt;br&gt;
+&lt;p&gt;La seguridad es una de las cualidades esenciales de un navegador. Porque, siendo honestos, hay muchas páginas web maliciosas, los usuarios deben estar alertas tanto como introducir información personal en páginas no seguras como descargar malware accidentalmente. Gracias a algunos navegadores como firefox, Chrome, Brave y opera, podemos saber cuando una página es segura, y cuando no.&lt;br&gt;
 Cuando se habla de privacidad, siempre se recurre a "modo privado" o algo así. Se supone que es una opción para que los usuarios del Pc no vean tu historial ni nada por el estilo. Los 7 tienen un punto en esta materia.&lt;/p&gt;
 
 &lt;blockquote&gt;
@@ -1351,8 +2211,9 @@ Cuando se habla de privacidad, siempre se recurre a "modo privado" o algo así. 
 
 &lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--7_7NwfqS--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/aye8qn7hytdlqbqruuau.jpg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--7_7NwfqS--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/aye8qn7hytdlqbqruuau.jpg" alt="utility nav"&gt;&lt;/a&gt;&lt;/p&gt;
 
-&lt;p&gt;Lo primero que hay que señalar de Portabilidad, es que no todos los navegadores están disponibles para todos los sistemas, tales son Internet Explorer y Safari, solo disponibles para sistemas operativos de Microsoft o Apple. Mientras que Firefox, Brave, Opera y Edge funcionan en todos los sistemas operativos principales y tienen una fácil instalación&lt;br&gt;
- La versión móvil de Safari viene pre instalada en los sistemas móviles de Apple, y los móviles con Android tienen un navegador de estos pero modificado por el fabricante. Edge, Chrome, Opera y Brave se pueden usar hasta al mismo tiempo.&lt;/p&gt;
+&lt;p&gt;Lo primero que hay que señalar de Portabilidad, es que no todos los navegadores están disponibles para todos los sistemas, tales son Internet Explorer y Safari, solo disponibles para sistemas operativos de Microsoft o Apple. Mientras que Firefox, Brave, Opera y Edge funcionan en todos los sistemas operativos principales y tienen una fácil instalación.&lt;/p&gt;
+
+&lt;p&gt;La versión móvil de Safari viene pre instalada en los sistemas móviles de Apple, y los móviles con Android tienen un navegador de estos pero modificado por el fabricante. Edge, Chrome, Opera y Brave se pueden usar hasta al mismo tiempo.&lt;/p&gt;
 
 &lt;p&gt;Casi todos los navegadores pueden sincronizar un ordenador a un móvil. Para eso necesitas una cuenta e iniciar sesión, puedes acceder a tus contraseñas, historial, marcadores y configuraciones.&lt;/p&gt;
 
@@ -1364,7 +2225,7 @@ Cuando se habla de privacidad, siempre se recurre a "modo privado" o algo así. 
 
 &lt;p&gt;Los navegadores, más capaces, más  veloces, más seguros, son:&lt;/p&gt;
 
-&lt;p&gt;Encabezando &lt;a href="https://www.mozilla.org/es-ES/firefox/new/"&gt;Firefox&lt;/a&gt;, contestó satisfactoriamente a todas las demandas.  Luego viene &lt;a href="https://brave.com/es/download/"&gt;Brave&lt;/a&gt; que tuvo sus problemas con de texto a voz, con la opción de capturar pantalla y la contraseña maestra. Luego viene &lt;a href="https://www.opera.com/es"&gt;opera&lt;/a&gt; que tuvo un rendimiento parecido a Brave.&lt;/p&gt;
+&lt;p&gt;Encabezando &lt;a href="https://www.mozilla.org/es-ES/firefox/new/"&gt;Firefox&lt;/a&gt;, contestó satisfactoriamente a todas las demandas.  Luego viene &lt;a href="https://brave.com/es/download/"&gt;Brave&lt;/a&gt; que tuvo sus problemas con  texto a voz, con la opción de capturar pantalla y la contraseña maestra. Luego viene &lt;a href="https://www.opera.com/es"&gt;opera&lt;/a&gt; que tuvo un rendimiento parecido a Brave.&lt;/p&gt;
 
 &lt;h1&gt;
   &lt;a href="#despedida"&gt;
@@ -2902,95 +3763,6 @@ Thank you&lt;/p&gt;
       <category>webperf</category>
       <category>vue</category>
       <category>netlify</category>
-    </item>
-    <item>
-      <title>My Twitch Stream Setup</title>
-      <author>Nick Taylor (he/him)</author>
-      <pubDate>Sat, 17 Apr 2021 19:27:33 +0000</pubDate>
-      <link>https://dev.to/nickytonline/my-twitch-stream-setup-2m0c</link>
-      <guid>https://dev.to/nickytonline/my-twitch-stream-setup-2m0c</guid>
-      <description>&lt;p&gt;So I started streaming on Twitch last year.&lt;/p&gt;
-
-
-&lt;div class="ltag__link"&gt;
-  &lt;a href="/nickytonline" class="ltag__link__link"&gt;
-    &lt;div class="ltag__link__pic"&gt;
-      &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--BmhzwLSV--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://res.cloudinary.com/practicaldev/image/fetch/s--zhsA-ZEm--/c_fill%2Cf_auto%2Cfl_progressive%2Ch_150%2Cq_auto%2Cw_150/https://dev-to-uploads.s3.amazonaws.com/uploads/user/profile_image/9597/68d6245f-3152-4ed2-a245-d015fca4160b.jpeg" alt="nickytonline image"&gt;
-    &lt;/div&gt;
-  &lt;/a&gt;
-  &lt;a href="/nickytonline/i-ve-started-to-live-code-on-twitch-for-dev-13cn" class="ltag__link__link"&gt;
-    &lt;div class="ltag__link__content"&gt;
-      &lt;h2&gt;I've Started to Live Code on Twitch for DEV&lt;/h2&gt;
-      &lt;h3&gt;Nick Taylor (he/him) ・ Apr  1 '20 ・ 2 min read&lt;/h3&gt;
-      &lt;div class="ltag__link__taglist"&gt;
-        &lt;span class="ltag__link__tag"&gt;#twitch&lt;/span&gt;
-        &lt;span class="ltag__link__tag"&gt;#streaming&lt;/span&gt;
-        &lt;span class="ltag__link__tag"&gt;#livecoding&lt;/span&gt;
-      &lt;/div&gt;
-    &lt;/div&gt;
-  &lt;/a&gt;
-&lt;/div&gt;
-
-
-&lt;p&gt;Most of my streaming efforts have been dedicated to the DEV Twitch stream, but I'm finally getting back into streaming regularly on my own stream as well.&lt;/p&gt;
-
-
-&lt;div class="ltag__link"&gt;
-  &lt;a href="/nickytonline" class="ltag__link__link"&gt;
-    &lt;div class="ltag__link__pic"&gt;
-      &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--BmhzwLSV--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://res.cloudinary.com/practicaldev/image/fetch/s--zhsA-ZEm--/c_fill%2Cf_auto%2Cfl_progressive%2Ch_150%2Cq_auto%2Cw_150/https://dev-to-uploads.s3.amazonaws.com/uploads/user/profile_image/9597/68d6245f-3152-4ed2-a245-d015fca4160b.jpeg" alt="nickytonline image"&gt;
-    &lt;/div&gt;
-  &lt;/a&gt;
-  &lt;a href="/devteam/let-s-pair-during-a-live-coding-session-8he" class="ltag__link__link"&gt;
-    &lt;div class="ltag__link__content"&gt;
-      &lt;h2&gt;Let's Pair during a Live Coding Session!&lt;/h2&gt;
-      &lt;h3&gt;Nick Taylor (he/him) ・ Jul 14 '20 ・ 2 min read&lt;/h3&gt;
-      &lt;div class="ltag__link__taglist"&gt;
-        &lt;span class="ltag__link__tag"&gt;#webdev&lt;/span&gt;
-        &lt;span class="ltag__link__tag"&gt;#pairprogramming&lt;/span&gt;
-        &lt;span class="ltag__link__tag"&gt;#devstream&lt;/span&gt;
-        &lt;span class="ltag__link__tag"&gt;#meta&lt;/span&gt;
-      &lt;/div&gt;
-    &lt;/div&gt;
-  &lt;/a&gt;
-&lt;/div&gt;
-
-
-&lt;p&gt;I've been streaming for about a year now, so I've tweaked things as I've gone along and have learnt some things from fellow streamers.&lt;/p&gt;
-
-&lt;p&gt;Here was how my stream looked liked about a year ago&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--d1zhHRvO--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/nzgad8wb78yytjs0de3n.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--d1zhHRvO--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/nzgad8wb78yytjs0de3n.png" alt="Nick Taylor's Twitch stream about a year ago with a very basic layout. Just a screenshare and a webcam"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;And here is what it looks like now as of yesterday. &lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--0Pv1IqAf--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/56s9mufap1oia35udov1.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--0Pv1IqAf--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/56s9mufap1oia35udov1.png" alt="Nick Taylor's Twitch stream improved with integrated chat, and more assets to make things look better"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;I thought to get back in the swing of things with my stream, that it made sense to go through my setup. The video is still up on Twitch, but I'm going to link to the YouTube as the Twitch recording disappears in two weeks.&lt;/p&gt;
-
-&lt;p&gt;&lt;iframe width="710" height="399" src="https://www.youtube.com/embed/H7HGYV2dT-w"&gt;
-&lt;/iframe&gt;
-&lt;/p&gt;
-
-&lt;p&gt;Things that I cover are how I made the layout, what I use for video/screen sharing and how to provide and enable closed captioning for viewers.&lt;/p&gt;
-
-&lt;p&gt;In this particular stream, the audio is all good, but there is a delay between the video and audio which never happens when I stream usually, so I'm chalking it up to showing my stream setup in the stream. 🙃&lt;/p&gt;
-
-&lt;p&gt;I forgot to talk about my hardware setup, so for that, checkout &lt;a href="https://iamdeveloper.com/uses"&gt;my uses page&lt;/a&gt;.&lt;/p&gt;
-
-&lt;p&gt;All streaming happens on Twitch, but as mentioned, I also upload them to YouTube. Feel free to give me a follow on both. 😎&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;&lt;a href="https://livecoding.ca"&gt;livecoding.ca&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://youtube.iamdeveloper.com"&gt;youtube.iamdeveloper.com&lt;/a&gt;&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;If you are a streamer, I'm curious about your setup!&lt;/p&gt;
-
-</description>
-      <category>twitch</category>
-      <category>streaming</category>
-      <category>learninpublic</category>
     </item>
   </channel>
 </rss>
