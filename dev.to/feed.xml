@@ -7,6 +7,103 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>EC2インスタンス作成時にホスト名変更＆AD参加する（RunCommand編）</title>
+      <author>ryanc</author>
+      <pubDate>Wed, 21 Apr 2021 02:03:30 +0000</pubDate>
+      <link>https://dev.to/ryanch79/ec2-ad-runcommand-1b70</link>
+      <guid>https://dev.to/ryanch79/ec2-ad-runcommand-1b70</guid>
+      <description>&lt;p&gt;前回の&lt;a href="https://dev.to/ryanch79/ec2-ad-userdata-19k6"&gt;UserData編&lt;/a&gt;に続き、達成したい目的は同じく下記のままで、&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;①（AWS Managed ADではない）ADに参加&lt;br&gt;
+②ホスト名を、自分がつけたNameタグの値に揃える&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;やり方をUserDataではなくもうちょっと柔軟なSystems Manager RunCommandを利用する方法を試していこうと思う。&lt;/p&gt;
+
+&lt;p&gt;Systems Managerを利用すると、もちろんできることの幅は非常に広がるのだが、その代わりSSMエージェントのインストールとインスタンスプロファイルの設定等、必要条件を満たす必要はある（Amazon提供のAMIならエージェントは最初から入っているので楽）。&lt;/p&gt;
+
+&lt;p&gt;&lt;br&gt;&lt;br&gt;
+インスタンスプロファイルに必要なIAM権限と、シークレットマネージャーへのADユーザー認証情報の登録等は前回同様なので省略する。&lt;/p&gt;
+
+&lt;p&gt;&lt;br&gt;&lt;br&gt;
+Systems Managerの「ドキュメント」を開き、「Create Document」から&lt;code&gt;Command or session&lt;/code&gt;タイプを選択する。&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--BT2yq9ph--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/4jl3us2enbudh8b9czni.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--BT2yq9ph--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/4jl3us2enbudh8b9czni.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;br&gt;&lt;br&gt;
+ドキュメントの詳細はこんな感じで作成する。&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--4LwK1uJv--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/xkfbiusqu4yu01wyj8r4.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--4LwK1uJv--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/xkfbiusqu4yu01wyj8r4.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;ドキュメントタイプは&lt;code&gt;コマンドドキュメント&lt;/code&gt;になる。 &lt;/p&gt;
+
+&lt;p&gt;&lt;br&gt;&lt;br&gt;
+肝心なコマンドのコンテンツだが、前回のPowerShellスクリプトをそのまま流用して、大事そうなパラメータが指定できるようにだけ少し手を入れてYAML形式にしてみた。&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;---
+schemaVersion: "2.2"
+description: "Join AD and rename host with instance tag"
+parameters:
+  DomainName:
+    type: "String"
+    description: "参加するADドメインのDNS名"
+  UserCredentialSecretID:
+    type: "String"
+    description: "AD参加に利用するユーザー認証情報を保持するSecrets ManagerシークレットID"
+  HostnameTag:
+    type: "String"
+    description: "ホスト名を定義するタグ名（デフォルトはName）"
+    default: "Name"
+mainSteps:
+- action: "aws:runPowerShellScript"
+  name: "example"
+  inputs:
+    runCommand:
+    - $secretManager = Get-SECSecretValue -SecretId {{UserCredentialSecretID}}
+    - $secret = $secretManager.SecretString | ConvertFrom-Json
+    - $username = $domainName + "\" + $secret.Account
+    - $password = $secret.Password | ConvertTo-SecureString -AsPlainText -Force
+    - $credential = New-Object System.Management.Automation.PSCredential($username,$password)
+    - $instanceID = Get-EC2InstanceMetadata -Category InstanceId
+    - $nameTag = Get-EC2Tag -Filter @{Name="resource-id";Value="$instanceID"},@{Name="key";Value="{{HostnameTag}}"}
+    - $newName = $nameTag.Value
+    - Add-Computer -DomainName "{{DomainName}}" -NewName "$newName" -Credential $credential -Passthru -Force -Restart
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;（パラメータ値は&lt;code&gt;{{}}&lt;/code&gt;で囲む）&lt;/p&gt;
+
+&lt;p&gt;&lt;br&gt;&lt;br&gt;
+これで実際にRun Commandで実行する際には、こんな感じでパラメータを指定できるしEC2インスタンスの初回起動時じゃなくてもいつでも実行でき、たくさんのインスタンスに対しても一気に実行できるので一気に柔軟性が増す。&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--HnuN1U4R--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ze84k5ua72uyub85thti.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--HnuN1U4R--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ze84k5ua72uyub85thti.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;一々パラメータ設定が面倒であれば、デフォルト値をセットしてしまえば良し。&lt;/p&gt;
+
+&lt;p&gt;&lt;br&gt; &lt;br&gt;
+実際にやってみたが問題なく動作した。&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--CnuMEdif--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/s6v5eukz9bcyz8xf8tay.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--CnuMEdif--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/s6v5eukz9bcyz8xf8tay.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;今回は以上。次Chef好き向けにOpsWorksでやってみようかと思う。&lt;/p&gt;
+
+&lt;p&gt;&lt;br&gt;&lt;br&gt;
+※イラストはこちらからご提供いただきました：&lt;br&gt;
+&lt;a href="https://www.freepik.com/vectors/computer"&gt;Computer vector created by macrovector - &lt;/a&gt;&lt;a href="http://www.freepik.com"&gt;www.freepik.com&lt;/a&gt;&lt;/p&gt;
+
+</description>
+      <category>aws</category>
+      <category>windows</category>
+      <category>ec2</category>
+      <category>activedirectory</category>
+    </item>
+    <item>
       <title>SQL Review - Useful queries for mySQL</title>
       <author>Jo</author>
       <pubDate>Wed, 21 Apr 2021 01:42:00 +0000</pubDate>
@@ -219,6 +316,431 @@ npm install dotenv --save-dev
       <category>tutorial</category>
       <category>redis</category>
       <category>node</category>
+    </item>
+    <item>
+      <title>Upload files to Google Drive with Phoenix LiveView</title>
+      <author>Santiago Cardona</author>
+      <pubDate>Wed, 21 Apr 2021 00:34:44 +0000</pubDate>
+      <link>https://dev.to/santiagocardo/upload-files-to-google-drive-with-phoenix-liveview-256e</link>
+      <guid>https://dev.to/santiagocardo/upload-files-to-google-drive-with-phoenix-liveview-256e</guid>
+      <description>&lt;p&gt;Phoenix LiveView has a great abstraction when it comes to uploading files. It makes our life much easier both from the client side (user interface) and from the server side (our server or even to third party services such as cloud services).&lt;/p&gt;
+
+&lt;p&gt;This post is focused on helping you with uploading files to the Google Drive service since many times Google services are difficult to understand and it takes time to figure out how to make successful integration, as was my case. That's why I would like to share with the community how I managed to do it after a long time of searching and testing.&lt;/p&gt;
+
+&lt;p&gt;You can also see this post in Spanish 🇨🇴 &lt;br&gt;
+&lt;/p&gt;
+&lt;div class="ltag__link"&gt;
+  &lt;a href="/santiagocardo" class="ltag__link__link"&gt;
+    &lt;div class="ltag__link__pic"&gt;
+      &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--dkPOt6LF--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://res.cloudinary.com/practicaldev/image/fetch/s--uDvZZEOo--/c_fill%2Cf_auto%2Cfl_progressive%2Ch_150%2Cq_auto%2Cw_150/https://dev-to-uploads.s3.amazonaws.com/uploads/user/profile_image/616717/4d670ae5-1bc6-4a63-911c-9f3168ea5631.jpeg" alt="santiagocardo image"&gt;
+    &lt;/div&gt;
+  &lt;/a&gt;
+  &lt;a href="/santiagocardo/cargar-archivos-a-google-drive-con-phoenix-liveview-5581" class="ltag__link__link"&gt;
+    &lt;div class="ltag__link__content"&gt;
+      &lt;h2&gt;Cargar archivos a Google Drive con Phoenix LiveView&lt;/h2&gt;
+      &lt;h3&gt;Santiago Cardona ・ Apr 19 ・ 5 min read&lt;/h3&gt;
+      &lt;div class="ltag__link__taglist"&gt;
+        &lt;span class="ltag__link__tag"&gt;#elixir&lt;/span&gt;
+        &lt;span class="ltag__link__tag"&gt;#phoenix&lt;/span&gt;
+        &lt;span class="ltag__link__tag"&gt;#liveview&lt;/span&gt;
+        &lt;span class="ltag__link__tag"&gt;#javascript&lt;/span&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/a&gt;
+&lt;/div&gt;
+
+
+&lt;h3&gt;
+  &lt;a href="#lets-start"&gt;
+  &lt;/a&gt;
+  Let's start
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--TERHQoDR--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/5n7n9ykkr4oxnq37mv7e.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--TERHQoDR--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/5n7n9ykkr4oxnq37mv7e.png" alt="File upload form"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;This guide is not intended to show the detail of how the file upload process works in Phoenix LiveView. Rather, it is intended to show the integration of Google Drive with what the Phoenix LiveView &lt;a href="https://hexdocs.pm/phoenix_live_view/uploads-external.html"&gt;External Uploads&lt;/a&gt; and &lt;a href="https://www.phoenixframework.org/blog/phoenix-live-view-upload-deep-dive"&gt;Phoenix LiveView Uploads Deep Dive&lt;/a&gt; guides by &lt;a href="https://twitter.com/chris_mccord"&gt;Chris McCord&lt;/a&gt; already show in a super clear and easy to understand way.&lt;/p&gt;
+
+&lt;p&gt;For details on how the file upload process works in Phoenix LiveView, you can refer to the guides mentioned above.&lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#prerequisites"&gt;
+  &lt;/a&gt;
+  Prerequisites
+&lt;/h4&gt;
+
+&lt;p&gt;The first thing we must take into account is that we must enable access to the Google Drive API, this can be achieved by visiting the &lt;a href="https://developers.google.com/drive/api/v3/about-sdk"&gt;Google Drive API&lt;/a&gt; documentation.&lt;/p&gt;
+
+&lt;p&gt;Make sure you create a &lt;a href="https://console.cloud.google.com/iam-admin/serviceaccounts"&gt;Google Cloud Service Account&lt;/a&gt; and finally have the &lt;strong&gt;.json&lt;/strong&gt; file with your Google Cloud Service Account credentials. This file should contain something like this:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight json"&gt;&lt;code&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+  &lt;/span&gt;&lt;span class="nl"&gt;"type"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"service_account"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+  &lt;/span&gt;&lt;span class="nl"&gt;"project_id"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"&amp;lt;your google cloud project&amp;gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+  &lt;/span&gt;&lt;span class="nl"&gt;"private_key_id"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"&amp;lt;your private key id&amp;gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+  &lt;/span&gt;&lt;span class="nl"&gt;"private_key"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"&amp;lt;your private key&amp;gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+  &lt;/span&gt;&lt;span class="nl"&gt;"client_email"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"&amp;lt;your client email&amp;gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+  &lt;/span&gt;&lt;span class="nl"&gt;"client_id"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"&amp;lt;your client id&amp;gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+  &lt;/span&gt;&lt;span class="nl"&gt;"auth_uri"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"https://accounts.google.com/o/oauth2/auth"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+  &lt;/span&gt;&lt;span class="nl"&gt;"token_uri"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"https://oauth2.googleapis.com/token"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+  &lt;/span&gt;&lt;span class="nl"&gt;"auth_provider_x509_cert_url"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"https://www.googleapis.com/oauth2/v1/certs"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+  &lt;/span&gt;&lt;span class="nl"&gt;"client_x509_cert_url"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"&amp;lt;your client x509 cert url&amp;gt;"&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+&lt;h4&gt;
+  &lt;a href="#dependencies-configuration"&gt;
+  &lt;/a&gt;
+  Dependencies configuration
+&lt;/h4&gt;
+
+&lt;p&gt;In order to authenticate with Google services, we will use the &lt;a href="https://hexdocs.pm/goth/api-reference.html"&gt;Goth&lt;/a&gt; library (Google + Auth).&lt;/p&gt;
+
+&lt;p&gt;Add Goth to your dependencies in the file &lt;strong&gt;mix.exs&lt;/strong&gt;&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight elixir"&gt;&lt;code&gt;  &lt;span class="k"&gt;defp&lt;/span&gt; &lt;span class="n"&gt;deps&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
+    &lt;span class="p"&gt;[&lt;/span&gt;
+      &lt;span class="o"&gt;...&lt;/span&gt;
+      &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="ss"&gt;:goth&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s2"&gt;"~&amp;gt; 1.2.0"&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="p"&gt;]&lt;/span&gt;
+  &lt;span class="k"&gt;end&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;Run the following line in the console to download the dependencies:&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;$ mix deps.get&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;And finally, we must expose an environmental variable called &lt;strong&gt;GOOGLE_APPLICATION_CREDENTIALS&lt;/strong&gt; in order to let Goth obtain an &lt;em&gt;access token&lt;/em&gt;:&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;$ export GOOGLE_APPLICATION_CREDENTIALS=&amp;lt;your_service_account_file&amp;gt;.json&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;Where &amp;lt;your_service_account_file&amp;gt; is the path to the &lt;strong&gt;.json&lt;/strong&gt; file containing your Google Cloud Service Account credentials.&lt;/p&gt;
+
+&lt;p&gt;(This file has sensitive info, you shouldn't add it to your code repository)&lt;/p&gt;
+&lt;h3&gt;
+  &lt;a href="#lets-go-to-the-code"&gt;
+  &lt;/a&gt;
+  Let's go to the code...
+&lt;/h3&gt;
+&lt;h4&gt;
+  &lt;a href="#on-the-liveview-side"&gt;
+  &lt;/a&gt;
+  On the LiveView side
+&lt;/h4&gt;
+
+&lt;p&gt;In our LiveView file we must enable file uploads. To do this in the &lt;strong&gt;mount&lt;/strong&gt; function, we modify:&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight elixir"&gt;&lt;code&gt;  &lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="n"&gt;mount&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;socket&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
+    &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="ss"&gt;:ok&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+     &lt;span class="n"&gt;allow_upload&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+       &lt;span class="n"&gt;socket&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+       &lt;span class="ss"&gt;:photos&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+       &lt;span class="ss"&gt;accept:&lt;/span&gt; &lt;span class="sx"&gt;~w(.png .jpeg .jpg)&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+       &lt;span class="ss"&gt;max_entries:&lt;/span&gt; &lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+       &lt;span class="ss"&gt;external:&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;presign_entry&lt;/span&gt;&lt;span class="o"&gt;/&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;
+     &lt;span class="p"&gt;)}&lt;/span&gt;
+  &lt;span class="k"&gt;end&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;The &lt;em&gt;accept&lt;/em&gt; property enables file uploads by accepting only &lt;strong&gt;.png&lt;/strong&gt;, &lt;strong&gt;.jpeg&lt;/strong&gt; or &lt;strong&gt;.jpg&lt;/strong&gt; formats, in this case. The &lt;em&gt;max_entries&lt;/em&gt; property allows the upload of a maximum of two (2) files.&lt;/p&gt;
+
+&lt;p&gt;The &lt;em&gt;external&lt;/em&gt; property must be a callback function with two parameters. This function will actually be in charge of calling the function that uploads the files to Google Drive, passing it the necessary data to perform the upload. When we use &lt;em&gt;external&lt;/em&gt; it is because the function that will be in charge of uploading the files will be a JavaScript function (on the client side). We will do it with JavaScript, since later we want to know the upload progress of each of the files, to know if there is an error in this upload process, or if there is an error in the validation of the files. All this using JavaScript's &lt;em&gt;XMLHttpRequest&lt;/em&gt;.&lt;/p&gt;
+
+&lt;p&gt;Add the &lt;strong&gt;presign_entry&lt;/strong&gt; function in your LiveView file:&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight elixir"&gt;&lt;code&gt;  &lt;span class="nv"&gt;@google_drive_url&lt;/span&gt; &lt;span class="s2"&gt;"https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart"&lt;/span&gt;
+  &lt;span class="nv"&gt;@google_drive_scope&lt;/span&gt; &lt;span class="s2"&gt;"https://www.googleapis.com/auth/drive.file"&lt;/span&gt;
+  &lt;span class="k"&gt;defp&lt;/span&gt; &lt;span class="n"&gt;presign_entry&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;entry&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;socket&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
+    &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="ss"&gt;:ok&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;%{&lt;/span&gt;&lt;span class="ss"&gt;token:&lt;/span&gt; &lt;span class="n"&gt;token&lt;/span&gt;&lt;span class="p"&gt;}}&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="no"&gt;Goth&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="no"&gt;Token&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;for_scope&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nv"&gt;@google_drive_scope&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+    &lt;span class="n"&gt;fields&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;%{&lt;/span&gt;
+      &lt;span class="ss"&gt;name:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="si"&gt;#{&lt;/span&gt;&lt;span class="n"&gt;entry&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;uuid&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;.&lt;/span&gt;&lt;span class="si"&gt;#{&lt;/span&gt;&lt;span class="n"&gt;ext&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;entry&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+      &lt;span class="ss"&gt;content_type:&lt;/span&gt; &lt;span class="n"&gt;entry&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;client_type&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+      &lt;span class="ss"&gt;token:&lt;/span&gt; &lt;span class="n"&gt;token&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+
+    &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="ss"&gt;:ok&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;%{&lt;/span&gt;&lt;span class="ss"&gt;uploader:&lt;/span&gt; &lt;span class="s2"&gt;"GoogleDriveMultipart"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="ss"&gt;url:&lt;/span&gt; &lt;span class="nv"&gt;@google_drive_url&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="ss"&gt;fields:&lt;/span&gt; &lt;span class="n"&gt;fields&lt;/span&gt;&lt;span class="p"&gt;},&lt;/span&gt; &lt;span class="n"&gt;socket&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;
+  &lt;span class="k"&gt;end&lt;/span&gt;
+
+  &lt;span class="k"&gt;defp&lt;/span&gt; &lt;span class="n"&gt;ext&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;entry&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
+    &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;ext&lt;/span&gt; &lt;span class="o"&gt;|&lt;/span&gt; &lt;span class="n"&gt;_&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="no"&gt;MIME&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;extensions&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;entry&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;client_type&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="n"&gt;ext&lt;/span&gt;
+  &lt;span class="k"&gt;end&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;Add the &lt;strong&gt;handle_event&lt;/strong&gt; callback function to handle the event of canceling the upload of one of the files:&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight elixir"&gt;&lt;code&gt;&lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="n"&gt;handle_event&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;"cancel-entry"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;%{&lt;/span&gt;&lt;span class="s2"&gt;"ref"&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="n"&gt;ref&lt;/span&gt;&lt;span class="p"&gt;},&lt;/span&gt; &lt;span class="n"&gt;socket&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
+  &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="ss"&gt;:noreply&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;cancel_upload&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;socket&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="ss"&gt;:photos&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;ref&lt;/span&gt;&lt;span class="p"&gt;)}&lt;/span&gt;
+&lt;span class="k"&gt;end&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;Add the Phoenix HTML components for files uploading:&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight elixir"&gt;&lt;code&gt;    &lt;span class="o"&gt;...&lt;/span&gt;
+    &lt;span class="o"&gt;&amp;lt;%=&lt;/span&gt; &lt;span class="n"&gt;live_file_input&lt;/span&gt; &lt;span class="nv"&gt;@uploads&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;photos&lt;/span&gt; &lt;span class="p"&gt;%&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+
+    &lt;span class="o"&gt;&amp;lt;%=&lt;/span&gt; &lt;span class="n"&gt;for&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="n"&gt;_ref&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;msg&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;-&lt;/span&gt; &lt;span class="nv"&gt;@uploads&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;photos&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;errors&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt; &lt;span class="p"&gt;%&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+      &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;p&lt;/span&gt; &lt;span class="n"&gt;class&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s2"&gt;"alert alert-danger"&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+        &lt;span class="o"&gt;&amp;lt;%=&lt;/span&gt; &lt;span class="no"&gt;Phoenix&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="no"&gt;Naming&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;humanize&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;msg&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;%&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+      &lt;span class="o"&gt;&amp;lt;/&lt;/span&gt;&lt;span class="n"&gt;p&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+    &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="p"&gt;%&lt;/span&gt; &lt;span class="k"&gt;end&lt;/span&gt; &lt;span class="p"&gt;%&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+
+    &lt;span class="o"&gt;&amp;lt;%=&lt;/span&gt; &lt;span class="n"&gt;for&lt;/span&gt; &lt;span class="n"&gt;entry&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;-&lt;/span&gt; &lt;span class="nv"&gt;@uploads&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;photos&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;entries&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt; &lt;span class="p"&gt;%&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+      &lt;span class="o"&gt;&amp;lt;%=&lt;/span&gt; &lt;span class="n"&gt;live_img_preview&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;entry&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;%&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+      &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;progress&lt;/span&gt; &lt;span class="n"&gt;max&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s2"&gt;"100"&lt;/span&gt; &lt;span class="n"&gt;value&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s2"&gt;"&amp;lt;%= entry.progress %&amp;gt;"&lt;/span&gt; &lt;span class="o"&gt;/&amp;gt;&lt;/span&gt;
+      &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;a&lt;/span&gt;
+        &lt;span class="n"&gt;href&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s2"&gt;"#"&lt;/span&gt;
+        &lt;span class="n"&gt;phx&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="n"&gt;click&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s2"&gt;"cancel-entry"&lt;/span&gt;
+        &lt;span class="n"&gt;phx&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="n"&gt;value&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="n"&gt;ref&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s2"&gt;"&amp;lt;%= entry.ref %&amp;gt;"&lt;/span&gt;
+      &lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+        &lt;span class="no"&gt;Cancel&lt;/span&gt;
+      &lt;span class="o"&gt;&amp;lt;/&lt;/span&gt;&lt;span class="n"&gt;a&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+    &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="p"&gt;%&lt;/span&gt; &lt;span class="k"&gt;end&lt;/span&gt; &lt;span class="p"&gt;%&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+&lt;h4&gt;
+  &lt;a href="#on-the-javascript-side"&gt;
+  &lt;/a&gt;
+  On the JavaScript side
+&lt;/h4&gt;
+
+&lt;p&gt;In the &lt;strong&gt;app.js&lt;/strong&gt; file enable external file uploads by adding the following:&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;uploadPhotosToGoogleDrive&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;./uploaders/google-drive&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;Uploaders&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="na"&gt;GoogleDriveMultipart&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;uploadPhotosToGoogleDrive&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;liveSocket&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;LiveSocket&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;/live&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;Socket&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="na"&gt;uploaders&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;Uploaders&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="na"&gt;params&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;_csrf_token&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;csrfToken&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;})&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;In the &lt;em&gt;uploaders&lt;/em&gt; folder create the &lt;strong&gt;google-drive.js&lt;/strong&gt; file adding the following:&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;createRequestPayload&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;fields&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;photo&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;boundary&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;uploading photos&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;multipartRequestHeaders&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;
+    &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Content-Type&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s2"&gt;`multipart/related; boundary="&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;boundary&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;"`&lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt;
+    &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Authorization&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s2"&gt;`Bearer &lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;fields&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;token&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+  &lt;span class="p"&gt;]&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;delimiter&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="se"&gt;\r\n&lt;/span&gt;&lt;span class="s2"&gt;--&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="nx"&gt;boundary&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="se"&gt;\r\n&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;close_delim&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="se"&gt;\r\n&lt;/span&gt;&lt;span class="s2"&gt;--&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="nx"&gt;boundary&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;--&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;contentType&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;fields&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;content_type&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;metadata&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;name&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;fields&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;name&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;mimeType&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;contentType&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;parents&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;fields&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;parent&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+  &lt;span class="p"&gt;}&lt;/span&gt;
+
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;base64Data&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;btoa&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;photo&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;multipartRequestBody&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt;
+    &lt;span class="nx"&gt;delimiter&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt;
+    &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Content-Type: application/json; charset=UTF-8&lt;/span&gt;&lt;span class="se"&gt;\r\n\r\n&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt;
+    &lt;span class="nx"&gt;JSON&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;stringify&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;metadata&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt;
+    &lt;span class="nx"&gt;delimiter&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt;
+    &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Content-Type: &lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="nx"&gt;contentType&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="se"&gt;\r\n&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt;
+    &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Content-Transfer-Encoding: base64&lt;/span&gt;&lt;span class="se"&gt;\r\n&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt;
+    &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="se"&gt;\r\n&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt;
+    &lt;span class="nx"&gt;base64Data&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt;
+    &lt;span class="nx"&gt;close_delim&lt;/span&gt;
+
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="nx"&gt;multipartRequestHeaders&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="nx"&gt;multipartRequestBody&lt;/span&gt;
+  &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;uploadPhotosToGoogleDrive&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;entries&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;onViewError&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="nx"&gt;entries&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;forEach&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;entry&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;file&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="na"&gt;meta&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;url&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;fields&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;entry&lt;/span&gt;
+
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;reader&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;FileReader&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+
+    &lt;span class="nx"&gt;reader&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;readAsBinaryString&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;file&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="nx"&gt;reader&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;onload&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="nx"&gt;multipartRequestHeaders&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+        &lt;span class="nx"&gt;multipartRequestBody&lt;/span&gt;
+      &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;createRequestPayload&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;fields&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;reader&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;result&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+      &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;xhr&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;XMLHttpRequest&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+      &lt;span class="nx"&gt;onViewError&lt;/span&gt;&lt;span class="p"&gt;(()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;xhr&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;abort&lt;/span&gt;&lt;span class="p"&gt;())&lt;/span&gt;
+
+      &lt;span class="nx"&gt;xhr&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;onprogress&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;event&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;event&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;lengthComputable&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+          &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;percent&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nb"&gt;Math&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;round&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;event&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;loaded&lt;/span&gt; &lt;span class="o"&gt;/&lt;/span&gt; &lt;span class="nx"&gt;event&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;total&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt; &lt;span class="mi"&gt;100&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+          &lt;span class="nx"&gt;entry&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;progress&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;percent&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+        &lt;span class="p"&gt;}&lt;/span&gt;
+      &lt;span class="p"&gt;}&lt;/span&gt;
+
+      &lt;span class="nx"&gt;xhr&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;open&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;POST&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;url&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+      &lt;span class="nx"&gt;multipartRequestHeaders&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;map&lt;/span&gt;&lt;span class="p"&gt;(([&lt;/span&gt;&lt;span class="nx"&gt;key&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;value&lt;/span&gt;&lt;span class="p"&gt;])&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="nx"&gt;xhr&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;setRequestHeader&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;key&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;value&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+      &lt;span class="p"&gt;})&lt;/span&gt;
+
+      &lt;span class="nx"&gt;xhr&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;send&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;multipartRequestBody&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+      &lt;span class="nx"&gt;xhr&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;onload&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;xhr&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;status&lt;/span&gt; &lt;span class="o"&gt;!==&lt;/span&gt; &lt;span class="mi"&gt;200&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+          &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;entry&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+        &lt;span class="p"&gt;}&lt;/span&gt;
+      &lt;span class="p"&gt;}&lt;/span&gt;
+      &lt;span class="nx"&gt;xhr&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;onerror&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;entry&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+  &lt;span class="p"&gt;})&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+&lt;h3&gt;
+  &lt;a href="#thats-it-lets-try"&gt;
+  &lt;/a&gt;
+  That's it! Let's try...
+&lt;/h3&gt;
+
+&lt;p&gt;When testing the file upload we can see how the upload progress shows the bar at 100% complete (in green color).&lt;br&gt;
+&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--e4E4omz5--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/sdbumwf3mkzvcg9z1hzh.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--e4E4omz5--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/sdbumwf3mkzvcg9z1hzh.png" alt="File successfully uploaded"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;And finally, in the Dev Tools we can see a successful response obtained by Google Drive API from which we can know the kind of upload, the ID of the file on Google Drive, the name and format of the file.&lt;br&gt;
+&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--GYGpIkLB--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/5kv594f7hbl4dhd06om4.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--GYGpIkLB--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/5kv594f7hbl4dhd06om4.png" alt="Response de Google Drive"&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;h2&gt;
+  &lt;a href="#great-you-have-your-file-in-google-drive"&gt;
+  &lt;/a&gt;
+  Great, you have your file in Google Drive!
+&lt;/h2&gt;
+
+
+
+&lt;p&gt;To see the full implementation you can visit the repo:&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="ltag-github-readme-tag"&gt;
+  &lt;div class="readme-overview"&gt;
+    &lt;h2&gt;
+      &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--i3JOwpme--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/github-logo-ba8488d21cd8ee1fee097b8410db9deaa41d0ca30b004c0c63de0a479114156f.svg" alt="GitHub logo"&gt;
+      &lt;a href="https://github.com/santiagocardo80"&gt;
+        santiagocardo80
+      &lt;/a&gt; / &lt;a href="https://github.com/santiagocardo80/car-workshop"&gt;
+        car-workshop
+      &lt;/a&gt;
+    &lt;/h2&gt;
+    &lt;h3&gt;
+      Car Workshop Managment Web App
+    &lt;/h3&gt;
+  &lt;/div&gt;
+  &lt;div class="ltag-github-body"&gt;
+    
+&lt;div id="readme" class="md"&gt;
+&lt;h1&gt;
+CarWorkshop&lt;/h1&gt;
+&lt;p&gt;To start your Phoenix server:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;Install dependencies with &lt;code&gt;mix deps.get&lt;/code&gt;
+&lt;/li&gt;
+&lt;li&gt;Create and migrate your database with &lt;code&gt;mix ecto.setup&lt;/code&gt;
+&lt;/li&gt;
+&lt;li&gt;Install Node.js dependencies with &lt;code&gt;npm install&lt;/code&gt; inside the &lt;code&gt;assets&lt;/code&gt; directory&lt;/li&gt;
+&lt;li&gt;Start Phoenix endpoint with &lt;code&gt;mix phx.server&lt;/code&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;Now you can visit &lt;a href="http://localhost:4000" rel="nofollow"&gt;&lt;code&gt;localhost:4000&lt;/code&gt;&lt;/a&gt; from your browser.&lt;/p&gt;
+&lt;p&gt;Ready to run in production? Please &lt;a href="https://hexdocs.pm/phoenix/deployment.html" rel="nofollow"&gt;check our deployment guides&lt;/a&gt;.&lt;/p&gt;
+&lt;h2&gt;
+Learn more&lt;/h2&gt;
+&lt;ul&gt;
+&lt;li&gt;Official website: &lt;a href="https://www.phoenixframework.org/" rel="nofollow"&gt;https://www.phoenixframework.org/&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;Guides: &lt;a href="https://hexdocs.pm/phoenix/overview.html" rel="nofollow"&gt;https://hexdocs.pm/phoenix/overview.html&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;Docs: &lt;a href="https://hexdocs.pm/phoenix" rel="nofollow"&gt;https://hexdocs.pm/phoenix&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;Forum: &lt;a href="https://elixirforum.com/c/phoenix-forum" rel="nofollow"&gt;https://elixirforum.com/c/phoenix-forum&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;Source: &lt;a href="https://github.com/phoenixframework/phoenix"&gt;https://github.com/phoenixframework/phoenix&lt;/a&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+&lt;/div&gt;
+
+  &lt;/div&gt;
+  &lt;div class="gh-btn-container"&gt;&lt;a class="gh-btn" href="https://github.com/santiagocardo80/car-workshop"&gt;View on GitHub&lt;/a&gt;&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+</description>
+      <category>elixir</category>
+      <category>phoenix</category>
+      <category>liveview</category>
+      <category>javascript</category>
+    </item>
+    <item>
+      <title>Back on track to basic DOM manipulation</title>
+      <author>Jonathan Cohen</author>
+      <pubDate>Wed, 21 Apr 2021 00:15:30 +0000</pubDate>
+      <link>https://dev.to/jdc1492/back-on-track-to-basic-dom-manipulation-57af</link>
+      <guid>https://dev.to/jdc1492/back-on-track-to-basic-dom-manipulation-57af</guid>
+      <description>&lt;p&gt;So now that we've gone over variable assignments and have also talked about functions and methods, we're now ready to finally put it all together to discuss the DOM manipulation we want to achieve. For the final time, we want to take a phrase that is inputted by the user and have it render onto the page when the user clicks the submit button on the form.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--qH0w7Ed9--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/snclthuqdt2d8yhs56ax.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--qH0w7Ed9--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/snclthuqdt2d8yhs56ax.png" alt="Screen Shot 2021-04-20 at 8.07.30 PM"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;As we examine the HTML document we can see that our form has an ID of &lt;code&gt;formPhrase&lt;/code&gt;. With that knowledge, we can set it to a variable. We can also attach a variable to our div with the id of phrasePlace since we'll be adding HTML within the opening and closing tags. &lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--9fnwq8Eo--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/p75hwjb7kibvn7w4nizm.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--9fnwq8Eo--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/p75hwjb7kibvn7w4nizm.png" alt="Screen Shot 2021-04-20 at 8.08.01 PM"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Now that we have our form able to be accessed as a variable we can now use methods on the variable that represents a particular HTML element. For this example we will use .addEventListener().  This will let allow javascript to listen out for the appropriate action to perform some sort of work.  The action, in this case, being 'submit'. That would be the first argument passed to the method with the second being a callback function.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;form.addEventListener("submit", function(event){
+  event.preventDefault();
+  const phrase = event.target.phrase.value;
+  phrasePlace.innerHTML += placePhrase(phrase);
+});
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Within the blocks is where we would put our code. Above in the example, we have an argument (event) being passed into the callback function and then we're calling a preventDefault method on the event as the first statement in the function.  On the submission of a form, it's normal behavior for the page to refresh, but we don't want that in this case. Since we aren't fetching to a database the phrases that we would have rendered would be erased and to avoid all of that we're telling the event to not cause a refresh and instead continue with the function.  The next line grabs the phrase from the input field. Finally, using a function that takes the argument of phrase and returns HTML with the actual phrase. This returned HTML will be placed in the div that has an ID of phrasePlace. &lt;/p&gt;
+
+&lt;p&gt;Take a breath, that was alot of information. Hopefully, this wordy explanation helped to shed light on what DOM manipulation is. Now practice with different types of event listener keywords and see what you find. The only way to learn is to practice! &lt;/p&gt;
+
+</description>
     </item>
     <item>
       <title>What is SQL - Part 4</title>
@@ -1268,6 +1790,172 @@ and understand the three main modules of epi-spot &lt;br&gt;
       <category>datascience</category>
     </item>
     <item>
+      <title>Vue 3 Supabase.js Client</title>
+      <author>Davide Marchet</author>
+      <pubDate>Tue, 20 Apr 2021 22:55:28 +0000</pubDate>
+      <link>https://dev.to/didomarchet/vue-3-supabase-js-client-18m1</link>
+      <guid>https://dev.to/didomarchet/vue-3-supabase-js-client-18m1</guid>
+      <description>&lt;p&gt;(Original repo &lt;a href="https://github.com/DidoMarchet/vue-3-supabase"&gt;https://github.com/DidoMarchet/vue-3-supabase&lt;/a&gt;)&lt;/p&gt;
+
+&lt;p&gt;🍔 Simple &lt;a href="https://github.com/vuejs/docs-next"&gt;Vue 3&lt;/a&gt; wrap for &lt;a href="https://supabase.io/docs/reference/javascript/supabase-client"&gt;Supabase.js Client&lt;/a&gt; build with &lt;a href="https://github.com/vitejs/vite"&gt;Vitejs&lt;/a&gt;&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#table-of-content"&gt;
+  &lt;/a&gt;
+  Table of content:
+&lt;/h3&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="#install-plugin"&gt;Install&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="#usages"&gt;Usages&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="#methods"&gt;Methods&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Install the package via npm:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;npm i vue-3-supabase
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h1&gt;
+  &lt;a href="#install"&gt;
+  &lt;/a&gt;
+  Install
+&lt;/h1&gt;
+
+&lt;p&gt;It's Simple! In your &lt;code&gt;main.js&lt;/code&gt; add the following:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;createApp&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;vue&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="nx"&gt;App&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;./App.vue&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+
+&lt;span class="c1"&gt;// Import supabase&lt;/span&gt;
+&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="nx"&gt;supabase&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;vue-3-supabase&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;app&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;createApp&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;App&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+&lt;span class="c1"&gt;// Use supabase&lt;/span&gt;
+&lt;span class="nx"&gt;app&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;use&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;supabase&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="na"&gt;supabaseUrl&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;https://xxxxxxxxxxxxxxxxx.supabase.co&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="c1"&gt;// actually you can use something like import.meta.env.VITE_SUPABASE_URL&lt;/span&gt;
+  &lt;span class="na"&gt;supabaseKey&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;xxxxx__xxxxx___xxxxx___xxxxx&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="c1"&gt;// actually you can use something like import.meta.env.VITE_SUPABASE_KEY,&lt;/span&gt;
+  &lt;span class="na"&gt;options&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{}&lt;/span&gt;
+&lt;span class="p"&gt;})&lt;/span&gt;
+
+&lt;span class="nx"&gt;app&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;mount&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;#app&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;It takes three params as argument :&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;supabaseUrl&lt;/code&gt;: the unique &lt;strong&gt;required&lt;/strong&gt; Supabase URL which is supplied when you create a new project in your project dashboard.&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;supabaseKey&lt;/code&gt;: the unique &lt;strong&gt;required&lt;/strong&gt; Supabase Key which is supplied when you create a new project in your project dashboard.&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;options&lt;/code&gt;: additional parameters &lt;strong&gt;not required&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;More references &lt;a href="https://supabase.io/docs/reference/javascript/initializing"&gt;here&lt;/a&gt;&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#usages"&gt;
+  &lt;/a&gt;
+  Usages
+&lt;/h1&gt;
+
+&lt;h3&gt;
+  &lt;a href="#options-api"&gt;
+  &lt;/a&gt;
+  Options API
+&lt;/h3&gt;
+
+&lt;p&gt;In the &lt;strong&gt;Option API&lt;/strong&gt; you can use &lt;code&gt;this.$supabase&lt;/code&gt; to access the Supabase.js Client:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight vue"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;&lt;/span&gt;&lt;span class="k"&gt;template&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
+  // Your HTML Stuff
+&lt;span class="nt"&gt;&amp;lt;/&lt;/span&gt;&lt;span class="k"&gt;template&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
+
+&lt;span class="nt"&gt;&amp;lt;&lt;/span&gt;&lt;span class="k"&gt;script&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
+&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="k"&gt;default&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="nx"&gt;mounted&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;user&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;session&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;error&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;$supabase&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;auth&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;signUp&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt;
+      &lt;span class="na"&gt;email&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;user@provider.com&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+      &lt;span class="na"&gt;password&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;myawesomepassword&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="p"&gt;})&lt;/span&gt;
+    &lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;user&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;session&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="nt"&gt;&amp;lt;/&lt;/span&gt;&lt;span class="k"&gt;script&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#composition-api"&gt;
+  &lt;/a&gt;
+  Composition API
+&lt;/h3&gt;
+
+&lt;p&gt;In the &lt;strong&gt;Composition API&lt;/strong&gt; you can use &lt;code&gt;inject('supabase')&lt;/code&gt; to access the Supabase.js Client:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight vue"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;&lt;/span&gt;&lt;span class="k"&gt;template&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
+  // Your HTML Stuff
+&lt;span class="nt"&gt;&amp;lt;/&lt;/span&gt;&lt;span class="k"&gt;template&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
+
+&lt;span class="nt"&gt;&amp;lt;&lt;/span&gt;&lt;span class="k"&gt;script&lt;/span&gt; &lt;span class="na"&gt;setup&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
+&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;inject&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;onMounted&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;vue&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;supabase&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;inject&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;supabase&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+&lt;span class="nx"&gt;onMounted&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;user&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;session&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;error&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;supabase&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;auth&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;signUp&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt;
+    &lt;span class="na"&gt;email&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;user@provider.com&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="na"&gt;password&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;myawesomepassword&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="p"&gt;})&lt;/span&gt;
+  &lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;user&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;session&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="p"&gt;})&lt;/span&gt;
+&lt;span class="nt"&gt;&amp;lt;/&lt;/span&gt;&lt;span class="k"&gt;script&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h1&gt;
+  &lt;a href="#methods"&gt;
+  &lt;/a&gt;
+  Methods
+&lt;/h1&gt;
+
+&lt;p&gt;Here the methods references from official doc:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="https://supabase.io/docs/reference/javascript/auth-signup"&gt;Auth&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://supabase.io/docs/reference/javascript/select"&gt;Data&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://supabase.io/docs/reference/javascript/subscribe"&gt;Realtime&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://supabase.io/docs/reference/javascript/storage-createbucket"&gt;Storage&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://supabase.io/docs/reference/javascript/using-modifiers"&gt;Modifiers&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://supabase.io/docs/reference/javascript/using-filters"&gt;Filters&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Enjoy 👊&lt;/p&gt;
+
+</description>
+    </item>
+    <item>
       <title>Introducing Arch-Go</title>
       <author>Francisco Daines</author>
       <pubDate>Tue, 20 Apr 2021 22:53:18 +0000</pubDate>
@@ -1640,995 +2328,6 @@ jobs:
       <category>webdev</category>
       <category>tutorial</category>
       <category>beginners</category>
-    </item>
-    <item>
-      <title>Fix "Unexpected field" Error From Multer</title>
-      <author>Maxim Orlov</author>
-      <pubDate>Tue, 20 Apr 2021 22:40:48 +0000</pubDate>
-      <link>https://dev.to/maximization/fix-unexpected-field-error-from-multer-2mmo</link>
-      <guid>https://dev.to/maximization/fix-unexpected-field-error-from-multer-2mmo</guid>
-      <description>&lt;p&gt;&lt;em&gt;This article was originally published a day earlier at &lt;a href="https://maximorlov.com/fix-unexpected-field-error-multer/"&gt;https://maximorlov.com/fix-unexpected-field-error-multer/&lt;/a&gt;&lt;/em&gt;&lt;/p&gt;
-
-&lt;p&gt;You set out to implement file uploads in Node.js, only to get blocked by this particular error:&lt;/p&gt;
-
-&lt;p&gt;&lt;code&gt;MulterError: Unexpected field&lt;/code&gt;&lt;/p&gt;
-
-&lt;p&gt;What does this cryptic message even mean?!&lt;/p&gt;
-
-&lt;p&gt;By now you've already spent &lt;em&gt;several hours&lt;/em&gt; trying to solve this problem. Why does implementing a simple file upload feature have to be so &lt;em&gt;hard&lt;/em&gt;?!&lt;/p&gt;
-
-&lt;p&gt;It doesn't have to be this way though. &lt;strong&gt;Writing an endpoint that accepts, parses and uploads a file in Node.js &lt;em&gt;can&lt;/em&gt; be straightforward.&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;After reading this article, you'll turn an annoying error into something you'll solve in less than 5 minutes!&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#input-name-needs-to-match-multer-function-argument"&gt;
-  &lt;/a&gt;
-  Input name needs to match multer function argument
-&lt;/h2&gt;
-
-&lt;p&gt;The foremost cause for this error is when the &lt;em&gt;name&lt;/em&gt; attribute of the file input doesn't match the argument passed to one of multer's middleware functions.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--PFfD17fU--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/trxhjnm8cbse5q7ix57p.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--PFfD17fU--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/trxhjnm8cbse5q7ix57p.png" alt="Two code snippets: one shows an HTML form with one file input, another shows an Express POST route with a multer middleware to parse the multipart/form-data request. Both are linked with an arrow pointing at the input name in HTML, and multer argument on the server indicating they should be the same"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;The &lt;code&gt;NAME&lt;/code&gt; you use in multer's &lt;code&gt;upload.single(NAME)&lt;/code&gt; middleware function (or any of the other functions discussed below) &lt;em&gt;must&lt;/em&gt; be the same as  the name attribute of the input element &lt;code&gt;&amp;lt;input type="file" name="NAME" /&amp;gt;&lt;/code&gt;.&lt;/p&gt;
-
-&lt;p&gt;Therefore, you have to double-check that these values are an &lt;em&gt;exact&lt;/em&gt; match. Pay extra attention to invisible whitespace or characters that may look the same but have a different Unicode value. It's better to copy-paste the value from one place to another.&lt;/p&gt;
-
-&lt;p&gt;Multer is strict in what input it accepts from the client, and for a good reason. File uploads can be a big vulnerability for backend servers. It's easy for a bad actor to overflow the server with a huge amount of files, or send malformed data that breaks the parser and potentially gives the hacker access to the server. Multer is designed with a mindset to trust nothing that comes from the client so it can protect your server from a potential DoS attack.&lt;/p&gt;
-
-&lt;p&gt;Depending on the form data you're expecting from the client, multer provides you with different middleware functions:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;no file (text only) - &lt;code&gt;upload.none()&lt;/code&gt;
-&lt;/li&gt;
-&lt;li&gt;single file - &lt;code&gt;upload.single(fieldname)&lt;/code&gt;
-&lt;/li&gt;
-&lt;li&gt;multiple files, single input - &lt;code&gt;upload.array(fieldname[, maxCount])&lt;/code&gt;
-&lt;/li&gt;
-&lt;li&gt;multiples files, multiple inputs - &lt;code&gt;upload.fields(fields)&lt;/code&gt; where fields is an array of objects with &lt;code&gt;name&lt;/code&gt; and optionally &lt;code&gt;maxCount&lt;/code&gt; keys&lt;/li&gt;
-&lt;li&gt;any of the above - &lt;code&gt;upload.any()&lt;/code&gt; (avoid if possible)&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;&lt;code&gt;multer.any()&lt;/code&gt; is oftentimes used as a quick fix. This is dangerous and can make your server vulnerable to attacks. &lt;code&gt;multer.any()&lt;/code&gt; will accept all files sent by the client which can lead to unexpected values further down in your application logic. Especially when used as a global middleware instead of a route-specific middleware.&lt;/p&gt;
-
-&lt;p&gt;It's always better to fix the error by making sure field names are the same, instead of using &lt;code&gt;multer.any()&lt;/code&gt;.&lt;/p&gt;
-
-&lt;p&gt;If you decide to use &lt;code&gt;multer.any()&lt;/code&gt;, use it only on specific routes and make sure you're handling &lt;em&gt;all&lt;/em&gt; uploaded files.&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;Use the appropriate middleware function so that the form data received from the client is allowed to pass through. When you see an "Unexpected field" error from Multer, it's because the middleware function is rejecting some (or all) form data.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#with-formdata"&gt;
-  &lt;/a&gt;
-  With FormData
-&lt;/h3&gt;
-
-&lt;p&gt;When you're using &lt;code&gt;FormData&lt;/code&gt; to programatically construct a form, input name is the first argument to the &lt;code&gt;.append()&lt;/code&gt; function:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// Constructing a form in JavaScript&lt;/span&gt;
-&lt;span class="c1"&gt;// Input name is the first argument of `append` function&lt;/span&gt;
-&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;formData&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;FormData&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
-&lt;span class="nx"&gt;formData&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;append&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;NAME&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;file&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;You then have to make sure that the same value, &lt;code&gt;NAME&lt;/code&gt; in this case, is used as the &lt;code&gt;fieldname&lt;/code&gt; argument in the middleware function:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// Pass the same input name to the multer middleware function&lt;/span&gt;
-&lt;span class="nx"&gt;app&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;post&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;/upload&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;upload&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;single&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;NAME&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;req&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;res&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="c1"&gt;// ...&lt;/span&gt;
-&lt;span class="p"&gt;});&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h3&gt;
-  &lt;a href="#inputs-with-multiple-files-might-have-a-name-ending-with-raw-endraw-"&gt;
-  &lt;/a&gt;
-  Inputs with multiple files might have a name ending with &lt;code&gt;[]&lt;/code&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;In some cases, you might have a client that appends &lt;code&gt;[]&lt;/code&gt; to the input name if it has multiple files.&lt;/p&gt;
-
-&lt;p&gt;When you configure multer to accept a &lt;code&gt;photos&lt;/code&gt; field but the client sends &lt;code&gt;photos[]&lt;/code&gt; instead, multer will throw a &lt;code&gt;MulterError: Unexpected field&lt;/code&gt; error.&lt;/p&gt;
-
-&lt;p&gt;To fix the error, append &lt;code&gt;[]&lt;/code&gt; to the &lt;code&gt;fieldname&lt;/code&gt; argument in the middleware function: &lt;code&gt;upload.array('photos[]')&lt;/code&gt;.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#finding-the-unexpected-field"&gt;
-  &lt;/a&gt;
-  Finding the unexpected field
-&lt;/h2&gt;
-
-&lt;p&gt;Error messages from multer are rather cryptic. They don't give you much information to help you find the root cause of the problem.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;There's a way to extract a little bit more information from the error thrown by multer and find the rejected field.&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;Add an &lt;a href="https://expressjs.com/en/guide/error-handling.html"&gt;error handling middleware&lt;/a&gt; and log the error argument. More specifically, the &lt;code&gt;field&lt;/code&gt; property of the error tells you which input name multer has an issue with:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// Logging the rejected field from multer error&lt;/span&gt;
-&lt;span class="nx"&gt;app&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;use&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;req&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;res&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;next&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;This is the rejected field -&amp;gt;&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;field&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="p"&gt;});&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;In a &lt;a href="https://maximorlov.com/start-node-js-in-production/"&gt;Node.js production application&lt;/a&gt;, you'd want to replace &lt;code&gt;console.log&lt;/code&gt; with a &lt;a href="https://maximorlov.com/logging-with-pino-and-asynclocalstorage-in-nodejs/"&gt;proper logging mechanism&lt;/a&gt; to avoid messy logs and quickly find what you're looking for.&lt;/p&gt;
-
-&lt;p&gt;Having found the rejected field, you're a step closer to solving the error since you know where to start looking.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#other-possible-causes"&gt;
-  &lt;/a&gt;
-  Other possible causes
-&lt;/h2&gt;
-
-&lt;p&gt;If the error persists after verifying the input name matches the multer function argument, there might be something else going on. Here are three other possible causes for this error, and a solution for each.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#conflicting-multer-instances"&gt;
-  &lt;/a&gt;
-  Conflicting multer instances
-&lt;/h3&gt;
-
-&lt;p&gt;I've seen this come up a few times so it's worth mentioning.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Make sure there is only &lt;em&gt;one&lt;/em&gt; multer instance used in the middleware chain of any particular route.&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;What do I mean by this? Let's look at an example:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// Typical Express application&lt;/span&gt;
-&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;express&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;require&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;express&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;app&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;express&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
-
-&lt;span class="nx"&gt;app&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;use&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;upload&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;array&lt;/span&gt;&lt;span class="p"&gt;());&lt;/span&gt;
-
-&lt;span class="c1"&gt;// Some more express middleware ...&lt;/span&gt;
-
-&lt;span class="nx"&gt;app&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;post&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;/upload&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;upload&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;single&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;photo&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;req&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;res&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="c1"&gt;// ...&lt;/span&gt;
-&lt;span class="p"&gt;});&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Can you see what's wrong with the above example?&lt;/p&gt;
-
-&lt;p&gt;There's a multer instance used on all routes (&lt;code&gt;upload.array()&lt;/code&gt;) and another multer instance (&lt;code&gt;upload.single('photo')&lt;/code&gt;) specific to the &lt;code&gt;/upload&lt;/code&gt; route.&lt;/p&gt;
-
-&lt;p&gt;If you try to upload a single file with the correct input name (&lt;code&gt;photo&lt;/code&gt;), the first multer instance will throw an error and the code never reaches the second multer instance. That's because &lt;code&gt;upload.array()&lt;/code&gt; is missing a &lt;code&gt;fieldname&lt;/code&gt; argument and it will always throw an error on file uploads.&lt;/p&gt;
-
-&lt;p&gt;If you're using multer at top of your middleware chain to get access to the authentication token in the body, you should move it to the request headers instead. It's standard practice to put an authentication token in the &lt;code&gt;Authorization&lt;/code&gt; header.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#unaccounted-file-inputs"&gt;
-  &lt;/a&gt;
-  Unaccounted file inputs
-&lt;/h3&gt;
-
-&lt;p&gt;Remember when I said earlier that multer is strict about accepting form data from the client?&lt;/p&gt;
-
-&lt;p&gt;Even if you made sure the field names are the same, you will still face this error if there are file inputs you haven't told multer about.&lt;/p&gt;
-
-&lt;p&gt;You can configure multer to accept multiple fields with the &lt;code&gt;upload.fields(fields)&lt;/code&gt; method. &lt;code&gt;fields&lt;/code&gt; is an array of objects with a &lt;code&gt;name&lt;/code&gt;, and optionally &lt;code&gt;maxCount&lt;/code&gt;, key.&lt;/p&gt;
-
-&lt;p&gt;For example, the following HTML form has two file inputs:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="c"&gt;&amp;lt;!-- Form with two file inputs: "avatar" and "photos" --&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;form&lt;/span&gt; &lt;span class="na"&gt;action=&lt;/span&gt;&lt;span class="s"&gt;"/upload"&lt;/span&gt; &lt;span class="na"&gt;method=&lt;/span&gt;&lt;span class="s"&gt;"POST"&lt;/span&gt; &lt;span class="na"&gt;enctype=&lt;/span&gt;&lt;span class="s"&gt;"multipart/form-data"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-  &lt;span class="nt"&gt;&amp;lt;input&lt;/span&gt; &lt;span class="na"&gt;type=&lt;/span&gt;&lt;span class="s"&gt;"file"&lt;/span&gt; &lt;span class="na"&gt;name=&lt;/span&gt;&lt;span class="s"&gt;"avatar"&lt;/span&gt; &lt;span class="nt"&gt;/&amp;gt;&lt;/span&gt;
-  &lt;span class="nt"&gt;&amp;lt;input&lt;/span&gt; &lt;span class="na"&gt;type=&lt;/span&gt;&lt;span class="s"&gt;"file"&lt;/span&gt; &lt;span class="na"&gt;name=&lt;/span&gt;&lt;span class="s"&gt;"photos"&lt;/span&gt; &lt;span class="na"&gt;multiple&lt;/span&gt; &lt;span class="nt"&gt;/&amp;gt;&lt;/span&gt;
-  &lt;span class="nt"&gt;&amp;lt;input&lt;/span&gt; &lt;span class="na"&gt;type=&lt;/span&gt;&lt;span class="s"&gt;"submit"&lt;/span&gt; &lt;span class="na"&gt;value=&lt;/span&gt;&lt;span class="s"&gt;"Send"&lt;/span&gt; &lt;span class="nt"&gt;/&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;/form&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;To configure multer to accept the above form, you would have to write the following code:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// Configure multer to accept two file inputs: "avatar" and "photos".&lt;/span&gt;
-&lt;span class="c1"&gt;// The "avatar" and "photos" inputs are allowed to have up to 1 and 6 files, respectively.&lt;/span&gt;
-&lt;span class="nx"&gt;app&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;post&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
-  &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;/upload&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="nx"&gt;upload&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;fields&lt;/span&gt;&lt;span class="p"&gt;([&lt;/span&gt;
-    &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;avatar&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="na"&gt;maxCount&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt; &lt;span class="p"&gt;},&lt;/span&gt;
-    &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;photos&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="na"&gt;maxCount&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="mi"&gt;6&lt;/span&gt; &lt;span class="p"&gt;},&lt;/span&gt;
-  &lt;span class="p"&gt;]),&lt;/span&gt;
-  &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;req&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;res&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{},&lt;/span&gt;
-&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;This configuration tells multer we're expecting two file input fields named "avatar" and "photos" with no more than 1 and 6 files, respectively. In case there are other fields present, multer will throw an "Unexpected field" error.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#number-of-files-exceeding-the-configured-limit"&gt;
-  &lt;/a&gt;
-  Number of files exceeding the configured limit
-&lt;/h3&gt;
-
-&lt;p&gt;When you see a &lt;code&gt;MulterError: Unexpected field&lt;/code&gt; error, you don't suspect the reason to be the number of files exceeding the configured limit.&lt;/p&gt;
-
-&lt;p&gt;If you're using a middleware function that allows multiple files to be uploaded (&lt;code&gt;.array()&lt;/code&gt; or &lt;code&gt;.fields()&lt;/code&gt;), &lt;strong&gt;make sure the number of files uploaded doesn't exceed the &lt;code&gt;maxCount&lt;/code&gt; value.&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;To quickly check if this might be the cause, set &lt;code&gt;maxCount&lt;/code&gt; to a huge number (eg.: &lt;code&gt;upload.array('photos', 9999)&lt;/code&gt;). If the error disappears, you've found the issue. Either increase &lt;code&gt;maxCount&lt;/code&gt; to allow more files to be uploaded at once, or change the client to send fewer files at a time.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#conclusion"&gt;
-  &lt;/a&gt;
-  Conclusion
-&lt;/h2&gt;
-
-&lt;p&gt;Fixing cryptic multer errors and getting file uploads to work properly in Node.js can be a frustrating experience.&lt;/p&gt;
-
-&lt;p&gt;The foremost reason for the "Unexpected field" error is when the file input name doesn't match the argument passed to the multer function.&lt;/p&gt;
-
-&lt;p&gt;Other possible reasons for this error are conflicting multer instances, unaccounted file inputs and exceeding the number of files limit.&lt;/p&gt;
-
-&lt;p&gt;Having a hard time implementing file uploads in Node.js? Become an expert at handling file uploads with this &lt;a href="https://maximorlov.com/request-parsing-nodejs-guide/"&gt;FREE reference guide&lt;/a&gt;. Code examples, concise explanations and best practices are waiting for you.&lt;/p&gt;
-
-</description>
-      <category>node</category>
-      <category>webdev</category>
-      <category>programming</category>
-      <category>beginners</category>
-    </item>
-    <item>
-      <title>Storybook for everyone: CSF vs. MDX</title>
-      <author>Laura Carballo</author>
-      <pubDate>Tue, 20 Apr 2021 22:31:40 +0000</pubDate>
-      <link>https://dev.to/lauracarballo/storybook-for-everyone-csf-vs-mdx-88b</link>
-      <guid>https://dev.to/lauracarballo/storybook-for-everyone-csf-vs-mdx-88b</guid>
-      <description>&lt;p&gt;Today, I'm going to talk about &lt;a href="https://storybook.js.org/"&gt;Storybook&lt;/a&gt; v6. It is such a great tool to design, build, document and test isolated components and organize a perfect component library.&lt;/p&gt;
-
-&lt;p&gt;The &lt;a href="https://storybook.js.org/docs/react/api/csf"&gt;Component Story Format (CSF)&lt;/a&gt; is the recommended way of writing stories but more recently, Storybook introduced the option of writing stories using &lt;a href="https://storybook.js.org/docs/react/writing-docs/mdx"&gt;MDX Format&lt;/a&gt; so we can easily document our components with a format that we are all very familiar with.&lt;/p&gt;
-
-&lt;p&gt;In this post I'll be covering both ways of writing stories with the aim of showing some benefits of both tools and let you choose what works best for your project.&lt;/p&gt;
-
-&lt;p&gt;I'll be using a simple &lt;code&gt;Avatar&lt;/code&gt; component to serve as example and we'll be creating our stories based on it. I usually build my component libraries using React and Style Components so that's what we'll be using today too.&lt;/p&gt;
-
-&lt;p&gt;Our &lt;code&gt;Avatar&lt;/code&gt; will look like this:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="nx"&gt;styled&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;styled-components&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="nx"&gt;PropTypes&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;prop-types&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-
-&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="k"&gt;default&lt;/span&gt; &lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;Avatar&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="nx"&gt;src&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;size&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;className&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;alt&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Image&lt;/span&gt; &lt;span class="nx"&gt;size&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;size&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="nx"&gt;className&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;className&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="nx"&gt;src&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;src&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="nx"&gt;alt&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;alt&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="sr"&gt;/&amp;gt;&lt;/span&gt;&lt;span class="err"&gt;;
-&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;Image&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;styled&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;img&lt;/span&gt;&lt;span class="s2"&gt;`
-  border-radius: 100%;
-  height: &lt;/span&gt;&lt;span class="p"&gt;${(&lt;/span&gt;&lt;span class="nx"&gt;props&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;sizes&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;props&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;size&lt;/span&gt;&lt;span class="p"&gt;]}&lt;/span&gt;&lt;span class="s2"&gt;;
-  width: &lt;/span&gt;&lt;span class="p"&gt;${(&lt;/span&gt;&lt;span class="nx"&gt;props&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;sizes&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;props&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;size&lt;/span&gt;&lt;span class="p"&gt;]}&lt;/span&gt;&lt;span class="s2"&gt;;
-`&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-
-&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;sizes&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="na"&gt;small&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;30px&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="na"&gt;medium&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;60px&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="na"&gt;large&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;160px&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-&lt;span class="p"&gt;};&lt;/span&gt;
-
-&lt;span class="nx"&gt;Avatar&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;propTypes&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="cm"&gt;/**
-  The display src of the avatar
-  */&lt;/span&gt;
-  &lt;span class="na"&gt;src&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;PropTypes&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;string&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="cm"&gt;/**
-  The display size of the avatar
-  */&lt;/span&gt;
-  &lt;span class="na"&gt;size&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;PropTypes&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;oneOf&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nb"&gt;Object&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;keys&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;sizes&lt;/span&gt;&lt;span class="p"&gt;)),&lt;/span&gt;
-  &lt;span class="cm"&gt;/**
-  Preserve className for styling
-  */&lt;/span&gt;
-  &lt;span class="na"&gt;className&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;PropTypes&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;string&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="cm"&gt;/**
-  Include alt tag for accessibility
-  */&lt;/span&gt;
-  &lt;span class="na"&gt;alt&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;PropTypes&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;string&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-&lt;span class="p"&gt;};&lt;/span&gt;
-
-&lt;span class="nx"&gt;Avatar&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;defaultProps&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="na"&gt;size&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;medium&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="na"&gt;src&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;/defaultAvatar.svg&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="na"&gt;alt&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;avatar&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-&lt;span class="p"&gt;};&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;For those new to Storybook, a story is composed of a Canvas, which shows our rendered component and a Docs Block, which are the building blocks of Storybook documentation pages. The &lt;code&gt;PropTypes&lt;/code&gt; function will be used in our Docs Block later to show our &lt;code&gt;ArgsTable&lt;/code&gt; with all the &lt;code&gt;args&lt;/code&gt; (props) included in our component.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#component-story-format-csf"&gt;
-  &lt;/a&gt;
-  Component Story Format (CSF)
-&lt;/h2&gt;
-
-&lt;p&gt;Let's begin with Storybook's recommended syntax, CSF.&lt;/p&gt;
-
-&lt;p&gt;In CSF, stories are defined as ES6 modules. Consequently, each story is composed of a single default export and one or multiple named exports.&lt;/p&gt;
-
-&lt;p&gt;The default exports serves as a default structure for all the stories that we'll write for a component, in our case, the &lt;code&gt;Avatar&lt;/code&gt;.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// Avatar.stories.js/ts&lt;/span&gt;
-
-&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="nx"&gt;React&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;react&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="nx"&gt;Avatar&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;../components/Avatar&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-
-&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="k"&gt;default&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="na"&gt;title&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Components/Avatar&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="na"&gt;component&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;Avatar&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-&lt;span class="p"&gt;};&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;The named export is a function that describes how to render a component, so it would simply look like this:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;Default&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Avatar&lt;/span&gt; &lt;span class="nx"&gt;src&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;/defaultAvatar.svg&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt; &lt;span class="nx"&gt;size&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;medium&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt; &lt;span class="o"&gt;/&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;But we're usually building our component library for documentation purposes so we want to be able to interact with our story and check every use case. For this reason, it is quite handy to include &lt;code&gt;args&lt;/code&gt; so we can benefit from the &lt;a href="https://storybook.js.org/docs/react/essentials/controls"&gt;Controls addon&lt;/a&gt; and &lt;a href="https://storybook.js.org/docs/react/essentials/actions"&gt;Actions addon&lt;/a&gt;.&lt;/p&gt;
-
-&lt;p&gt;In the Storybook documentation they use the &lt;code&gt;.bind()&lt;/code&gt; method to create a reusable template to pass the components &lt;code&gt;args&lt;/code&gt; to each of the component's stories. This comes in handy when we're going to have multiple stories from a single component since it reduces code repetition.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;Template&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;args&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Avatar&lt;/span&gt; &lt;span class="p"&gt;{...&lt;/span&gt;&lt;span class="nx"&gt;args&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="sr"&gt;/&amp;gt;&lt;/span&gt;&lt;span class="err"&gt;;
-&lt;/span&gt;
-&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;Default&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;Template&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;bind&lt;/span&gt;&lt;span class="p"&gt;({});&lt;/span&gt;
-&lt;span class="nx"&gt;Default&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;args&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="na"&gt;src&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;/defaultAvatar.svg&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="na"&gt;size&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;medium&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="na"&gt;alt&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;avatar&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-&lt;span class="p"&gt;};&lt;/span&gt;
-
-&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;Profile&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;Template&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;bind&lt;/span&gt;&lt;span class="p"&gt;({});&lt;/span&gt;
-&lt;span class="nx"&gt;Profile&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;args&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="na"&gt;src&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;/lauraAvatar.svg&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="na"&gt;size&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;small&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="na"&gt;alt&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;user profile&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-&lt;span class="p"&gt;};&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;But if you're working closely with designers or other colleagues that are not too comfortable or familiar with the &lt;code&gt;.bind()&lt;/code&gt; method, passing &lt;code&gt;args&lt;/code&gt; within each story is also good. We end up having a bit more repetition but the code is more readable and you can save yourself the JavaScript lesson.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;Default&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;args&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Avatar&lt;/span&gt; &lt;span class="p"&gt;{...&lt;/span&gt;&lt;span class="nx"&gt;args&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="sr"&gt;/&amp;gt;&lt;/span&gt;&lt;span class="err"&gt;;
-&lt;/span&gt;&lt;span class="nx"&gt;Default&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;args&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="na"&gt;src&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;/defaultAvatar.svg&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="na"&gt;size&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;medium&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="na"&gt;alt&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;avatar&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-&lt;span class="p"&gt;};&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Alright, so now that we have completed our &lt;code&gt;Avatar&lt;/code&gt; story we should probably include some documentation for it. That's when using CSF can get a bit tricky.&lt;/p&gt;
-
-&lt;p&gt;To add a description in our main Story, we need to insert it inside the &lt;code&gt;parameters&lt;/code&gt; object usign &lt;code&gt;parameters.docs.description.component&lt;/code&gt; in our export default or &lt;code&gt;parameters.docs.description.story&lt;/code&gt; for our named exports.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="k"&gt;default&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="na"&gt;title&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Components/Avatar&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="na"&gt;component&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;Avatar&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="na"&gt;parameters&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="na"&gt;component&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;Avatar&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="na"&gt;componentSubtitle&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
-      &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;An Avatar is a visual representation of a user or entity.&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="na"&gt;docs&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-      &lt;span class="na"&gt;description&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-        &lt;span class="na"&gt;component&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Some description&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-      &lt;span class="p"&gt;},&lt;/span&gt;
-    &lt;span class="p"&gt;},&lt;/span&gt;
-  &lt;span class="p"&gt;},&lt;/span&gt;
-&lt;span class="p"&gt;};&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;Template&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;args&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Avatar&lt;/span&gt; &lt;span class="p"&gt;{...&lt;/span&gt;&lt;span class="nx"&gt;args&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="sr"&gt;/&amp;gt;&lt;/span&gt;&lt;span class="err"&gt;;
-&lt;/span&gt;&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;Default&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;Template&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;bind&lt;/span&gt;&lt;span class="p"&gt;({});&lt;/span&gt;
-&lt;span class="nx"&gt;Default&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;args&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="na"&gt;src&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;/defaultAvatar.svg&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="na"&gt;size&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;medium&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="na"&gt;alt&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;avatar&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-&lt;span class="p"&gt;};&lt;/span&gt;
-&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;Profile&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;Template&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;bind&lt;/span&gt;&lt;span class="p"&gt;({});&lt;/span&gt;
-&lt;span class="nx"&gt;Profile&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;args&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="na"&gt;src&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;/lauraAvatar.svg&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="na"&gt;size&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;small&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="na"&gt;alt&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;user profile&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-&lt;span class="p"&gt;};&lt;/span&gt;
-&lt;span class="nx"&gt;Profile&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;parameters&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="na"&gt;docs&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="na"&gt;description&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-      &lt;span class="na"&gt;story&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;`This is a story`&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="p"&gt;},&lt;/span&gt;
-  &lt;span class="p"&gt;},&lt;/span&gt;
-&lt;span class="p"&gt;};&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;As you can see, this is a bit of a tedious way of writing documentation.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#mdx"&gt;
-  &lt;/a&gt;
-  MDX
-&lt;/h2&gt;
-
-&lt;p&gt;Writing stories with MDX fixes the previous issue. It allows anyone familiar with the simple Markdown &lt;code&gt;.md&lt;/code&gt; format to write documentation. The main benefit is that now non-technical team members can be a part of documenting component libraries.&lt;/p&gt;
-
-&lt;p&gt;Designers can now share their design tokens and write documentation to make developers understand the reason behind design patterns. Here is a very cool example from the Storybook MDX announcement &lt;a href="https://medium.com/storybookjs/rich-docs-with-storybook-mdx-61bc145ae7bc"&gt;article&lt;/a&gt;. Philip Siekmann created an &lt;a href="https://github.com/UX-and-I/storybook-design-token"&gt;amazing addon&lt;/a&gt; that generates design token documentation from your stylesheets and asset files and the &lt;a href="https://storybook-design-token-v1.netlify.app/?path=/story/components-button--button"&gt;demo file&lt;/a&gt; is documented using MDX.&lt;/p&gt;
-
-&lt;p&gt;Imagine that in our &lt;code&gt;Avatar&lt;/code&gt; story we want to include documentation that ensure our component's best practices. MDX makes this super easy.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;Meta&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;Story&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;Canvas&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;ArgsTable&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;@storybook/addon-docs/blocks&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="nx"&gt;Avatar&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;../components/Avatar&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-
-&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Meta&lt;/span&gt;
-  &lt;span class="nx"&gt;title&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Components/Avatar&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
-  &lt;span class="nx"&gt;component&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;Avatar&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;
-  &lt;span class="nx"&gt;argTypes&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{{&lt;/span&gt;
-    &lt;span class="na"&gt;src&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-      &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;source&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-      &lt;span class="na"&gt;control&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;type&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;text&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt; &lt;span class="p"&gt;},&lt;/span&gt;
-    &lt;span class="p"&gt;},&lt;/span&gt;
-    &lt;span class="na"&gt;size&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-      &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;size&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-      &lt;span class="na"&gt;defaultValue&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;medium&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-      &lt;span class="na"&gt;control&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-        &lt;span class="na"&gt;type&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;select&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-        &lt;span class="na"&gt;options&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;small&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;medium&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;large&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt;
-      &lt;span class="p"&gt;},&lt;/span&gt;
-    &lt;span class="p"&gt;},&lt;/span&gt;
-  &lt;span class="p"&gt;}}&lt;/span&gt;
-&lt;span class="sr"&gt;/&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
-&lt;/span&gt;
-&lt;span class="err"&gt;#&lt;/span&gt; &lt;span class="nx"&gt;Avatar&lt;/span&gt;
-
-&lt;span class="nx"&gt;An&lt;/span&gt; &lt;span class="s2"&gt;`Avatar`&lt;/span&gt; &lt;span class="nx"&gt;is&lt;/span&gt; &lt;span class="nx"&gt;a&lt;/span&gt; &lt;span class="nx"&gt;visual&lt;/span&gt; &lt;span class="nx"&gt;representation&lt;/span&gt; &lt;span class="k"&gt;of&lt;/span&gt; &lt;span class="nx"&gt;a&lt;/span&gt; &lt;span class="nx"&gt;user&lt;/span&gt; &lt;span class="nx"&gt;or&lt;/span&gt; &lt;span class="nx"&gt;entity&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;
-
-&lt;span class="nx"&gt;The&lt;/span&gt; &lt;span class="s2"&gt;`small`&lt;/span&gt; &lt;span class="nx"&gt;size&lt;/span&gt; &lt;span class="nx"&gt;should&lt;/span&gt; &lt;span class="nx"&gt;only&lt;/span&gt; &lt;span class="nx"&gt;be&lt;/span&gt; &lt;span class="nx"&gt;used&lt;/span&gt; &lt;span class="nx"&gt;inside&lt;/span&gt; &lt;span class="nx"&gt;a&lt;/span&gt; &lt;span class="s2"&gt;`navbar`&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;
-
-&lt;span class="nx"&gt;We&lt;/span&gt; &lt;span class="nx"&gt;should&lt;/span&gt; &lt;span class="nx"&gt;always&lt;/span&gt; &lt;span class="nx"&gt;make&lt;/span&gt; &lt;span class="nx"&gt;sure&lt;/span&gt; &lt;span class="nx"&gt;that&lt;/span&gt; &lt;span class="nx"&gt;we&lt;/span&gt; &lt;span class="nx"&gt;provide&lt;/span&gt; &lt;span class="nx"&gt;an&lt;/span&gt; &lt;span class="nx"&gt;alternative&lt;/span&gt; &lt;span class="nx"&gt;text&lt;/span&gt; &lt;span class="k"&gt;for&lt;/span&gt; &lt;span class="nx"&gt;screen&lt;/span&gt; &lt;span class="nx"&gt;readers&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt; &lt;span class="nx"&gt;Therefore&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;always&lt;/span&gt; &lt;span class="nx"&gt;ensure&lt;/span&gt; &lt;span class="nx"&gt;that&lt;/span&gt; &lt;span class="nx"&gt;the&lt;/span&gt; &lt;span class="s2"&gt;`alt`&lt;/span&gt; &lt;span class="nx"&gt;tag&lt;/span&gt; &lt;span class="nx"&gt;is&lt;/span&gt; &lt;span class="nx"&gt;being&lt;/span&gt; &lt;span class="nx"&gt;used&lt;/span&gt; &lt;span class="k"&gt;in&lt;/span&gt; &lt;span class="nx"&gt;the&lt;/span&gt; &lt;span class="nx"&gt;component&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;
-
-&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Canvas&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
-  &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Story&lt;/span&gt;
-    &lt;span class="nx"&gt;name&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Default&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
-    &lt;span class="nx"&gt;args&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{{&lt;/span&gt;
-      &lt;span class="na"&gt;src&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;/defaultAvatar.svg&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-      &lt;span class="na"&gt;size&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;medium&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-      &lt;span class="na"&gt;alt&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;default&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
-    &lt;span class="p"&gt;}}&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
-    &lt;span class="p"&gt;{(&lt;/span&gt;&lt;span class="nx"&gt;args&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Avatar&lt;/span&gt; &lt;span class="p"&gt;{...&lt;/span&gt;&lt;span class="nx"&gt;args&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="sr"&gt;/&amp;gt;&lt;/span&gt;&lt;span class="err"&gt;}
-&lt;/span&gt;  &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/Story&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
-&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/Canvas&amp;gt;&lt;/span&gt;&lt;span class="err"&gt;;
-&lt;/span&gt;
-&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;ArgsTable&lt;/span&gt; &lt;span class="k"&gt;of&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;Avatar&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="sr"&gt;/&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
-&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;The &lt;code&gt;ArgsTable&lt;/code&gt; is going to render a table in the Docs Blocks with all of the available &lt;code&gt;args&lt;/code&gt;. Notice that when using MDX even if we have the Controls addon we can't interact with the component's arguments dynamically in the Docs Blocks but we can customise this table using &lt;a href="https://storybook.js.org/docs/react/api/argtypes"&gt;&lt;code&gt;argsType&lt;/code&gt;&lt;/a&gt; inside the &lt;code&gt;&amp;lt;Meta /&amp;gt;&lt;/code&gt; component.&lt;/p&gt;
-
-&lt;p&gt;As you can see, the MDX structure is very similar to CSF since in the back, Storybook will compiled the MDX files into CSF.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#source-dynamic-code-snippet"&gt;
-  &lt;/a&gt;
-  Source Dynamic code snippet
-&lt;/h2&gt;
-
-&lt;p&gt;If you're using &lt;code&gt;decorators&lt;/code&gt; in your component, you might have encountered something like this inside the source code snippet:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// CSF&lt;/span&gt;
-&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;div&lt;/span&gt;
-  &lt;span class="nx"&gt;style&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{{&lt;/span&gt;
-    &lt;span class="na"&gt;margin&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;2em&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="p"&gt;}}&lt;/span&gt;
-&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
-  &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;No&lt;/span&gt; &lt;span class="nx"&gt;Display&lt;/span&gt; &lt;span class="nx"&gt;Name&lt;/span&gt; &lt;span class="o"&gt;/&amp;gt;&lt;/span&gt;
-&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/div&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
-&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// MDX&lt;/span&gt;
-&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;MDXCreateElement&lt;/span&gt;
-  &lt;span class="nx"&gt;mdxType&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;div&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
-  &lt;span class="nx"&gt;originalType&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;div&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
-  &lt;span class="nx"&gt;style&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{{&lt;/span&gt;
-    &lt;span class="na"&gt;margin&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;2em&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="p"&gt;}}&lt;/span&gt;
-&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
-  &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;No&lt;/span&gt; &lt;span class="nx"&gt;Display&lt;/span&gt; &lt;span class="nx"&gt;Name&lt;/span&gt; &lt;span class="o"&gt;/&amp;gt;&lt;/span&gt;
-&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/MDXCreateElement&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
-&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Decorators provide extra "external" information about a component like extra markup for styling, providing side-loaded data or including required context as &lt;code&gt;ThemeProvider&lt;/code&gt;. We can use them globally but also render decorators individually inside each component. When used locally inside our component, these decorators are causing some issues inside the source code snippet.&lt;/p&gt;
-
-&lt;p&gt;There are plans of fixing this in the next version but currently, you can use a workaround changing the source code to &lt;code&gt;code&lt;/code&gt; using &lt;code&gt;parameters.docs.source.type&lt;/code&gt;.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="k"&gt;default&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="na"&gt;title&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Components/Avatar&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="na"&gt;component&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;Avatar&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="na"&gt;parameters&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="na"&gt;docs&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-      &lt;span class="na"&gt;source&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-        &lt;span class="na"&gt;type&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;code&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-      &lt;span class="p"&gt;},&lt;/span&gt;
-    &lt;span class="p"&gt;},&lt;/span&gt;
-  &lt;span class="p"&gt;},&lt;/span&gt;
-&lt;span class="p"&gt;};&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;I have created a &lt;a href="https://github.com/storybookjs/storybook/pull/14652"&gt;PR for Storybook&lt;/a&gt; in an attempt to fix this, so it would be great to get any feedback from you all!&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#conclusion"&gt;
-  &lt;/a&gt;
-  Conclusion
-&lt;/h2&gt;
-
-&lt;p&gt;Both CSF and MDX provide a great way of building component libraries. Choosing one over the other mainly depends on your team structure or the usage your planning on having from your component library.&lt;/p&gt;
-
-&lt;p&gt;I recently ran a &lt;a href="https://twitter.com/lcarb14/status/1379913918445801473"&gt;twitter poll&lt;/a&gt; on prefered method when writing stories and nearly 70% of the people (80 votes aprox.) voted on using CSF, which is understandable as it is still the standard and recommended way. But, MDX is still a very convenient way of writing stories in those cases where CSF seems a bit of a barrier for non technical users or our component needs precise and well structured documentation.&lt;/p&gt;
-
-&lt;p&gt;In my opinion you should not pick between CSF or MDX, they are both a great way of writing stories and both work best when complementing each other.&lt;/p&gt;
-
-</description>
-      <category>storybook</category>
-      <category>react</category>
-      <category>designsystems</category>
-      <category>docs</category>
-    </item>
-    <item>
-      <title>Make Rick Astley sing in your console 🎙</title>
-      <author>Kuba</author>
-      <pubDate>Tue, 20 Apr 2021 22:18:55 +0000</pubDate>
-      <link>https://dev.to/kuba_szw/make-rick-astley-sing-in-your-console-3cmc</link>
-      <guid>https://dev.to/kuba_szw/make-rick-astley-sing-in-your-console-3cmc</guid>
-      <description>&lt;p&gt;This is kind of post that I'm still thinking why I did that 🤔. But remember that not every line of code should be serious. Keep it fun! 🎙&lt;/p&gt;
-
-&lt;p&gt;Let's make &lt;a href="https://www.youtube.com/watch?v=dQw4w9WgXcQ"&gt;Rick Astley sing "Never Gonna Give You Up"&lt;/a&gt; in console. &lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#step-first-video"&gt;
-  &lt;/a&gt;
-  Step first — Video
-&lt;/h3&gt;
-
-&lt;p&gt;I assume that you already have some .mp4 file. If not, you can use &lt;code&gt;pytube&lt;/code&gt;. Check out this snippet:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="nn"&gt;pytube&lt;/span&gt;
-
-&lt;span class="k"&gt;class&lt;/span&gt; &lt;span class="nc"&gt;YT_video&lt;/span&gt;&lt;span class="p"&gt;():&lt;/span&gt;
-    &lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;__init__&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;url&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt; 
-        &lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;url&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;url&lt;/span&gt;
-        &lt;span class="n"&gt;youtube&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;pytube&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;YouTube&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;url&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-        &lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;video&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;youtube&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;streams&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;get_highest_resolution&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
-
-    &lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;download&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;dest_folder&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s"&gt;'downloads'&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;
-        &lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;video&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;download&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;dest_folder&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h3&gt;
-  &lt;a href="#read-file-and-display-it-with-opencv"&gt;
-  &lt;/a&gt;
-  Read file and display it with OpenCV
-&lt;/h3&gt;
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="nn"&gt;cv2&lt;/span&gt; 
-
-&lt;span class="n"&gt;video&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;cv2&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;VideoCapture&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;video_path&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-
-&lt;span class="k"&gt;while&lt;/span&gt; &lt;span class="bp"&gt;True&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
-    &lt;span class="n"&gt;_&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;frame&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;video&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;read&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
-    &lt;span class="n"&gt;cv2&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;imshow&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"video"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;frame&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-
-    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="n"&gt;cv2&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;waitKey&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&lt;/span&gt; &lt;span class="mh"&gt;0xFF&lt;/span&gt; &lt;span class="o"&gt;==&lt;/span&gt; &lt;span class="nb"&gt;ord&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"q"&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;
-        &lt;span class="k"&gt;break&lt;/span&gt;
-
-&lt;span class="n"&gt;video&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;release&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
-&lt;span class="n"&gt;cv2&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;destroyAllWindows&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Ok now we have our core. We play video, but there is no sound, it is playing to fast and our goal is to have it in console. &lt;/p&gt;
-
-&lt;p&gt;Let's solve those problems one by one. &lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#sound"&gt;
-  &lt;/a&gt;
-  Sound
-&lt;/h3&gt;
-
-&lt;p&gt;You can use &lt;code&gt;ffpyplayer&lt;/code&gt; package. I added to our code next part for handling sound. It's only music player that will start song in the background.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="nn"&gt;cv2&lt;/span&gt; 
-
-&lt;span class="n"&gt;video&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;cv2&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;VideoCapture&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;video_path&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-&lt;span class="n"&gt;music_player&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;MediaPlayer&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;video_path&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-
-&lt;span class="k"&gt;while&lt;/span&gt; &lt;span class="bp"&gt;True&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
-    &lt;span class="n"&gt;_&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;frame&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;video&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;read&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;    
-    &lt;span class="n"&gt;cv2&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;imshow&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"video"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;frame&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-
-    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="n"&gt;cv2&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;waitKey&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&lt;/span&gt; &lt;span class="mh"&gt;0xFF&lt;/span&gt; &lt;span class="o"&gt;==&lt;/span&gt; &lt;span class="nb"&gt;ord&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"q"&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;
-        &lt;span class="k"&gt;break&lt;/span&gt;
-
-&lt;span class="n"&gt;video&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;release&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
-&lt;span class="n"&gt;cv2&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;destroyAllWindows&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;But wait, Rick is dancing twice as fast as sings. That is not spreading joy 🤔.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#speed"&gt;
-  &lt;/a&gt;
-  Speed
-&lt;/h3&gt;
-
-&lt;p&gt;To know FPS (Frames Per Second) we will use OpenCV. First we calculate how long should one frame last. Then we will wait a bit before displaying next one.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="n"&gt;fps&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;video&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;get&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;cv2&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;CAP_PROP_FPS&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-&lt;span class="n"&gt;seconds_per_frame&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt; &lt;span class="o"&gt;/&lt;/span&gt; &lt;span class="n"&gt;fps&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Now add small wait in the end of out While.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="nn"&gt;cv2&lt;/span&gt; 
-
-&lt;span class="n"&gt;video&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;cv2&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;VideoCapture&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;video_path&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-&lt;span class="n"&gt;music_player&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;MediaPlayer&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;video_path&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-
-&lt;span class="k"&gt;while&lt;/span&gt; &lt;span class="bp"&gt;True&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
-    &lt;span class="n"&gt;frame_t_start&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;time&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;time&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
-
-    &lt;span class="n"&gt;_&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;frame&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;video&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;read&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;    
-    &lt;span class="n"&gt;cv2&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;imshow&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"video"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;frame&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-
-    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="n"&gt;cv2&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;waitKey&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&lt;/span&gt; &lt;span class="mh"&gt;0xFF&lt;/span&gt; &lt;span class="o"&gt;==&lt;/span&gt; &lt;span class="nb"&gt;ord&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"q"&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;
-        &lt;span class="k"&gt;break&lt;/span&gt;
-
-    &lt;span class="k"&gt;while&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt; &lt;span class="n"&gt;time&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;time&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;-&lt;/span&gt; &lt;span class="n"&gt;frame_t_start&lt;/span&gt; &lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt; &lt;span class="n"&gt;seconds_per_frame&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
-        &lt;span class="k"&gt;pass&lt;/span&gt;
-
-&lt;span class="n"&gt;video&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;release&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
-&lt;span class="n"&gt;cv2&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;destroyAllWindows&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h3&gt;
-  &lt;a href="#to-console"&gt;
-  &lt;/a&gt;
-  To Console!
-&lt;/h3&gt;
-
-&lt;p&gt;Before we print it to console, we need to make our video grayscale. Use below to change frame. I've added some threshold to make it more 'binary' for console. You can play with values &lt;code&gt;treshold&lt;/code&gt; and &lt;code&gt;treshold_type&lt;/code&gt;. Check &lt;a href="https://docs.opencv.org/master/d7/d4d/tutorial_py_thresholding.html"&gt;docs&lt;/a&gt; of OpenCV to read more. &lt;/p&gt;
-
-&lt;p&gt;I set my &lt;code&gt;treshold_type&lt;/code&gt; for 3 and &lt;code&gt;treshold&lt;/code&gt; around 120.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight python"&gt;&lt;code&gt;
-&lt;span class="n"&gt;frame&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;cv2&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;cvtColor&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;frame&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;cv2&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;COLOR_BGR2GRAY&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-&lt;span class="n"&gt;_&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;frame&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;cv2&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;threshold&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;frame&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;treshold&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;255&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;treshold_type&lt;/span&gt; &lt;span class="p"&gt;)&lt;/span&gt;
-
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Now our image is a 2D matrix of numbers. We will replace every number with some character. Assuming that our grayscale is from 0 to 255, find a char that suits perfect. &lt;/p&gt;
-
-&lt;p&gt;Assume that our grayscale is such string:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="n"&gt;GRAY_SCALE&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s"&gt;"@$#*!=;:~-,. "&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Method for mapping number to char will be:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight python"&gt;&lt;code&gt;
-&lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;grayScaleNumber&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;num&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;
-    &lt;span class="n"&gt;scale_size&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nb"&gt;len&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;GRAY_SCALE&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-    &lt;span class="n"&gt;index&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nb"&gt;int&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="n"&gt;num&lt;/span&gt; &lt;span class="o"&gt;/&lt;/span&gt; &lt;span class="mi"&gt;255&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt; &lt;span class="n"&gt;scale_size&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="n"&gt;GRAY_SCALE&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;index&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
-
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Let's add simple print method instead of &lt;code&gt;cv2.imshow("video",frame)&lt;/code&gt;.&lt;/p&gt;
-
-&lt;p&gt;One more thing here is to resize the video. OpenCV can handle it for us.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;printFrameInConsole&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;frame&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;height&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;width&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;
-    &lt;span class="n"&gt;console_out_dim&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt; &lt;span class="nb"&gt;int&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;width&lt;/span&gt; &lt;span class="o"&gt;/&lt;/span&gt; &lt;span class="n"&gt;SCALE&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;&lt;span class="nb"&gt;int&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;height&lt;/span&gt; &lt;span class="o"&gt;/&lt;/span&gt; &lt;span class="n"&gt;SCALE&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;
-    &lt;span class="n"&gt;frame&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;cv2&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;resize&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;frame&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;console_out_dim&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;interpolation&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;cv2&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;INTER_AREA&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-
-    &lt;span class="n"&gt;to_print&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s"&gt;''&lt;/span&gt;
-    &lt;span class="k"&gt;for&lt;/span&gt; &lt;span class="n"&gt;row&lt;/span&gt; &lt;span class="ow"&gt;in&lt;/span&gt; &lt;span class="n"&gt;frame&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; 
-        &lt;span class="n"&gt;to_print&lt;/span&gt; &lt;span class="o"&gt;+=&lt;/span&gt; &lt;span class="s"&gt;' '&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;join&lt;/span&gt;&lt;span class="p"&gt;([&lt;/span&gt; &lt;span class="n"&gt;grayScaleNumber&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;num&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="k"&gt;for&lt;/span&gt; &lt;span class="n"&gt;num&lt;/span&gt; &lt;span class="ow"&gt;in&lt;/span&gt; &lt;span class="n"&gt;row&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;tolist&lt;/span&gt;&lt;span class="p"&gt;()])&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="s"&gt;"&lt;/span&gt;&lt;span class="se"&gt;\n&lt;/span&gt;&lt;span class="s"&gt;"&lt;/span&gt;
-
-    &lt;span class="n"&gt;sys&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;stdout&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;write&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;to_print&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-    &lt;span class="n"&gt;sys&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;stdout&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;flush&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
-
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h3&gt;
-  &lt;a href="#enjoy"&gt;
-  &lt;/a&gt;
-  Enjoy
-&lt;/h3&gt;
-
-&lt;p&gt;Remember to play with it a bit. Check out some different thresholds and threshold types. Find the best Rick Astley for yourself. &lt;/p&gt;
-
-&lt;p&gt;I will upload some video as soon as I can. Now admire console &lt;a href="https://www.youtube.com/watch?v=dQw4w9WgXcQ"&gt;Rick&lt;/a&gt; 😅&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Boy36yS1--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://github.com/JakubSzwajka/JakubSzwajka.github.io/blob/master/_posts/_images/Rick_Astley_1.png%3Fraw%3Dtrue" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Boy36yS1--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://github.com/JakubSzwajka/JakubSzwajka.github.io/blob/master/_posts/_images/Rick_Astley_1.png%3Fraw%3Dtrue" alt="Rick_astley"&gt;&lt;/a&gt;&lt;/p&gt;
-
-</description>
-      <category>python</category>
-      <category>opencv</category>
-      <category>imageprocessing</category>
-      <category>5days5blogposts</category>
-    </item>
-    <item>
-      <title>Inline member variables in C++</title>
-      <author>maniowy</author>
-      <pubDate>Tue, 20 Apr 2021 21:59:40 +0000</pubDate>
-      <link>https://dev.to/maniowy/inline-member-variables-in-c-38a6</link>
-      <guid>https://dev.to/maniowy/inline-member-variables-in-c-38a6</guid>
-      <description>&lt;p&gt;Say we need a class member variable (non-const). Global variables should be best avoided, but let's ignore that for now and focus on the solution.&lt;/p&gt;
-
-&lt;p&gt;This is a bad choice most often:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight cpp"&gt;&lt;code&gt;&lt;span class="k"&gt;struct&lt;/span&gt; &lt;span class="nc"&gt;S&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="k"&gt;static&lt;/span&gt; &lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="n"&gt;i&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;};&lt;/span&gt;
-&lt;span class="c1"&gt;// somewhere in cpp file:&lt;/span&gt;
-&lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="n"&gt;S&lt;/span&gt;&lt;span class="o"&gt;::&lt;/span&gt;&lt;span class="n"&gt;i&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;The definition (&lt;code&gt;int S::i = 0;&lt;/code&gt;) needs to be placed in a single translation unit in the whole project, otherwise we get an error indicating multiple definition of &lt;code&gt;S::i&lt;/code&gt;.&lt;/p&gt;
-
-&lt;p&gt;In pre-C++17 world we need to find some workaround of this problem. One way is to go with a static member function:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight cpp"&gt;&lt;code&gt;&lt;span class="k"&gt;struct&lt;/span&gt; &lt;span class="nc"&gt;S&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="k"&gt;static&lt;/span&gt; &lt;span class="kt"&gt;int&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt; &lt;span class="n"&gt;getStatic&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-        &lt;span class="k"&gt;static&lt;/span&gt; &lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="n"&gt;i&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="n"&gt;i&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="p"&gt;};&lt;/span&gt;
-
-&lt;span class="c1"&gt;// sample use: ++S::getStatic();&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Another way is to use templates:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight cpp"&gt;&lt;code&gt;&lt;span class="k"&gt;template&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="k"&gt;typename&lt;/span&gt; &lt;span class="nc"&gt;T&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;
-&lt;span class="k"&gt;struct&lt;/span&gt; &lt;span class="nc"&gt;S&lt;/span&gt;
-&lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="k"&gt;static&lt;/span&gt; &lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="n"&gt;i&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;};&lt;/span&gt;
-
-&lt;span class="k"&gt;template&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="k"&gt;typename&lt;/span&gt; &lt;span class="nc"&gt;T&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;
-&lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="n"&gt;S&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;T&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;::&lt;/span&gt;&lt;span class="n"&gt;i&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-
-&lt;span class="k"&gt;using&lt;/span&gt; &lt;span class="n"&gt;static_instance&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;S&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="kt"&gt;void&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="c1"&gt;// sample use: ++static_instance::i;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;That makes a lot of boilerplate and obscure code. Our problem is solved by &lt;em&gt;inline variables&lt;/em&gt; in C++17. That looks simple and serves well:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight cpp"&gt;&lt;code&gt;&lt;span class="k"&gt;struct&lt;/span&gt; &lt;span class="nc"&gt;S&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="k"&gt;static&lt;/span&gt; &lt;span class="kr"&gt;inline&lt;/span&gt; &lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="n"&gt;i&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;};&lt;/span&gt;
-
-&lt;span class="c1"&gt;// sample use: ++S::i;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;The &lt;em&gt;inline variable&lt;/em&gt; has an &lt;em&gt;external linkage&lt;/em&gt; if our class is not inside an &lt;em&gt;unnamed namespace&lt;/em&gt; (i.e. when the class has &lt;em&gt;external linkage&lt;/em&gt; too). It enables the possibility of more than one definition of the variable (hence no &lt;em&gt;multiple definition&lt;/em&gt; errors). The variable must be declared &lt;em&gt;inline&lt;/em&gt; in all the translation units and it always has the same memory address. All the definitions have to be identical, otherwise we break &lt;em&gt;one definition rule&lt;/em&gt;. That may lead to hard to detect problems if we are not cautious.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight cpp"&gt;&lt;code&gt;&lt;span class="c1"&gt;// one translation unit file, S has external linkage&lt;/span&gt;
-&lt;span class="k"&gt;struct&lt;/span&gt; &lt;span class="nc"&gt;S&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="k"&gt;static&lt;/span&gt; &lt;span class="kr"&gt;inline&lt;/span&gt; &lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="n"&gt;i&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="mi"&gt;3&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;};&lt;/span&gt;
-
-&lt;span class="c1"&gt;// another translation unit, S has external linkage&lt;/span&gt;
-&lt;span class="k"&gt;struct&lt;/span&gt; &lt;span class="nc"&gt;S&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="k"&gt;static&lt;/span&gt; &lt;span class="kr"&gt;inline&lt;/span&gt; &lt;span class="kt"&gt;double&lt;/span&gt; &lt;span class="n"&gt;i&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="mf"&gt;3.14159&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;};&lt;/span&gt;
-
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;The code in the example above is invalid, but it compiles and can behave unexpectedly.&lt;/p&gt;
-
-&lt;p&gt;Static &lt;em&gt;constexpr&lt;/em&gt; members are &lt;em&gt;inline&lt;/em&gt; by default.&lt;/p&gt;
-
-&lt;p&gt;Interesting resources:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;
-&lt;a href="https://en.cppreference.com/w/cpp/language/inline"&gt;inline specifier&lt;/a&gt; on &lt;a href="https://en.cppreference.com"&gt;en.cppreference.com&lt;/a&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;a href="https://stackoverflow.com/questions/18860895/how-to-initialize-static-members-in-the-header"&gt;How to initialize static members in the header&lt;/a&gt; on &lt;a href="https://stackoverflow.com"&gt;stackoverflow.com&lt;/a&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;a href="https://stackoverflow.com/questions/38043442/how-do-inline-variables-work"&gt;How do inline variables work&lt;/a&gt; on &lt;a href="https://stackoverflow.com"&gt;stackoverflow.com&lt;/a&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;Originally posted &lt;a href="https://burnicki.pl/en/2021/04/20/inline-member-variables-cpp.html"&gt;here&lt;/a&gt;.&lt;/p&gt;
-
-</description>
-      <category>cpp</category>
-      <category>cpp17</category>
-      <category>programming</category>
-      <category>5days5blogposts</category>
     </item>
   </channel>
 </rss>
