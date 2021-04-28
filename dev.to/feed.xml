@@ -7,6 +7,987 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>Using AWS CDK to deploy your Amazon Managed Workflows for Apache Airflow environment</title>
+      <author>Ricardo Sueiras</author>
+      <pubDate>Wed, 28 Apr 2021 18:48:17 +0000</pubDate>
+      <link>https://dev.to/aws/using-aws-cdk-to-deploy-your-amazon-managed-workflows-for-apache-airflow-environment-12cf</link>
+      <guid>https://dev.to/aws/using-aws-cdk-to-deploy-your-amazon-managed-workflows-for-apache-airflow-environment-12cf</guid>
+      <description>&lt;h3&gt;
+  &lt;a href="#using-aws-cdk-to-deploy-your-amazon-managed-workflows-for-apache-airflow-environment"&gt;
+  &lt;/a&gt;
+  Using AWS CDK to deploy your Amazon Managed Workflows for Apache Airflow environment
+&lt;/h3&gt;
+
+&lt;p&gt;What better way to celebrate CDK Day tomorrow, than to return to a previous blog where I wrote about automating the &lt;a href="https://aws-oss.beachgeek.co.uk/3h"&gt;installation and configuration of Amazon Managed Workflows for Apache Airflow (MWAA)&lt;/a&gt;, and take a look at doing the same thing but this time using AWS CDK. &lt;/p&gt;
+
+&lt;p&gt;What this post will show you is how you can use AWS CDK to deploy a working MWAA environment, and I will provide enough details that you should be able to tailor this to your own needs. It should take (if everything works ok!) around 45-60 minutes to complete. Given that Apache Airflow uses Python, this CDK application is also going to be using Python.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;CDK Day&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;If you didn't know, &lt;a href="https://aws-oss.beachgeek.co.uk/fq"&gt;CDK Day&lt;/a&gt; is a community run event that covers the AWS Cloud Development Kit (AWS CDK), a developer tool built on the open source Constructs model. With over 3500 people signed up, if you are reading this before the 30th, there is still time to &lt;a href="https://aws-oss.beachgeek.co.uk/fr"&gt;register&lt;/a&gt; - it is a free, virtual event, so what are you waiting for..&lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#installing-mwaa-with-cdk"&gt;
+  &lt;/a&gt;
+  Installing MWAA with CDK
+&lt;/h4&gt;
+
+&lt;p&gt;&lt;strong&gt;What will you need&lt;/strong&gt;&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;An AWS account with the right level of privileges&lt;/li&gt;
+&lt;li&gt;An environment with the AWS CDK configured and running - it is outside the scope of this post to cover what AWS CDK is, but check out my open source newsletter as I often feature great tutorial blog posts. Also, I would ensure you are running the latest version too.&lt;/li&gt;
+&lt;li&gt;Access to an AWS region where Managed Workflows for Apache Airflow is supported&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;I have provided everything you need in a &lt;a href="https://aws-oss.beachgeek.co.uk/fs"&gt;GitHub repository&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;Some thing to watch out for:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;If you are deploying this in an environment that already has VPCs, you may generate an error if you exceed the number of VPCs within your AWS Account.&lt;/li&gt;
+&lt;li&gt;If you deploy and are using an existing Amazon S3 bucket as your MWAA Dag bucket, the deployment will fail. Make sure that the Amazon S3 bucket you define for your MWAA environment does not existing before running the CDK app - I need to put some better logic in the code, so by the time you read this I might have done this. If not, keep note.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;&lt;strong&gt;Getting Started&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;After checking out the repository you will have the following files on your local developer environment.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;├── LICENSE
+├── README.md
+├── app.py
+├── cdk.json
+├── dags
+│   ├── sample-cdk-dag-od.py
+│   └── sample-cdk-dag.py
+├── mwaa_cdk
+│   ├── mwaa_cdk_backend.py
+│   └── mwaa_cdk_env.py
+└── requirements.txt
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We will go through these files, but first we need to install the AWS CDK constructs we are using. If you are familiar with CDK, then you may already have these but in this specific CDK application, I will be using the &lt;strong&gt;aws_cdk.aws_mwaa&lt;/strong&gt; construct, which you may not have installed.&lt;/p&gt;
+
+&lt;p&gt;To make this easier, I have put them in the requirements.txt so all you need to do is&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;$ pip install -r requirements.txt
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;If we take a look at the &lt;strong&gt;app.py&lt;/strong&gt; file, we can see what our CDK application looks like. We are creating two stacks, one called &lt;strong&gt;mwaa_cdk_backend&lt;/strong&gt; and the other called &lt;strong&gt;mwaa_cdk_env&lt;/strong&gt;.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;#!/usr/bin/env python3
+import io
+from aws_cdk import core
+
+from mwaa_cdk.mwaa_cdk_backend import MwaaCdkStackBackend
+from mwaa_cdk.mwaa_cdk_env import MwaaCdkStackEnv
+
+env_EU=core.Environment(region="eu-central-1", account="XXXXXXXXX")
+mwaa_props = {'dagss3location': 'airflow-ricsue-cdk-demo','mwaa_env' : 'cdk-ricsue-demo-delete'}
+
+app = core.App()
+
+mwaa_backend = MwaaCdkStackBackend(
+    scope=app,
+    id="MWAA-Backend",
+    env=env_EU,
+    mwaa_props=mwaa_props
+)
+
+mwaa_env = MwaaCdkStackEnv(
+    scope=app,
+    id="MWAA-Environment",
+    vpc=mwaa_backend.vpc,
+    env=env_EU,
+    mwaa_props=mwaa_props
+)
+
+app.synth()
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The &lt;strong&gt;mwaa_cdk_backend&lt;/strong&gt; will be used to setup the VPC network that the MWAA environment is going to use. The &lt;strong&gt;mwaa_cdk_env&lt;/strong&gt; is the stack that will configure your MWAA environment. In order to do both though, first we set up some parameters we want to use so that we do not need to hard code these. If you look at&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;env_EU=core.Environment(region="eu-central-1", account="XXXXXXXXX")
+mwaa_props = {'dagss3location': 'airflow-ricsue-cdk-demo','mwaa_env' : 'cdk-ricsue-demo-delete'}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;First we define the AWS region and the AWS Account we want to deploy this into. These are used when creating the IAM policies as well as ensuring the environment is setup in the AWS region you want to run this in. Following that we define &lt;strong&gt;dagss3location&lt;/strong&gt; which is the name of the Amazon S3 bucket that will get created. You will need to change this before you run this to make sure it is something unique. The &lt;strong&gt;mwaa_env&lt;/strong&gt; is the name we give to the MWAA environment.&lt;/p&gt;
+
+&lt;p&gt;After changing the values in the &lt;strong&gt;app.py&lt;/strong&gt; file and saving, we are ready to deploy. Before we do that, lets take a look at the stacks.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;mwaa_cdk_backend&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;There is nothing particular interesting about this other than it creates the underlying network infrastructure that MWAA needs. There is nothing you need to do, but if you do want to experiment, then what I would say is that a) ensure you read and follow the networking guidance on the MWAA documentation site, as they provide you with details on what needs to be setup, b) if you are trying to lock down the networking, try just deploying the backend stack, and then manually creating a MWAA environment to see if it works/fails.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;from aws_cdk import core
+import aws_cdk.aws_ec2 as ec2
+import aws_cdk.aws_s3 as s3
+import aws_cdk.aws_s3_deployment as s3deploy
+import aws_cdk.aws_mwaa as mwaa
+
+class MwaaCdkStackBackend(core.Stack):
+
+    def __init__(self, scope: core.Construct, id: str, mwaa_props, **kwargs) -&amp;gt; None:
+        super().__init__(scope, id, **kwargs)
+
+        # Create VPC network
+
+        self.vpc = ec2.Vpc(
+            self,
+            id="MWAA-ApacheAirflow-VPC",
+            cidr="10.192.0.0/16",
+            max_azs=2,
+            nat_gateways=1,
+            subnet_configuration=[
+                ec2.SubnetConfiguration(
+                    name="public", cidr_mask=24,
+                    reserved=False, subnet_type=ec2.SubnetType.PUBLIC),
+                ec2.SubnetConfiguration(
+                    name="private", cidr_mask=24,
+                    reserved=False, subnet_type=ec2.SubnetType.PRIVATE)
+            ],
+            enable_dns_hostnames=True,
+            enable_dns_support=True
+        )
+
+
+        core.CfnOutput(
+            self,
+            id="VPCId",
+            value=self.vpc.vpc_id,
+            description="VPC ID",
+            export_name=f"{self.region}:{self.account}:{self.stack_name}:vpc-id"
+        )
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;strong&gt;mwaa_cdk_env&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;The MWAA environment stack is a little more interesting and I will break it down. The first part of the stack configures the Amazon S3 buckets that MWAA will use.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;class MwaaCdkStackEnv(core.Stack):
+
+    def __init__(self, scope: core.Construct, id: str, vpc, mwaa_props,  **kwargs) -&amp;gt; None:
+        super().__init__(scope, id, **kwargs)
+
+        # Create MWAA S3 Bucket and upload local dags 
+
+        dags_bucket = s3.Bucket(
+            self,
+            "mwaa-dags",
+            bucket_name=f"{mwaa_props['dagss3location'].lower()}",
+            versioned=True,
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL
+        )
+
+        s3deploy.BucketDeployment(self, "DeployDAG",
+        sources=[s3deploy.Source.asset("./dags")],
+        destination_bucket=dags_bucket,
+        destination_key_prefix="dags",
+        prune=False,
+        retain_on_delete=False
+        )
+
+        dags_bucket_arn = dags_bucket.bucket_arn
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;What this also does however, is it takes all the files it finds in the local dags folder (on your developer environment) and uploads those as part of the deployment process. You can tweak this to your own requirements if you want, and even comment it out/remove as needed if you do not need to do this.&lt;/p&gt;
+
+&lt;p&gt;Next up we have the code that creates the MWAA execution policy and associated role that will be used by the MWAA worker nodes. This is taken from the MWAA documentation, but you can adjust as needed for your own environment. You might need to do this if you are integrating with other AWS services - this has been setup with default none access, so anything you need to do will need to be added.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;       # Create MWAA IAM Policies and Roles, copied from MWAA documentation site
+
+        mwaa_policy_document = iam.PolicyDocument(
+            statements=[
+                iam.PolicyStatement(
+                    actions=["airflow:PublishMetrics"],
+                    effect=iam.Effect.ALLOW,
+                    resources=[f"arn:aws:airflow:{self.region}:{self.account}:environment/{mwaa_props['mwaa_env']}"],
+                ),
+                iam.PolicyStatement(
+                    actions=[
+                        "s3:ListAllMyBuckets"
+                    ],
+                    effect=iam.Effect.DENY,
+                    resources=[
+                        f"{dags_bucket_arn}/*",
+                        f"{dags_bucket_arn}"
+                        ],
+                ),
+                iam.PolicyStatement(
+                    actions=[
+                        "s3:GetObject*",
+                        "s3:Head*",
+                                 "s3:GetBucket*",
+                                 "s3:List*"
+                    ],
+                    effect=iam.Effect.ALLOW,
+                    resources=[
+                        f"{dags_bucket_arn}/*",
+                        f"{dags_bucket_arn}"
+                        ],
+                ),
+                iam.PolicyStatement(
+                    actions=[
+                        "logs:CreateLogStream",
+                        "logs:CreateLogGroup",
+                        "logs:PutLogEvents",
+                        "logs:GetLogEvents",
+                        "logs:GetLogRecord",
+                        "logs:GetLogGroupFields",
+                        "logs:GetQueryResults"
+                    ],
+                    effect=iam.Effect.ALLOW,
+                    resources=[f"arn:aws:logs:{self.region}:{self.account}:log-group:airflow-{mwaa_props['mwaa_env']}-*"],
+                ),
+                iam.PolicyStatement(
+                    actions=[
+                        "logs:DescribeLogGroups"
+                    ],
+                    effect=iam.Effect.ALLOW,
+                    resources=["*"],
+                ),
+                iam.PolicyStatement(
+                    actions=[
+                        "sqs:ChangeMessageVisibility",
+                        "sqs:DeleteMessage",
+                        "sqs:GetQueueAttributes",
+                        "sqs:GetQueueUrl",
+                        "sqs:ReceiveMessage",
+                        "sqs:SendMessage"
+                    ],
+                    effect=iam.Effect.ALLOW,
+                    resources=[f"arn:aws:sqs:{self.region}:*:airflow-celery-*"],
+                ),
+                iam.PolicyStatement(
+                    actions=[
+                        "kms:Decrypt",
+                        "kms:DescribeKey",
+                        "kms:GenerateDataKey*",
+                        "kms:Encrypt",
+                    ],
+                    effect=iam.Effect.ALLOW,
+                    resources=["*"],
+                    conditions={
+                        "StringEquals": {
+                            "kms:ViaService": [
+                                f"sqs.{self.region}.amazonaws.com",
+                                f"s3.{self.region}.amazonaws.com",
+                            ]
+                        }
+                    },
+                ),
+            ]
+        )
+
+        mwaa_service_role = iam.Role(
+            self,
+            "mwaa-service-role",
+            assumed_by=iam.CompositePrincipal(
+                iam.ServicePrincipal("airflow.amazonaws.com"),
+                iam.ServicePrincipal("airflow-env.amazonaws.com"),
+            ),
+            inline_policies={"CDKmwaaPolicyDocument": mwaa_policy_document},
+            path="/service-role/"
+        )
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The next part configures the security group and subnets needed by MWAA.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;   # Create MWAA Security Group and get networking info
+
+        security_group = ec2.SecurityGroup(
+            self,
+            id = "mwaa-sg",
+            vpc = vpc,
+            security_group_name = "mwaa-sg"
+        )
+
+        security_group_id = security_group.security_group_id
+
+        security_group.connections.allow_internally(ec2.Port.all_traffic(),"MWAA")
+
+        subnets = [subnet.subnet_id for subnet in vpc.private_subnets]
+        network_configuration = mwaa.CfnEnvironment.NetworkConfigurationProperty(
+            security_group_ids=[security_group_id],
+            subnet_ids=subnets,
+        )
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The final part is the most interesting from the MWAA perspective, which is setting up and then configuring the environment. I have commented some of the environment settings out, so feel free to adjust for your own needs.&lt;/p&gt;
+
+&lt;p&gt;The first thing we do is create a configuration for the MWAA logging. In this particular configuration, I have enabled everything with INFO level logging so feel free to enable/disable or change the logging level as you need.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;# Configure specific MWAA settings - you can externalise these if you want
+
+        logging_configuration = mwaa.CfnEnvironment.LoggingConfigurationProperty(
+            task_logs=mwaa.CfnEnvironment.ModuleLoggingConfigurationProperty(enabled=True, log_level="INFO"),
+            worker_logs=mwaa.CfnEnvironment.ModuleLoggingConfigurationProperty(enabled=True, log_level="INFO"),
+            scheduler_logs=mwaa.CfnEnvironment.ModuleLoggingConfigurationProperty(enabled=True, log_level="INFO"),
+            dag_processing_logs=mwaa.CfnEnvironment.ModuleLoggingConfigurationProperty(enabled=True, log_level="INFO"),
+            webserver_logs=mwaa.CfnEnvironment.ModuleLoggingConfigurationProperty(enabled=True, log_level="INFO")
+            )
+
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Next up we define some MWAA Apache Airflow configuration parameters. If you use custom properties, then this is where you will add them. Also, if you want to use TAGs for your MWAA environment, you can adjust accordingly.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;
+        options = {
+            'core.load_default_connections': False,
+            'core.load_examples': False,
+            'webserver.dag_default_view': 'tree',
+            'webserver.dag_orientation': 'TB'
+        }
+
+        tags = {
+            'env': f"{mwaa_props['mwaa_env']}",
+            'service': 'MWAA Apache AirFlow'
+        }
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Now we come to actually creating the environment, using the stuff we have created or setup above.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;        # Create MWAA environment using all the info above
+
+        managed_airflow = mwaa.CfnEnvironment(
+            scope=self,
+            id='airflow-test-environment',
+            name=f"{mwaa_props['mwaa_env']}",
+            airflow_configuration_options={'core.default_timezone': 'utc'},
+            airflow_version='1.10.12',
+            dag_s3_path="dags",
+            environment_class='mw1.small',
+            execution_role_arn=mwaa_service_role.role_arn,
+            #kms_key=key.key_id,
+            logging_configuration=logging_configuration,
+            max_workers=5,
+            network_configuration=network_configuration,
+            #plugins_s3_object_version=None,
+            #plugins_s3_path=None,
+            #requirements_s3_object_version=None,
+            #requirements_s3_path=None,
+            source_bucket_arn=dags_bucket_arn,
+            webserver_access_mode='PUBLIC_ONLY',
+            #weekly_maintenance_window_start=None
+        )
+
+        managed_airflow.add_override('Properties.AirflowConfigurationOptions', options)
+        managed_airflow.add_override('Properties.Tags', tags)
+
+        core.CfnOutput(
+            self,
+            id="MWAASecurityGroup",
+            value=security_group_id,
+            description="VPC ID for MWAA"
+        )
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;strong&gt;Running the CDK application&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;Now you have reviewed the app, modified it so that it contains your details (your AWS account/unique S3 bucket/etc) you can now run the app and deploy the CDK stacks. To do this we use the "cdk deploy" command.&lt;/p&gt;
+
+&lt;p&gt;First of all, from the directory, make sure everything is working ok. To do this we can use the "cdk ls" command.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;$ cdk ls
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;It should return the following (which are the ids assigned in the stacks that this CDK application uses) if it is working ok.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;MWAA-Backend
+MWAA-Environment
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We can now deploy them, either all together or one at a time. This CDK application needs the MWAA-Backend app deployed first as it contains the VPC networking that will be used in the MWAA-Environment stack, so we can deploy that by:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;$ cdk deplpy MWAA-Backend
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;And if it is working ok, it should start of with..&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;MWAA-Backend: deploying...
+MWAA-Backend: creating CloudFormation changeset...
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;and then start creating the CloudFormation which you can then track/view via the AWS Console. Once it has finished, you should see something like the following (your numbers/letters will be different):&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;
+ ✅  MWAA-Backend
+
+Outputs:
+MWAA-Backend.ExportsOutputRefMWAAApacheAirflowVPCB5BDED9D45FBF85F = vpc-0a46c87709f48799a
+MWAA-Backend.ExportsOutputRefMWAAApacheAirflowVPCprivateSubnet1Subnet41EDA5200DFEC7E0 = subnet-0a5ea20a194b2e7e1
+MWAA-Backend.ExportsOutputRefMWAAApacheAirflowVPCprivateSubnet2SubnetF8BEBBAC6108F015 = subnet-0e4bb92d83d79e8fa
+MWAA-Backend.VPCId = vpc-0a46c87709f48799a
+
+Stack ARN:
+arn:aws:cloudformation:eu-central-1:XXXXXXXXX:stack/MWAA-Backend/4de53ff0-a84d-11eb-a753-020a8f92cbec
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We can now deploy the MWAA environment, which we can do simply by typing:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;$ cdk deploy MWAA-Environment
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This time it will pop up details about some of the security related information, in this case the IAM policies and security groups which I mentioned earlier. Answer "y" to deploying these changes. This will kick off the deployment which you can track by going to the CloudFormation console.&lt;/p&gt;
+
+&lt;p&gt;This will take approx 20-25 minutes, so a good time to grab a cup of tea and read some of my other blog posts perhaps :-)&lt;/p&gt;
+
+&lt;p&gt;If it has been successful, you will see the following output (again, your details will change but it should look similar to this):&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;
+ ✅  MWAA-Environment
+
+Outputs:
+MWAA-Environment.MWAASecurityGroup = sg-0c2a02f721d2ce27b
+
+Stack ARN:
+arn:aws:cloudformation:eu-central-1:704533066374:stack/MWAA-Environment/16380e60-a84e-11eb-a109-0a082239d27a
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;strong&gt;Testing the environment&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;If we take a look at the Amazon S3 bucket we can see we have our MWAA bucket and dags folder created, as well as our local dags uploaded.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--PEfCfGwm--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://github.com/094459/blogpost-cdk-mwaa/blob/main/images/mwaa-cdk-s3.png%3Fraw%3Dtrue" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--PEfCfGwm--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://github.com/094459/blogpost-cdk-mwaa/blob/main/images/mwaa-cdk-s3.png%3Fraw%3Dtrue" alt="s3"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;If we go to the MWAA console, we can see our environment&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Q1AxwtL8--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://github.com/094459/blogpost-cdk-mwaa/blob/main/images/mwaa-cdk-env.png%3Fraw%3Dtrue" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Q1AxwtL8--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://github.com/094459/blogpost-cdk-mwaa/blob/main/images/mwaa-cdk-env.png%3Fraw%3Dtrue" alt="mwaa"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;We can now grab the URL for this environment, either by getting it from the console or by using the AWS Cli.&lt;/p&gt;
+
+&lt;p&gt;Just substitute the name of the MWAA environment and AWS region, and it should then give you the URL you can use in your browser (although you will have to append /home to it)&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;Note I am using jq, if you do not have this in your environment, you can run the command without this but just need to find the entry in the output where it says "WebserverUrl"&lt;br&gt;
+&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;$ aws mwaa get-environment --name {name of the environment created} --region={region} | jq -r '.Environment | .WebserverUrl'
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;And as we can see, we have the two sample DAGS that were in the local folder, and are now available for us in the MWAA environment.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--UcIh5gO_--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://github.com/094459/blogpost-cdk-mwaa/blob/main/images/mwaa-cdk-ui.png%3Fraw%3Dtrue" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--UcIh5gO_--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://github.com/094459/blogpost-cdk-mwaa/blob/main/images/mwaa-cdk-ui.png%3Fraw%3Dtrue" alt="ui"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Removing/Cleaning up&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;In order to remove everything we have deployed, all we need to do is:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;$ cdk destroy MWAA-Environment
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This will take 20-30 minutes to clean up the MWAA environment. One thing that it will not do however, is remove the Amazon S3 bucket we setup, so you will need to manually delete that via the console (or use the AWS Cli - that would be my approach). Once you have removed that S3 bucket, now clean up the backend stack&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;$ cdk destroy MWAA-Backend
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This should be much quicker to clean up. Once finished, you should be done.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Conclusion&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;That's all folks, I hope this has been helpful. You can find out more about the MWAA CDK construct by checking out the documentation &lt;a href="https://docs.aws.amazon.com/cdk/api/latest/docs/aws-mwaa-readme.html"&gt;here&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;One of the things I will hopefully come back to in the weeks to come is taking some of the other ways I have setup MWAA and incorporate these into existing or new CDK stacks. For example;&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;either extending the &lt;strong&gt;mwaa_cdk_backend&lt;/strong&gt; stack to include a bastion host so we can configure a Private environment, or even creating a new stack that does that&lt;/li&gt;
+&lt;li&gt;setting up and integrating a simple CI/CD stack that improves the developer experience&lt;/li&gt;
+&lt;li&gt;setting up the KMS key and then configuring the MWAA environment to use it&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;If you have any other suggestions, feel free to use the comments or get in touch and let me know. Would be great to hear from you...and on that note.&lt;/p&gt;
+
+&lt;p&gt;If you found this post useful, I would be very grateful if you could let me know by completing this very short feedback thingie, which will probably only take you around 30 seconds.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://eventbox.dev/survey/TVWJXPA"&gt;Complete Survey&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Thank you!&lt;/p&gt;
+
+</description>
+      <category>aws</category>
+      <category>opensource</category>
+    </item>
+    <item>
+      <title>10 Helpful CSS Tips</title>
+      <author>mrwolferinc</author>
+      <pubDate>Wed, 28 Apr 2021 18:29:09 +0000</pubDate>
+      <link>https://dev.to/mrwolferinc/10-helpful-css-tips-4669</link>
+      <guid>https://dev.to/mrwolferinc/10-helpful-css-tips-4669</guid>
+      <description>&lt;p&gt;These are 10 small CSS tips that can actually help you in projects. If you would like to request more tips, let me know in the comments section.&lt;/p&gt;
+
+
+
+
+&lt;h1 id="smooth-scrolling"&gt;1. Smooth Scrolling&lt;/h1&gt;
+
+&lt;p&gt;When you visit some websites and try to go to different sections, it scrolls smoothly to that section. You can achieve this feature on your website by using one line of CSS.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="nt"&gt;html&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="py"&gt;scroll-behavior&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;smooth&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#live-example"&gt;
+  &lt;/a&gt;
+  Live Example
+&lt;/h2&gt;
+
+&lt;p&gt;&lt;iframe height="600" src="https://codepen.io/mrwolferinc/embed/BapbJKK?height=600&amp;amp;default-tab=result&amp;amp;embed-version=2"&gt;
+&lt;/iframe&gt;
+&lt;/p&gt;
+
+
+
+
+&lt;h1&gt;
+  &lt;a href="#2-prevent-raw-lttextareagt-endraw-resize"&gt;
+  &lt;/a&gt;
+  2. Prevent &lt;code&gt;&amp;lt;textarea&amp;gt;&lt;/code&gt; Resize
+&lt;/h1&gt;
+
+&lt;p&gt;You can use the &lt;code&gt;resize&lt;/code&gt; property to prevent a &lt;code&gt;&amp;lt;textarea&amp;gt;&lt;/code&gt; element from being resized (or limit it to one axis).&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="nt"&gt;textarea&lt;/span&gt;&lt;span class="nc"&gt;.no-resize&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="nl"&gt;resize&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;none&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="nt"&gt;textarea&lt;/span&gt;&lt;span class="nc"&gt;.horizontal-resize&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="nl"&gt;resize&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;horizontal&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="nt"&gt;textarea&lt;/span&gt;&lt;span class="nc"&gt;.vertical-resize&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="nl"&gt;resize&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;vertical&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#live-example"&gt;
+  &lt;/a&gt;
+  Live Example
+&lt;/h2&gt;
+
+&lt;p&gt;&lt;iframe height="600" src="https://codepen.io/mrwolferinc/embed/poRYpVL?height=600&amp;amp;default-tab=css,result&amp;amp;embed-version=2"&gt;
+&lt;/iframe&gt;
+&lt;/p&gt;
+
+
+
+
+&lt;h1&gt;
+  &lt;a href="#3-drop-cap"&gt;
+  &lt;/a&gt;
+  3. Drop Cap
+&lt;/h1&gt;
+
+&lt;p&gt;You can add a drop cap to a paragraph by using the &lt;code&gt;::first-letter&lt;/code&gt; pseudo-element.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="nd"&gt;::first-letter&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="nl"&gt;font-size&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;250%&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#live-example"&gt;
+  &lt;/a&gt;
+  Live Example
+&lt;/h2&gt;
+
+&lt;p&gt;&lt;iframe height="600" src="https://codepen.io/mrwolferinc/embed/qBRvxZO?height=600&amp;amp;default-tab=result&amp;amp;embed-version=2"&gt;
+&lt;/iframe&gt;
+&lt;/p&gt;
+
+
+
+
+&lt;h1&gt;
+  &lt;a href="#4-drop-shadow"&gt;
+  &lt;/a&gt;
+  4. Drop Shadow
+&lt;/h1&gt;
+
+&lt;p&gt;You can use the &lt;code&gt;drop-shadow()&lt;/code&gt; filter effect on transparent images. It will give a much better shadow effect than using the &lt;code&gt;box-shadow&lt;/code&gt; property.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="nt"&gt;img&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="nl"&gt;filter&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;drop-shadow&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="m"&gt;0&lt;/span&gt; &lt;span class="m"&gt;0&lt;/span&gt; &lt;span class="m"&gt;3px&lt;/span&gt; &lt;span class="m"&gt;#000&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#live-example"&gt;
+  &lt;/a&gt;
+  Live Example
+&lt;/h2&gt;
+
+&lt;p&gt;&lt;iframe height="600" src="https://codepen.io/mrwolferinc/embed/bGgJwjq?height=600&amp;amp;default-tab=result&amp;amp;embed-version=2"&gt;
+&lt;/iframe&gt;
+&lt;/p&gt;
+
+
+
+
+&lt;h1&gt;
+  &lt;a href="#5-center-any-raw-ltdivgt-endraw-element"&gt;
+  &lt;/a&gt;
+  5. Center Any &lt;code&gt;&amp;lt;div&amp;gt;&lt;/code&gt; Element
+&lt;/h1&gt;
+
+&lt;p&gt;It can sometimes be difficult to center a &lt;code&gt;&amp;lt;div&amp;gt;&lt;/code&gt; element on the page, but not with this tip. You can center any &lt;code&gt;&amp;lt;div&amp;gt;&lt;/code&gt; element on the page using a few lines of CSS code.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="nt"&gt;body&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="nl"&gt;display&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;grid&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+  &lt;span class="py"&gt;place-items&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;center&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#live-example"&gt;
+  &lt;/a&gt;
+  Live Example
+&lt;/h2&gt;
+
+&lt;p&gt;&lt;iframe height="600" src="https://codepen.io/mrwolferinc/embed/NWdmbRy?height=600&amp;amp;default-tab=result&amp;amp;embed-version=2"&gt;
+&lt;/iframe&gt;
+&lt;/p&gt;
+
+
+
+
+&lt;h1&gt;
+  &lt;a href="#6-input-caret-color"&gt;
+  &lt;/a&gt;
+  6. Input Caret Color
+&lt;/h1&gt;
+
+&lt;p&gt;You can use the &lt;code&gt;caret-color&lt;/code&gt; property to change the color of the input field caret.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="nt"&gt;input&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="py"&gt;caret-color&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="no"&gt;red&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#live-example"&gt;
+  &lt;/a&gt;
+  Live Example
+&lt;/h2&gt;
+
+&lt;p&gt;&lt;iframe height="600" src="https://codepen.io/mrwolferinc/embed/xxgeRYG?height=600&amp;amp;default-tab=result&amp;amp;embed-version=2"&gt;
+&lt;/iframe&gt;
+&lt;/p&gt;
+
+
+
+
+&lt;h1&gt;
+  &lt;a href="#7-prevent-highlighting"&gt;
+  &lt;/a&gt;
+  7. Prevent Highlighting
+&lt;/h1&gt;
+
+&lt;p&gt;This one is similar to #2, but you can use the &lt;code&gt;user-select&lt;/code&gt; property to prevent an element from being highlighted by the user.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="nc"&gt;.no-highlight&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="nl"&gt;-webkit-user-select&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;none&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+  &lt;span class="nl"&gt;-moz-user-select&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;none&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+  &lt;span class="py"&gt;user-select&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;none&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#live-example"&gt;
+  &lt;/a&gt;
+  Live Example
+&lt;/h2&gt;
+
+&lt;p&gt;&lt;iframe height="600" src="https://codepen.io/mrwolferinc/embed/zYNXobv?height=600&amp;amp;default-tab=result&amp;amp;embed-version=2"&gt;
+&lt;/iframe&gt;
+&lt;/p&gt;
+
+
+
+
+&lt;h1&gt;
+  &lt;a href="#8-input-range-pseudoclasses"&gt;
+  &lt;/a&gt;
+  8. Input Range Pseudo-Classes
+&lt;/h1&gt;
+
+&lt;p&gt;The lesser-known &lt;code&gt;:in-range&lt;/code&gt; and &lt;code&gt;:out-of-range&lt;/code&gt; pseudo-classes can help you validate an &lt;code&gt;&amp;lt;input&amp;gt;&lt;/code&gt; element whose current value is within the range specified by its &lt;code&gt;min&lt;/code&gt; and &lt;code&gt;max&lt;/code&gt; attributes.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="nt"&gt;input&lt;/span&gt;&lt;span class="nd"&gt;:in-range&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="nl"&gt;background&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;rgba&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="m"&gt;0&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="m"&gt;255&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="m"&gt;0&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="m"&gt;.25&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="nt"&gt;input&lt;/span&gt;&lt;span class="nd"&gt;:out-of-range&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="nl"&gt;background&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;rgba&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="m"&gt;255&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="m"&gt;0&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="m"&gt;0&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="m"&gt;.25&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#live-example"&gt;
+  &lt;/a&gt;
+  Live Example
+&lt;/h2&gt;
+
+&lt;p&gt;&lt;iframe height="600" src="https://codepen.io/mrwolferinc/embed/poRBMGd?height=600&amp;amp;default-tab=result&amp;amp;embed-version=2"&gt;
+&lt;/iframe&gt;
+&lt;/p&gt;
+
+
+
+
+&lt;h1&gt;
+  &lt;a href="#9-image-overlay"&gt;
+  &lt;/a&gt;
+  9. Image Overlay
+&lt;/h1&gt;
+
+&lt;p&gt;You can create an image overlay using the &lt;code&gt;object-fit&lt;/code&gt; property. This can prove to be useful when you want to create a hero image on your website.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="nc"&gt;.image-overlay&lt;/span&gt; &lt;span class="nt"&gt;img&lt;/span&gt;&lt;span class="nd"&gt;:only-of-type:nth-child&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="err"&gt;1&lt;/span&gt;&lt;span class="o"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="nl"&gt;object-fit&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;cover&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+  &lt;span class="nl"&gt;opacity&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;.4&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#live-example"&gt;
+  &lt;/a&gt;
+  Live Example
+&lt;/h2&gt;
+
+&lt;p&gt;&lt;iframe height="600" src="https://codepen.io/mrwolferinc/embed/abproKb?height=600&amp;amp;default-tab=result&amp;amp;embed-version=2"&gt;
+&lt;/iframe&gt;
+&lt;/p&gt;
+
+
+
+
+&lt;h1&gt;
+  &lt;a href="#10-the-raw-transition-endraw-property"&gt;
+  &lt;/a&gt;
+  10. The &lt;code&gt;transition&lt;/code&gt; Property
+&lt;/h1&gt;
+
+&lt;p&gt;You might know this one already, but what if I told you that there was a way to animate elements without the use of keyframes? The &lt;code&gt;transition&lt;/code&gt; property allows you to define the transition between two states of an element. It is mostly used for hover animations.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="nt"&gt;a&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="nl"&gt;color&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;#0d6efd&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+  &lt;span class="nl"&gt;text-decoration&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;none&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+  &lt;span class="nl"&gt;-webkit-transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;.15s&lt;/span&gt; &lt;span class="n"&gt;ease-in-out&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+  &lt;span class="nl"&gt;-moz-transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;.15s&lt;/span&gt; &lt;span class="n"&gt;ease-in-out&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+  &lt;span class="nl"&gt;transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;.15s&lt;/span&gt; &lt;span class="n"&gt;ease-in-out&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="nt"&gt;a&lt;/span&gt;&lt;span class="nd"&gt;:hover&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="nl"&gt;color&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;#0a58ca&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#live-example"&gt;
+  &lt;/a&gt;
+  Live Example
+&lt;/h2&gt;
+
+&lt;p&gt;&lt;iframe height="600" src="https://codepen.io/mrwolferinc/embed/RwKmbzZ?height=600&amp;amp;default-tab=result&amp;amp;embed-version=2"&gt;
+&lt;/iframe&gt;
+&lt;/p&gt;
+
+</description>
+      <category>webdev</category>
+      <category>css</category>
+      <category>html</category>
+      <category>beginners</category>
+    </item>
+    <item>
       <title>Redux-Cool Philosophy</title>
       <author>Ruben Arushanyan</author>
       <pubDate>Wed, 28 Apr 2021 18:23:47 +0000</pubDate>
@@ -221,6 +1202,191 @@ As can be seen from the diagram above, we have a &lt;strong&gt;store&lt;/strong&
       <category>react</category>
       <category>javascript</category>
       <category>reduxcool</category>
+    </item>
+    <item>
+      <title>Integration stories: elevating Storybook with Mock Service Worker</title>
+      <author>Mike Schutte</author>
+      <pubDate>Wed, 28 Apr 2021 17:51:42 +0000</pubDate>
+      <link>https://dev.to/tmikeschu/integration-stories-elevating-storybook-with-mock-service-worker-22m3</link>
+      <guid>https://dev.to/tmikeschu/integration-stories-elevating-storybook-with-mock-service-worker-22m3</guid>
+      <description>&lt;p&gt;During our last &lt;a href="https://www.process.st/shape-up/"&gt;product cycle&lt;/a&gt; at &lt;a href="https://www.process.st/"&gt;Process Street&lt;/a&gt;, our development experience was heavily aided by combining &lt;a href="https://mswjs.io/"&gt;Mock Service Worker (MSW)&lt;/a&gt; and &lt;a href="https://storybook.js.org/"&gt;Storybook&lt;/a&gt;. It's a powerful union of tools worth knowing about.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--6367MqYV--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/8gg550jaotkmkalacu91.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--6367MqYV--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/8gg550jaotkmkalacu91.png" alt="Storybook with MSW"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#building-a-rich-text-editor"&gt;
+  &lt;/a&gt;
+  Building a rich text editor
+&lt;/h2&gt;
+
+&lt;p&gt;At Process Street, we're adding rich text documents ("Pages") to our app to help people document their processes faster without having to learn right away about our more structured workflow models.&lt;/p&gt;
+
+&lt;p&gt;We chose &lt;a href="https://docs.slatejs.org/"&gt;Slate.js&lt;/a&gt; to be the engine of our text editing features, topped off with UI composed by &lt;a href="https://chakra-ui.com/"&gt;Chakra&lt;/a&gt; components.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#you-dont-need-a-rewrite-to-improve-developer-experience"&gt;
+  &lt;/a&gt;
+  You don't need a re-write to improve developer experience
+&lt;/h2&gt;
+
+&lt;p&gt;Process Street is one of many teams who has done its darnedest to keep up with the rapidly evolving JavaScript landscape whilst iterating rapidly on product. The product started as an &lt;a href="https://code.angularjs.org/1.5.6/docs/api"&gt;AngularJS (1.5.6)&lt;/a&gt; application and has gradually adopted more and more &lt;a href="https://reactjs.org/"&gt;React&lt;/a&gt; components using &lt;a href="https://github.com/coatue-oss/react2angular"&gt;react2angular&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;The surface area of our product is already huge, and the frankenstein-state of our UI architecture adds some...friction...to the development experience in certain ways. Instead of loading up the entire application and depending on a locally running API server, we do all of our new UI work in React starting with Storybook.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#getting-integrated"&gt;
+  &lt;/a&gt;
+  Getting integrated
+&lt;/h2&gt;
+
+&lt;p&gt;In my 3+ years of using Storybook to build user interfaces, most of the story-able components end up being leaves or very close to leaves in the DOM tree: the ones that are basically taking props and rendering JSX. This is a great pattern for rendering myriad states as named stories, but it's always been a challenge to move up the tree and achieve what is essentially an integration test, but in the form of an interactive story.&lt;/p&gt;
+
+&lt;p&gt;Modern React features and patterns make the demand for integration stories even greater. With the rising popularity and leverage of React's &lt;a href="https://reactjs.org/docs/hooks-intro.html"&gt;hook&lt;/a&gt; and &lt;a href="https://reactjs.org/docs/context.html#gatsby-focus-wrapper"&gt;context&lt;/a&gt; APIs along with adopting more colocated network fetching patterns (e.g., &lt;a href="https://react-query.tanstack.com/"&gt;react-query&lt;/a&gt; and &lt;a href="https://www.apollographql.com/docs/react"&gt;Apollo Client&lt;/a&gt;) in place of a global store like Redux, it's becoming more common and instinctual to build opaque components (meaning you don't pass them props) that fetch their own data via hooks and context providers.&lt;/p&gt;
+
+&lt;p&gt;The same patterns and tools that have allowed us to write more powerful, loosely coupled, and extensible components have left us in somewhat of a pickle when trying to express these components as stories without going through a kind of surgery to separate prop-driven UI components from wrapping components that take care of sourcing those props.&lt;/p&gt;
+
+&lt;p&gt;Enter Mock Service Worker.&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;Mock by intercepting requests on the network level. Seamlessly reuse the same mock definition for testing, development, and debugging.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;&lt;strong&gt;By combining MSW with Storybook, you can express components anywhere in the DOM tree as interactive stories.&lt;/strong&gt; Here's how I got an integration story set up for that Pages feature.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#implement-a-working-mvp-in-the-app"&gt;
+  &lt;/a&gt;
+  Implement a working MVP in the app
+&lt;/h2&gt;
+
+&lt;p&gt;Similar to testing, you can either build your story after you have a working feature, or use the story to drive the component's development. I like starting with a low-fidelity working feature in the app, then moving to Storybook to refine the UI.&lt;/p&gt;
+
+&lt;p&gt;All of the necessary API endpoints for this feature already existed, so I opted to build the MSW handlers based on real data from the server. To do so, I observed the network traffic in the developer console while exercising the feature. After that I copied (via right-click) the relevant requests and responses related to the feature's interaction points.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--NMBafV_A--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/976mjiapk70qfvygfc73.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--NMBafV_A--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/976mjiapk70qfvygfc73.png" alt="copy fetch"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--LLXI5ipC--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/vq15i1p823x05xay1jpb.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--LLXI5ipC--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/vq15i1p823x05xay1jpb.png" alt="copy response"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#wire-up-msw-for-storybook"&gt;
+  &lt;/a&gt;
+  Wire up MSW for Storybook
+&lt;/h2&gt;
+
+&lt;p&gt;I'm going to focus specifically on how we integrated Storybook with MSW, ignoring setup. Check out &lt;a href="https://blog.logrocket.com/using-storybook-and-mock-service-worker-for-mocked-api-responses/"&gt;this article&lt;/a&gt; for a more thorough walk through of setting everything up. While we're not using it yet in our app, I recently learned there is even a &lt;a href="https://storybook.js.org/addons/msw-storybook-addon"&gt;Storybook addon&lt;/a&gt; that simplifies the integration. For educational purposes, I'll still walk through the DIY setup we currently use.&lt;/p&gt;
+
+&lt;p&gt;Given a &lt;a href="https://mswjs.io/docs/getting-started/install"&gt;standard MSW setup&lt;/a&gt;, first make sure the service worker is kicked off in &lt;code&gt;preview.js&lt;/code&gt;.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// .storybook/preview.js&lt;/span&gt;
+
+&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;worker&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;../src/mocks/browser&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="c1"&gt;// this allows you to simply use `worker.use` in your story and/or story decorators&lt;/span&gt;
+&lt;span class="nx"&gt;worker&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;start&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;In my case there was a lot of API responses that would clutter the story itself, so I exported an object with named keys from a file called &lt;code&gt;story-data&lt;/code&gt;.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight tsx"&gt;&lt;code&gt;&lt;span class="c1"&gt;// story-data.ts&lt;/span&gt;
+&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;data&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="na"&gt;latest&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="p"&gt;...&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;With the response data in place, import &lt;code&gt;data&lt;/code&gt; and configure the &lt;code&gt;worker.use&lt;/code&gt; API from MSW using the Storybook template pattern.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight tsx"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;data&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;./story-data&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;Template&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;Story&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Args&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;props&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="nx"&gt;worker&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;use&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="nx"&gt;rest&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="kd"&gt;get&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;/latest&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;req&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;res&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;ctx&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;res&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;ctx&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;json&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;latest&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;
+    &lt;span class="p"&gt;},&lt;/span&gt;
+    &lt;span class="p"&gt;...&lt;/span&gt;
+  &lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nc"&gt;Component&lt;/span&gt; &lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="p"&gt;...&lt;/span&gt;&lt;span class="nx"&gt;props&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt; &lt;span class="p"&gt;/&amp;gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;Demo&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;Template&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;bind&lt;/span&gt;&lt;span class="p"&gt;({})&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;I prefer to put &lt;code&gt;worker.use&lt;/code&gt; in the story component itself instead of a decorator because I often end up using Storybook args to influence the MSW response data.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight tsx"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;Template&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;Story&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Args&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="nx"&gt;loading&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;...&lt;/span&gt;&lt;span class="nx"&gt;props&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="nx"&gt;worker&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;use&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="nx"&gt;rest&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="kd"&gt;get&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;/latest&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;req&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;res&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;ctx&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;loading&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;res&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+          &lt;span class="nx"&gt;ctx&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;delay&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;1000&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt; &lt;span class="mi"&gt;60&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+          &lt;span class="nx"&gt;ctx&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;json&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;latest&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+        &lt;span class="p"&gt;)&lt;/span&gt;
+      &lt;span class="p"&gt;}&lt;/span&gt;
+      &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;res&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;ctx&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;json&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;latest&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;
+    &lt;span class="p"&gt;},&lt;/span&gt;
+    &lt;span class="p"&gt;...&lt;/span&gt;
+  &lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nc"&gt;Component&lt;/span&gt; &lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="p"&gt;...&lt;/span&gt;&lt;span class="nx"&gt;props&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt; &lt;span class="p"&gt;/&amp;gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Another thing to remember is you can often leverage the request object data (&lt;code&gt;req&lt;/code&gt;) to influence the response data.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight tsx"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;Template&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;Story&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Args&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="nx"&gt;loading&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;...&lt;/span&gt;&lt;span class="nx"&gt;props&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="nx"&gt;worker&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;use&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="nx"&gt;rest&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="kd"&gt;get&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;/latest/:id&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;req&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;res&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;ctx&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;loading&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;res&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+          &lt;span class="nx"&gt;ctx&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;delay&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;1000&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt; &lt;span class="mi"&gt;60&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+          &lt;span class="nx"&gt;ctx&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;json&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;latest&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+        &lt;span class="p"&gt;)&lt;/span&gt;
+      &lt;span class="p"&gt;}&lt;/span&gt;
+      &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;res&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;ctx&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;json&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;someLookup&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;req&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;params&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;id&lt;/span&gt;&lt;span class="p"&gt;]))&lt;/span&gt;
+    &lt;span class="p"&gt;},&lt;/span&gt;
+    &lt;span class="p"&gt;...&lt;/span&gt;
+  &lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nc"&gt;Component&lt;/span&gt; &lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="p"&gt;...&lt;/span&gt;&lt;span class="nx"&gt;props&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt; &lt;span class="p"&gt;/&amp;gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;From here, you can get creative combining Storybook arguments and request data to simulate full interaction with a remote data source. Now in addition to observing with and interacting with specific UI states, we get to leverage MSW and Storybook to represent specific &lt;em&gt;server&lt;/em&gt; and &lt;em&gt;network&lt;/em&gt; states. Similar to the ethos of integration tests using &lt;a href="https://testing-library.com/docs/react-testing-library/intro"&gt;React Testing Library&lt;/a&gt;, we're testing and exercising our components in a way that is much closer to how a user will interact with them in production, which is a good, good thing.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://i.giphy.com/media/26tOZ42Mg6pbTUPHW/giphy.gif" class="article-body-image-wrapper"&gt;&lt;img src="https://i.giphy.com/media/26tOZ42Mg6pbTUPHW/giphy.gif" alt=""&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;If you're interested in working at Process Street, &lt;a href="https://angel.co/company/process-street/jobs"&gt;we're hiring&lt;/a&gt;!&lt;/p&gt;
+
+</description>
+      <category>mockserviceworker</category>
+      <category>storybook</category>
+      <category>react</category>
+      <category>javascript</category>
     </item>
     <item>
       <title>NextProps in React Functional Components.</title>
@@ -1643,493 +2809,6 @@ No, not nearly that entertaining.
       <category>beginners</category>
       <category>webdev</category>
       <category>codenewbie</category>
-    </item>
-    <item>
-      <title>Updated: Write and auto-deploy daemons on FreeBSD</title>
-      <author>Daniel Ziltener</author>
-      <pubDate>Wed, 28 Apr 2021 16:28:54 +0000</pubDate>
-      <link>https://dev.to/zilti/updated-write-and-auto-deploy-daemons-on-freebsd-k7i</link>
-      <guid>https://dev.to/zilti/updated-write-and-auto-deploy-daemons-on-freebsd-k7i</guid>
-      <description>&lt;h2&gt;
-  &lt;a href="#goal"&gt;
-  &lt;/a&gt;
-  Goal
-&lt;/h2&gt;
-
-&lt;p&gt;Our goal is to write an rc.d file that allows us to start anything as a daemon, and an accompanying settings file, and to get to know the commands to use for automated deploy.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#settings-file"&gt;
-  &lt;/a&gt;
-  Settings File
-&lt;/h2&gt;
-
-&lt;p&gt;We will start with the settings file. &lt;em&gt;Technically&lt;/em&gt; you can do in there whatever you want; if you have any sanity left, you will simply use it to set environment variables. This makes it easy to follow &lt;a href="https://12factor.net/config"&gt;the third rule of the Twelve-Factor App&lt;/a&gt;. And it really is that simple, you just add export statements, and make "dummy values" you will replace in your CI/CD script using sed, or replace them with variables and use &lt;code&gt;RENDER&lt;/code&gt; in Bastille:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nb"&gt;export &lt;/span&gt;&lt;span class="nv"&gt;HTTP_PORT&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;3000
-&lt;span class="nb"&gt;export &lt;/span&gt;&lt;span class="nv"&gt;POSTGRES_IP&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;SED_PGSQL_IP
-&lt;span class="nb"&gt;export &lt;/span&gt;&lt;span class="nv"&gt;POSTGRES_USERNAME&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;SED_PGSQL_USER
-&lt;span class="nb"&gt;export &lt;/span&gt;&lt;span class="nv"&gt;POSTGRES_PASSWORD&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;SED_PGSQL_PASS
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;This file has to be stored with the same name as your actual service file, but under &lt;code&gt;/usr/local/etc/rc.conf.d/&lt;/code&gt;. The RC system will auto-detect it.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#daemon-file"&gt;
-  &lt;/a&gt;
-  Daemon file
-&lt;/h2&gt;
-
-&lt;p&gt;This one is going to be a little bit longer. Let's first take a look at the whole script:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="c"&gt;#!/bin/sh&lt;/span&gt;
-
-&lt;span class="c"&gt;# PROVIDE: location_service&lt;/span&gt;
-&lt;span class="c"&gt;# REQUIRE: LOGIN DAEMON NETWORKING&lt;/span&gt;
-&lt;span class="c"&gt;# BEFORE: some_other_service&lt;/span&gt;
-&lt;span class="c"&gt;# KEYWORD: shutdown&lt;/span&gt;
-
-&lt;span class="nb"&gt;.&lt;/span&gt; /etc/rc.subr
-
-&lt;span class="nv"&gt;name&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;location_service
-&lt;span class="nv"&gt;rcvar&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="k"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;name&lt;/span&gt;&lt;span class="k"&gt;}&lt;/span&gt;_enable
-&lt;span class="nv"&gt;pidfile&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s2"&gt;"/var/run/&lt;/span&gt;&lt;span class="k"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;name&lt;/span&gt;&lt;span class="k"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;.pid"&lt;/span&gt;
-&lt;span class="nv"&gt;pidfile_child&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s2"&gt;"/var/run/&lt;/span&gt;&lt;span class="k"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;name&lt;/span&gt;&lt;span class="k"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;_jvm.pid"&lt;/span&gt;
-&lt;span class="nv"&gt;logfile&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s2"&gt;"/var/log/&lt;/span&gt;&lt;span class="k"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;name&lt;/span&gt;&lt;span class="k"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;.log"&lt;/span&gt;
-&lt;span class="nv"&gt;location_service_chdir&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s2"&gt;"/usr/local/share/location-service"&lt;/span&gt;
-
-&lt;span class="nb"&gt;command&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s2"&gt;"/usr/sbin/daemon"&lt;/span&gt;
-&lt;span class="nv"&gt;start_cmd&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s2"&gt;"location_service_start"&lt;/span&gt;
-&lt;span class="nv"&gt;procname&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s2"&gt;"daemon"&lt;/span&gt;
-
-load_rc_config &lt;span class="k"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;name&lt;/span&gt;&lt;span class="k"&gt;}&lt;/span&gt;
-: &lt;span class="k"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;location_service_enable&lt;/span&gt;:&lt;span class="p"&gt;=no&lt;/span&gt;&lt;span class="k"&gt;}&lt;/span&gt;
-
-location_service_start&lt;span class="o"&gt;()&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
-    /usr/sbin/daemon &lt;span class="nt"&gt;-r&lt;/span&gt; &lt;span class="nt"&gt;-f&lt;/span&gt; &lt;span class="nt"&gt;-P&lt;/span&gt; &lt;span class="k"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;pidfile&lt;/span&gt;&lt;span class="k"&gt;}&lt;/span&gt; &lt;span class="nt"&gt;-p&lt;/span&gt; &lt;span class="k"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;pidfile_child&lt;/span&gt;&lt;span class="k"&gt;}&lt;/span&gt; &lt;span class="nt"&gt;-t&lt;/span&gt; &lt;span class="k"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;name&lt;/span&gt;&lt;span class="k"&gt;}&lt;/span&gt; &lt;span class="nt"&gt;-o&lt;/span&gt; &lt;span class="k"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;logfile&lt;/span&gt;&lt;span class="k"&gt;}&lt;/span&gt; /usr/local/bin/java &lt;span class="nt"&gt;-jar&lt;/span&gt; location-service.jar
-&lt;span class="o"&gt;}&lt;/span&gt;
-
-run_rc_command &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$1&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h3&gt;
-  &lt;a href="#main-variables"&gt;
-  &lt;/a&gt;
-  Main variables
-&lt;/h3&gt;
-
-&lt;p&gt;There is some magic going on with the variable names, but that aside, it is a pretty standard shell script file. In this case, we are working with a location service that is to be run by the JVM, but it really doesn't matter - you can run literally anything as a service this way.&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;
-&lt;code&gt;PROVIDE&lt;/code&gt; is the name of the daemon; this is placed here again so potentially other daemons can REQUIRE it.&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;REQUIRE&lt;/code&gt; are the daemons/targets that should be loaded before this one. The values should be quite self-explanatory.&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;BEFORE&lt;/code&gt; is the inverse of REQUIRE; use it to tell the rc system to start this daemon before the mentioned one(s).&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;KEYWORD&lt;/code&gt; can be either &lt;code&gt;nojail&lt;/code&gt; (will be ignored if inside a jail), &lt;code&gt;nostart&lt;/code&gt; (automatic startup procedure will ignore the script. In conjunction with the shutdown keyword, this can be used to write scripts that do something only at system shutdown), and &lt;code&gt;shutdown&lt;/code&gt; (service needs to be stopped before system shutdown).&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;. /etc/rc.subr&lt;/code&gt; loads subroutines that enable the "magic" to run the service.&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;rcvar&lt;/code&gt; is the flag that you can set to enable or disable your service in the rc.conf file.&lt;/li&gt;
-&lt;li&gt;The two pidfiles are holding the process id of the daemon and the actual process, so the system can keep track of it.&lt;/li&gt;
-&lt;li&gt;and the &lt;code&gt;location_service_chdir&lt;/code&gt; (or &lt;code&gt;whatever_you_name_it_chdir&lt;/code&gt;) sets the working directory.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h3&gt;
-  &lt;a href="#the-daemon-command"&gt;
-  &lt;/a&gt;
-  The Daemon command
-&lt;/h3&gt;
-
-&lt;p&gt;FreeBSD ships with a program aptly called daemon, and we are using it to run our normal program as one. We thus tell the rc system to use /usr/sbin/daemon as the main &lt;code&gt;command&lt;/code&gt;, and tell it that the process started by it - &lt;code&gt;procname&lt;/code&gt; - will be called "daemon". We also tell it to run a custom starting function, &lt;code&gt;start_cmd&lt;/code&gt;, which in this case is called "location_service_start".&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#configure-the-daemon"&gt;
-  &lt;/a&gt;
-  Configure the &lt;a href="https://www.unix.com/man-page/freebsd/8/daemon/"&gt;daemon&lt;/a&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;We configure the daemon by setting the flags when starting it. We have the following flags:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;
-&lt;code&gt;-r&lt;/code&gt;: Restarts the process if it dies&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;-f&lt;/code&gt;: Redirects standard input/output and standard error to /dev/null&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;-p&lt;/code&gt;: the pidfile for the process you want to have daemonized&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;-P&lt;/code&gt;: the pidfile of the daemon process itself - that is what the rc system needs&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;-o&lt;/code&gt;: the log file to log to&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;-t&lt;/code&gt;: gives the process a name (optional)&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;-u&lt;/code&gt;: (not used here): the user to run the process as&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;This service file has to be stored under &lt;code&gt;/usr/local/etc/rc.d&lt;/code&gt; and be made executable.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#automatic-deployment"&gt;
-  &lt;/a&gt;
-  Automatic deployment
-&lt;/h2&gt;
-
-&lt;p&gt;We almost have it - the only thing missing are the commands for your CI/CD. It is really simple once you have both files at their respective locations.&lt;/p&gt;
-
-&lt;p&gt;You can set the config variables using &lt;code&gt;sed -i.bak "s/SED_PGSQL_IP/${your_ci_var}/g" /usr/local/etc/rc.conf.d/location_service&lt;/code&gt;. Remember, if your variable contains the "/" character, you can use something else for sed, whatever character follows the "s" will be the separator.&lt;/p&gt;
-
-&lt;p&gt;Enable the service using &lt;code&gt;sysrc -f /etc/rc.conf "location_service_enable=YES"&lt;/code&gt;.&lt;/p&gt;
-
-&lt;p&gt;And finally, don't forget to actually (re-)start it using &lt;code&gt;service location_service restart&lt;/code&gt;.&lt;/p&gt;
-
-&lt;p&gt;Have fun!&lt;/p&gt;
-
-</description>
-      <category>devops</category>
-      <category>freebsd</category>
-      <category>daemon</category>
-    </item>
-    <item>
-      <title>Welcome Thread - v122</title>
-      <author>dev.to staff</author>
-      <pubDate>Wed, 28 Apr 2021 16:23:42 +0000</pubDate>
-      <link>https://dev.to/thepracticaldev/welcome-thread-v122-ij0</link>
-      <guid>https://dev.to/thepracticaldev/welcome-thread-v122-ij0</guid>
-      <description>&lt;p&gt;&lt;a href="https://i.giphy.com/media/J6PSuK1xecAuFXeRUy/giphy.gif" class="article-body-image-wrapper"&gt;&lt;img src="https://i.giphy.com/media/J6PSuK1xecAuFXeRUy/giphy.gif" alt="Star Trek Welcome"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#welcome-to-dev"&gt;
-  &lt;/a&gt;
-  Welcome to DEV!
-&lt;/h3&gt;
-
-&lt;ol&gt;
-&lt;li&gt;&lt;p&gt;Leave a comment below to introduce yourself! You can talk about what brought you here, what you're learning, or just a fun fact about yourself.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;Reply to someone's comment, either with a question or just a hello. 👋 &lt;/p&gt;&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;p&gt;&lt;strong&gt;Great to have you in the community!&lt;/strong&gt;&lt;/p&gt;
-
-</description>
-      <category>welcome</category>
-    </item>
-    <item>
-      <title>I built a chat app using React and GraphQL</title>
-      <author>Abdou Ouahib</author>
-      <pubDate>Wed, 28 Apr 2021 16:12:24 +0000</pubDate>
-      <link>https://dev.to/aouahib/i-built-a-chat-app-using-react-and-graphql-1ejm</link>
-      <guid>https://dev.to/aouahib/i-built-a-chat-app-using-react-and-graphql-1ejm</guid>
-      <description>&lt;h4&gt;
-  &lt;a href="#tldr"&gt;
-  &lt;/a&gt;
-  TLDR
-&lt;/h4&gt;
-
-&lt;p&gt;You can try the app here: &lt;a href="https://chat.abdou.dev/"&gt;chat.abdou.dev&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;You can view the source code in this &lt;a href="https://github.com/aouahib/very_good_chat"&gt;github repo&lt;/a&gt;&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#intro"&gt;
-  &lt;/a&gt;
-  Intro
-&lt;/h1&gt;
-
-&lt;p&gt;About 4 months ago, I decided to start learning web development, and I thought that the best way to know that I became a job-ready developer, is to build a complex, real-world application, from scratch. My first choice was to build a chat app. It seemed complex enough for me, and I knew I would learn many things along the way.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#disclaimer"&gt;
-  &lt;/a&gt;
-  Disclaimer
-&lt;/h1&gt;
-
-&lt;p&gt;I think it's only fair to say that, although I had no experience in web dev, I wasn't a complete newbie to the coding world. I did some C programming, I worked with Flutter a little, and I think it made it a lot easier for me to pick up all those new technologies like React. Otherwise, this would have taken me a lot more than 4 months :). Also, here's my GitHub graph in the aftermath.&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--y8x1V4-g--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/849vrcxceax5mlyr98dk.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--y8x1V4-g--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/849vrcxceax5mlyr98dk.png" alt="Github graph"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#the-first-steps"&gt;
-  &lt;/a&gt;
-  The first steps
-&lt;/h1&gt;
-
-&lt;p&gt;I knew that I had to learn the basics. It doesn't make sense to start learning the crazy stuff (React) first, before having a solid (meh) understanding of HTML, CSS, and Javascript (SPOILERS: I ended up learning Typescript instead).&lt;/p&gt;
-
-&lt;p&gt;So, my first destination was FreeCodeCamp. It had a big nice curriculum of everything you need to get you started in web dev. I finished the first 3 certifications, and by then, I was ready to go out into the wilderness, and start learning on my own.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#building-the-app"&gt;
-  &lt;/a&gt;
-  Building the app
-&lt;/h1&gt;
-
-&lt;p&gt;Now that I had all the basics I needed, it was time to start building the chat app.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#the-tech-stack"&gt;
-  &lt;/a&gt;
-  The tech stack
-&lt;/h1&gt;
-
-&lt;p&gt;I took a look around some job listings here and there, to see what's popular in the market, and I finally decided to use these technologies for my next project (non-exhaustive list):&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#frontend"&gt;
-  &lt;/a&gt;
-  Frontend
-&lt;/h2&gt;
-
-&lt;ul&gt;
-&lt;li&gt;&lt;strong&gt;React&lt;/strong&gt;&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;Redux&lt;/strong&gt;: I'm building a full fledged chat app after all. I will need a solid state management solution.&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;MaterialUI&lt;/strong&gt; for components/styling&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;Apollo client&lt;/strong&gt; for GraphQL&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h2&gt;
-  &lt;a href="#backend"&gt;
-  &lt;/a&gt;
-  Backend
-&lt;/h2&gt;
-
-&lt;ul&gt;
-&lt;li&gt;
-&lt;strong&gt;Node.js&lt;/strong&gt; and &lt;strong&gt;Express&lt;/strong&gt;.&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;Apollo server&lt;/strong&gt; for GraphQL&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;TypeGraphQL&lt;/strong&gt;:  for building GraphQL APis&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;PostgreSQL&lt;/strong&gt; in combination with &lt;strong&gt;Prisma&lt;/strong&gt; (The next generation ORM, very cool stuff) for the database.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;Did I mention that I used Typescript throughout the project? I really find it hard to work without type-safety.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#setup"&gt;
-  &lt;/a&gt;
-  Setup
-&lt;/h2&gt;
-
-&lt;p&gt;At that time, I've been hearing about &lt;strong&gt;Next.js&lt;/strong&gt;, and it seemed like something I'd want to learn, so I decided to use it. I was also planning to do all the coding using TDD (test driven development), so setting up a test environment was a must. After lots of headaches, I finally got &lt;strong&gt;jest&lt;/strong&gt; and &lt;strong&gt;React Testing Library&lt;/strong&gt; to work with Typescript. Now I'm ready to start coding.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#app-features"&gt;
-  &lt;/a&gt;
-  App features
-&lt;/h2&gt;
-
-&lt;h3&gt;
-  &lt;a href="#authentication"&gt;
-  &lt;/a&gt;
-  Authentication
-&lt;/h3&gt;
-
-&lt;p&gt;To make things simple, I used Google for authentication. The user signs in with Google, I grab the token and send it to the backend. If no user is associated with that Google account, I create it, then proceed.&lt;/p&gt;
-
-&lt;p&gt;I spent some time researching different authentication methods, the simplest one was to use &lt;strong&gt;jwt&lt;/strong&gt;. Other solutions like auth0 seemed very complicated. I tried to implement jwt authentication in the best way I could. I didn't use local storage to store any tokens (although it's widely used in many tutorials), and I used a refresh/access token strategy:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;
-&lt;strong&gt;Refresh token&lt;/strong&gt;: it's generated with a very long expiry date (it basically never expires), and it is set in a http-only cookie, so the client can never access it. It's used to generate new access tokens when they expire.&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;Access token&lt;/strong&gt;: it's generated with a low expiration time (30min), and it's only stored in memory (in a variable) in the frontend. It is sent with all future http requests to make authenticated actions.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;I also implemented auto-refreshing in the frontend, so when the access token expires, a new one is generated without the user noticing anything. Not very sophisticated, but I'm happy with the results.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#user-profiles"&gt;
-  &lt;/a&gt;
-  User profiles
-&lt;/h3&gt;
-
-&lt;p&gt;Each user has a unique username, a name, and a profile photo. These are all public, and can be viewed by anyone. The user has the ability to change his username, name, and upload new profile pictures. It's kinda worth noting that pictures are resized to different sizes (small, medium, and original). So we don't need to fetch a 1280x1024 picture for a 48x48 user avatar.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#friends"&gt;
-  &lt;/a&gt;
-  Friends
-&lt;/h3&gt;
-
-&lt;p&gt;Each user can send friend requests to other users, and they can either accept or decline them, exactly like facebook. A user can also block another user, preventing them from sending further friend requests and messages. Being friends with someone makes you able to text them and view their active status (last seen date) if they don't hide it.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#notifications"&gt;
-  &lt;/a&gt;
-  Notifications
-&lt;/h3&gt;
-
-&lt;p&gt;For now, they only show if someone accepted your friend request. I can't think of any other use-case at the moment.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#messaging"&gt;
-  &lt;/a&gt;
-  Messaging
-&lt;/h3&gt;
-
-&lt;p&gt;The core feature of the app, It was the last one implemented after all the above. I tried to clone Facebook Messenger's behaviour. It wasn't that hard since I was already familiar with everything at this point, but I still faced some very annoying problems:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;
-&lt;strong&gt;The delivery status&lt;/strong&gt;: If you look at facebook messenger, you'll notice that every message has a delivery status, that can be either &lt;code&gt;SENDING&lt;/code&gt;, &lt;code&gt;SENT&lt;/code&gt;,
-&lt;code&gt;RECEIVED&lt;/code&gt;, &lt;code&gt;DELIVERED&lt;/code&gt;, or &lt;code&gt;SEEN&lt;/code&gt;. Trying to implement it exactly the same way messenger did, was very tricky. I didn't think about this problem from the start, so I ended up modifying many things to get it working.&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;Race conditions&lt;/strong&gt;: You usually expect things to happen in a certain order, for example, a message status can go from &lt;code&gt;SENDING&lt;/code&gt; to &lt;code&gt;SENT&lt;/code&gt;, and then to
-&lt;code&gt;DELIVERED&lt;/code&gt;, but sometimes it's not the case. If the internet is slow for example, you can get notified that the message was delivered, before a response has reached the client to confirm that the message was sent, therefore the status goes from &lt;code&gt;SENDING&lt;/code&gt; to &lt;code&gt;DELIVERED&lt;/code&gt;, and then to &lt;code&gt;SENT&lt;/code&gt;, which is not at all desired, and can lead to annoying bugs, like the message being shown twice, or not at all. Handling these race conditions was not straightforward, and I think the code became a little messy afterwards.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;The user can also send multiple images/videos with each message.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#realtime"&gt;
-  &lt;/a&gt;
-  Realtime
-&lt;/h2&gt;
-
-&lt;p&gt;Before starting the messaging feature, I always thought I was going to use sockets to make it realtime. Then I figured that there's a chance GraphQL has a solution for this kind of problem, and I was right. GraphQL supports&lt;br&gt;
-&lt;strong&gt;Subscriptions&lt;/strong&gt;, which are (quoting &lt;a href="https://www.apollographql.com/docs/react/data/subscriptions/"&gt;Apollo docs&lt;/a&gt;) "&lt;em&gt;useful for notifying your client in real time about changes to back-end data, such as the creation of a new object or updates to an important field&lt;/em&gt;". They were perfect for this use-case, and implementing them was fairly simple.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#nextjs-and-vitejs"&gt;
-  &lt;/a&gt;
-  Next.js and Vite.js
-&lt;/h2&gt;
-
-&lt;p&gt;Almost halfway through the project, I realized that I'm not really benefiting from most of Next.js features (Or maybe I didn't know how to?). At the same time I discovered &lt;strong&gt;Vite.js&lt;/strong&gt; that uses &lt;strong&gt;esbuild&lt;/strong&gt;, which is the fastest bundler out there, so I switched to it. It was indeed really fast, I could make changes to the code and see them instantly in the browser, so I'm sticking with it for now. I'm not completely giving up on Next.js, I will definitely learn it later, while building a suitable project (A blog/portfolio for example). After all, concepts like Server Side Rendering are a little too advanced, and I'm still new to all of this.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#hosting"&gt;
-  &lt;/a&gt;
-  Hosting
-&lt;/h2&gt;
-
-&lt;p&gt;I used digitalocean to host both the front and the backend. I bought a droplet for 5$/month and put everything inside. Deploying was fun, I always disliked everything related to IP addresses, DNS, firewalls... but it turned out to be not that bad, everything has an article/tutorial explaining all the details, and you just have to follow.&lt;/p&gt;
-
-&lt;p&gt;For file hosting, you'd usually want to use some cloud storage solution, like an Amazon s3 bucket for example, but it doesn't make sense to pay for it separately, since this is just a personal project. So I decided to just use the droplet's memory instead.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#the-hard-parts"&gt;
-  &lt;/a&gt;
-  The hard parts
-&lt;/h1&gt;
-
-&lt;p&gt;These are the things I found difficult the most. They sometimes made me sit and consider my options of quitting the whole thing, and becoming a full time baker.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#configuration"&gt;
-  &lt;/a&gt;
-  Configuration
-&lt;/h2&gt;
-
-&lt;p&gt;I'm not sure what to call it, so I called it configuration, but you know... when you're trying to make jest work, but it just won't work, even though you followed all the instructions. To finally discover, by accident, in a comment buried deep inside a github conversation, that you have to remove a certain line from you tsconfig.json... Or that time when I wanted to use decorators inside a Next.js project, but it didn't work, so I had to painfully experiment with Babel config, which I know absolutely nothing of, until it started working, but then I discovered that Next.js HMR broke, so I had to give up using decorators after all that wasted time. The funny thing is, I tried to use them in the backend project, and they just worked from the first try.&lt;/p&gt;
-
-&lt;p&gt;I always stumble upon terms like webpack, bundlers, build tools..., but they remain foreign to me, I just use them without knowing anything about how they work, and I feel bad about it. Maybe I should start learning them seriously, maybe that will help me with those time-consuming configuration problems in the future.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#styling"&gt;
-  &lt;/a&gt;
-  Styling
-&lt;/h2&gt;
-
-&lt;p&gt;Styling was one of the hardest things, I didn't know how should I style my components. Should I use plain CSS files? Should I use CSS modules instead? Should I use bootstrap or something more modern like Tailwind? It was a really hard decision to make. I used CSS modules at first, and then switched to Styled Components, to finally settle down with MaterialUI. At last, I had to migrate everything to use MaterialUI and its JSS solution. It was a real mess, the refactoring was very time-consuming, and I still think I'm not doing things as they're supposed to be done. Now I can't even add dark-mode without modifying every single component in the code base.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#virtualization"&gt;
-  &lt;/a&gt;
-  Virtualization
-&lt;/h2&gt;
-
-&lt;p&gt;I already use pagination, if a conversation has a 1000 messages, I don't fetch them all at once. I fetch only the first 30, and when the user scrolls all the way to the top, I fetch another 30, and so on and so forth.&lt;/p&gt;
-
-&lt;p&gt;This is not enough, because after fetching all those 1000 messages, we will have a 1000 message elements in the DOM, and that's not good performance wise. Virtualization solves this problem by rendering only the visible elements. Let's say the user's viewport can fit 20 messages, then only 20 (usually a little more than 20) elements will be present in the DOM, and while the user scrolls, the invisible messages will be replaced by the visible ones, but the DOM will always have the same number of elements.&lt;br&gt;
-(The below illustration is from this &lt;a href="https://twitter.com/addyosmani/status/1104645563138506753"&gt;tweet&lt;/a&gt;&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--6k2l7_9N--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/nkqgoqxbbr1bn91fsmme.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--6k2l7_9N--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/nkqgoqxbbr1bn91fsmme.png" alt="virtualization explained"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Some libraries like Virtuoso and React Window are doing a nice job implementing virtualization for us, but in my case, both of them didn't work well. Message elements have variable heights, and those heights must be calculated before rendering, along with many other calculations. When the list of messages gets big, those calculations become very heavy, and the app becomes unusable. I spent so much time trying to make virtualization work, but in the end, I decided it's better to stop trying, and just render everything into the DOM. So far I haven't noticed any performance issues, and I checked Facebook Messenger and Whatsapp Web, they both don't use virtualization, it was a big relief knowing that Facebook is doing the same thing I'm doing :).&lt;/p&gt;
-
-&lt;p&gt;In mobile development (or at least in Flutter), you have built-in virtualization that's working out-of-the-box, and until now, I always thought that it's something standard, and you can find it in all other SDKs, I took it for granted. I'm still confused why React doesn't have such a thing, is virtualization not that important in the web?&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#keeping-everything-tested"&gt;
-  &lt;/a&gt;
-  Keeping everything tested
-&lt;/h2&gt;
-
-&lt;p&gt;Since I was doing test driven development, I had to write tests for almost every piece of production code. Keeping your codebase well tested is a very important thing, there's no doubt about that, but this process becomes extremely tedious. Some tests are harder than others, and sometimes you spend 90% of the time writing mock objects for a test, and only 10% to write the actual testing, and if, god forbid, you made changes to the code you tested, you'll have to go through those tests all over again.&lt;/p&gt;
-
-&lt;p&gt;In the end, it's always worth it. Having a strong test suite gives you confidence that your code is actually working. Whenever you want to make a new commit, you just run those tests, and if everything passes, you're good to go.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--0zL2y3yQ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/128skuxi3e3mkk6ovsgc.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--0zL2y3yQ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/128skuxi3e3mkk6ovsgc.png" alt="Frontend test suite"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#things-im-not-proud-of"&gt;
-  &lt;/a&gt;
-  Things I'm not proud of
-&lt;/h1&gt;
-
-&lt;h2&gt;
-  &lt;a href="#theming"&gt;
-  &lt;/a&gt;
-  Theming
-&lt;/h2&gt;
-
-&lt;p&gt;I know I already complained about styling, but theming is one of the things that I didn't do correctly, and I blame myself for that. I knew that I shouldn't hardcode colors, or font sizes, or anything related to styling, inside every component. I had to use a global theme instead, and material UI provided a convenient way to do it, but sill, I was always in a rush to see the results of my work on screen, I just had to build those components as quickly as possible, telling myself that I will refactor things later, but little did I know. At one point, it became too much, and I was too lazy to refactor everything, so I just gave up and left things as they are.&lt;/p&gt;
-
-&lt;p&gt;Next time, I will write down my global theme first, before writing any component code.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#routing"&gt;
-  &lt;/a&gt;
-  Routing
-&lt;/h2&gt;
-
-&lt;p&gt;I'm pretty sure I could've implemented routing a lot better than the way it is now. I didn't discover React Router until I had already finished the whole authentication feature. I was using conditional rendering, if the user is logged in I display the main screen, if not I display the login screen. After that, I started using React Router, and I'm still not sure if I'm fully utilizing its power, I had to use some hacky tricks to get things working as I wanted&lt;br&gt;
-(I needed a custom back button, that does not always act like the one in the browser), which wasn't very clean in my opinion. I'll definitely give more time and thought to routing in my next project.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#app-size"&gt;
-  &lt;/a&gt;
-  App size
-&lt;/h2&gt;
-
-&lt;p&gt;Lastly, the app is over 1.4 MB in size, I'm not sure, but I think it should be a lot smaller than this. I will take some time later to analyze the issue.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#final-thoughts"&gt;
-  &lt;/a&gt;
-  Final thoughts
-&lt;/h1&gt;
-
-&lt;p&gt;This little journey was fun, and you can say I'm satisfied with the final result. I think I can finally call myself a "fullstack developer"? I know There are many other things in this field that I have yet to explore and get good at, but this is just the start.&lt;/p&gt;
-
-&lt;p&gt;I don't know where to go from here, so I'll take my time reflecting and deciding on the next steps. Otherwise, I hope you had a good read, feel free to try out the app and leave me some feedback. Bye bye!&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://i.giphy.com/media/w89ak63KNl0nJl80ig/giphy.gif" class="article-body-image-wrapper"&gt;&lt;img src="https://i.giphy.com/media/w89ak63KNl0nJl80ig/giphy.gif" alt="bye bye"&gt;&lt;/a&gt;&lt;/p&gt;
-
-</description>
-      <category>javascript</category>
-      <category>typescript</category>
-      <category>react</category>
-      <category>graphql</category>
     </item>
   </channel>
 </rss>
