@@ -147,6 +147,472 @@ And here’s the new response:&lt;br&gt;
       <category>postman</category>
     </item>
     <item>
+      <title>Solving GraphQL N+1 problem  in fastify with loaders and conditional queries</title>
+      <author>Kenwanjohi</author>
+      <pubDate>Fri, 30 Apr 2021 19:36:22 +0000</pubDate>
+      <link>https://dev.to/kenwanjohi/solving-graphql-n-1-problem-in-fastify-with-loaders-and-conditional-queries-380o</link>
+      <guid>https://dev.to/kenwanjohi/solving-graphql-n-1-problem-in-fastify-with-loaders-and-conditional-queries-380o</guid>
+      <description>&lt;h2&gt;
+  &lt;a href="#what-is-1n-err-n1-"&gt;
+  &lt;/a&gt;
+  What is 1+N, err, N+1 ?
+&lt;/h2&gt;
+
+&lt;p&gt;To understand this, let's give an example.&lt;/p&gt;
+
+&lt;p&gt;Lets start by defining our graphql schema in a &lt;code&gt;schema.graphql&lt;/code&gt; file&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;type Song {
+ songid: ID!
+ songname: String!
+ genre: String!
+}
+type Query {
+ songs: [Song]
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Normally we would have a songs table and a genres table in a relational database, say PostgreSQL:&lt;br&gt;
+Songs table:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight sql"&gt;&lt;code&gt;&lt;span class="k"&gt;CREATE&lt;/span&gt; &lt;span class="k"&gt;TABLE&lt;/span&gt; &lt;span class="n"&gt;Songs&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="n"&gt;SongID&lt;/span&gt; &lt;span class="n"&gt;UUID&lt;/span&gt; &lt;span class="k"&gt;NOT&lt;/span&gt; &lt;span class="k"&gt;NULL&lt;/span&gt; &lt;span class="k"&gt;PRIMARY&lt;/span&gt; &lt;span class="k"&gt;KEY&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="n"&gt;SongName&lt;/span&gt; &lt;span class="nb"&gt;VARCHAR&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;75&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="k"&gt;NOT&lt;/span&gt; &lt;span class="k"&gt;NULL&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="n"&gt;GenreID&lt;/span&gt; &lt;span class="nb"&gt;SMALLINT&lt;/span&gt; &lt;span class="k"&gt;NOT&lt;/span&gt; &lt;span class="k"&gt;NULL&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Genres table&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight sql"&gt;&lt;code&gt;&lt;span class="k"&gt;CREATE&lt;/span&gt; &lt;span class="k"&gt;TABLE&lt;/span&gt; &lt;span class="n"&gt;Genres&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="n"&gt;GenreID&lt;/span&gt; &lt;span class="nb"&gt;SMALLINT&lt;/span&gt; &lt;span class="k"&gt;NOT&lt;/span&gt; &lt;span class="k"&gt;NULL&lt;/span&gt; &lt;span class="k"&gt;PRIMARY&lt;/span&gt; &lt;span class="k"&gt;KEY&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="n"&gt;GenreDescription&lt;/span&gt; &lt;span class="nb"&gt;VARCHAR&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;75&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="k"&gt;NOT&lt;/span&gt; &lt;span class="k"&gt;NULL&lt;/span&gt;
+&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Here, a genre can be in many songs, we're linking the two tables by having a foreign key (genreid ) in our songs table that references the genreid column in the genres table.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight sql"&gt;&lt;code&gt; &lt;span class="k"&gt;ALTER&lt;/span&gt; &lt;span class="k"&gt;TABLE&lt;/span&gt; &lt;span class="n"&gt;songs&lt;/span&gt;
+    &lt;span class="k"&gt;ADD&lt;/span&gt; &lt;span class="k"&gt;CONSTRAINT&lt;/span&gt; &lt;span class="n"&gt;FK_Songs&lt;/span&gt; 
+    &lt;span class="k"&gt;FOREIGN&lt;/span&gt; &lt;span class="k"&gt;KEY&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;GenreID&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="k"&gt;REFERENCES&lt;/span&gt; &lt;span class="n"&gt;Genres&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;GenreID&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Now let's define a query to fetch our songs and their genres from our server.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight graphql"&gt;&lt;code&gt;&lt;span class="k"&gt;query&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+ &lt;/span&gt;&lt;span class="n"&gt;songs&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+  &lt;/span&gt;&lt;span class="n"&gt;songid&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="n"&gt;songname&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="n"&gt;genre&lt;/span&gt;&lt;span class="w"&gt;
+ &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We define our resolvers in resolvers.js file:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;resolvers&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="na"&gt;Query&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="na"&gt;songs&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;_&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;args&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;client&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;reply&lt;/span&gt;&lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="nx"&gt;reply&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;info&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;getting all songs&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+            &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;rows&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;client&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;query&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`
+            SELECT songs.songid, songs.songname, songs.genreid FROM songs LIMIT 5;
+            `&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+            &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;rows&lt;/span&gt;
+            &lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="p"&gt;},&lt;/span&gt;
+    &lt;span class="na"&gt;Song&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="na"&gt;genre&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;parent&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;args&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;client&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;reply&lt;/span&gt;&lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="nx"&gt;reply&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;info&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;getting genre&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; 
+            &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;rows&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;client&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;query&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`
+            SELECT genredescription AS genre FROM genres WHERE genreid = $1
+            `&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;parent&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;genreid&lt;/span&gt;&lt;span class="p"&gt;])&lt;/span&gt;
+            &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;rows&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;].&lt;/span&gt;&lt;span class="nx"&gt;genre&lt;/span&gt;
+        &lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="nx"&gt;module&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;exports&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;resolvers&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;If we ran our query and inspect the logs we see:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;{"msg":"getting all songs"}
+{"msg":"getting genre"}
+{"msg":"getting genre"}
+{"msg":"getting genre"}
+{"msg":"getting genre"}
+{"msg":"getting genre"}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;strong&gt;What's happening?&lt;/strong&gt; &lt;/p&gt;
+
+&lt;p&gt;We are fetching all songs from our database and for each song we are also making &lt;br&gt;
+a database request to get the genre, hence the &lt;strong&gt;"N + 1"&lt;/strong&gt; problem.&lt;/p&gt;
+
+&lt;p&gt;That's really not efficient, especially with nested queries in many to many relations. A GraphQL API should fetch data efficiently as possible.&lt;/p&gt;
+&lt;h2&gt;
+  &lt;a href="#solutions"&gt;
+  &lt;/a&gt;
+  Solutions
+&lt;/h2&gt;
+&lt;h3&gt;
+  &lt;a href="#solution-1-using-a-join"&gt;
+  &lt;/a&gt;
+  Solution 1:  Using a join
+&lt;/h3&gt;
+
+&lt;p&gt;One of the solution would be to perform a SQL INNER JOIN.&lt;/p&gt;
+
+&lt;p&gt;Now our reslovers will look like this:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;resolvers&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="na"&gt;Query&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="na"&gt;songs&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;_&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;args&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;client&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;reply&lt;/span&gt;&lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="nx"&gt;reply&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;info&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;getting all songs and genres&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+            &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;rows&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;client&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;query&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`
+            SELECT songs.songid, songs.songname, genres.genredescription AS genre
+            FROM genres
+            INNER JOIN songs
+            ON genres.genreid = songs.genreid
+            LIMIT 5
+            `&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+            &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;rows&lt;/span&gt;
+            &lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="p"&gt;},&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;In our logs we'll see this:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;{"msg":"getting all songs and genres"}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Great! we have eliminated the extra SQL queries from our previous resolvers.&lt;/p&gt;
+
+&lt;p&gt;Have we really?&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;The problem with this:&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;Let's say our API user now creates a query to fetch the songid and songname only, no genre.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight graphql"&gt;&lt;code&gt;&lt;span class="k"&gt;query&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+ &lt;/span&gt;&lt;span class="n"&gt;songs&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+  &lt;/span&gt;&lt;span class="n"&gt;songid&lt;/span&gt;&lt;span class="w"&gt;
+  &lt;/span&gt;&lt;span class="n"&gt;songname&lt;/span&gt;&lt;span class="w"&gt;
+ &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;If you could check your database logs, you'll notice that we still have the join which is really unnecessary in this case.&lt;/p&gt;
+
+&lt;p&gt;The same SQL query will be executed even though we don't need the genre. That's not very efficient right?&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#solution-2-conditional-queries"&gt;
+  &lt;/a&gt;
+  Solution 2: Conditional queries
+&lt;/h3&gt;
+
+&lt;p&gt;What if we could be able to look into the query fields, see which fields our users have requested and create conditional SQL queries that returns only the data they requested.&lt;/p&gt;
+
+&lt;p&gt;That sounds great, but how do we do that? &lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;The GraphQL &lt;code&gt;info&lt;/code&gt; object&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;Our resolver function takes four arguments: &lt;code&gt;parent&lt;/code&gt;, &lt;code&gt;args&lt;/code&gt;, &lt;code&gt;context&lt;/code&gt; and &lt;code&gt;info&lt;/code&gt;. The &lt;code&gt;info&lt;/code&gt; object contains, well,  information on the incoming GraphQl query. What we are interested in are the fields requested in the info.&lt;/p&gt;
+
+&lt;p&gt;We could parse the &lt;code&gt;info&lt;/code&gt; ourselves but there are some libraries we could use for that.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://www.npmjs.com/package/graphql-parse-resolve-info"&gt;graphql-parse-resolve-info&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;It parses the &lt;code&gt;info&lt;/code&gt; object and returns  the fields that are being requested by our API user enabling us to optimise our resolvers.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;npm i graphql-parse-resolve-info
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;strong&gt;Usage&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;In our &lt;code&gt;reslovers.js&lt;/code&gt; file require the module&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;parseResolveInfo&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="nx"&gt;simplifyParsedResolveInfoFragmentWithType&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;require&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;graphql-parse-resolve-info&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We use the first function to parse the &lt;code&gt;info&lt;/code&gt; object and the second function as a helper to  obtain the fields  in  our  returnType, in our case &lt;code&gt;Song&lt;/code&gt;. From these, we can  create conditional SQL queries.&lt;/p&gt;
+
+&lt;p&gt;By using the &lt;code&gt;hasOwnproperty()&lt;/code&gt; method, we can check whether our &lt;code&gt;Song&lt;/code&gt; object has the field we need and execute the SQL queries conditionally.&lt;/p&gt;
+
+&lt;p&gt;Now our resolvers will look like this:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;resolvers&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="na"&gt;Query&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="na"&gt;songs&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;_&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;args&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;client&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;reply&lt;/span&gt;&lt;span class="p"&gt;},&lt;/span&gt; &lt;span class="nx"&gt;info&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="nx"&gt;reply&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;info&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;getting all songs&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+            &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;parsedInfoObject&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;parseResolveInfo&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;info&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+            &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;fields&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;simplifyParsedResolveInfoFragmentWithType&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;parsedInfoObject&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;info&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;returnType&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+            &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="nx"&gt;fields&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;hasOwnProperty&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;genre&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+                &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;rows&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;client&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;query&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`
+                SELECT songs.songid, songs.songname FROM songs LIMIT 5
+                `&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+                &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;rows&lt;/span&gt;
+            &lt;span class="p"&gt;}&lt;/span&gt;
+            &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;rows&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;client&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;query&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`
+                SELECT songs.songid, songs.songname, genres.genredescription AS genre
+                FROM genres
+                INNER JOIN songs
+                ON genres.genreid = songs.genreid
+                LIMIT 5
+                `&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+                &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;rows&lt;/span&gt;
+        &lt;span class="p"&gt;}&lt;/span&gt;
+
+
+    &lt;span class="p"&gt;},&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;strong&gt;The problem with this:&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;This is a good solution for simple query types, in our case, we only check whether the API user includes the &lt;code&gt;genre&lt;/code&gt; in the query fields and perform the conditional SQL queries. &lt;/p&gt;
+
+&lt;p&gt;However, with complex query types, our resolvers could get really messy and verbose.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#solution-3-loaders"&gt;
+  &lt;/a&gt;
+  Solution 3:  Loaders
+&lt;/h3&gt;
+
+&lt;p&gt;From mercurius &lt;a href="https://mercurius.dev/#/docs/loaders"&gt;documentation&lt;/a&gt;:&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;Each defined loader will register a resolver that coalesces each of the request and combines them into a single, bulk query.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;Loaders enable us to write  resolvers that batch requests.&lt;/p&gt;
+
+&lt;p&gt;Mercurius - the  graphql adapter for fastify - comes with great set of features including automatic loaders integration to solve 1 + N queries.&lt;/p&gt;
+
+&lt;p&gt;We just need to define our loaders and add them in the options object where we register the mercurius plugin.&lt;/p&gt;
+
+&lt;p&gt;In the&lt;code&gt;server.js&lt;/code&gt; we have:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="nx"&gt;fastify&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;register&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;mercurius&lt;/span&gt;&lt;span class="p"&gt;,{&lt;/span&gt;
+    &lt;span class="na"&gt;schema&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;makeExecutableSchema&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt;
+        &lt;span class="nx"&gt;typeDefs&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+        &lt;span class="nx"&gt;resolvers&lt;/span&gt;
+    &lt;span class="p"&gt;}),&lt;/span&gt;
+    &lt;span class="na"&gt;context&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+          &lt;span class="na"&gt;client&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;fastify&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;client&lt;/span&gt;
+        &lt;span class="p"&gt;}&lt;/span&gt; 
+    &lt;span class="p"&gt;},&lt;/span&gt;
+    &lt;span class="nx"&gt;loaders&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="na"&gt;graphiql&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;playground&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+&lt;span class="p"&gt;})&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Refactor our resolver and add our loader&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;resolvers&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="na"&gt;Query&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="na"&gt;songs&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;_&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;args&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;client&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;reply&lt;/span&gt;&lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="nx"&gt;reply&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;info&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;getting all songs&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+            &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;rows&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;client&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;query&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`
+            SELECT songs.songid, songs.songname, songs.genreid FROM songs LIMIT 5;
+            `&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+            &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;rows&lt;/span&gt;
+            &lt;span class="p"&gt;}&lt;/span&gt;           
+    &lt;span class="p"&gt;},&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;loaders&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="na"&gt;Song&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="na"&gt;genre&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;queries&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;client&lt;/span&gt;&lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;     
+            &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;genreids&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;queries&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;map&lt;/span&gt;&lt;span class="p"&gt;(({&lt;/span&gt; &lt;span class="nx"&gt;obj&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;obj&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;genreid&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;  
+            &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;rows&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;client&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;query&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`
+            SELECT genreid, genredescription genre FROM genres WHERE  genres.genreid = ANY ($1)
+            `&lt;/span&gt;&lt;span class="p"&gt;,[&lt;/span&gt;&lt;span class="nx"&gt;genreids&lt;/span&gt;&lt;span class="p"&gt;])&lt;/span&gt;     
+            &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;genreids&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;map&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;genreid&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+               &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;rows&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;filter&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;genreitem&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;genreitem&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;genreid&lt;/span&gt; &lt;span class="o"&gt;===&lt;/span&gt; &lt;span class="nx"&gt;genreid&lt;/span&gt;&lt;span class="p"&gt;)[&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;].&lt;/span&gt;&lt;span class="nx"&gt;genre&lt;/span&gt;
+            &lt;span class="p"&gt;})&lt;/span&gt;
+        &lt;span class="p"&gt;},&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We have created a resolver for the &lt;code&gt;genre&lt;/code&gt; in our &lt;code&gt;Song&lt;/code&gt; object type. The loader receives two arguments, &lt;code&gt;queries&lt;/code&gt;and &lt;code&gt;context&lt;/code&gt;. &lt;code&gt;queries&lt;/code&gt; is an array of objects in  our case this:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="p"&gt;[&lt;/span&gt;
+    &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="na"&gt;obj&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="na"&gt;songid&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;f4b800b9-5093-49a7-9bc8-37561b2d7041&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;       
+        &lt;span class="na"&gt;songname&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Let Me Down Slowly (feat. Alessia Cara)&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;  
+        &lt;span class="na"&gt;genreid&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="mi"&gt;2&lt;/span&gt;
+      &lt;span class="p"&gt;},&lt;/span&gt;
+      &lt;span class="na"&gt;params&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{}&lt;/span&gt;
+    &lt;span class="p"&gt;},&lt;/span&gt;
+    &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="na"&gt;obj&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="na"&gt;songid&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;8a3416e9-a4ab-468c-b81d-b58c214ed3fd&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;       
+        &lt;span class="na"&gt;songname&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;stupid&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+        &lt;span class="na"&gt;genreid&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="mi"&gt;2&lt;/span&gt;
+      &lt;span class="p"&gt;},&lt;/span&gt;
+      &lt;span class="na"&gt;params&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{}&lt;/span&gt;
+    &lt;span class="p"&gt;},&lt;/span&gt;
+    &lt;span class="c1"&gt;// more objects&lt;/span&gt;
+  &lt;span class="p"&gt;]&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We map this object to obtain all the &lt;code&gt;genreids&lt;/code&gt;, and perform a SQL batch query.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;genreids&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;queries&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;map&lt;/span&gt;&lt;span class="p"&gt;(({&lt;/span&gt; &lt;span class="nx"&gt;obj&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;obj&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;genreid&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;  
+&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;rows&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;client&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;query&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`
+            SELECT genreid, genredescription genre FROM genres WHERE  genres.genreid = ANY ($1)
+            `&lt;/span&gt;&lt;span class="p"&gt;,[&lt;/span&gt;&lt;span class="nx"&gt;genreids&lt;/span&gt;&lt;span class="p"&gt;])&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We then return the result ordered  by the genreids.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt; &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;genreids&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;map&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;genreid&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+               &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;rows&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;filter&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;genreitem&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;genreitem&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;genreid&lt;/span&gt; &lt;span class="o"&gt;===&lt;/span&gt; &lt;span class="nx"&gt;genreid&lt;/span&gt;&lt;span class="p"&gt;)[&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;].&lt;/span&gt;&lt;span class="nx"&gt;genre&lt;/span&gt;
+            &lt;span class="p"&gt;})&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Our resolvers can now query our database efficiently.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#references"&gt;
+  &lt;/a&gt;
+  References
+&lt;/h2&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="https://mercurius.dev/#/"&gt;Mercurius documentation&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+</description>
+      <category>graphql</category>
+      <category>node</category>
+      <category>webdev</category>
+      <category>javascript</category>
+    </item>
+    <item>
       <title>What Are Floating-point Numbers?</title>
       <author>Dave Saunders</author>
       <pubDate>Fri, 30 Apr 2021 18:51:22 +0000</pubDate>
@@ -2456,83 +2922,6 @@ If you store tokens client-side then you probably have a mechanism that periodic
       <category>javascript</category>
       <category>webdev</category>
       <category>frontend</category>
-    </item>
-    <item>
-      <title>Node.js v10 Is Being End-of-Lifed Today, but What Does It All Mean?</title>
-      <author>Alex Lakatos 🥑</author>
-      <pubDate>Fri, 30 Apr 2021 17:07:39 +0000</pubDate>
-      <link>https://dev.to/lakatos88/node-js-10-is-being-end-of-lifed-today-but-what-does-it-all-mean-44ih</link>
-      <guid>https://dev.to/lakatos88/node-js-10-is-being-end-of-lifed-today-but-what-does-it-all-mean-44ih</guid>
-      <description>&lt;p&gt;Any Node.js end-of-life day is a good day, but today especially so! Node.js v10 is being end-of-lifed today, so you can finally support ES6 imports in your JavaScript code examples and libraries by default!&lt;/p&gt;
-
-&lt;p&gt;The latest versions of Node.js v12 (not the earlier versions, mind you) support ES6 modules by default, so there is no need to do the ugly hacks you needed to do before if you wanted to write modern JavaScript.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#before"&gt;
-  &lt;/a&gt;
-  Before
-&lt;/h2&gt;
-
-&lt;p&gt;Before, you had to save your code a &lt;code&gt;.mjs&lt;/code&gt; instead of &lt;code&gt;js&lt;/code&gt;, and then run &lt;code&gt;node&lt;/code&gt; with the &lt;code&gt;--experimental-modules&lt;/code&gt; flag. Which most Node.js runtimes online were very slow to adopt.&lt;/p&gt;
-
-&lt;p&gt;&lt;code&gt;$ node --experimental-modules index.mjs&lt;/code&gt;&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#after"&gt;
-  &lt;/a&gt;
-  After
-&lt;/h2&gt;
-
-&lt;p&gt;The latest versions of Node.js v12+ support this out of the box, so there is no need to run with a flag. And most Node.js runtimes update to the latest Maintenance release, so they support it as well.&lt;/p&gt;
-
-&lt;p&gt;If you want to run on your own hosted environment now you can either:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;save the file with a &lt;code&gt;.mjs&lt;/code&gt; extension, and run it regularly with &lt;code&gt;node index.mjs&lt;/code&gt;
-&lt;/li&gt;
-&lt;li&gt;save the file with a regular &lt;code&gt;.js&lt;/code&gt; extension, add &lt;code&gt;type: module&lt;/code&gt; to your &lt;code&gt;package.json&lt;/code&gt; file, and then run the file regularly with &lt;code&gt;node index.js&lt;/code&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h2&gt;
-  &lt;a href="#changing-old-code"&gt;
-  &lt;/a&gt;
-  Changing Old Code
-&lt;/h2&gt;
-
-&lt;p&gt;If you're migrating from the old &lt;code&gt;require&lt;/code&gt; to the more modern &lt;code&gt;import&lt;/code&gt;, there are a couple of things you'll need to do to your files:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;change &lt;code&gt;module.exports = avocados&lt;/code&gt; into &lt;code&gt;export default avocados&lt;/code&gt;
-&lt;/li&gt;
-&lt;li&gt;change &lt;code&gt;const avocados = require('avocados')&lt;/code&gt; into &lt;code&gt;import avocados from 'avocados'&lt;/code&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;Most IDEs account for this and help you change it. Like &lt;a href="https://umaar.com/dev-tips/222-vs-code-convert-es-import/"&gt;VS Code&lt;/a&gt;.&lt;/p&gt;
-
-&lt;p&gt;If you want to see it in action on a slightly bigger project, I've switched over the Fidel sample application using things like express, dotenv and axios a little while back, &lt;a href="https://github.com/FidelLimited/fidel-api-sample-app/commit/300f672b5d119d9d80afe07ac23f67b3bb52f805"&gt;it's all contained in a commit&lt;/a&gt; thought so easy to see the changes.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#wait-what-is-endoflife"&gt;
-  &lt;/a&gt;
-  Wait, What is End-of-Life?
-&lt;/h2&gt;
-
-&lt;p&gt;"End-of-life" or EOL is a term used by older, more enterprise-focused companies, to let everyone know that they're limiting support or outright not supporting a certain version of their product anymore. You could say the OpenJS Foundation has "pulled the plug" on Node.js v10. 😅&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#got-love"&gt;
-  &lt;/a&gt;
-  Got Love?
-&lt;/h2&gt;
-
-&lt;p&gt;If you've loved the pun at the end, or if you just found this mildly useful, please consider &lt;a href="https://twitter.com/lakatos88"&gt;following me on Twitter&lt;/a&gt;. I'd be storked. 😅&lt;/p&gt;
-
-</description>
-      <category>javascript</category>
-      <category>node</category>
-      <category>beginners</category>
     </item>
   </channel>
 </rss>
