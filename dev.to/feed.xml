@@ -239,6 +239,148 @@ Except with dev.to. Social media isn't really my thing, but I try to stay update
 </description>
     </item>
     <item>
+      <title>Mitigation of SSRF Vulnerabilities</title>
+      <author>Anvil Engineering</author>
+      <pubDate>Tue, 04 May 2021 18:33:12 +0000</pubDate>
+      <link>https://dev.to/useanvil/mitigation-of-ssrf-vulnerabilities-15gb</link>
+      <guid>https://dev.to/useanvil/mitigation-of-ssrf-vulnerabilities-15gb</guid>
+      <description>&lt;p&gt;Businesses rely on &lt;a href="//www.useanvil.com/developers"&gt;Anvil&lt;/a&gt; for many of their most critical processes. Being in that critical path for business software, reliability and—more importantly—security is something we take very seriously at Anvil. As part of our security practices, we undergo regular auditing, pen-testing and certification to make sure we're as good as we can be on the security front. This dedication to security has allowed us to achieve our &lt;code&gt;SOC 2 Type 2&lt;/code&gt; compliance. Our SOC 2 designation recognizes the effort and policies that we take to actively guard against attacks and vulnerabilities.  In this post, I'm going to dive into one of those vulnerabilities, the Server Side Request Forgery (&lt;a href="https://owasp.org/www-community/attacks/Server_Side_Request_Forgery"&gt;SSRF&lt;/a&gt;) attack, and discuss the steps we have taken to protect ourselves and our customers.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#what-is-ssrf"&gt;
+  &lt;/a&gt;
+  What is SSRF?
+&lt;/h2&gt;
+
+&lt;p&gt;Before we dive deeper, let’s briefly review what an SSRF attack is. Here's a good description I found:&lt;/p&gt;
+
+&lt;p&gt;&lt;em&gt;"Server-side request forgery is a web security vulnerability that allows an attacker to induce the server-side application to make HTTP requests to an arbitrary domain of the attacker's choosing. In typical SSRF examples, the attacker might cause the server to make a connection back to itself, or to other web-based services within the organization's infrastructure, or to external third-party systems."&lt;/em&gt; &lt;sup id="fnref1"&gt;&lt;a href="#fn1"&gt;1&lt;/a&gt;&lt;/sup&gt;&lt;/p&gt;
+
+&lt;p&gt;Why would this be bad? Let’s imagine a website that performs SEO analysis of web pages for its users. This website accepts a URL from Userland. A server visits that URL and then analyzes the results and displays them back to the user. Now, imagine if that URL was something like &lt;code&gt;"http://localhost/insecure-admin-page.php"&lt;/code&gt;, or &lt;code&gt;"file:///etc/passwd"&lt;/code&gt;. You can see how you might quickly become &lt;a href="https://www.urbandictionary.com/define.php?term=pwned"&gt;&lt;code&gt;pwned&lt;/code&gt;&lt;/a&gt;.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#anvils-exposure"&gt;
+  &lt;/a&gt;
+  Anvil's Exposure
+&lt;/h2&gt;
+
+&lt;p&gt;We have several parts of the system where it's necessary for us to ingest URLs from Userland. We couldn't just stop accepting this input, so we had to take some steps to protect ourselves from SSRF.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;&lt;em&gt;Disclaimer: An SSRF vulnerability is potentially quite serious for any application. In order to prevent leaking any useful information about our system in this post, and to prevent readers from thinking about a "copy pasta" from this post as a way to close their SSRF exposure, I will only provide very loose pseudo code examples, and not reference any particular libraries, packages or frameworks. This post is only meant to be an interesting resource, so please do your own homework before implementing any of the things discussed here.&lt;/em&gt;&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;In all of our APIs, we enforce a JSON schema validation of all accepted data. In addition to checking the basic shape and types of data in a given payload, most tools will allow you to perform additional validation on the data. Here's a basic validation schema example to consider:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// A payload validation schema&lt;/span&gt;
+&lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="nl"&gt;urlFromUser&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="na"&gt;type&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;string&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="na"&gt;format&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;validUrl&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;In this example, &lt;code&gt;validUrl&lt;/code&gt; is a reference to a custom format that we registered with the validator. As you might have guessed, the validator will check that the value provided to &lt;code&gt;urlFromUser&lt;/code&gt; is a &lt;code&gt;string&lt;/code&gt;, and then pass that value to our &lt;code&gt;validUrl&lt;/code&gt; function, which will return a boolean indicating if the value is acceptable or not. Here's what the &lt;code&gt;validUrl&lt;/code&gt; function might look like:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;validUrl&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;url&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;url&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; &lt;span class="sr"&gt;/^&lt;/span&gt;&lt;span class="se"&gt;(&lt;/span&gt;&lt;span class="sr"&gt;http|https&lt;/span&gt;&lt;span class="se"&gt;)&lt;/span&gt;&lt;span class="sr"&gt;:&lt;/span&gt;&lt;span class="se"&gt;\/\/&lt;/span&gt;&lt;span class="sr"&gt;/&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;test&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;url&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This is a nice start, but it's pretty naive. While it makes sure that the URL is in fact an HTTP(S) resource, it doesn't check to see if that resource is &lt;code&gt;"localhost"&lt;/code&gt;, &lt;code&gt;"127.0.0.1"&lt;/code&gt;, or any other IPs that are considered "private". We can do better.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#mitigation"&gt;
+  &lt;/a&gt;
+  Mitigation
+&lt;/h1&gt;
+
+&lt;p&gt;So that we didn't have to become experts in private IPs, we enlisted the help of a library that handles all of that for us. &lt;/p&gt;
+
+&lt;p&gt;Our validation function might now look like this:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;validUrl&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;url&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;url&lt;/span&gt;
+    &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; &lt;span class="sr"&gt;/^&lt;/span&gt;&lt;span class="se"&gt;(&lt;/span&gt;&lt;span class="sr"&gt;http|https&lt;/span&gt;&lt;span class="se"&gt;)&lt;/span&gt;&lt;span class="sr"&gt;:&lt;/span&gt;&lt;span class="se"&gt;\/\/&lt;/span&gt;&lt;span class="sr"&gt;/&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;test&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;url&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; &lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="nx"&gt;someIpChecker&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;isPrivate&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;url&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Nice. Now a hacker can't provide us with something like &lt;code&gt;"http://127.0.0.1/admin.php"&lt;/code&gt; or we will reject the input.&lt;/p&gt;
+
+&lt;p&gt;But wait a minute. What if the hacker owns the domain &lt;code&gt;not-evil-i-swear.com&lt;/code&gt;, and has their DNS record set to resolve to &lt;code&gt;"127.0.0.1"&lt;/code&gt;? With the above validation, you would be &lt;code&gt;pwned&lt;/code&gt;. This means that in order to truly know if a URL is trying to access a private IP, you have to check with DNS first to see what it resolves to.&lt;/p&gt;
+
+&lt;p&gt;The validation might then look something like this:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;validUrl&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;url&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;url&lt;/span&gt;
+    &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; &lt;span class="sr"&gt;/^&lt;/span&gt;&lt;span class="se"&gt;(&lt;/span&gt;&lt;span class="sr"&gt;http|https&lt;/span&gt;&lt;span class="se"&gt;)&lt;/span&gt;&lt;span class="sr"&gt;:&lt;/span&gt;&lt;span class="se"&gt;\/\/&lt;/span&gt;&lt;span class="sr"&gt;/&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;test&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;url&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; &lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="nx"&gt;someIpChecker&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;isPrivate&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;url&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; &lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="nx"&gt;someIpChecker&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;isPrivate&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;dnsLookup&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;url&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Nice, nice. This feels pretty solid and smart.&lt;/p&gt;
+
+&lt;p&gt;But wait another minute. What if the provided URL is validated on its way &lt;strong&gt;&lt;em&gt;into&lt;/em&gt;&lt;/strong&gt; the system, but we don't use it right away - or we will be using it repeatedly in the &lt;strong&gt;&lt;em&gt;future&lt;/em&gt;&lt;/strong&gt;? What's to stop a hacker from changing the DNS entry from something innocuous to &lt;code&gt;"127.0.0.1"&lt;/code&gt; after we've run our checks and have decided to let it into the system? Answer: &lt;code&gt;pwned&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;To prevent this scenario, we had to dig into the library we use to perform our web requests with these URLs. Fortunately, this library has a hook where we can intercept the moment &lt;em&gt;after&lt;/em&gt; it's resolved the DNS entry for a URL, but &lt;em&gt;before&lt;/em&gt; it's actually gone out and begun connecting to it. In this hook, we check the resolved host to see if it's private, and if so, we will block the request.&lt;/p&gt;
+
+&lt;p&gt;Nice, nice, nice.&lt;/p&gt;
+
+&lt;p&gt;But wait yet another minute. What if that URL resolves to a non-private IP, so we make the initial request, but then that request results in a redirect to another IP (or &lt;code&gt;host&lt;/code&gt; that resolves to an IP) that is private? If your web request library doesn't trigger your protection code in that case, too: you are &lt;code&gt;pwned&lt;/code&gt;. Better make sure your web request library handles this.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#summary"&gt;
+  &lt;/a&gt;
+  Summary
+&lt;/h2&gt;
+
+&lt;p&gt;Any time a system accepts input from Userland it is putting itself at risk from potential bad actors. There are myriad examples of this: &lt;a href="https://owasp.org/www-community/attacks/SQL_Injection"&gt;SQL Injection&lt;/a&gt;, &lt;a href="https://owasp.org/www-community/attacks/xss/"&gt;XXS Injection&lt;/a&gt;, and &lt;a href="https://owasp.org/www-community/attacks/Server_Side_Request_Forgery"&gt;SSRF&lt;/a&gt; to name just a few. The tough part is that in order for your website or application to do anything interesting, oftentimes you need to accept such input. It's a calculated risk that can be mitigated to the point of acceptability by using safeguards and steps along the way. Hopefully this post provides some useful information for preventing your systems from SSRF vunerabilities!&lt;/p&gt;
+
+&lt;p&gt;If you have questions, please do not hesitate to contact us at:&lt;br&gt;
+&lt;a href="//mailto:developers@useanvil.com"&gt;developers@useanvil.com&lt;/a&gt;&lt;/p&gt;
+
+
+
+
+&lt;ol&gt;
+
+&lt;li id="fn1"&gt;
+&lt;p&gt;&lt;a href="https://portswigger.net/web-security/ssrf"&gt;https://portswigger.net/web-security/ssrf&lt;/a&gt; &lt;a href="#fnref1"&gt;↩&lt;/a&gt;&lt;/p&gt;
+&lt;/li&gt;
+
+&lt;/ol&gt;
+
+</description>
+      <category>webdev</category>
+      <category>security</category>
+      <category>javascript</category>
+    </item>
+    <item>
       <title>The 7 Most Popular DEV Posts from the Past Week</title>
       <author>Gracie Gregory (she/her)</author>
       <pubDate>Tue, 04 May 2021 18:06:04 +0000</pubDate>
@@ -468,6 +610,25 @@ Except with dev.to. Social media isn't really my thing, but I try to stay update
 
 </description>
       <category>icymi</category>
+    </item>
+    <item>
+      <title>CPANdeps end of life</title>
+      <author>David Cantrell</author>
+      <pubDate>Tue, 04 May 2021 17:53:56 +0000</pubDate>
+      <link>https://dev.to/drhyde/cpandeps-end-of-life-1pdf</link>
+      <guid>https://dev.to/drhyde/cpandeps-end-of-life-1pdf</guid>
+      <description>&lt;p&gt;Back in 2007 I wrote CPANdeps, a web site which analysed dependencies between distributions on the CPAN, and displayed them along with their &lt;a href="http://www.cpantesters.org/"&gt;CPAN testers&lt;/a&gt; results.&lt;/p&gt;
+
+&lt;p&gt;I have decided to retire it, for several reasons. First, &lt;a href="https://metacpan.org/"&gt;metacpan&lt;/a&gt; has sprouted tentacles to do the dependency analysis. Second, the code is a mess and it needs quite a bit of work to cope with the current size of the CPAN-testers database. But third, and most importantly, the employer that I left over a year ago are withdrawing the free hosting.&lt;/p&gt;
+
+&lt;p&gt;I've not actually &lt;em&gt;used&lt;/em&gt; the site myself for a while, preferring the &lt;a href="https://metacpan.org/pod/distribution/CPAN-FindDependencies/bin/cpandeps"&gt;command line version&lt;/a&gt;. That, like metacpan, doesn't include test results, but I've found that I generally don't care much. Nigh on everything Just Works on every platform I care about.&lt;/p&gt;
+
+&lt;p&gt;It's going away on or shortly after the 17th of May. If anyone would like to take it over and host it themselves please email me.&lt;/p&gt;
+
+</description>
+      <category>perl</category>
+      <category>cpan</category>
+      <category>dependencies</category>
     </item>
     <item>
       <title>So Where Do I Deploy My App ??</title>
@@ -1364,1630 +1525,6 @@ Thanks for reading, and see you later!&lt;/p&gt;
       <category>notion</category>
       <category>actions</category>
       <category>automation</category>
-    </item>
-    <item>
-      <title>Deploy a Cloud Native Application to Code Engine in 5 Easy Steps!</title>
-      <author>Jenna Ritten</author>
-      <pubDate>Tue, 04 May 2021 16:39:31 +0000</pubDate>
-      <link>https://dev.to/ibmdeveloper/deploy-a-cloud-native-application-to-code-engine-in-5-easy-steps-4bcg</link>
-      <guid>https://dev.to/ibmdeveloper/deploy-a-cloud-native-application-to-code-engine-in-5-easy-steps-4bcg</guid>
-      <description>&lt;h3&gt;
-  &lt;a href="#hello-ibm-developers-welcome-to-tutorial-tuesdays"&gt;
-  &lt;/a&gt;
-  Hello, IBM Developers! Welcome to Tutorial Tuesdays!
-&lt;/h3&gt;
-
-&lt;p&gt;When I was first learning how to code, Tuesdays became my favorite day for blocking out time to work through a new tutorial. I will be posting quick and easy tutorials occasionally on Tuesdays to help all of you level up your Dev skills! &lt;/p&gt;
-
-&lt;p&gt;For purposes of this Tutorial Tuesday, I'm going to show you how to deploy a Cloud native application to &lt;a href="https://www.ibm.com/cloud/code-engine"&gt;IBM Cloud Code Engine&lt;/a&gt; from both a container image and using Code Engine's source-to-image, with the IBM CODAIT team's &lt;a href="https://github.com/IBM/MAX-Object-Detector"&gt;Max Object Detector&lt;/a&gt; in 5 easy steps! &lt;/p&gt;
-
-&lt;p&gt;Once you get your application deployed successfully, you'll be able to start using the object detection model to detect object from the images you upload or from your web cam! &lt;/p&gt;
-
-&lt;p&gt;First, a little about &lt;a href="https://github.com/IBM/CodeEngine"&gt;IBM Cloud Code Engine&lt;/a&gt;. Code Engine let's you focus on writing code instead of worrying about managing infrastructure. Code Engine is a fully managed, serverless platform that allows you to bring your container images, batch jobs, or source code, and let Code Engine manage and secure the underlying infrastructure for you. No need to size, deploy, or scale container clusters yourself! No networking skills required, either.&lt;/p&gt;
-
-&lt;p&gt;With &lt;a href="https://www.ibm.com/cloud/code-engine"&gt;IBM Cloud Code Engine&lt;/a&gt; You Can:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Create container images from source code using Code Engine's source-to-image&lt;/li&gt;
-&lt;li&gt;Store source code in repositories&lt;/li&gt;
-&lt;li&gt;Push images to registries &lt;/li&gt;
-&lt;li&gt;Integrate into IBM Cloud and all IBM Cloud services&lt;/li&gt;
-&lt;li&gt;Handle all cluster provisioning, configuring, scaling, and managing servers &lt;/li&gt;
-&lt;li&gt;Auto scale workloads up/down or to zero when no requests are active&lt;/li&gt;
-&lt;li&gt;Built on OS Kubernetes, Knative, Istio, and Tekton, keeping apps and jobs portable&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;I'm going to walk you through how to deploy an application, any application, with &lt;a href="https://github.com/IBM/CodeEngine"&gt;IBM Cloud Code Engine&lt;/a&gt;. Do you already have your container images? Great! Don't know what a container  image is? No worries! I'll show you how to deploy your application using both an existing container image AND directly from your source code in your project repo!&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#lets-build-something"&gt;
-  &lt;/a&gt;
-  Let's Build Something!
-&lt;/h1&gt;
-
-&lt;h3&gt;
-  &lt;a href="#steps"&gt;
-  &lt;/a&gt;
-  Steps
-&lt;/h3&gt;
-
-&lt;ol&gt;
-&lt;li&gt;Sign Up for a Free &lt;a href="https://ibm.biz/cloud-sign-up"&gt;IBM Cloud Account&lt;/a&gt;
-&lt;/li&gt;
-&lt;li&gt;Install the &lt;a href="https://cloud.ibm.com/docs/cli?topic=cli-getting-started"&gt;IBM Cloud Developer Tools CLI&lt;/a&gt; (command line interface, the commands you type into your Terminal) &lt;/li&gt;
-&lt;li&gt;Install the &lt;a href="https://cloud.ibm.com/docs/codeengine?topic=codeengine-install-cli"&gt;IBM Cloud Code Engine Plugin&lt;/a&gt; &lt;/li&gt;
-&lt;li&gt;Login to Your IBM Cloud Account via the CLI&lt;/li&gt;
-&lt;li&gt;Deploy to Code Engine 2 Ways (with a Container Image OR with Source Code)&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;h2&gt;
-  &lt;a href="#setup-amp-installation"&gt;
-  &lt;/a&gt;
-  Setup &amp;amp; Installation
-&lt;/h2&gt;
-
-&lt;h3&gt;
-  &lt;a href="#2-install-the-ibm-cloud-developer-tools-cli"&gt;
-  &lt;/a&gt;
-  2. Install the IBM Cloud Developer Tools CLI
-&lt;/h3&gt;
-
-&lt;ul&gt;
-&lt;li&gt;For Mac and Linux, run the following command in Terminal:
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;curl -sL https://raw.githubusercontent.com/IBM-Cloud/ibm-cloud-developer-tools/master/linux-installer/idt-installer | bash
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;ul&gt;
-&lt;li&gt;Verify the IBM Cloud Developer Tools CLI is installed
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;ibmcloud dev help
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;ul&gt;
-&lt;li&gt;For Windows 10 Pro, run the following command as an administrator in Powershell:
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;[Net.ServicePointManager]::SecurityProtocol = "Tls12, Tls11, Tls, Ssl3"; iex(New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/IBM-Cloud/ibm-cloud-developer-tools/master/windows-installer/idt-win-installer.ps1')
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;&lt;strong&gt;Note For Windows Users: If you encounter a Git error similar to the one below, you will need to install Git in the correct path.&lt;/strong&gt;&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;bash: git: command not found
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;&lt;strong&gt;Follow the Windows Guide &lt;a href="https://www.jcchouinard.com/install-git"&gt;HERE&lt;/a&gt;&lt;/strong&gt;&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#3-install-the-ibm-cloud-code-engine-plugin"&gt;
-  &lt;/a&gt;
-  3. Install the IBM Cloud Code Engine Plugin
-&lt;/h3&gt;
-
-&lt;ul&gt;
-&lt;li&gt;For Mac, Linux, and Windows 10 Pro, run the following command:
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;ibmcloud plugin install code-engine
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;ul&gt;
-&lt;li&gt;Verify the IBM Cloud Code Engine Plugin is installed
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;ibmcloud ce help
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h3&gt;
-  &lt;a href="#4-login-to-your-ibm-cloud-account-via-the-cli"&gt;
-  &lt;/a&gt;
-  4. Login to Your IBM Cloud Account via the CLI
-&lt;/h3&gt;
-
-&lt;ul&gt;
-&lt;li&gt;For Mac, Linux, and Windows 10 Pro, run the following command:
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;ibmcloud login
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;ul&gt;
-&lt;li&gt;&lt;p&gt;Enter email and password&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;View available resource groups&lt;br&gt;
-&lt;/p&gt;&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;ibmcloud resource groups
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;ul&gt;
-&lt;li&gt;Assign a target resource group (default to your "Default")
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;ibmcloud target -g Default
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#5-deploy-to-code-engine-2-ways"&gt;
-  &lt;/a&gt;
-  5. Deploy to Code Engine 2 Ways
-&lt;/h2&gt;
-
-&lt;h3&gt;
-  &lt;a href="#deploy-to-code-engine-with-a-container-image"&gt;
-  &lt;/a&gt;
-  Deploy to Code Engine with a Container Image
-&lt;/h3&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Create a new Code Engine project and give it a name
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;ibmcloud ce project create --name PROJECT_NAME
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;ibmcloud ce project create --name max-object-detector
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;ul&gt;
-&lt;li&gt;Create a new app from a Container Image
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;ibmcloud ce application create --name APP_NAME --image 
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;&lt;strong&gt;(Optional)&lt;/strong&gt; If you need to change the default port, run the following command:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;ibmcloud ce application create --name APP_NAME --image IMAGE_LOCATION --port PORT_NUM
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;&lt;strong&gt;Note: IMAGE_LOCATION is not the URL where the app is deployed. The port defaults to ‘8080’ unless specified.&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;Run the following command:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;ibmcloud ce application create --name max-object-detector --image quay.io/codait/max-object-detector --port 5000
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;ul&gt;
-&lt;li&gt;Check the application status
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;ibmcloud ce application get -n APP_NAME 
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;ibmcloud ce application get -n max-object-detector
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;ul&gt;
-&lt;li&gt;Get the app URL
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;ibmcloud ce application get -n APP_NAME -output url
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;ibmcloud ce application get -n max-object-detector -output url
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;ul&gt;
-&lt;li&gt;View the live application at the URL in your browser
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;URL + /index.html
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;https://ibm.biz/max-obj-det
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h3&gt;
-  &lt;a href="#deploy-to-code-engine-with-source-code"&gt;
-  &lt;/a&gt;
-  Deploy to Code Engine with Source Code
-&lt;/h3&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Install the IBM Cloud Container Registry Plugin
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;ibmcloud plugin install container-registry -r 'IBM Cloud'
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;ul&gt;
-&lt;li&gt;Create an IBM Cloud API Key
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;ibmcloud iam api-key-create cliapikey -d "My CLI APIkey" --file key_file
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;ul&gt;
-&lt;li&gt;Create Container Registry secret and add access to Code Engine
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;ibmcloud ce registry create --name myregistry --server us.icr.io --username iamapikey --password API_KEY
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;ul&gt;
-&lt;li&gt;Create a new Container Regisry namespace
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;ibmcloud cr namespace-add MY_NAMESPACE
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;ul&gt;
-&lt;li&gt;Verify your namespace has been created
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;ibmcloud cr namespace-list -v
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;ul&gt;
-&lt;li&gt;Create a new app from Source Code
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt; ibmcloud ce build create --name BUILD_NAME --image IMAGE_REF --source SOURCE --registry-secret REGISTRY_REF [--commit COMMIT] [--context-dir CONTEXT_DIR] [--dockerfile DOCKERFILE] [--git-repo-secret GIT_REPO_SECRET] [--size SIZE] [--strategy STRATEGY] [--timeout TIMEOUT]
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;ibmcloud ce build create --name max-obj-det-build --image us.icr.io/MY_NAMESPACE/max-obj-det --registry-secret myregistry --source https://github.com/IBM/MAX-Object-Detector --commit master --strategy dockerfile --size medium
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;ul&gt;
-&lt;li&gt;Check the status of your build
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;ibmcloud ce build get --name BUILD_NAME
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;ibmcloud ce build get --name max-obj-det-build
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;ul&gt;
-&lt;li&gt;Run the image build
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;ibmcloud ce buildrun submit --build BUILD_NAME --name BUILD_NAME-run
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;ibmcloud ce buildrun submit --build max-obj-det-build --name max-obj-det-build-run
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;ul&gt;
-&lt;li&gt;Check the status of the build
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;ibmcloud ce buildrun get --name BUILD_NAME-run
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;ibmcloud ce buildrun get --name max-obj-det-build-run
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;ul&gt;
-&lt;li&gt;Verify that your image is in your Container Registry
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;ibmcloud cr image-list
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;ul&gt;
-&lt;li&gt;Deploy the app with the Code Engine CLI
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;ibmcloud ce application create --name APP_NAME --image IMAGE_REF
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;ibmcloud ce application create --name max-obj-det --image us.icr.io/MY_NAMESPACE/max-obj-det
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;ul&gt;
-&lt;li&gt;Get the app URL
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;ibmcloud ce application get -n APP_NAME -output url
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;ibmcloud ce application get -n max-object-detector -output url
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;ul&gt;
-&lt;li&gt;View the live application at the URL in your browser
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;URL + /index.html
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h1&gt;
-  &lt;a href="#play-with-the-max-object-detector"&gt;
-  &lt;/a&gt;
-  Play with the &lt;a href="https://ibm.biz/max-obj-det"&gt;Max Object Detector&lt;/a&gt;!
-&lt;/h1&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Upload an Image&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--AhsVD6yQ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/76ull2hp6txyb5x1t2up.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--AhsVD6yQ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/76ull2hp6txyb5x1t2up.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;OR&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Use Your Web Cam&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--wVNecv1z--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/eb08zeiw7iuvbcvit3h4.gif" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--wVNecv1z--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/eb08zeiw7iuvbcvit3h4.gif" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
-
-</description>
-    </item>
-    <item>
-      <title>Join Us For the First DEV Community Bug Smash!</title>
-      <author>Christina Gorton</author>
-      <pubDate>Tue, 04 May 2021 16:38:56 +0000</pubDate>
-      <link>https://dev.to/devteam/join-us-for-the-first-dev-community-bug-smash-3plm</link>
-      <guid>https://dev.to/devteam/join-us-for-the-first-dev-community-bug-smash-3plm</guid>
-      <description>&lt;h3&gt;
-  &lt;a href="#team-forem-is-excited-to-share-the-news-of-our-first-community-bug-smash"&gt;
-  &lt;/a&gt;
-  Team Forem is excited to share the news of our first community Bug Smash!
-&lt;/h3&gt;
-
-&lt;p&gt;Join us for this DEV-wide collaboration that’s all about improving the Forem repository, encouraging more contributions from the community, and having fun in the process. 🐛&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#details"&gt;
-  &lt;/a&gt;
-  Details
-&lt;/h3&gt;
-
-&lt;blockquote&gt;
-&lt;h4&gt;
-  &lt;a href="#what-is-it"&gt;
-  &lt;/a&gt;
-  What is it?
-&lt;/h4&gt;
-
-&lt;p&gt;The DEV Community Bug Smash challenges members of our community to resolve one (or several!) of our predetermined bugs in the Forem codebase &lt;a href="https://github.com/forem/forem/labels/Bug%20Smash"&gt;here&lt;/a&gt; in exchange for open source community involvement, a limited-edition profile badge for eligible contributions, and a sticker pack!&lt;/p&gt;
-&lt;h4&gt;
-  &lt;a href="#when-is-bug-smash"&gt;
-  &lt;/a&gt;
-  When is Bug Smash?
-&lt;/h4&gt;
-
-&lt;p&gt;Our first Bug Smash will be running today, May 4 through May 28, 2021. We plan to assess the overall experience at the end of the month with the intention of doing this again in the future or possibly extending the event immediately.&lt;/p&gt;
-&lt;h4&gt;
-  &lt;a href="#who-can-participate"&gt;
-  &lt;/a&gt;
-  Who can participate?
-&lt;/h4&gt;
-
-&lt;p&gt;Bug Smash is open to anyone in our community who would like to participate. We added the general &lt;code&gt;bug smash&lt;/code&gt; label to all eligible issues, however, &lt;strong&gt;we’ve broken a handful of them into two different categories below to help you select the bug that makes the most sense for your experience level.&lt;/strong&gt;&lt;/p&gt;
-&lt;h4&gt;
-  &lt;a href="#where-will-i-be-smashing-bugs"&gt;
-  &lt;/a&gt;
-  Where will I be smashing bugs?
-&lt;/h4&gt;
-
-&lt;p&gt;&lt;strong&gt;In the Forem repository!&lt;/strong&gt; &lt;br&gt;
-For Bug Smash, you’ll be tackling issues labeled with (you guessed it,) &lt;code&gt;bug smash&lt;/code&gt; in our repo (click &lt;a href="https://github.com/forem/forem/labels/Bug%20Smash"&gt;here&lt;/a&gt; to see the full list). We’ve captured a handful of these issues below under “Examples of Eligible Bugs”. Any issue not labeled with &lt;code&gt;bug smash&lt;/code&gt; is &lt;strong&gt;not&lt;/strong&gt; part of the DEV Community Bug Smash. &lt;/p&gt;
-&lt;h4&gt;
-  &lt;a href="#why-should-i-participate"&gt;
-  &lt;/a&gt;
-  Why should I participate?
-&lt;/h4&gt;
-
-&lt;p&gt;So many reasons! The DEV Community Bug Smash is a great way for you to get more practice with tackling issues in GitHub if you’re a newer developer. If you have more experience, this initiative is a fantastic opportunity to help a community you know and love (DEV!) while lending a hand to the Forem engineering team on issues that they might not have the capacity to work on at the moment. &lt;/p&gt;
-
-&lt;p&gt;The best part? We’ll be awarding limited-edition DEV profile badges and a sticker pack to anyone who submits a &lt;code&gt;bug smash&lt;/code&gt; PR that gets approved. &lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;TL;DR: Greener GitHub contribution history, community camaraderie, and cool rewards&lt;/strong&gt; 😎&lt;/p&gt;
-&lt;/blockquote&gt;
-
-
-
-
-&lt;h2&gt;
-  &lt;a href="#how-to-participate-stepbystep"&gt;
-  &lt;/a&gt;
-  How to Participate, Step-by-Step
-&lt;/h2&gt;
-
-&lt;ol&gt;
-&lt;li&gt;Please read our &lt;a href="https://docs.forem.com/contributing/forem/"&gt;Contributing to Forem&lt;/a&gt; guide for contribution guidelines, rules, and etiquette related to working in our codebase. Also, please revisit our &lt;a href="https://dev.to/code-of-conduct"&gt;code of conduct&lt;/a&gt; for overall expectations on how to treat one another.&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;Claim an &lt;a href="https://github.com/forem/forem/labels/Bug%20Smash"&gt;issue labeled &lt;code&gt;bug smash&lt;/code&gt;&lt;/a&gt;, based on your experience level by commenting on it.&lt;/strong&gt; &lt;/li&gt;
-&lt;li&gt;You will be notified by our team with a confirmation if you’ve been assigned to that issue. If the issue is already taken, we reply with a suggestion of a different one for you to tackle&lt;/li&gt;
-&lt;li&gt;Once you are assigned a bug, create a pull request (PR) (don’t forget to link to the original issue!)&lt;/li&gt;
-&lt;li&gt;After you’ve submitted a pull request (PR) for your assigned bug, you’ll be notified by our team if it was approved. Once it’s approved (🎉) please use &lt;a href="//dev.to/new/devbugsmash"&gt;this template&lt;/a&gt; to write a reflection post about the bug you smashed, right here on DEV! &lt;/li&gt;
-&lt;li&gt;Find another post on DEV labeled &lt;a href="//dev.to/t/devbugsmash"&gt;devbugsmash&lt;/a&gt; and leave a comment or a question! Keep it encouraging, kind, and collaborative.&lt;/li&gt;
-&lt;li&gt;After you’ve completed steps 1-6, we’ll reach out with details on getting your sticker pack. We will also award badges at this time.&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;p&gt;&lt;em&gt;Note: We will only be awarding one badge and one sticker pack per participant, regardless of how many bugs you smash.&lt;/em&gt;&lt;/p&gt;
-
-&lt;p&gt;Thanks in advance for your patience following the publication of your Bug Smash post on DEV. The Forem engineering team is small but mighty and it will take focused time on their behalf to review Bug Smash PRs.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#examples-of-eligible-bugs"&gt;
-  &lt;/a&gt;
-  &lt;strong&gt;&lt;em&gt;Examples of Eligible Bugs&lt;/em&gt;&lt;/strong&gt;
-&lt;/h2&gt;
-
-&lt;p&gt;Here is an incomplete preview of the bugs you can smash! &lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#good-first-issue-bugs"&gt;
-  &lt;/a&gt;
-  &lt;strong&gt;Good first issue bugs&lt;/strong&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;em&gt;Here are a few issues that are perfect for early-career developers and people learning to code.&lt;/em&gt; &lt;/p&gt;
-
-
-&lt;div class="ltag_github-liquid-tag"&gt;
-  &lt;h1&gt;
-    &lt;a href="https://github.com/forem/forem/issues/1228"&gt;
-      &lt;img class="github-logo" alt="GitHub logo" src="https://res.cloudinary.com/practicaldev/image/fetch/s--i3JOwpme--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/github-logo-ba8488d21cd8ee1fee097b8410db9deaa41d0ca30b004c0c63de0a479114156f.svg"&gt;
-      &lt;span class="issue-title"&gt;
-        HTML is stripped from runkit source
-      &lt;/span&gt;
-      &lt;span class="issue-number"&gt;#1228&lt;/span&gt;
-    &lt;/a&gt;
-  &lt;/h1&gt;
-  &lt;div class="github-thread"&gt;
-    &lt;div class="timeline-comment-header"&gt;
-      &lt;a href="https://github.com/joelnet"&gt;
-        &lt;img class="github-liquid-tag-img" src="https://res.cloudinary.com/practicaldev/image/fetch/s--rRhcm5v0--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://avatars.githubusercontent.com/u/742630%3Fv%3D4" alt="joelnet avatar"&gt;
-      &lt;/a&gt;
-      &lt;div class="timeline-comment-header-text"&gt;
-        &lt;strong&gt;
-          &lt;a href="https://github.com/joelnet"&gt;joelnet&lt;/a&gt;
-        &lt;/strong&gt; posted on &lt;a href="https://github.com/forem/forem/issues/1228"&gt;&lt;time&gt;Nov 30, 2018&lt;/time&gt;&lt;/a&gt;
-      &lt;/div&gt;
-    &lt;/div&gt;
-    &lt;div class="ltag-github-body"&gt;
-      &lt;p&gt;&lt;strong&gt;Describe the bug&lt;/strong&gt;
-HTML is incorrectly stripped from runkit code blocks.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;To Reproduce&lt;/strong&gt;&lt;/p&gt;
-&lt;ol&gt;
-&lt;li&gt;Click &lt;code&gt;WRITE A POST&lt;/code&gt;.&lt;/li&gt;
-&lt;li&gt;Paste into body:&lt;/li&gt;
-&lt;/ol&gt;
-&lt;div class="highlight highlight-text-html-basic js-code-highlight"&gt;
-&lt;pre&gt;{% runkit %}
-const { ValueViewerSymbol } = require("@runkit/value-viewer");
-
-const myCustomObject = {
-    [ValueViewerSymbol]: {
-        title: "My First Viewer",
-        HTML: "&lt;span class="pl-kos"&gt;&amp;lt;&lt;/span&gt;&lt;span class="pl-ent"&gt;marquee&lt;/span&gt;&lt;span class="pl-kos"&gt;&amp;gt;&lt;/span&gt;🍔Hello, World!🍔&lt;span class="pl-kos"&gt;&amp;lt;/&lt;/span&gt;&lt;span class="pl-ent"&gt;marquee&lt;/span&gt;&lt;span class="pl-kos"&gt;&amp;gt;&lt;/span&gt;"
-    }
-};
-{% endrunkit %} &lt;/pre&gt;
-
-&lt;/div&gt;
-&lt;ol start="3"&gt;
-&lt;li&gt;Click &lt;code&gt;SAVE POST&lt;/code&gt;
-&lt;/li&gt;
-&lt;li&gt;See code in runkit (incorrectly) translated into:&lt;/li&gt;
-&lt;/ol&gt;
-&lt;div class="highlight highlight-text-html-basic js-code-highlight"&gt;
-&lt;pre&gt;const { ValueViewerSymbol } = require("@runkit/value-viewer");
-
-const myCustomObject = {
-    [ValueViewerSymbol]: {
-        title: "My First Viewer",
-        HTML: "🍔Hello, World!🍔"
-    }
-};&lt;/pre&gt;
-
-&lt;/div&gt;
-&lt;p&gt;&lt;strong&gt;Expected behavior&lt;/strong&gt;
-Code was expected to keep &lt;code&gt;&amp;lt;marquee&amp;gt;&lt;/code&gt; tags.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Additional Info&lt;/strong&gt;
-I can trick the parser by encoding my HTML.&lt;/p&gt;
-&lt;p&gt;This works:&lt;/p&gt;
-&lt;div class="highlight highlight-text-html-basic js-code-highlight"&gt;
-&lt;pre&gt;{% runkit %}
-const { ValueViewerSymbol } = require("@runkit/value-viewer");
-const atob = require('atob-lite')
-
-const myCustomObject = {
-    [ValueViewerSymbol]: {
-        title: "My First Viewer",
-        HTML: atob('PG1hcnF1ZWU+SGVsbG8sIFdvcmxkITwvbWFycXVlZT4=')
-    }
-};
-{% endrunkit %}&lt;/pre&gt;
-
-&lt;/div&gt;
-&lt;p&gt;Strangely enough, this does not work:&lt;/p&gt;
-&lt;div class="highlight highlight-text-html-basic js-code-highlight"&gt;
-&lt;pre&gt;{% runkit %}
-const { ValueViewerSymbol } = require("@runkit/value-viewer");
-
-const myCustomObject = {
-    [ValueViewerSymbol]: {
-        title: "My First Viewer",
-        HTML: ["&lt;span class="pl-kos"&gt;&amp;lt;&lt;/span&gt;", "m", "a", "r", "q", "u", "e", "e", "&lt;span class="pl-kos"&gt;&amp;gt;&lt;/span&gt;", "🍔", "H", "e", "l", "l", "o", ",", " ", "W", "o", "r", "l", "d", "!", "🍔", "&lt;span class="pl-kos"&gt;&amp;lt;&lt;/span&gt;", "/", "m", "a", "r", "q", "u", "e", "e", "&lt;span class="pl-kos"&gt;&amp;gt;&lt;/span&gt;"].join('')
-    }
-};
-{% endrunkit %}&lt;/pre&gt;
-
-&lt;/div&gt;
-&lt;p&gt;as it (incorrectly) results in this:&lt;/p&gt;
-&lt;div class="highlight highlight-text-html-basic js-code-highlight"&gt;
-&lt;pre&gt;const { ValueViewerSymbol } = require("@runkit/value-viewer");
-
-const myCustomObject = {
-    [ValueViewerSymbol]: {
-        title: "My First Viewer",
-        HTML: ["", "🍔", "H", "e", "l", "l", "o", ",", " ", "W", "o", "r", "l", "d", "!", "🍔", ""].join('')
-    }
-};&lt;/pre&gt;
-
-&lt;/div&gt;
-
-    &lt;/div&gt;
-    &lt;div class="gh-btn-container"&gt;&lt;a class="gh-btn" href="https://github.com/forem/forem/issues/1228"&gt;View on GitHub&lt;/a&gt;&lt;/div&gt;
-  &lt;/div&gt;
-&lt;/div&gt;
-&lt;br&gt;
-&lt;div class="ltag_github-liquid-tag"&gt;
-  &lt;h1&gt;
-    &lt;a href="https://github.com/forem/forem/issues/1446"&gt;
-      &lt;img class="github-logo" alt="GitHub logo" src="https://res.cloudinary.com/practicaldev/image/fetch/s--i3JOwpme--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/github-logo-ba8488d21cd8ee1fee097b8410db9deaa41d0ca30b004c0c63de0a479114156f.svg"&gt;
-      &lt;span class="issue-title"&gt;
-        Code blocks get breaks added between each line
-      &lt;/span&gt;
-      &lt;span class="issue-number"&gt;#1446&lt;/span&gt;
-    &lt;/a&gt;
-  &lt;/h1&gt;
-  &lt;div class="github-thread"&gt;
-    &lt;div class="timeline-comment-header"&gt;
-      &lt;a href="https://github.com/abraham"&gt;
-        &lt;img class="github-liquid-tag-img" src="https://res.cloudinary.com/practicaldev/image/fetch/s--4jnw-Jr6--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://avatars.githubusercontent.com/u/3341%3Fv%3D4" alt="abraham avatar"&gt;
-      &lt;/a&gt;
-      &lt;div class="timeline-comment-header-text"&gt;
-        &lt;strong&gt;
-          &lt;a href="https://github.com/abraham"&gt;abraham&lt;/a&gt;
-        &lt;/strong&gt; posted on &lt;a href="https://github.com/forem/forem/issues/1446"&gt;&lt;time&gt;Jan 02, 2019&lt;/time&gt;&lt;/a&gt;
-      &lt;/div&gt;
-    &lt;/div&gt;
-    &lt;div class="ltag-github-body"&gt;
-      &lt;p&gt;&lt;strong&gt;Describe the bug&lt;/strong&gt;
-Code blocks sometimes get breaks &lt;code&gt;&amp;lt;br&amp;gt;&lt;/code&gt; added between each line. You can see it in the one codeblock on &lt;a href="https://dev.to/abraham/a-month-of-flutter-a-look-back-1j1a#annotatedregion" rel="nofollow"&gt;A month of Flutter: a look back&lt;/a&gt;. It appears to be related to having headers following the code blocks.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;To Reproduce&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;Go to &lt;a href="https://dev.to/new" rel="nofollow"&gt;create a new post&lt;/a&gt; enter the following markdown and hit "preview".&lt;/p&gt;
-&lt;pre&gt;&lt;code&gt;~~~
-function hello() {
-  console.log('hello');
-}
-~~~
-
-~~~
-function goodbye() {
-  console.log('goodbye');
-}
-~~~
-
-# header
-&lt;/code&gt;&lt;/pre&gt;
-&lt;p&gt;&lt;strong&gt;Expected behavior&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;The code blocks should not have any blank lines between each line of code.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Screenshots&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;Correct display when &lt;code&gt;# header&lt;/code&gt; is not included:&lt;/p&gt;
-&lt;p&gt;&lt;a href="https://user-images.githubusercontent.com/3341/50610638-50ce6700-0e99-11e9-9fc1-6fe4c6d80770.png" rel="nofollow"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--iApRP2ri--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/3341/50610638-50ce6700-0e99-11e9-9fc1-6fe4c6d80770.png" alt="screenshot from 2019-01-02 14-17-11"&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;Incorrect display when &lt;code&gt;# header&lt;/code&gt; is included:&lt;/p&gt;
-&lt;p&gt;&lt;a href="https://user-images.githubusercontent.com/3341/50610645-562bb180-0e99-11e9-8a51-54eecd27f333.png" rel="nofollow"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--9zwjmimM--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/3341/50610645-562bb180-0e99-11e9-8a51-54eecd27f333.png" alt="screenshot from 2019-01-02 14-17-00"&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Desktop (please complete the following information):&lt;/strong&gt;&lt;/p&gt;
-&lt;ul&gt;
-&lt;li&gt;OS: Ubuntu 18.10&lt;/li&gt;
-&lt;li&gt;Browsers:
-&lt;ul&gt;
-&lt;li&gt;Chrome 72.0.3626.28&lt;/li&gt;
-&lt;li&gt;Firefox 64.0&lt;/li&gt;
-&lt;/ul&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-&lt;p&gt;&lt;strong&gt;Additional context&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;The broken display only appears to happen when a header follows the code blocks. If I move it between or before the code blocks the breaks don't happen. I'm using v2 of the editor and have not tested with v1.&lt;/p&gt;
-
-    &lt;/div&gt;
-    &lt;div class="gh-btn-container"&gt;&lt;a class="gh-btn" href="https://github.com/forem/forem/issues/1446"&gt;View on GitHub&lt;/a&gt;&lt;/div&gt;
-  &lt;/div&gt;
-&lt;/div&gt;
-&lt;br&gt;
-&lt;div class="ltag_github-liquid-tag"&gt;
-  &lt;h1&gt;
-    &lt;a href="https://github.com/forem/forem/issues/13195"&gt;
-      &lt;img class="github-logo" alt="GitHub logo" src="https://res.cloudinary.com/practicaldev/image/fetch/s--i3JOwpme--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/github-logo-ba8488d21cd8ee1fee097b8410db9deaa41d0ca30b004c0c63de0a479114156f.svg"&gt;
-      &lt;span class="issue-title"&gt;
-        Modal appears under the navbar
-      &lt;/span&gt;
-      &lt;span class="issue-number"&gt;#13195&lt;/span&gt;
-    &lt;/a&gt;
-  &lt;/h1&gt;
-  &lt;div class="github-thread"&gt;
-    &lt;div class="timeline-comment-header"&gt;
-      &lt;a href="https://github.com/aurelieverrot"&gt;
-        &lt;img class="github-liquid-tag-img" src="https://res.cloudinary.com/practicaldev/image/fetch/s--KBy2XoLK--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://avatars.githubusercontent.com/u/50857179%3Fv%3D4" alt="aurelieverrot avatar"&gt;
-      &lt;/a&gt;
-      &lt;div class="timeline-comment-header-text"&gt;
-        &lt;strong&gt;
-          &lt;a href="https://github.com/aurelieverrot"&gt;aurelieverrot&lt;/a&gt;
-        &lt;/strong&gt; posted on &lt;a href="https://github.com/forem/forem/issues/13195"&gt;&lt;time&gt;Mar 30, 2021&lt;/time&gt;&lt;/a&gt;
-      &lt;/div&gt;
-    &lt;/div&gt;
-    &lt;div class="ltag-github-body"&gt;
-      &lt;p&gt;&lt;strong&gt;Describe the bug&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;The modal triggered by the three dots on the left of an article appears stuck under the navbar of the website, it is not readable entirely.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;To Reproduce&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;After submitting an article but before publishing.
-Click on the three dots on the top left of the article.
-The modal will show up but a part of it is hidden behind the navbar&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Expected behavior&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;The modal should appear entirely to see all the links.  It can appear under the navbar, or on top of it.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Screenshots&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;a href="https://user-images.githubusercontent.com/50857179/113064409-c6eed080-916b-11eb-80a0-9425a733ac65.png" rel="nofollow"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--eIWvzyaP--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/50857179/113064409-c6eed080-916b-11eb-80a0-9425a733ac65.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Desktop (please complete the following information):&lt;/strong&gt;&lt;/p&gt;
-&lt;ul&gt;
-&lt;li&gt;OS, version: MacOS Catalina 10.15.7&lt;/li&gt;
-&lt;li&gt;Browser, version: Chrome Version 88.0.4324.192 (Official Build) (x86_64)&lt;/li&gt;
-&lt;/ul&gt;
-&lt;p&gt;&lt;strong&gt;Additional context&lt;/strong&gt;
-button id="article-show-more-button"&lt;/p&gt;
-
-    &lt;/div&gt;
-    &lt;div class="gh-btn-container"&gt;&lt;a class="gh-btn" href="https://github.com/forem/forem/issues/13195"&gt;View on GitHub&lt;/a&gt;&lt;/div&gt;
-  &lt;/div&gt;
-&lt;/div&gt;
-
-
-&lt;h3&gt;
-  &lt;a href="#general-bugs"&gt;
-  &lt;/a&gt;
-  &lt;strong&gt;General bugs&lt;/strong&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;em&gt;If you have more experience with software development and working in GitHub, here are a few issues you might want to take a look at&lt;/em&gt;&lt;/p&gt;
-
-
-&lt;div class="ltag_github-liquid-tag"&gt;
-  &lt;h1&gt;
-    &lt;a href="https://github.com/forem/forem/issues/6586"&gt;
-      &lt;img class="github-logo" alt="GitHub logo" src="https://res.cloudinary.com/practicaldev/image/fetch/s--i3JOwpme--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/github-logo-ba8488d21cd8ee1fee097b8410db9deaa41d0ca30b004c0c63de0a479114156f.svg"&gt;
-      &lt;span class="issue-title"&gt;
-        Tag "taggings_count" are not always updated correctly
-      &lt;/span&gt;
-      &lt;span class="issue-number"&gt;#6586&lt;/span&gt;
-    &lt;/a&gt;
-  &lt;/h1&gt;
-  &lt;div class="github-thread"&gt;
-    &lt;div class="timeline-comment-header"&gt;
-      &lt;a href="https://github.com/rhymes"&gt;
-        &lt;img class="github-liquid-tag-img" src="https://res.cloudinary.com/practicaldev/image/fetch/s--b29X-Z_H--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://avatars.githubusercontent.com/u/146201%3Fv%3D4" alt="rhymes avatar"&gt;
-      &lt;/a&gt;
-      &lt;div class="timeline-comment-header-text"&gt;
-        &lt;strong&gt;
-          &lt;a href="https://github.com/rhymes"&gt;rhymes&lt;/a&gt;
-        &lt;/strong&gt; posted on &lt;a href="https://github.com/forem/forem/issues/6586"&gt;&lt;time&gt;Mar 11, 2020&lt;/time&gt;&lt;/a&gt;
-      &lt;/div&gt;
-    &lt;/div&gt;
-    &lt;div class="ltag-github-body"&gt;
-      
-
-&lt;p&gt;&lt;strong&gt;Describe the bug&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;Each tag has an associated &lt;code&gt;taggings_count&lt;/code&gt; which contains the number of items they are associated with (in our case either articles or listings).&lt;/p&gt;
-&lt;p&gt;The problem lies in the fact that some of these counts are incorrect in the DB.&lt;/p&gt;
-&lt;p&gt;I found this out by playing with the Tags API which returns tags sorted by &lt;code&gt;taggings_count&lt;/code&gt; in descending order&lt;/p&gt;
-&lt;p&gt;For example:&lt;/p&gt;
-&lt;ol&gt;
-&lt;li&gt;
-&lt;code&gt;archlinux&lt;/code&gt; according to the API - &lt;a href="https://dev.to/api/tags" rel="nofollow"&gt;https://dev.to/api/tags&lt;/a&gt; - is the third most used tag but it's very unlikely that is true. Its tag page - &lt;a href="https://dev.to/t/archlinux" rel="nofollow"&gt;https://dev.to/t/archlinux&lt;/a&gt; - lists 50 articles and even taking into account all listings it might have been used in, it doesn't add up&lt;/li&gt;
-&lt;li&gt;
-&lt;a href="https://dev.to/api/tags?per_page=15" rel="nofollow"&gt;https://dev.to/api/tags?per_page=15&lt;/a&gt; shows that &lt;code&gt;devops&lt;/code&gt; is more popular than &lt;code&gt;showdev&lt;/code&gt; but &lt;a href="https://dev.to/t/devops" rel="nofollow"&gt;devops page&lt;/a&gt; contains 2917 articles, &lt;a href="https://dev.to/t/showdev" rel="nofollow"&gt;showdev page&lt;/a&gt; contains 3110. Again, I don't think there are enough listings tagged with &lt;code&gt;devops&lt;/code&gt; to account for the difference&lt;/li&gt;
-&lt;/ol&gt;
-&lt;p&gt;Thus, the bug.&lt;/p&gt;
-&lt;p&gt;This counter is managed by automatically by the &lt;a href="https://github.com/mbleigh/acts-as-taggable-on"&gt;acts-as-taggable-on&lt;/a&gt; gem.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Expected behavior&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;I'd expect the counter to reflect the correct number of items that have been tagged with it.&lt;/p&gt;
-&lt;p&gt;I see two possible explanations:&lt;/p&gt;
-&lt;ol&gt;
-&lt;li&gt;there's an error in our setup, in respect to the &lt;a href="https://github.com/mbleigh/acts-as-taggable-on#usage"&gt;usage guide&lt;/a&gt;
-&lt;/li&gt;
-&lt;li&gt;it has something to do with tag aliasing (?)&lt;/li&gt;
-&lt;li&gt;there's a bug in the gem itself. I found a few issue tickets that might point us in this direction:&lt;/li&gt;
-&lt;/ol&gt;
-&lt;ul&gt;
-&lt;li&gt;&lt;a href="https://github.com/mbleigh/acts-as-taggable-on/issues/929"&gt;https://github.com/mbleigh/acts-as-taggable-on/issues/929&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://github.com/mbleigh/acts-as-taggable-on/issues/947"&gt;https://github.com/mbleigh/acts-as-taggable-on/issues/947&lt;/a&gt;&lt;/li&gt;
-&lt;/ul&gt;
-
-    &lt;/div&gt;
-    &lt;div class="gh-btn-container"&gt;&lt;a class="gh-btn" href="https://github.com/forem/forem/issues/6586"&gt;View on GitHub&lt;/a&gt;&lt;/div&gt;
-  &lt;/div&gt;
-&lt;/div&gt;
-&lt;br&gt;
-&lt;div class="ltag_github-liquid-tag"&gt;
-  &lt;h1&gt;
-    &lt;a href="https://github.com/forem/forem/issues/7561"&gt;
-      &lt;img class="github-logo" alt="GitHub logo" src="https://res.cloudinary.com/practicaldev/image/fetch/s--i3JOwpme--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/github-logo-ba8488d21cd8ee1fee097b8410db9deaa41d0ca30b004c0c63de0a479114156f.svg"&gt;
-      &lt;span class="issue-title"&gt;
-        Error in date display on comment
-      &lt;/span&gt;
-      &lt;span class="issue-number"&gt;#7561&lt;/span&gt;
-    &lt;/a&gt;
-  &lt;/h1&gt;
-  &lt;div class="github-thread"&gt;
-    &lt;div class="timeline-comment-header"&gt;
-      &lt;a href="https://github.com/corentinbettiol"&gt;
-        &lt;img class="github-liquid-tag-img" src="https://res.cloudinary.com/practicaldev/image/fetch/s--PAV8Qzjr--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://avatars.githubusercontent.com/u/45763865%3Fv%3D4" alt="corentinbettiol avatar"&gt;
-      &lt;/a&gt;
-      &lt;div class="timeline-comment-header-text"&gt;
-        &lt;strong&gt;
-          &lt;a href="https://github.com/corentinbettiol"&gt;corentinbettiol&lt;/a&gt;
-        &lt;/strong&gt; posted on &lt;a href="https://github.com/forem/forem/issues/7561"&gt;&lt;time&gt;Apr 28, 2020&lt;/time&gt;&lt;/a&gt;
-      &lt;/div&gt;
-    &lt;/div&gt;
-    &lt;div class="ltag-github-body"&gt;
-      &lt;p&gt;&lt;strong&gt;Describe the bug&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;Date tag on a comment is "Apr 27", but on hover the text is "Tuesday, 28 April 2020, 00:01:19".&lt;/p&gt;
-&lt;p&gt;In HTML, datetime content is &lt;code&gt;2020-04-27T22:01:19Z&lt;/code&gt; 🤔&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;To Reproduce&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;Hover date of &lt;a href="https://dev.to/lofiandcode/comment/o8k9" rel="nofollow"&gt;this&lt;/a&gt; comment.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Expected behavior&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;Date on tag &amp;amp; on hover should be the same.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Screenshots&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;a href="https://user-images.githubusercontent.com/45763865/80465932-1dd89e00-893c-11ea-9eea-dce56e2cf40f.png" rel="nofollow"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--_Nv2XxcM--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/45763865/80465932-1dd89e00-893c-11ea-9eea-dce56e2cf40f.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;a href="https://user-images.githubusercontent.com/45763865/80466054-46f92e80-893c-11ea-9bc0-5020c6f01f91.png" rel="nofollow"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--BLc9s47a--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/45763865/80466054-46f92e80-893c-11ea-9bc0-5020c6f01f91.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Desktop (please complete the following information):&lt;/strong&gt;&lt;/p&gt;
-&lt;ul&gt;
-&lt;li&gt;OS: Xubuntu&lt;/li&gt;
-&lt;li&gt;Browser: Firefox&lt;/li&gt;
-&lt;li&gt;Version: 75.0&lt;/li&gt;
-&lt;/ul&gt;
-
-    &lt;/div&gt;
-    &lt;div class="gh-btn-container"&gt;&lt;a class="gh-btn" href="https://github.com/forem/forem/issues/7561"&gt;View on GitHub&lt;/a&gt;&lt;/div&gt;
-  &lt;/div&gt;
-&lt;/div&gt;
-&lt;br&gt;
-&lt;div class="ltag_github-liquid-tag"&gt;
-  &lt;h1&gt;
-    &lt;a href="https://github.com/forem/forem/issues/6377"&gt;
-      &lt;img class="github-logo" alt="GitHub logo" src="https://res.cloudinary.com/practicaldev/image/fetch/s--i3JOwpme--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/github-logo-ba8488d21cd8ee1fee097b8410db9deaa41d0ca30b004c0c63de0a479114156f.svg"&gt;
-      &lt;span class="issue-title"&gt;
-        "Follow back" button has no text in notification at times
-      &lt;/span&gt;
-      &lt;span class="issue-number"&gt;#6377&lt;/span&gt;
-    &lt;/a&gt;
-  &lt;/h1&gt;
-  &lt;div class="github-thread"&gt;
-    &lt;div class="timeline-comment-header"&gt;
-      &lt;a href="https://github.com/sivaraam"&gt;
-        &lt;img class="github-liquid-tag-img" src="https://res.cloudinary.com/practicaldev/image/fetch/s--TJXCdCng--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://avatars.githubusercontent.com/u/12448084%3Fv%3D4" alt="sivaraam avatar"&gt;
-      &lt;/a&gt;
-      &lt;div class="timeline-comment-header-text"&gt;
-        &lt;strong&gt;
-          &lt;a href="https://github.com/sivaraam"&gt;sivaraam&lt;/a&gt;
-        &lt;/strong&gt; posted on &lt;a href="https://github.com/forem/forem/issues/6377"&gt;&lt;time&gt;Feb 29, 2020&lt;/time&gt;&lt;/a&gt;
-      &lt;/div&gt;
-    &lt;/div&gt;
-    &lt;div class="ltag-github-body"&gt;
-      &lt;p&gt;&lt;strong&gt;Describe the bug&lt;/strong&gt;
-When someone follows me, I get a notification with a "Follow back" button in it. But in some cases, the button has no text in it. As a consequence, it's not clear what the button does.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;To Reproduce&lt;/strong&gt;&lt;/p&gt;
-&lt;ol&gt;
-&lt;li&gt;Go to 'Notifications'&lt;/li&gt;
-&lt;li&gt;Find a "$USER followed you" notification&lt;/li&gt;
-&lt;li&gt;If the "FOLLOW BACK" text in the button in visible, refresh and check.&lt;/li&gt;
-&lt;/ol&gt;
-&lt;p&gt;&lt;em&gt;Note&lt;/em&gt;: I realise these aren't ideal steps to reproduce the issue but unfortunately that's all I have. I'm not sure about the exact cases for which the text is visible and for which the text is not. But I'll be glad to provide information, if needed.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Expected behavior&lt;/strong&gt;
-The "FOLLOW BACK" text should always be visible in the button. For me, it's visible only at random times. The probability of the button having no text is higher.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Screenshots&lt;/strong&gt;
-&lt;a href="https://user-images.githubusercontent.com/12448084/75611812-d607e700-5b43-11ea-9ca9-f1f9c2140186.png" rel="nofollow"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--vLALIhHB--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/12448084/75611812-d607e700-5b43-11ea-9ca9-f1f9c2140186.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Desktop (please complete the following information):&lt;/strong&gt;&lt;/p&gt;
-&lt;ul&gt;
-&lt;li&gt;OS: Windows&lt;/li&gt;
-&lt;li&gt;Browser: Firefox/Chrome&lt;/li&gt;
-&lt;li&gt;Version: 73.0.1/80.0.3987&lt;/li&gt;
-&lt;/ul&gt;
-
-    &lt;/div&gt;
-    &lt;div class="gh-btn-container"&gt;&lt;a class="gh-btn" href="https://github.com/forem/forem/issues/6377"&gt;View on GitHub&lt;/a&gt;&lt;/div&gt;
-  &lt;/div&gt;
-&lt;/div&gt;
-&lt;br&gt;
-&lt;div class="ltag_github-liquid-tag"&gt;
-  &lt;h1&gt;
-    &lt;a href="https://github.com/forem/forem/issues/6417"&gt;
-      &lt;img class="github-logo" alt="GitHub logo" src="https://res.cloudinary.com/practicaldev/image/fetch/s--i3JOwpme--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/github-logo-ba8488d21cd8ee1fee097b8410db9deaa41d0ca30b004c0c63de0a479114156f.svg"&gt;
-      &lt;span class="issue-title"&gt;
-        Incomplete surrogate-key cache invalidation logic
-      &lt;/span&gt;
-      &lt;span class="issue-number"&gt;#6417&lt;/span&gt;
-    &lt;/a&gt;
-  &lt;/h1&gt;
-  &lt;div class="github-thread"&gt;
-    &lt;div class="timeline-comment-header"&gt;
-      &lt;a href="https://github.com/benhalpern"&gt;
-        &lt;img class="github-liquid-tag-img" src="https://res.cloudinary.com/practicaldev/image/fetch/s--Btd6rDfR--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://avatars.githubusercontent.com/u/3102842%3Fv%3D4" alt="benhalpern avatar"&gt;
-      &lt;/a&gt;
-      &lt;div class="timeline-comment-header-text"&gt;
-        &lt;strong&gt;
-          &lt;a href="https://github.com/benhalpern"&gt;benhalpern&lt;/a&gt;
-        &lt;/strong&gt; posted on &lt;a href="https://github.com/forem/forem/issues/6417"&gt;&lt;time&gt;Mar 02, 2020&lt;/time&gt;&lt;/a&gt;
-      &lt;/div&gt;
-    &lt;/div&gt;
-    &lt;div class="ltag-github-body"&gt;
-      &lt;p&gt;Currently we user surrogate keys to determine when certain endpoints should have their caches cleared, such as an article API endpoint like this...&lt;/p&gt;
-&lt;p&gt;&lt;code&gt;set_surrogate_key_header Article.table_key, @articles.map(&amp;amp;:record_key)&lt;/code&gt;&lt;/p&gt;
-&lt;p&gt;And then we call &lt;code&gt;article.purge&lt;/code&gt; which magically makes any endpoint with that article's &lt;code&gt;record_key&lt;/code&gt; have its edge cache expire.&lt;/p&gt;
-&lt;p&gt;More on surrogate keys...&lt;/p&gt;
-&lt;p&gt;&lt;a href="https://docs.fastly.com/en/guides/getting-started-with-surrogate-keys" rel="nofollow"&gt;https://docs.fastly.com/en/guides/getting-started-with-surrogate-keys&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;The issue with the above logic is that a &lt;em&gt;new&lt;/em&gt; article which should become part of that endpoint will not flush its cache if created. So it will not show up on that endpoint until another article which fits within the above &lt;code&gt;@articles&lt;/code&gt; is purged. This makes it kind of random to find out when it will be included.&lt;/p&gt;
-&lt;p&gt;&lt;code&gt;article.purge&lt;/code&gt; is a magic method to create a purge ping which uses the appropriate surrogate header.&lt;/p&gt;
-&lt;p&gt;A solution for this could be a surrogate key like this...&lt;/p&gt;
-&lt;p&gt;&lt;code&gt;set_surrogate_key_header Article.table_key, "tag-index-endpoint-#{tag}", @articles.map(&amp;amp;:record_key)&lt;/code&gt;&lt;/p&gt;
-&lt;p&gt;and then we make a specific purge call when a new article should purge it like &lt;code&gt;purge("tag-index-endpoint-#{tag}"&lt;/code&gt; when an article is created.&lt;/p&gt;
-&lt;p&gt;Our current situation isn't causing any radically wrong behavior and the "random" purging is working okay but we should look into this as we go about bigger changes here.&lt;/p&gt;
-
-    &lt;/div&gt;
-    &lt;div class="gh-btn-container"&gt;&lt;a class="gh-btn" href="https://github.com/forem/forem/issues/6417"&gt;View on GitHub&lt;/a&gt;&lt;/div&gt;
-  &lt;/div&gt;
-&lt;/div&gt;
-&lt;br&gt;
-&lt;div class="ltag_github-liquid-tag"&gt;
-  &lt;h1&gt;
-    &lt;a href="https://github.com/forem/forem/issues/6610"&gt;
-      &lt;img class="github-logo" alt="GitHub logo" src="https://res.cloudinary.com/practicaldev/image/fetch/s--i3JOwpme--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/github-logo-ba8488d21cd8ee1fee097b8410db9deaa41d0ca30b004c0c63de0a479114156f.svg"&gt;
-      &lt;span class="issue-title"&gt;
-        Error when submitting a comment on a recently deleted post
-      &lt;/span&gt;
-      &lt;span class="issue-number"&gt;#6610&lt;/span&gt;
-    &lt;/a&gt;
-  &lt;/h1&gt;
-  &lt;div class="github-thread"&gt;
-    &lt;div class="timeline-comment-header"&gt;
-      &lt;a href="https://github.com/adamkdean"&gt;
-        &lt;img class="github-liquid-tag-img" src="https://res.cloudinary.com/practicaldev/image/fetch/s--05LaqpUx--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://avatars.githubusercontent.com/u/1639527%3Fv%3D4" alt="adamkdean avatar"&gt;
-      &lt;/a&gt;
-      &lt;div class="timeline-comment-header-text"&gt;
-        &lt;strong&gt;
-          &lt;a href="https://github.com/adamkdean"&gt;adamkdean&lt;/a&gt;
-        &lt;/strong&gt; posted on &lt;a href="https://github.com/forem/forem/issues/6610"&gt;&lt;time&gt;Mar 12, 2020&lt;/time&gt;&lt;/a&gt;
-      &lt;/div&gt;
-    &lt;/div&gt;
-    &lt;div class="ltag-github-body"&gt;
-      &lt;p&gt;&lt;strong&gt;Describe the bug&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;Followed a link from an email, attempted to respond to a comment, received error &lt;code&gt;There was an error in your markdown: undefined method &lt;/code&gt;id' for nil:NilClass`, comment not posted.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;To Reproduce&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;Follow link from an email, attempt to respond to a comment.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Expected behavior&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;Comment is posted.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Screenshots&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://user-images.githubusercontent.com/1639527/76545609-0162ce00-6482-11ea-9232-a7c318c642e0.png" rel="nofollow"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--_E94JyZ2--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/1639527/76545609-0162ce00-6482-11ea-9232-a7c318c642e0.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Desktop (please complete the following information):&lt;/strong&gt;&lt;/p&gt;
-&lt;ul&gt;
-&lt;li&gt;OS: MacOS 10.15.3&lt;/li&gt;
-&lt;li&gt;Browser: Chrome  80.0.3987.87&lt;/li&gt;
-&lt;/ul&gt;
-
-    &lt;/div&gt;
-    &lt;div class="gh-btn-container"&gt;&lt;a class="gh-btn" href="https://github.com/forem/forem/issues/6610"&gt;View on GitHub&lt;/a&gt;&lt;/div&gt;
-  &lt;/div&gt;
-&lt;/div&gt;
-&lt;br&gt;
-&lt;div class="ltag_github-liquid-tag"&gt;
-  &lt;h1&gt;
-    &lt;a href="https://github.com/forem/forem/issues/4948"&gt;
-      &lt;img class="github-logo" alt="GitHub logo" src="https://res.cloudinary.com/practicaldev/image/fetch/s--i3JOwpme--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/github-logo-ba8488d21cd8ee1fee097b8410db9deaa41d0ca30b004c0c63de0a479114156f.svg"&gt;
-      &lt;span class="issue-title"&gt;
-        Runkit - indentation in the first line of a block
-      &lt;/span&gt;
-      &lt;span class="issue-number"&gt;#4948&lt;/span&gt;
-    &lt;/a&gt;
-  &lt;/h1&gt;
-  &lt;div class="github-thread"&gt;
-    &lt;div class="timeline-comment-header"&gt;
-      &lt;a href="https://github.com/iksemot"&gt;
-        &lt;img class="github-liquid-tag-img" src="https://res.cloudinary.com/practicaldev/image/fetch/s--jI-RReuz--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://avatars.githubusercontent.com/u/218702%3Fv%3D4" alt="iksemot avatar"&gt;
-      &lt;/a&gt;
-      &lt;div class="timeline-comment-header-text"&gt;
-        &lt;strong&gt;
-          &lt;a href="https://github.com/iksemot"&gt;iksemot&lt;/a&gt;
-        &lt;/strong&gt; posted on &lt;a href="https://github.com/forem/forem/issues/4948"&gt;&lt;time&gt;Nov 26, 2019&lt;/time&gt;&lt;/a&gt;
-      &lt;/div&gt;
-    &lt;/div&gt;
-    &lt;div class="ltag-github-body"&gt;
-      
-
-&lt;p&gt;&lt;strong&gt;Describe the bug&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;First line in the block of text cannot be indented.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;To Reproduce&lt;/strong&gt;&lt;/p&gt;
-&lt;ol&gt;
-&lt;li&gt;Create a new post&lt;/li&gt;
-&lt;li&gt;Add following content, make sure all lines are indented.&lt;/li&gt;
-&lt;/ol&gt;
-&lt;pre&gt;&lt;code&gt;{% runkit %}
-    console.log('BAD CODE')
-    console.log('OK CODE')
-
-    // BAD COMMENT
-    // OK COMMENT
-{% endrunkit %}
-&lt;/code&gt;&lt;/pre&gt;
-&lt;ol start="3"&gt;
-&lt;li&gt;Save the post&lt;/li&gt;
-&lt;/ol&gt;
-&lt;p&gt;&lt;strong&gt;Expected behavior&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;All lines in RunKit embed should be indented.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Screenshots&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;a href="https://user-images.githubusercontent.com/218702/69672956-7eb42f80-1099-11ea-8eb7-e045501791a3.png" rel="nofollow"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--2_07bios--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/218702/69672956-7eb42f80-1099-11ea-8eb7-e045501791a3.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Desktop (please complete the following information):&lt;/strong&gt;&lt;/p&gt;
-&lt;ul&gt;
-&lt;li&gt;OS: Windows 10 Pro&lt;/li&gt;
-&lt;li&gt;Browser: Opera&lt;/li&gt;
-&lt;li&gt;Version: 65&lt;/li&gt;
-&lt;/ul&gt;
-&lt;p&gt;&lt;strong&gt;Additional context&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;a href="https://dev.to/tomaszrydzewski/runkit-indentation-2n9c-temp-slug-526549?preview=b14fe31c6205719176ea1eb56003f5a280d576a6c6e235a8587e6669eef1c45774687968a6bb6b677f09c7fc6a84289a59ceeb548b7d896fe1e94793" rel="nofollow"&gt;https://dev.to/tomaszrydzewski/runkit-indentation-2n9c-temp-slug-526549?preview=b14fe31c6205719176ea1eb56003f5a280d576a6c6e235a8587e6669eef1c45774687968a6bb6b677f09c7fc6a84289a59ceeb548b7d896fe1e94793&lt;/a&gt;&lt;/p&gt;
-
-    &lt;/div&gt;
-    &lt;div class="gh-btn-container"&gt;&lt;a class="gh-btn" href="https://github.com/forem/forem/issues/4948"&gt;View on GitHub&lt;/a&gt;&lt;/div&gt;
-  &lt;/div&gt;
-&lt;/div&gt;
-&lt;br&gt;
-&lt;div class="ltag_github-liquid-tag"&gt;
-  &lt;h1&gt;
-    &lt;a href="https://github.com/forem/forem/issues/4955"&gt;
-      &lt;img class="github-logo" alt="GitHub logo" src="https://res.cloudinary.com/practicaldev/image/fetch/s--i3JOwpme--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/github-logo-ba8488d21cd8ee1fee097b8410db9deaa41d0ca30b004c0c63de0a479114156f.svg"&gt;
-      &lt;span class="issue-title"&gt;
-        users' profile photos are not showing on the dockerized installation 
-      &lt;/span&gt;
-      &lt;span class="issue-number"&gt;#4955&lt;/span&gt;
-    &lt;/a&gt;
-  &lt;/h1&gt;
-  &lt;div class="github-thread"&gt;
-    &lt;div class="timeline-comment-header"&gt;
-      &lt;a href="https://github.com/abdellani"&gt;
-        &lt;img class="github-liquid-tag-img" src="https://res.cloudinary.com/practicaldev/image/fetch/s--45SeYu8M--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://avatars.githubusercontent.com/u/16113997%3Fv%3D4" alt="abdellani avatar"&gt;
-      &lt;/a&gt;
-      &lt;div class="timeline-comment-header-text"&gt;
-        &lt;strong&gt;
-          &lt;a href="https://github.com/abdellani"&gt;abdellani&lt;/a&gt;
-        &lt;/strong&gt; posted on &lt;a href="https://github.com/forem/forem/issues/4955"&gt;&lt;time&gt;Nov 27, 2019&lt;/time&gt;&lt;/a&gt;
-      &lt;/div&gt;
-    &lt;/div&gt;
-    &lt;div class="ltag-github-body"&gt;
-      
-
-&lt;p&gt;&lt;strong&gt;Describe the bug&lt;/strong&gt;
-After following the &lt;a href="https://docs.dev.to/installation/docker/" rel="nofollow"&gt;installation with docker guide&lt;/a&gt; and accessing the locally hosted application,  users' profile photos weren't showing up.&lt;/p&gt;
-&lt;pre&gt;&lt;code&gt;web_1        | Cannot render console from 172.20.0.1! Allowed networks: 127.0.0.1, ::1, 127.0.0.0/127.255.255.255
-web_1        | GET /uploads/user/profile_image/6/7a1aba89-1d79-486f-8c82-ab7a8f8a58c2.png completed with 404 Not Found in 0.677355ms
-web_1        | Cannot render console from 172.20.0.1! Allowed networks: 127.0.0.1, ::1, 127.0.0.0/127.255.255.255
-web_1        | GET /serviceworker.js completed with 304 Not Modified in 15.124716ms
-&lt;/code&gt;&lt;/pre&gt;
-&lt;p&gt;&lt;strong&gt;To Reproduce&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;1- Follow the &lt;a href="https://docs.dev.to/installation/docker/" rel="nofollow"&gt;installation with docker guide&lt;/a&gt;.
-2- Access 127.0.0.1:3000&lt;/p&gt;
-
-
-
-
-&lt;p&gt;&lt;strong&gt;Expected behavior&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Screenshots&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;1-
-&lt;a href="https://user-images.githubusercontent.com/16113997/69758804-d6699e00-1160-11ea-8fd5-36d0673404fc.png" rel="nofollow"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Ds62lk4p--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/16113997/69758804-d6699e00-1160-11ea-8fd5-36d0673404fc.png" alt="1"&gt;&lt;/a&gt;
-2-
-&lt;a href="https://user-images.githubusercontent.com/16113997/69758814-db2e5200-1160-11ea-8be5-556f544d9383.png" rel="nofollow"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--00oVUmR6--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/16113997/69758814-db2e5200-1160-11ea-8be5-556f544d9383.png" alt="2"&gt;&lt;/a&gt;
-3-
-&lt;a href="https://user-images.githubusercontent.com/16113997/69758860-f6995d00-1160-11ea-9575-f41a032ef541.png" rel="nofollow"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--SK0-tSOX--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/16113997/69758860-f6995d00-1160-11ea-9575-f41a032ef541.png" alt="3"&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Desktop (please complete the following information):&lt;/strong&gt;&lt;/p&gt;
-&lt;ul&gt;
-&lt;li&gt;OS: Ubuntu 18.04&lt;/li&gt;
-&lt;li&gt;Browser: firefox&lt;/li&gt;
-&lt;li&gt;Version: 70&lt;/li&gt;
-&lt;/ul&gt;
-&lt;p&gt;&lt;strong&gt;Smartphone (please complete the following information):&lt;/strong&gt;&lt;/p&gt;
-&lt;ul&gt;
-&lt;li&gt;Device:&lt;/li&gt;
-&lt;li&gt;OS:&lt;/li&gt;
-&lt;li&gt;Browser:&lt;/li&gt;
-&lt;li&gt;Version:&lt;/li&gt;
-&lt;/ul&gt;
-&lt;p&gt;&lt;strong&gt;Additional context&lt;/strong&gt;&lt;/p&gt;
-
-
-    &lt;/div&gt;
-    &lt;div class="gh-btn-container"&gt;&lt;a class="gh-btn" href="https://github.com/forem/forem/issues/4955"&gt;View on GitHub&lt;/a&gt;&lt;/div&gt;
-  &lt;/div&gt;
-&lt;/div&gt;
-&lt;br&gt;
-&lt;div class="ltag_github-liquid-tag"&gt;
-  &lt;h1&gt;
-    &lt;a href="https://github.com/forem/forem/issues/4969"&gt;
-      &lt;img class="github-logo" alt="GitHub logo" src="https://res.cloudinary.com/practicaldev/image/fetch/s--i3JOwpme--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/github-logo-ba8488d21cd8ee1fee097b8410db9deaa41d0ca30b004c0c63de0a479114156f.svg"&gt;
-      &lt;span class="issue-title"&gt;
-        Left-To-Right-Override, invisible unicode chars
-      &lt;/span&gt;
-      &lt;span class="issue-number"&gt;#4969&lt;/span&gt;
-    &lt;/a&gt;
-  &lt;/h1&gt;
-  &lt;div class="github-thread"&gt;
-    &lt;div class="timeline-comment-header"&gt;
-      &lt;a href="https://github.com/anuraghazra"&gt;
-        &lt;img class="github-liquid-tag-img" src="https://res.cloudinary.com/practicaldev/image/fetch/s--fjkB0KNO--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://avatars.githubusercontent.com/u/35374649%3Fv%3D4" alt="anuraghazra avatar"&gt;
-      &lt;/a&gt;
-      &lt;div class="timeline-comment-header-text"&gt;
-        &lt;strong&gt;
-          &lt;a href="https://github.com/anuraghazra"&gt;anuraghazra&lt;/a&gt;
-        &lt;/strong&gt; posted on &lt;a href="https://github.com/forem/forem/issues/4969"&gt;&lt;time&gt;Nov 30, 2019&lt;/time&gt;&lt;/a&gt;
-      &lt;/div&gt;
-    &lt;/div&gt;
-    &lt;div class="ltag-github-body"&gt;
-      
-
-&lt;p&gt;&lt;strong&gt;Describe the bug&lt;/strong&gt;
-Looks like currently we can create posts with "U+202D" (LEFT-TO-RIGHT OVERRIDE) and other Invisible unicode characters&lt;/p&gt;
-&lt;p&gt;Here's the post&lt;/p&gt;
-&lt;ul&gt;
-&lt;li&gt;&lt;a href="https://dev.to/anuraghazra/-12ef" rel="nofollow"&gt;https://dev.to/anuraghazra/-12ef&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;hashtags:
-&lt;a href="https://dev.to/t/%E2%80%8E%E2%80%8E%E2%80%8E%E2%80%8E" rel="nofollow"&gt;https://dev.to/t/%E2%80%8E%E2%80%8E%E2%80%8E%E2%80%8E&lt;/a&gt;
-&lt;a href="https://dev.to/t/%E2%80%8E" rel="nofollow"&gt;https://dev.to/t/%E2%80%8E&lt;/a&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;&lt;strong&gt;To Reproduce&lt;/strong&gt;&lt;/p&gt;
-&lt;ul&gt;
-&lt;li&gt;Copy U+202D unicode character&lt;/li&gt;
-&lt;li&gt;Create a new post and set title to U+202D character
-&lt;ul&gt;
-&lt;li&gt;Same with hastags, Canonical URL &amp;amp; Series.&lt;/li&gt;
-&lt;/ul&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-
-
-
-
-
-&lt;p&gt;&lt;strong&gt;Expected behavior&lt;/strong&gt;
-Should not allow those invisible unicode characters&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Screenshots&lt;/strong&gt;
-&lt;a href="https://user-images.githubusercontent.com/35374649/69902388-1758f100-13b3-11ea-800c-2181a6c20a0b.png" rel="nofollow"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--rH4zpULl--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/35374649/69902388-1758f100-13b3-11ea-800c-2181a6c20a0b.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Desktop (please complete the following information):&lt;/strong&gt;&lt;/p&gt;
-&lt;ul&gt;
-&lt;li&gt;OS: Windows 7 64bit&lt;/li&gt;
-&lt;li&gt;Browser: Chrome&lt;/li&gt;
-&lt;li&gt;Version:&lt;/li&gt;
-&lt;/ul&gt;
-&lt;p&gt;&lt;strong&gt;Additional context&lt;/strong&gt;
-I also copy pasted characters from here
-&lt;a href="http://emptycharacter.com/" rel="nofollow"&gt;http://emptycharacter.com/&lt;/a&gt;&lt;/p&gt;
-
-
-    &lt;/div&gt;
-    &lt;div class="gh-btn-container"&gt;&lt;a class="gh-btn" href="https://github.com/forem/forem/issues/4969"&gt;View on GitHub&lt;/a&gt;&lt;/div&gt;
-  &lt;/div&gt;
-&lt;/div&gt;
-&lt;br&gt;
-&lt;div class="ltag_github-liquid-tag"&gt;
-  &lt;h1&gt;
-    &lt;a href="https://github.com/forem/forem/issues/11494"&gt;
-      &lt;img class="github-logo" alt="GitHub logo" src="https://res.cloudinary.com/practicaldev/image/fetch/s--i3JOwpme--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/github-logo-ba8488d21cd8ee1fee097b8410db9deaa41d0ca30b004c0c63de0a479114156f.svg"&gt;
-      &lt;span class="issue-title"&gt;
-        Keep getting notifications on previous email address
-      &lt;/span&gt;
-      &lt;span class="issue-number"&gt;#11494&lt;/span&gt;
-    &lt;/a&gt;
-  &lt;/h1&gt;
-  &lt;div class="github-thread"&gt;
-    &lt;div class="timeline-comment-header"&gt;
-      &lt;a href="https://github.com/javitruhlar"&gt;
-        &lt;img class="github-liquid-tag-img" src="https://res.cloudinary.com/practicaldev/image/fetch/s--WFlyhYIO--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://avatars.githubusercontent.com/u/7116409%3Fv%3D4" alt="javitruhlar avatar"&gt;
-      &lt;/a&gt;
-      &lt;div class="timeline-comment-header-text"&gt;
-        &lt;strong&gt;
-          &lt;a href="https://github.com/javitruhlar"&gt;javitruhlar&lt;/a&gt;
-        &lt;/strong&gt; posted on &lt;a href="https://github.com/forem/forem/issues/11494"&gt;&lt;time&gt;Nov 19, 2020&lt;/time&gt;&lt;/a&gt;
-      &lt;/div&gt;
-    &lt;/div&gt;
-    &lt;div class="ltag-github-body"&gt;
-      
-
-&lt;p&gt;&lt;strong&gt;Describe the bug&lt;/strong&gt;
-If you change the email address in your profile, you keep getting email notifications on your previous address even after you have confirmed the new one&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;To Reproduce&lt;/strong&gt;&lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;Go to 'Settings &amp;gt; Profile'&lt;/li&gt;
-&lt;li&gt;Under 'User' section, change the email&lt;/li&gt;
-&lt;li&gt;Open email sent to new address and click 'confirm my account'&lt;/li&gt;
-&lt;li&gt;See error -&amp;gt; Keep getting email notifications on previous address&lt;/li&gt;
-&lt;/ol&gt;
-&lt;p&gt;&lt;strong&gt;Expected behavior&lt;/strong&gt;
-After confirmation of new email address, all email notifications should be sent to that address and not to the previous one&lt;/p&gt;
-
-
-&lt;p&gt;&lt;strong&gt;Desktop (please complete the following information):&lt;/strong&gt;&lt;/p&gt;
-&lt;ul&gt;
-&lt;li&gt;OS, version: Linux Mint 19.3&lt;/li&gt;
-&lt;li&gt;Browser, version: 78.0.1 (64-bit)&lt;/li&gt;
-&lt;/ul&gt;
-
-
-    &lt;/div&gt;
-    &lt;div class="gh-btn-container"&gt;&lt;a class="gh-btn" href="https://github.com/forem/forem/issues/11494"&gt;View on GitHub&lt;/a&gt;&lt;/div&gt;
-  &lt;/div&gt;
-&lt;/div&gt;
-&lt;br&gt;
-&lt;div class="ltag_github-liquid-tag"&gt;
-  &lt;h1&gt;
-    &lt;a href="https://github.com/forem/forem/issues/12455"&gt;
-      &lt;img class="github-logo" alt="GitHub logo" src="https://res.cloudinary.com/practicaldev/image/fetch/s--i3JOwpme--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/github-logo-ba8488d21cd8ee1fee097b8410db9deaa41d0ca30b004c0c63de0a479114156f.svg"&gt;
-      &lt;span class="issue-title"&gt;
-        Themes (aka Dark Mode) not respected on first page loads
-      &lt;/span&gt;
-      &lt;span class="issue-number"&gt;#12455&lt;/span&gt;
-    &lt;/a&gt;
-  &lt;/h1&gt;
-  &lt;div class="github-thread"&gt;
-    &lt;div class="timeline-comment-header"&gt;
-      &lt;a href="https://github.com/kallmanation"&gt;
-        &lt;img class="github-liquid-tag-img" src="https://res.cloudinary.com/practicaldev/image/fetch/s--FSWGhKPu--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://avatars.githubusercontent.com/u/32068459%3Fv%3D4" alt="kallmanation avatar"&gt;
-      &lt;/a&gt;
-      &lt;div class="timeline-comment-header-text"&gt;
-        &lt;strong&gt;
-          &lt;a href="https://github.com/kallmanation"&gt;kallmanation&lt;/a&gt;
-        &lt;/strong&gt; posted on &lt;a href="https://github.com/forem/forem/issues/12455"&gt;&lt;time&gt;Jan 27, 2021&lt;/time&gt;&lt;/a&gt;
-      &lt;/div&gt;
-    &lt;/div&gt;
-    &lt;div class="ltag-github-body"&gt;
-      
-
-&lt;p&gt;&lt;strong&gt;Describe the bug&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;When first opening Dev.to (on both mobile &amp;amp; desktop) or when first visiting a new area (going to the dashboard from the homepage; starting a new post) the default theme is shown. This persists for a few page refreshes before my selected theme (night theme) is shown.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;To Reproduce&lt;/strong&gt;&lt;/p&gt;
-&lt;ol&gt;
-&lt;li&gt;Open a private/incognito browser window&lt;/li&gt;
-&lt;li&gt;Log in&lt;/li&gt;
-&lt;li&gt;The default theme is shown (instead of the one in settings)&lt;/li&gt;
-&lt;/ol&gt;
-&lt;p&gt;&lt;strong&gt;Expected behavior&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;The theme selected in settings would show after logging in.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Screenshots&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;First screen after logging in:
-&lt;a href="https://user-images.githubusercontent.com/32068459/106010811-dc6e4e00-6087-11eb-855e-c34d4128956d.png" rel="nofollow"&gt;&lt;img width="1220" alt="Screen Shot 2021-01-27 at 10 09 00 AM" src="https://res.cloudinary.com/practicaldev/image/fetch/s--znJ5dQx8--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/32068459/106010811-dc6e4e00-6087-11eb-855e-c34d4128956d.png"&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;Settings page (It was always set to Night Theme; pre-login):
-&lt;a href="https://user-images.githubusercontent.com/32068459/106010822-ded0a800-6087-11eb-9820-f29095abc541.png" rel="nofollow"&gt;&lt;img width="1219" alt="Screen Shot 2021-01-27 at 10 09 21 AM" src="https://res.cloudinary.com/practicaldev/image/fetch/s--v8MI1F13--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/32068459/106010822-ded0a800-6087-11eb-9820-f29095abc541.png"&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Desktop (please complete the following information):&lt;/strong&gt;&lt;/p&gt;
-&lt;ul&gt;
-&lt;li&gt;OS, version: macOS Catalina 10.15.7&lt;/li&gt;
-&lt;li&gt;Browser, version: Vivaldi 3.4.2066.90 (Stable channel) (x86_64)&lt;/li&gt;
-&lt;/ul&gt;
-&lt;p&gt;&lt;strong&gt;Smartphone (please complete the following information):&lt;/strong&gt;&lt;/p&gt;
-&lt;ul&gt;
-&lt;li&gt;Device: Samsung Note 10+&lt;/li&gt;
-&lt;li&gt;OS, version: Android 11.0&lt;/li&gt;
-&lt;li&gt;Browser, version: Chrome 88.0.4324.93&lt;/li&gt;
-&lt;/ul&gt;
-
-    &lt;/div&gt;
-    &lt;div class="gh-btn-container"&gt;&lt;a class="gh-btn" href="https://github.com/forem/forem/issues/12455"&gt;View on GitHub&lt;/a&gt;&lt;/div&gt;
-  &lt;/div&gt;
-&lt;/div&gt;
-&lt;br&gt;
-&lt;div class="ltag_github-liquid-tag"&gt;
-  &lt;h1&gt;
-    &lt;a href="https://github.com/forem/forem/issues/12545"&gt;
-      &lt;img class="github-logo" alt="GitHub logo" src="https://res.cloudinary.com/practicaldev/image/fetch/s--i3JOwpme--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/github-logo-ba8488d21cd8ee1fee097b8410db9deaa41d0ca30b004c0c63de0a479114156f.svg"&gt;
-      &lt;span class="issue-title"&gt;
-        "Unable to load Comment Subscription component"
-      &lt;/span&gt;
-      &lt;span class="issue-number"&gt;#12545&lt;/span&gt;
-    &lt;/a&gt;
-  &lt;/h1&gt;
-  &lt;div class="github-thread"&gt;
-    &lt;div class="timeline-comment-header"&gt;
-      &lt;a href="https://github.com/ludwiczakpawel"&gt;
-        &lt;img class="github-liquid-tag-img" src="https://res.cloudinary.com/practicaldev/image/fetch/s--hM75UrvC--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://avatars.githubusercontent.com/u/108287%3Fv%3D4" alt="ludwiczakpawel avatar"&gt;
-      &lt;/a&gt;
-      &lt;div class="timeline-comment-header-text"&gt;
-        &lt;strong&gt;
-          &lt;a href="https://github.com/ludwiczakpawel"&gt;ludwiczakpawel&lt;/a&gt;
-        &lt;/strong&gt; posted on &lt;a href="https://github.com/forem/forem/issues/12545"&gt;&lt;time&gt;Feb 02, 2021&lt;/time&gt;&lt;/a&gt;
-      &lt;/div&gt;
-    &lt;/div&gt;
-    &lt;div class="ltag-github-body"&gt;
-      
-
-&lt;p&gt;&lt;strong&gt;Describe the bug&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;a href="https://user-images.githubusercontent.com/108287/106653335-f253a580-6596-11eb-8ecc-3582965616a1.png" rel="nofollow"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--GhhmOqqY--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/108287/106653335-f253a580-6596-11eb-8ecc-3582965616a1.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;It's been happening quite often recently for me but I can't really tell how exactly this should be reproduced. It does work after refreshing the page, but then when I go to another post it's broken again.&lt;/p&gt;
-&lt;p&gt;Also, this is what's happening in the console:&lt;/p&gt;
-&lt;p&gt;&lt;a href="https://user-images.githubusercontent.com/108287/106653573-465e8a00-6597-11eb-8ff7-03bf34f7b404.png" rel="nofollow"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--dMXgu1vC--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/108287/106653573-465e8a00-6597-11eb-8ff7-03bf34f7b404.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;To Reproduce&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;See above.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Expected behavior&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;Fo this component to work properly :)&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Screenshots&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;See above.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Desktop (please complete the following information):&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;n/a&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Smartphone (please complete the following information):&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;n/a&lt;/p&gt;
-
-    &lt;/div&gt;
-    &lt;div class="gh-btn-container"&gt;&lt;a class="gh-btn" href="https://github.com/forem/forem/issues/12545"&gt;View on GitHub&lt;/a&gt;&lt;/div&gt;
-  &lt;/div&gt;
-&lt;/div&gt;
-&lt;br&gt;
-&lt;div class="ltag_github-liquid-tag"&gt;
-  &lt;h1&gt;
-    &lt;a href="https://github.com/forem/forem/issues/13298"&gt;
-      &lt;img class="github-logo" alt="GitHub logo" src="https://res.cloudinary.com/practicaldev/image/fetch/s--i3JOwpme--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/github-logo-ba8488d21cd8ee1fee097b8410db9deaa41d0ca30b004c0c63de0a479114156f.svg"&gt;
-      &lt;span class="issue-title"&gt;
-        Comment box not shrinking on submit
-      &lt;/span&gt;
-      &lt;span class="issue-number"&gt;#13298&lt;/span&gt;
-    &lt;/a&gt;
-  &lt;/h1&gt;
-  &lt;div class="github-thread"&gt;
-    &lt;div class="timeline-comment-header"&gt;
-      &lt;a href="https://github.com/Link2Twenty"&gt;
-        &lt;img class="github-liquid-tag-img" src="https://res.cloudinary.com/practicaldev/image/fetch/s--YEfIAkze--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://avatars.githubusercontent.com/u/3534427%3Fv%3D4" alt="Link2Twenty avatar"&gt;
-      &lt;/a&gt;
-      &lt;div class="timeline-comment-header-text"&gt;
-        &lt;strong&gt;
-          &lt;a href="https://github.com/Link2Twenty"&gt;Link2Twenty&lt;/a&gt;
-        &lt;/strong&gt; posted on &lt;a href="https://github.com/forem/forem/issues/13298"&gt;&lt;time&gt;Apr 07, 2021&lt;/time&gt;&lt;/a&gt;
-      &lt;/div&gt;
-    &lt;/div&gt;
-    &lt;div class="ltag-github-body"&gt;
-      &lt;p&gt;&lt;strong&gt;Describe the bug&lt;/strong&gt;
-Comment boxes grow as you type but when you press submit they stay the size they were when they had content.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;To Reproduce&lt;/strong&gt;&lt;/p&gt;
-&lt;ul&gt;
-&lt;li&gt;Go to a post&lt;/li&gt;
-&lt;li&gt;Write a long comment&lt;/li&gt;
-&lt;li&gt;Post the comment&lt;/li&gt;
-&lt;li&gt;See the comment box is still large.&lt;/li&gt;
-&lt;/ul&gt;
-&lt;p&gt;&lt;strong&gt;Expected behaviour&lt;/strong&gt;
-I'd expect the comment box the shrink back down to it's original size.&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Screenshots&lt;/strong&gt;
-&lt;a href="https://user-images.githubusercontent.com/3534427/113887114-20cd4700-97b9-11eb-9c14-49c0432ad96f.png" rel="nofollow"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--EokwLQab--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/3534427/113887114-20cd4700-97b9-11eb-9c14-49c0432ad96f.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;Desktop (please complete the following information):&lt;/strong&gt;&lt;/p&gt;
-&lt;ul&gt;
-&lt;li&gt;OS, version: Window 10&lt;/li&gt;
-&lt;li&gt;Browser, version: Chrome 89.0.4389.114&lt;/li&gt;
-&lt;/ul&gt;
-&lt;p&gt;&lt;strong&gt;Additional context&lt;/strong&gt;
-Another small bug that doesn't really cause any harm.&lt;/p&gt;
-
-    &lt;/div&gt;
-    &lt;div class="gh-btn-container"&gt;&lt;a class="gh-btn" href="https://github.com/forem/forem/issues/13298"&gt;View on GitHub&lt;/a&gt;&lt;/div&gt;
-  &lt;/div&gt;
-&lt;/div&gt;
-&lt;br&gt;
-&lt;div class="ltag_github-liquid-tag"&gt;
-  &lt;h1&gt;
-    &lt;a href="https://github.com/forem/forem/issues/13277"&gt;
-      &lt;img class="github-logo" alt="GitHub logo" src="https://res.cloudinary.com/practicaldev/image/fetch/s--i3JOwpme--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/github-logo-ba8488d21cd8ee1fee097b8410db9deaa41d0ca30b004c0c63de0a479114156f.svg"&gt;
-      &lt;span class="issue-title"&gt;
-        Refactor `/search/chat_channels` endpoint
-      &lt;/span&gt;
-      &lt;span class="issue-number"&gt;#13277&lt;/span&gt;
-    &lt;/a&gt;
-  &lt;/h1&gt;
-  &lt;div class="github-thread"&gt;
-    &lt;div class="timeline-comment-header"&gt;
-      &lt;a href="https://github.com/atsmith813"&gt;
-        &lt;img class="github-liquid-tag-img" src="https://res.cloudinary.com/practicaldev/image/fetch/s--H9J78MWl--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://avatars.githubusercontent.com/u/15987080%3Fv%3D4" alt="atsmith813 avatar"&gt;
-      &lt;/a&gt;
-      &lt;div class="timeline-comment-header-text"&gt;
-        &lt;strong&gt;
-          &lt;a href="https://github.com/atsmith813"&gt;atsmith813&lt;/a&gt;
-        &lt;/strong&gt; posted on &lt;a href="https://github.com/forem/forem/issues/13277"&gt;&lt;time&gt;Apr 06, 2021&lt;/time&gt;&lt;/a&gt;
-      &lt;/div&gt;
-    &lt;/div&gt;
-    &lt;div class="ltag-github-body"&gt;
-      &lt;p&gt;In &lt;a href="https://github.com/forem/forem/pull/13235"&gt;https://github.com/forem/forem/pull/13235&lt;/a&gt; we refactored how &lt;code&gt;/search/chat_channels&lt;/code&gt; works by essentially removing "search" functionality and turning it into more of a "filter". &lt;a href="https://github.com/forem/forem/pull/13235#discussion_r606368287"&gt;As noted in the PR&lt;/a&gt;:&lt;/p&gt;
-&lt;blockquote&gt;
-&lt;p&gt;You'll notice I left everything in the Search namespace (the route, the controller, and the service naming). I originally started removing chat_channels from search all together since this behaves more like a filter than a search.&lt;/p&gt;
-&lt;p&gt;However, I discovered there are some JS components that are using this endpoint as an "index". I started refactoring everything, but it quickly got out of hand and out of scope for what this PR is intended to address. I also realized it may actually be nice to leave everything in the search namespace so that when we re-do the search for Connect in the future, it's a smoother experience.&lt;/p&gt;
-&lt;p&gt;With that said, since we have the ChatChannelsController and the ChatChannelMembershipsController each with index actions, I think the right move would be to move those JS components to them so we don't have multiple controllers performing the same actions.&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;p&gt;This issue is to essentially update all the JS components on the frontend to use a newly refactored endpoint that lives in a more appropriate spot (i.e. &lt;code&gt;ChatChannelMembershipsController&lt;/code&gt; or &lt;code&gt;ChatChannelsController&lt;/code&gt;) than the &lt;code&gt;SearchController&lt;/code&gt;. Once this issue is complete, the &lt;code&gt;chat_channels&lt;/code&gt; action should no longer exist in the &lt;code&gt;SearchController&lt;/code&gt; and instead, a new endpoint should be able to take care of any "filtering" and "indexing" being done by the JS components.&lt;/p&gt;
-
-    &lt;/div&gt;
-    &lt;div class="gh-btn-container"&gt;&lt;a class="gh-btn" href="https://github.com/forem/forem/issues/13277"&gt;View on GitHub&lt;/a&gt;&lt;/div&gt;
-  &lt;/div&gt;
-&lt;/div&gt;
-
-
-&lt;p&gt;&lt;strong&gt;For the full list, click &lt;a href="https://github.com/forem/forem/labels/Bug%20Smash"&gt;here&lt;/a&gt;.&lt;/strong&gt;&lt;/p&gt;
-
-
-
-
-&lt;p&gt;We are so excited to see your contributions! Our team thanks you for your collaboration and commitment to improving our repository 💖&lt;/p&gt;
-
-&lt;p&gt;If you’re new to making pull requests, here are a few resources we recommend you check out: &lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;
-&lt;a href="https://dev.to/chrissiemhrk/git-cheat-sheet-26ak"&gt;Git Cheat Sheet&lt;/a&gt; by &lt;a class="mentioned-user" href="https://dev.to/chrissiemhrk"&gt;@chrissiemhrk&lt;/a&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;a href="https://dev.to/tracycss/git-and-github-for-beginners-po3"&gt;Git and GitHub for Beginners&lt;/a&gt; by &lt;a class="mentioned-user" href="https://dev.to/tracycss"&gt;@tracycss&lt;/a&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;a href="https://dev.to/healeycodes/your-first-open-source-pull-request-a-walkthrough-1omf"&gt;Your First Open-Source Pull Request: a Walkthrough&lt;/a&gt; by &lt;a class="mentioned-user" href="https://dev.to/healeycodes"&gt;@healeycodes&lt;/a&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;&lt;em&gt;P.S. With only a few exceptions, the Forem team is pro real-world, physical bugs and we don’t condone smashing them! #TakeSpidersOutside&lt;/em&gt;&lt;/p&gt;
-
-</description>
-      <category>devbugsmash</category>
-      <category>opensource</category>
-      <category>forem</category>
-      <category>contributorswanted</category>
     </item>
   </channel>
 </rss>
