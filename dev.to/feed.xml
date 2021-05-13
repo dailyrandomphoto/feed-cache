@@ -7,6 +7,205 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>Asynchronous API with DynamoDB Streams</title>
+      <author>Vikas Solegaonkar</author>
+      <pubDate>Thu, 13 May 2021 08:51:43 +0000</pubDate>
+      <link>https://dev.to/aws-builders/asynchronous-api-with-dynamodb-streams-652</link>
+      <guid>https://dev.to/aws-builders/asynchronous-api-with-dynamodb-streams-652</guid>
+      <description>&lt;p&gt;Responsiveness is one of the most important parameters for the success of any web application. And asynchronous processing is The Solution for attaining this responsiveness. A server request from the browser should return immediately - without wait for completion. The data flow should be designed in a way that it does not depend upon an immediate response from the server.&lt;/p&gt;
+
+&lt;p&gt;There are several architecture patterns to do this. But a major problem with asynchronous processing is error handling. How would the client know if the request failed? We should not lose data in the process. In fact, a fire and forget service, cannot afford to fail. Even if the processing failed for some reason, the data has to reach the DB. &lt;/p&gt;
+
+&lt;p&gt;DynamoDB streams provides a cool solution to this problem. Let's check it out&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#what-is-dynamodb-streams"&gt;
+  &lt;/a&gt;
+  What is DynamoDB Streams
+&lt;/h2&gt;
+
+&lt;p&gt;Most of the traditional databases have a concept of Triggers. These are events generated when some data change in the DB. DynamoDB Streams are quite similar. With one difference - instead of generating a distinct trigger per data change, it generates a stream of events that flows into a target - Lambda or Kinesis.&lt;/p&gt;
+
+&lt;p&gt;We can have a Lambda function triggered by such events - which can process this data. The incoming API call can directly dump the data into the DynamoDB - using API Gateway service integration. This ensures very low response time in the API. The DynamoDB streams can be configured to invoke a Lambda function that can &lt;/p&gt;
+
+&lt;p&gt;We have an advantage here - the data is already available in our DB before we start processing it. Even if the downstream processing fails, the data is already available in the DB. And in the unlikely event of DB insert/update failing, the API itself will return an error and the client will be able to handle it.&lt;/p&gt;
+
+&lt;p&gt;Thus, we have best of both the worlds - low response time as well as error resilience. Let us try to implement this in our AWS account.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#lambda-function"&gt;
+  &lt;/a&gt;
+  Lambda Function
+&lt;/h2&gt;
+
+&lt;p&gt;Start with creating a Lambda Function. This is simple. Just go to the Lambda Console, create a new Lambda Function. Call it StreamProcessor. (or any other name you like). Add the below code in it:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;AWS&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;require&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;aws-sdk&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;ddb&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;AWS&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;DynamoDB&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;DocumentClient&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;TABLE_NAME&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Restaurant&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;TTL&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="mi"&gt;300&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="nx"&gt;exports&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;handler&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;async&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;event&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;var&lt;/span&gt; &lt;span class="nx"&gt;plist&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[];&lt;/span&gt;
+    &lt;span class="nx"&gt;event&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Records&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;forEach&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;record&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;record&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;eventName&lt;/span&gt; &lt;span class="o"&gt;==&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;INSERT&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="nx"&gt;plist&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;push&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;processInsert&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;record&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;dynamodb&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;NewImage&lt;/span&gt;&lt;span class="p"&gt;));&lt;/span&gt;
+        &lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="p"&gt;});&lt;/span&gt;
+
+    &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nb"&gt;Promise&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;all&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;plist&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;response&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="na"&gt;statusCode&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="mi"&gt;200&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+        &lt;span class="na"&gt;body&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;JSON&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;stringify&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Hello from Lambda!&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+    &lt;span class="p"&gt;};&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;response&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;};&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;processInsert&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;async&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;newImage&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="c1"&gt;// Business Logic to process the input&lt;/span&gt;
+    &lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Processing: &lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="nx"&gt;JSON&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;stringify&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;newImage&lt;/span&gt;&lt;span class="p"&gt;));&lt;/span&gt;
+    &lt;span class="kd"&gt;var&lt;/span&gt; &lt;span class="nx"&gt;error&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;businesslogic&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;newImage&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+
+    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;ddb&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;update&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt;
+            &lt;span class="na"&gt;TableName&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;TABLE_NAME&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+            &lt;span class="na"&gt;Key&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;id&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;newImage&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;id&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;S&lt;/span&gt; &lt;span class="p"&gt;},&lt;/span&gt;
+            &lt;span class="na"&gt;UpdateExpression&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;set #error = :error&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+            &lt;span class="na"&gt;ExpressionAttributeValues&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;:error&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;error&lt;/span&gt; &lt;span class="p"&gt;},&lt;/span&gt;
+            &lt;span class="na"&gt;ExpressionAttributeNames&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;#error&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;error&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;
+        &lt;span class="p"&gt;}).&lt;/span&gt;&lt;span class="nx"&gt;promise&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="k"&gt;else&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;ddb&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;update&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt;
+            &lt;span class="na"&gt;TableName&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;TABLE_NAME&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+            &lt;span class="na"&gt;Key&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;id&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;newImage&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;id&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;S&lt;/span&gt; &lt;span class="p"&gt;},&lt;/span&gt;
+            &lt;span class="na"&gt;UpdateExpression&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;set #ttl = :ttl&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+            &lt;span class="na"&gt;ExpressionAttributeValues&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;:ttl&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;TTL&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="nb"&gt;Math&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;floor&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nb"&gt;Date&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;now&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;/&lt;/span&gt; &lt;span class="mi"&gt;1000&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;},&lt;/span&gt;
+            &lt;span class="na"&gt;ExpressionAttributeNames&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;#ttl&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;ttl&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;
+        &lt;span class="p"&gt;}).&lt;/span&gt;&lt;span class="nx"&gt;promise&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;};&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;businesslogic&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;async&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;input&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;    &lt;span class="c1"&gt;// return "Error Details" in case of any error&lt;/span&gt;
+&lt;span class="p"&gt;};&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#iam-role-for-lambda"&gt;
+  &lt;/a&gt;
+  IAM Role for Lambda
+&lt;/h2&gt;
+
+&lt;p&gt;This lambda function should have enough permissions to operate on the streams of DynamoDB, along with the update permissions. To get this, create a new IAM Role. &lt;/p&gt;
+
+&lt;p&gt;Along with the usual Lambda permissions, include the below for DB permissions&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight json"&gt;&lt;code&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"Version"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"2012-10-17"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"Statement"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"Sid"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"VisualEditor0"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"Effect"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"Allow"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"Action"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="w"&gt;
+                &lt;/span&gt;&lt;span class="s2"&gt;"dynamodb:DescribeStream"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+                &lt;/span&gt;&lt;span class="s2"&gt;"dynamodb:UpdateItem"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+                &lt;/span&gt;&lt;span class="s2"&gt;"dynamodb:GetShardIterator"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+                &lt;/span&gt;&lt;span class="s2"&gt;"dynamodb:GetItem"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+                &lt;/span&gt;&lt;span class="s2"&gt;"dynamodb:UpdateTable"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+                &lt;/span&gt;&lt;span class="s2"&gt;"dynamodb:GetRecords"&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"Resource"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="w"&gt;
+                &lt;/span&gt;&lt;span class="s2"&gt;"arn:aws:dynamodb:us-east-1:1234567890:table/TableName"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+                &lt;/span&gt;&lt;span class="s2"&gt;"arn:aws:dynamodb:us-east-1:1234567890:table/TableName/index/*"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+                &lt;/span&gt;&lt;span class="s2"&gt;"arn:aws:dynamodb:us-east-1:1234567890:table/TableName/stream/*"&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#dynamodb-table"&gt;
+  &lt;/a&gt;
+  DynamoDB Table
+&lt;/h2&gt;
+
+&lt;p&gt;Next, we create the table in DynamoDB. This table should have a primary key - id. On the Exports &amp;amp; Streams tab, click on Enable DynamoDB Streams (Not the Kinesis Streams). &lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--DMMAX0WI--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620740281343/BKDHnKtzE.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--DMMAX0WI--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620740281343/BKDHnKtzE.png" alt="image.png"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Along with that, add the Lambda Triggers to the stream. Click on Create Trigger and choose the Lambda Function we created above. And that sets up the stream + trigger. &lt;/p&gt;
+
+&lt;p&gt;Then, go the Additional Settings tab. There, we can enable the TTL as below.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--BP60sTIt--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620742434640/RxLf598Xj.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--BP60sTIt--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620742434640/RxLf598Xj.png" alt="image.png"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;That will setup the DynamoDB table for us.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#api-gateway"&gt;
+  &lt;/a&gt;
+  API Gateway
+&lt;/h2&gt;
+
+&lt;p&gt;Finally, we come to the API Gateway - to create an API. A client can invoke  this API. Here, we configure the API Gateway to add the request into the database table. This is achieved using the AWS Service integration of the API Gateway. Let's work on that.&lt;/p&gt;
+
+&lt;p&gt;Create a new REST API on the API Gateway. And add a Put method in it. Integrate the request with DynamoDB as below:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--SQHTPwo5--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620750636191/P6jrkjGlR.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--SQHTPwo5--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620750636191/P6jrkjGlR.png" alt="image.png"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;And add this to the JSON Mapping Template.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight json"&gt;&lt;code&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"TableName"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="s2"&gt;"TableName"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"Item"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="nl"&gt;"id"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nl"&gt;"S"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"$context.requestId"&lt;/span&gt;&lt;span class="p"&gt;},&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="nl"&gt;"request"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nl"&gt;"S"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"$util.escapeJavaScript($input.body)"&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;For every API call, this will add a new Item to the table - with the Request Id as the key. This insert will trigger the Lambda function and take the processing ahead. &lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#benefits"&gt;
+  &lt;/a&gt;
+  Benefits
+&lt;/h2&gt;
+
+&lt;p&gt;One would ask - what is the big deal? Why not directly call the lambda from API Gateway? There are two aspects to this. Foremost, the response time. Directly adding data from API Gateway to DynamoDB is a lot faster than invoking a Lambda. So the client application sees superfast response. &lt;/p&gt;
+
+&lt;p&gt;Second, resilience and error handling get complex when we invoke Lambda directly from the API gateway? What do we do if the Lambda fails half way? Retry the same API? Invoke another API that will heal the damage? This is too much intelligence to be carried into the client. It is best that the server manages this for itself.&lt;/p&gt;
+
+&lt;p&gt;The client just dumps data into the DynamoDB, and is assured that its data is accepted and will be processed by the server. It will not be lost because it is already in the DB. The processing and error handling is then localized on the server - leading to a cleaner architecture.&lt;/p&gt;
+
+</description>
+      <category>aws</category>
+      <category>dynamodb</category>
+      <category>serverless</category>
+      <category>api</category>
+    </item>
+    <item>
       <title>Bootstrap 5 Templates - Open-source and FREE</title>
       <author>Sm0ke</author>
       <pubDate>Thu, 13 May 2021 08:35:53 +0000</pubDate>
@@ -182,38 +381,353 @@
       <category>opensource</category>
     </item>
     <item>
-      <title>This one page website design will amaze your mind</title>
-      <author>Techy Programmers</author>
-      <pubDate>Thu, 13 May 2021 07:58:40 +0000</pubDate>
-      <link>https://dev.to/kunaal438/this-one-page-website-design-will-amaze-your-mind-eae</link>
-      <guid>https://dev.to/kunaal438/this-one-page-website-design-will-amaze-your-mind-eae</guid>
-      <description>&lt;h1&gt;
-  &lt;a href="#design"&gt;
+      <title>Learning Java as JavaScript Developer - week 1</title>
+      <author>Olena Drugalya</author>
+      <pubDate>Thu, 13 May 2021 08:25:30 +0000</pubDate>
+      <link>https://dev.to/olenadrugalya/learning-java-as-javascript-developer-week-1-2hnm</link>
+      <guid>https://dev.to/olenadrugalya/learning-java-as-javascript-developer-week-1-2hnm</guid>
+      <description>&lt;p&gt;This blog post is a beginning of the series "Java for JavaScript Developers" and it describes my experience while learning Java programming language. &lt;/p&gt;
+
+&lt;p&gt;So, as many of you have already know from Twitter, due to my job specification I started to learn Java after being a web developer and using JavaScript for building projects. During a few years of using JavaScript and building projects mostly with React and other front-end frameworks, I have to dig myself into back-end. &lt;/p&gt;
+
+&lt;p&gt;That felt a bit weird I should say. Even though I used to learn new languages all the time (I speak 5 languages and finished linguistic university), it takes time to get used to new rules and new syntax. &lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#differences"&gt;
   &lt;/a&gt;
-  Design
-&lt;/h1&gt;
+  Differences
+&lt;/h2&gt;
 
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Iamjs1cr--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/mkr5ppiq4yzp23fsym0z.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Iamjs1cr--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/mkr5ppiq4yzp23fsym0z.png" alt="Slide 3 Final"&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;After the first week of study I can already distinguish the main differences between 2 languages:&lt;/p&gt;
 
-&lt;p&gt;Isn't it awesome. Want to know how to code.&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;&lt;p&gt;Java is &lt;em&gt;static&lt;/em&gt; language and JS is &lt;em&gt;dynamic&lt;/em&gt; language. &lt;br&gt;
+What this means is they check their data types on different stages. &lt;br&gt;
+&lt;strong&gt;Java&lt;/strong&gt; checks types before run-time, each variable has to be associated with a type upon declaration.&lt;br&gt;
+&lt;strong&gt;JavaScript&lt;/strong&gt; checks types on the fly, during execution and the type of variable is unknown until program compilation.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Java is &lt;em&gt;one-paradigm&lt;/em&gt; and JS is &lt;em&gt;multi-paradigm&lt;/em&gt; &lt;br&gt;
+What this means is that:&lt;br&gt;
+&lt;strong&gt;Java&lt;/strong&gt; is strictly object-oriented, meaning it solves programming problems based on the concept of objects and everything is built around objects. &lt;br&gt;
+&lt;strong&gt;JavaScript&lt;/strong&gt; on the contrary can be used as object-oriented, procedural or scripting language (it is used mainly as scripting though).&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Java is &lt;em&gt;stand-alone&lt;/em&gt; language and JS is &lt;em&gt;co-dependant&lt;/em&gt; language&lt;br&gt;
+What that means is that:&lt;br&gt;
+&lt;strong&gt;Java&lt;/strong&gt; can be used to build a fully-functional application by developer without any additional languages. It can run on multiple platforms.&lt;br&gt;
+&lt;strong&gt;JavaScript&lt;/strong&gt; is depending on HTML and CSS and cannot be used as a stand-alone language to build a fully-functional application. Even though nowadays JS is widely used for back-end (Node.js), it still needs cooperation with additional languages.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Java objects are &lt;em&gt;class-based&lt;/em&gt; and JS objects are &lt;em&gt;prototype-based&lt;/em&gt;&lt;br&gt;
+What that means is that:&lt;br&gt;
+&lt;strong&gt;Java&lt;/strong&gt; uses classes as templates for objects creation. It allows a class to derive (inherit) the properties of another class. It also supports multiple inheritances i.e.; a class can derive properties from multiple classes.&lt;br&gt;
+&lt;strong&gt;JavaScript&lt;/strong&gt; uses prototypes - special objects, to which additional properties can be attached, which will be shared across all the instances of their constructor function. It does not support multiple inheritance.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Java supports &lt;em&gt;multi-threading&lt;/em&gt; and JS doesn't.&lt;br&gt;
+This one says it all in one sentence :) JavaScript does not support multi-threading because the JavaScript interpreter in the browser is a single thread.&lt;/p&gt;&lt;/li&gt;
+&lt;/ol&gt;
 
-&lt;p&gt;Coding Tutorial - &lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#part-1-"&gt;
+&lt;h2&gt;
+  &lt;a href="#similarities"&gt;
   &lt;/a&gt;
-  Part 1 -
-&lt;/h1&gt;
+  Similarities
+&lt;/h2&gt;
 
-&lt;p&gt;&lt;iframe width="710" height="399" src="https://www.youtube.com/embed/gWp9FbzsxQw"&gt;
-&lt;/iframe&gt;
-&lt;/p&gt;
+&lt;p&gt;BUT there are some similarities between the languages:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;&lt;p&gt;Object-Oriented Programming: Both languages have access to OOPs concepts such as abstraction, inheritance, and polymorphism.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Front-end Development: Java and JS both extend their applications in frontend development. JS can be embedded directly into HTML, which is implemented as a framework or a library; whereas, Java is used as Java Applet.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Back-end Development: Both languages offer server-side support. Java supports major backend technologies such as JBoss, Apache, and WebSphere. Node.js serve JavaScript-powered servers.&lt;/p&gt;&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;So, these are the main differences and similarities between Java and JavaScript and if you want to explore even more on this topic, take a look at this &lt;a href="https://hackr.io/blog/java-vs-javascript"&gt;article&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;In my next blog post I will write about basics of Java language and compare them to basics of Java Script :)&lt;/p&gt;
+
+&lt;p&gt;Thank you for reading my blog. Feel free to connect on &lt;a href="https://www.linkedin.com/in/olenadrugalya/"&gt;LinkedIn&lt;/a&gt; or &lt;a href="https://twitter.com/OlenaDrugalya"&gt;Twitter&lt;/a&gt; :)&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://ko-fi.com/J3J42JOOA"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--KS7c42cU--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.ko-fi.com/cdn/kofi1.png%3Fv%3D2" alt="Buy Me a Coffee at ko-fi.com"&gt;&lt;/a&gt; &lt;/p&gt;
 
 </description>
-      <category>uiweekly</category>
-      <category>ux</category>
-      <category>css</category>
-      <category>webdev</category>
+      <category>java</category>
+      <category>javascript</category>
+      <category>beginners</category>
+      <category>development</category>
+    </item>
+    <item>
+      <title>Change your Windows background by running a python script!</title>
+      <author>Matin Najafi</author>
+      <pubDate>Thu, 13 May 2021 08:21:09 +0000</pubDate>
+      <link>https://dev.to/matin/change-your-windows-background-by-running-a-python-script-281p</link>
+      <guid>https://dev.to/matin/change-your-windows-background-by-running-a-python-script-281p</guid>
+      <description>&lt;p&gt;Before we get started, be sure to note that this post is only for Windows users! An interesting idea for those who work with Windows.&lt;/p&gt;
+
+&lt;p&gt;What do you do if you want to change your desktop background using python? You are probably going to a library or looking for a library, but this does not require a library in Windows, and you can change the background without installing a special library and using ctypes.&lt;br&gt;
+In fact, the desktop background can be changed using a commonly used command to change system parameters in ctypes. (let's write the program object-oriented so that our work is clean and orderly.)&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="nn"&gt;ctypes&lt;/span&gt;
+
+&lt;span class="k"&gt;class&lt;/span&gt; &lt;span class="nc"&gt;Main&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+    &lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;__init__&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;
+        &lt;span class="n"&gt;path&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s"&gt;'c:/...'&lt;/span&gt;
+        &lt;span class="n"&gt;ctypes&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;windll&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;user32&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;SystemParametersInfoW&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;20&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;path&lt;/span&gt; &lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+&lt;span class="n"&gt;application&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;Main&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;It is easy to change your desktop wallpaper temporarily by giving the address of the png, jpg, etc. file.&lt;br&gt;
+Now let's make the program a little more attractive, suppose we have a folder called "backgrounds" and we want to randomly select an image from it and set it on our desktop background.&lt;br&gt;
+First we need to get the address of where the project is now located. We can do this using os and sys&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="o"&gt;&amp;gt;&amp;gt;&amp;gt;&lt;/span&gt; &lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="nn"&gt;os&lt;/span&gt;
+&lt;span class="o"&gt;&amp;gt;&amp;gt;&amp;gt;&lt;/span&gt; &lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="nn"&gt;sys&lt;/span&gt;
+&lt;span class="o"&gt;&amp;gt;&amp;gt;&amp;gt;&lt;/span&gt; &lt;span class="n"&gt;os&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;path&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;abspath&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;os&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;path&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;dirname&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;sys&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;argv&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;]))&lt;/span&gt;
+&lt;span class="s"&gt;'C:&lt;/span&gt;&lt;span class="se"&gt;\\&lt;/span&gt;&lt;span class="s"&gt;Users&lt;/span&gt;&lt;span class="se"&gt;\\&lt;/span&gt;&lt;span class="s"&gt;user'&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Now just take the "backgrounds" folder and download the files in it and put them in a list. Of course, note that we receive files that end with png, jpg and jpeg, Then select a random item and order it to change the desktop background randomly. (To select a random option from a list we need a random library)&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;
+&lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="nn"&gt;os&lt;/span&gt;
+&lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="nn"&gt;sys&lt;/span&gt;
+&lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="nn"&gt;ctypes&lt;/span&gt;
+&lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="nn"&gt;random&lt;/span&gt;
+
+&lt;span class="k"&gt;class&lt;/span&gt; &lt;span class="nc"&gt;Main&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+    &lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;__init__&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;
+        &lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;path&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;os&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;path&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;abspath&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;os&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;path&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;dirname&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;sys&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;argv&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;]))&lt;/span&gt;
+        &lt;span class="k"&gt;for&lt;/span&gt; &lt;span class="n"&gt;root&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;directories&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;files&lt;/span&gt; &lt;span class="ow"&gt;in&lt;/span&gt; &lt;span class="n"&gt;os&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;walk&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;os&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;path&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;join&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;path&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;'backgrounds'&lt;/span&gt;&lt;span class="p"&gt;)):&lt;/span&gt;
+            &lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;backgrounds&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nb"&gt;file&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;lower&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="k"&gt;for&lt;/span&gt; &lt;span class="nb"&gt;file&lt;/span&gt; &lt;span class="ow"&gt;in&lt;/span&gt; &lt;span class="n"&gt;files&lt;/span&gt; &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="nb"&gt;file&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;endswith&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="s"&gt;'.png'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;'.jpg'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;'.jpeg'&lt;/span&gt;&lt;span class="p"&gt;))]&lt;/span&gt;
+
+        &lt;span class="n"&gt;ctypes&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;windll&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;user32&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;SystemParametersInfoW&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;20&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;os&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;path&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;join&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;path&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;'backgrounds'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;random&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;choice&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;backgrounds&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt; &lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+&lt;span class="n"&gt;application&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;Main&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We are done! Now we can put the images we want in the "backgrounds" folder and temporarily set a random background on our desktop every time we run this script.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#an-interesting-point"&gt;
+  &lt;/a&gt;
+  An interesting point!
+&lt;/h2&gt;
+
+&lt;p&gt;If you want to run this script automatically when you turn on your computer, you can open the 'run' window with the key combination (win + r) and enter the 'shell: startup'. After entering, a folder will open for you. Just copy the script to this folder. (Every program in this folder runs when you turn on your computer)&lt;/p&gt;
+
+</description>
+      <category>python</category>
+      <category>discuss</category>
+      <category>beginners</category>
+      <category>tutorial</category>
+    </item>
+    <item>
+      <title>Lists in Python</title>
+      <author>Benjamin Thorpe</author>
+      <pubDate>Thu, 13 May 2021 08:19:23 +0000</pubDate>
+      <link>https://dev.to/benjithorpe/lists-in-python-7ni</link>
+      <guid>https://dev.to/benjithorpe/lists-in-python-7ni</guid>
+      <description>&lt;p&gt;Hello Everyone!!&lt;br&gt;
+Today I will be sharing what I learned about lists in Python.&lt;/p&gt;
+&lt;h4&gt;
+  &lt;a href="#what-are-lists"&gt;
+  &lt;/a&gt;
+  What are lists?
+&lt;/h4&gt;
+
+&lt;p&gt;List are one of the &lt;strong&gt;most used&lt;/strong&gt;, &lt;strong&gt;most powerful&lt;/strong&gt;, &lt;strong&gt;most easy&lt;/strong&gt; and also &lt;strong&gt;most efficient&lt;/strong&gt; data structure built in to Python.&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;Some languages also call it arrays.&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;h3&gt;
+  &lt;a href="#basic-structure-of-a-list"&gt;
+  &lt;/a&gt;
+  Basic structure of a list
+&lt;/h3&gt;
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="c1"&gt;# make a list of names
+&lt;/span&gt;&lt;span class="n"&gt;names&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s"&gt;'john'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;'jack'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;'mary'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;'jane'&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;blockquote&gt;
+&lt;p&gt;and it's done, you can mix any datatype in a list but it is not recommended.&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;h3&gt;
+  &lt;a href="#adding-items-to-the-list"&gt;
+  &lt;/a&gt;
+  Adding Items to the list
+&lt;/h3&gt;
+
+&lt;p&gt;To add items to an existing list use the &lt;code&gt;append()&lt;/code&gt; method&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="c1"&gt;# taking our initial list
+&lt;/span&gt;&lt;span class="n"&gt;names&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s"&gt;'john'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;'jack'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;'mary'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;'jane'&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+&lt;span class="k"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;names&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+&lt;span class="c1"&gt;# == output ==
+# ['john', 'jack', 'mary', 'jane']
+&lt;/span&gt;
+&lt;span class="c1"&gt;# now let's add something
+&lt;/span&gt;&lt;span class="n"&gt;names&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;append&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;'jonas'&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="c1"&gt;# printing the changed list with name that we add
+&lt;/span&gt;&lt;span class="k"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;names&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+&lt;span class="c1"&gt;# == output ==
+# ['john', 'jack', 'mary', 'jane', 'jonas']
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#removing-items-from-the-list"&gt;
+  &lt;/a&gt;
+  Removing Items from the list
+&lt;/h3&gt;
+
+&lt;p&gt;There are different options used to remove items in a list:&lt;br&gt;
+some common ones are:&lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#-raw-pop-endraw-removes-the-last-value-in-the-list"&gt;
+  &lt;/a&gt;
+  &lt;code&gt;pop()&lt;/code&gt; - removes the last value in the list
+&lt;/h4&gt;
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="c1"&gt;# taking our initial list
+&lt;/span&gt;&lt;span class="n"&gt;names&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s"&gt;'john'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;'jack'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;'mary'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;'jane'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;'jonas'&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+
+&lt;span class="c1"&gt;# let's say we don't want the last value again.
+&lt;/span&gt;&lt;span class="n"&gt;names&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;pop&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+
+&lt;span class="c1"&gt;# let's print our list again
+&lt;/span&gt;&lt;span class="k"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;names&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+&lt;span class="c1"&gt;# == output ==
+&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s"&gt;'john'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;'jack'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;'mary'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;'jane'&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h4&gt;
+  &lt;a href="#-raw-removevalue-endraw-removes-the-raw-value-endraw-passed-in-the-list"&gt;
+  &lt;/a&gt;
+  &lt;code&gt;remove(value)&lt;/code&gt; - removes the &lt;code&gt;value&lt;/code&gt; passed in the list
+&lt;/h4&gt;
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="c1"&gt;# taking our initial list
+&lt;/span&gt;&lt;span class="n"&gt;names&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s"&gt;'john'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;'jack'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;'mary'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;'jane'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;'jonas'&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+
+&lt;span class="c1"&gt;# this time we want to remove 'mary'
+&lt;/span&gt;&lt;span class="n"&gt;names&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;remove&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;'mary'&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+&lt;span class="c1"&gt;# let's print our list again
+&lt;/span&gt;&lt;span class="k"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;names&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+&lt;span class="c1"&gt;# == output ==
+&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s"&gt;'john'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;'jack'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;'jane'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;'jonas'&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;blockquote&gt;
+&lt;p&gt;&lt;code&gt;remove(value)&lt;/code&gt; only removes the first value it finds, not all of it.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;h4&gt;
+  &lt;a href="#-raw-del-endraw-deletes-a-value-based-on-the-index"&gt;
+  &lt;/a&gt;
+  &lt;code&gt;del&lt;/code&gt; - deletes a value based on the index
+&lt;/h4&gt;
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="c1"&gt;# taking our initial list
+&lt;/span&gt;&lt;span class="n"&gt;names&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s"&gt;'john'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;'jack'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;'mary'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;'jane'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;'jonas'&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+
+&lt;span class="c1"&gt;# this time we only want to remove the second item
+# lets assume we don't know the value.
+&lt;/span&gt;&lt;span class="k"&gt;del&lt;/span&gt; &lt;span class="n"&gt;names&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+
+&lt;span class="c1"&gt;# let's print our list again
+&lt;/span&gt;&lt;span class="k"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;names&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+&lt;span class="c1"&gt;# == output ==
+&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s"&gt;'john'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;'mary'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;'jane'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;'jonas'&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;There are many more functions to use in the list:&lt;br&gt;
+  some others are:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;
+&lt;code&gt;sort()&lt;/code&gt; - sorts the list&lt;/li&gt;
+&lt;li&gt;
+&lt;code&gt;copy()&lt;/code&gt; - returns a copy of the current list&lt;/li&gt;
+&lt;li&gt;
+&lt;code&gt;extend(another_list)&lt;/code&gt; - extends a list to the current one.&lt;em&gt;(almost like &lt;code&gt;append()&lt;/code&gt;)&lt;/em&gt;
+&lt;a href="https://www.freecodecamp.org/news/python-list-append-vs-python-list-extend/#:~:text=append()%20adds%20a%20single,the%20end%20of%20the%20list.&amp;amp;text=append()%20takes%20a%20single,dictionaries%2C%20sets%2C%20strings"&gt;This article&lt;/a&gt;. explains in detail&lt;/li&gt;
+&lt;li&gt;
+&lt;code&gt;clear()&lt;/code&gt; - clears everything in the list.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h4&gt;
+  &lt;a href="#here-are-some-other-references"&gt;
+  &lt;/a&gt;
+  Here are some other references
+&lt;/h4&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="https://www.w3schools.com/python/python_lists.asp"&gt;W3Schools&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://docs.python.org/3/tutorial/datastructures.html"&gt;Official Python Docs&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://realpython.com/python-lists-tuples/"&gt;Real Python&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://developers.google.com/edu/python/lists"&gt;Google For Education&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://www.programiz.com/python-programming/list"&gt;Programiz&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Thanks for reading, leave a comment or a suggestion to more links or code snippets.&lt;/p&gt;
+
+</description>
+      <category>tutorial</category>
+      <category>todayilearned</category>
+      <category>python</category>
+      <category>programming</category>
     </item>
     <item>
       <title>How to Detect Symbols &amp; spaces With RegEx!</title>
@@ -984,447 +1498,6 @@ citySuffix()
       <category>watercooler</category>
       <category>docker</category>
       <category>productivity</category>
-    </item>
-    <item>
-      <title>5 Qualities That Make You A Hireable Senior Engineer</title>
-      <author>Daine Mawer</author>
-      <pubDate>Thu, 13 May 2021 05:58:22 +0000</pubDate>
-      <link>https://dev.to/dainemawer/5-qualities-that-make-you-a-hireable-senior-engineer-3j7j</link>
-      <guid>https://dev.to/dainemawer/5-qualities-that-make-you-a-hireable-senior-engineer-3j7j</guid>
-      <description>&lt;p&gt;As we grow in such a fast-paced industry like technology, we often lose sight of what it takes to get hired. That statement is both true and false. Some of us find ourselves spending long tenures of time at specific companies while the rest of us jump ship rather frequently in order to find greener pastures.&lt;/p&gt;
-
-&lt;p&gt;Through countless hours of learning, failing, and succeeding we eventually reach a point where we are autonomous enough to proactively solve our own challenges. Be that engineering features, tackling a backlog of bugs successfully, or aiding more junior members of the team. These are some of the key points that differentiate less experienced engineers from those who are more experienced.&lt;/p&gt;
-
-&lt;p&gt;However, what does it really boil down to when we label an engineer as "senior"? What should companies be looking for when they advertise the position? And, what qualities should you display in order to grab the attention of recruiters and/or HR departments?&lt;/p&gt;
-
-&lt;p&gt;Here are 5 qualities of senior engineers that I look for and more importantly, rely on:&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#1-arrive-at-a-problem-with-a-solution"&gt;
-  &lt;/a&gt;
-  1. Arrive at a problem, with a solution.
-&lt;/h3&gt;
-
-&lt;p&gt;One of the biggest red flags I see amongst teammates is when an engineer does not come to the party with solutions to a problem. Regardless of whether the solution is correct or the best possible solution for that problem. It's the mindset of providing a solution when faced with a problem that becomes an outstanding quality in a teammate.&lt;/p&gt;
-
-&lt;p&gt;Coming up with your own solutions means that you've given thought to the challenge, in a constructive and pro-active manner. Rather than admitting defeat straight away and declaring "I don't know".&lt;/p&gt;
-
-&lt;p&gt;I can almost guarantee you that the majority of your peers probably have either come across the situation you face or know someone who does, so they're not stressed about the fact that you didn't arrive at the expected outcome, you just showed a willingness to and that's what counts.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#2-you-acknowledge-your-imposter-syndrome"&gt;
-  &lt;/a&gt;
-  2. You acknowledge your imposter syndrome.
-&lt;/h3&gt;
-
-&lt;p&gt;Everyone has imposter syndrome, everyone. It just occurs at relative degrees. When someone new to web development faces a difficult learning curve they think to themselves: "I will never understand this". It's the same thought and gravity as that of a more experienced engineer thinking: "I have no idea how to write this function in the most performant way possible" or "I have no idea how to ensure that this code runs asynchronously". &lt;/p&gt;
-
-&lt;p&gt;In my opinion, the voice inside your head that tells you you can't do something needs to be countered by a voice outside your head that tells you, you can. That voice can be from a mentor or member of a community that you respect. The most important part of dealing with imposter syndrome is acknowledging the fact that you and I both have it and it's okay because it helps push us to do things we don't think we can do.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#3-you-dive-into-the-unknown"&gt;
-  &lt;/a&gt;
-  3. You dive into the unknown.
-&lt;/h3&gt;
-
-&lt;p&gt;Perhaps one of the most daring parts of being a senior or lead in a tech company is taking ownership and responsibility for code features that you have very little experience with.&lt;/p&gt;
-
-&lt;p&gt;It can be a real struggle, and there will be times when you feel completely hopeless and paralyzed with confusion. There is always light at the end of the tunnel and there will always be someone who has either been through the same thing or knows how to implement what you're working on. &lt;/p&gt;
-
-&lt;p&gt;It's important to carry on leading in a situation like this.&lt;/p&gt;
-
-&lt;p&gt;Saying: "I don't know how to do this...", followed by: "I'm going to time-box it to 2 hours and see where I land up" or "We should bring in person x to help provide clarity" ensures transparency when it comes to dealing with the situation. &lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#4-you-dont-know-everything-and-admit-it"&gt;
-  &lt;/a&gt;
-  4. You don't know everything and admit it.
-&lt;/h3&gt;
-
-&lt;p&gt;I haven't spoken much about technical skill here as that can be learnt with repetition and motivation. If you dedicate yourself to learning a new concept or language you will eventually overcome the learning curve and beat it.&lt;/p&gt;
-
-&lt;p&gt;Far too often, companies "go fishing" and look to hire engineers that appear to know almost every computer language available today. No one actually wants to hire that "unicorn". &lt;/p&gt;
-
-&lt;p&gt;Good leaders hire those that can apply their knowledge and skills to challenges. You don't have to know everything about Webpack or Node, or React. Working knowledge is important, and you cannot do your job without it, but every discipline will present a challenge you have no idea how to solve and if you can admit that you are far closer to overcoming it. &lt;/p&gt;
-
-&lt;p&gt;Furthermore, if you never admit that you don't know how to do something, it burns resources, time and patience. 3 things that are very precious.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#5-you-give-out-and-can-take-criticism"&gt;
-  &lt;/a&gt;
-  5. You give out and can take criticism.
-&lt;/h3&gt;
-
-&lt;p&gt;One of the quickest ways to grow is being able to consume criticism. Be that good or bad. When people identify your shortcomings in a way that allows you to grow and not feel like you've failed, it presents you with an opportunity to better yourself alongside your peers. Sometimes it's really hard to hear, but if you can take it in your stride you will see tremendous amounts of respect headed your way. &lt;/p&gt;
-
-&lt;p&gt;That being said, the way you give out criticism is also really important. No one likes to feel criticised, and the way you handle constructive criticism in code reviews or retrospectives with peers and junior members of the team really shows your worth as a contributing member and leader. &lt;/p&gt;
-
-&lt;p&gt;Today, for just a moment, grab a coffee and think about these 5 points in your career journey. If you place focus on them you will undoubtedly see that your position in a team starts to mould and change, for the better.&lt;/p&gt;
-
-</description>
-      <category>webdev</category>
-      <category>career</category>
-      <category>productivity</category>
-      <category>motivation</category>
-    </item>
-    <item>
-      <title>49 Days of Ruby: Day 47 -- Testing Frameworks: RSpec</title>
-      <author>Ben Greenberg</author>
-      <pubDate>Thu, 13 May 2021 05:47:41 +0000</pubDate>
-      <link>https://dev.to/bengreenberg/49-days-of-ruby-day-47-testing-frameworks-rspec-4kl3</link>
-      <guid>https://dev.to/bengreenberg/49-days-of-ruby-day-47-testing-frameworks-rspec-4kl3</guid>
-      <description>&lt;p&gt;&lt;strong&gt;Welcome to day 47 of the 49 Days of Ruby! 🎉&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;Yesterday, we explored the testing library Minitest as we looked at testing implementations in Ruby for the first time.&lt;/p&gt;
-
-&lt;p&gt;Today, we are going to explore RSpec as another testing framework option. RSpec has a lot of "bells and whistles", which can be overwhelming, and you may not need all of them all the time. However, when you do need one of those bells or whistles, you will appreciate the benefits of it being packaged together.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://github.com/rspec/rspec"&gt;RSpec&lt;/a&gt; defines itself as:&lt;/p&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;Behavior driven development for Ruby&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;Essentially, RSpec when done within a context of TDD (Test Driven Development), trains the developer to think about the kind of results they want their code to accomplish. It is done using maximally human readable language.&lt;/p&gt;
-
-&lt;p&gt;For example, this is what a test in RSpec might look like, taken from the &lt;a href="https://rspec.info/"&gt;RSpec website&lt;/a&gt;:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight ruby"&gt;&lt;code&gt;&lt;span class="no"&gt;RSpec&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;describe&lt;/span&gt; &lt;span class="no"&gt;Bowling&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s2"&gt;"#score"&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
-  &lt;span class="n"&gt;context&lt;/span&gt; &lt;span class="s2"&gt;"with no strikes or spares"&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
-    &lt;span class="n"&gt;it&lt;/span&gt; &lt;span class="s2"&gt;"sums the pin count for each roll"&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
-      &lt;span class="n"&gt;bowling&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="no"&gt;Bowling&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;new&lt;/span&gt;
-      &lt;span class="mi"&gt;20&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;times&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="n"&gt;bowling&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;hit&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;4&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;
-      &lt;span class="n"&gt;expect&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;bowling&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;score&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nf"&gt;to&lt;/span&gt; &lt;span class="n"&gt;eq&lt;/span&gt; &lt;span class="mi"&gt;80&lt;/span&gt;
-    &lt;span class="k"&gt;end&lt;/span&gt;
-  &lt;span class="k"&gt;end&lt;/span&gt;
-&lt;span class="k"&gt;end&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Do you notice how verbose that example is? There are keywords like &lt;code&gt;describe&lt;/code&gt;, &lt;code&gt;context&lt;/code&gt;, and &lt;code&gt;it&lt;/code&gt;. All those statements help form a clear human sentence when the test is run:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;bin/rspec 
-
-Bowling#score
-  with no strikes or spares
-    sums the pin count &lt;span class="k"&gt;for &lt;/span&gt;each roll 
-
-Finished &lt;span class="k"&gt;in &lt;/span&gt;0.00137 seconds &lt;span class="o"&gt;(&lt;/span&gt;files took 0.13421 seconds to load&lt;span class="o"&gt;)&lt;/span&gt;
-1 example, 0 failures
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;You do not need to have the &lt;code&gt;context&lt;/code&gt; block, but it helps add another layer of comprehensibility to a test when running it. &lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#rspec-basics"&gt;
-  &lt;/a&gt;
-  RSpec Basics
-&lt;/h2&gt;
-
-&lt;p&gt;Let's cover a little bit of the basic functionality of RSpec. I encourage you to spend some time today familiarizing yourself more with it and see what kind of tests you can build!&lt;/p&gt;
-
-&lt;p&gt;Imagine we had some code in a file called &lt;code&gt;my_code.rb&lt;/code&gt; and we wanted to test it.&lt;/p&gt;
-
-&lt;p&gt;First, we would &lt;code&gt;require&lt;/code&gt; that file in our test file. The convention is to name the test file the same name as the code file and append &lt;code&gt;_spec&lt;/code&gt; to it: &lt;code&gt;my_code_spec.rb&lt;/code&gt;:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight ruby"&gt;&lt;code&gt;&lt;span class="c1"&gt;# my_code_spec.rb&lt;/span&gt;
-
-&lt;span class="nb"&gt;require&lt;/span&gt; &lt;span class="s2"&gt;"my_code"&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Now, let's continue our imagined example and say we had a class called &lt;code&gt;Coffee&lt;/code&gt; inside our &lt;code&gt;my_code&lt;/code&gt; file:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight ruby"&gt;&lt;code&gt;&lt;span class="c1"&gt;# my_code_spec.rb&lt;/span&gt;
-
-&lt;span class="nb"&gt;require&lt;/span&gt; &lt;span class="s2"&gt;"my_code"&lt;/span&gt;
-
-&lt;span class="no"&gt;RSpec&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;describe&lt;/span&gt; &lt;span class="no"&gt;Coffee&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
-&lt;span class="k"&gt;end&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Then, now extending it, we also have a class method called &lt;code&gt;#name&lt;/code&gt;:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight ruby"&gt;&lt;code&gt;&lt;span class="c1"&gt;# my_code_spec.rb&lt;/span&gt;
-
-&lt;span class="nb"&gt;require&lt;/span&gt; &lt;span class="s2"&gt;"my_code"&lt;/span&gt;
-
-&lt;span class="no"&gt;RSpec&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;describe&lt;/span&gt; &lt;span class="no"&gt;Coffee&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
-  &lt;span class="n"&gt;context&lt;/span&gt; &lt;span class="s2"&gt;"when asked for a coffee name"&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
-    &lt;span class="n"&gt;it&lt;/span&gt; &lt;span class="s2"&gt;"returns the correct name"&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
-      &lt;span class="n"&gt;expect&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="no"&gt;Coffee&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;name&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nf"&gt;to&lt;/span&gt; &lt;span class="n"&gt;eq&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;"Espresso"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-    &lt;span class="k"&gt;end&lt;/span&gt;
-  &lt;span class="k"&gt;end&lt;/span&gt;
-&lt;span class="k"&gt;end&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;That is a pretty straightforward test. We want to confirm that when the &lt;code&gt;#name&lt;/code&gt; method is invoked that it outputs the string &lt;code&gt;Espresso&lt;/code&gt;.&lt;/p&gt;
-
-&lt;p&gt;What if our &lt;code&gt;Coffee&lt;/code&gt; class was a bit more complex and had a lot of parameters to initialize with? Would we have to make a new instance for each test? The &lt;code&gt;subject&lt;/code&gt; convention can help make that less repetitive. Perhaps the &lt;code&gt;#name&lt;/code&gt; method is actually an instance method:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight ruby"&gt;&lt;code&gt;&lt;span class="c1"&gt;# my_code_spec.rb&lt;/span&gt;
-
-&lt;span class="nb"&gt;require&lt;/span&gt; &lt;span class="s2"&gt;"my_code"&lt;/span&gt;
-
-&lt;span class="no"&gt;RSpec&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;describe&lt;/span&gt; &lt;span class="no"&gt;Coffee&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
-  &lt;span class="n"&gt;let&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="ss"&gt;:subject&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
-    &lt;span class="no"&gt;Coffee&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;new&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
-      &lt;span class="ss"&gt;something: &lt;/span&gt;&lt;span class="s2"&gt;"its value"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-      &lt;span class="ss"&gt;something_else: &lt;/span&gt;&lt;span class="s2"&gt;"its value"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-      &lt;span class="ss"&gt;another_thing: &lt;/span&gt;&lt;span class="mi"&gt;123456&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-      &lt;span class="ss"&gt;yet_another_thing: &lt;/span&gt;&lt;span class="kp"&gt;true&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-      &lt;span class="ss"&gt;coffee_type: &lt;/span&gt;&lt;span class="s2"&gt;"Espresso"&lt;/span&gt;
-    &lt;span class="p"&gt;)&lt;/span&gt;
-  &lt;span class="k"&gt;end&lt;/span&gt;
-
-  &lt;span class="n"&gt;describe&lt;/span&gt; &lt;span class="s2"&gt;"#name"&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
-    &lt;span class="n"&gt;it&lt;/span&gt; &lt;span class="s2"&gt;"returns the correct coffee name"&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
-      &lt;span class="n"&gt;expect&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;subject&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;name&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nf"&gt;to&lt;/span&gt; &lt;span class="n"&gt;eq&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;"Espresso"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-    &lt;span class="k"&gt;end&lt;/span&gt;
-  &lt;span class="k"&gt;end&lt;/span&gt;
-&lt;span class="k"&gt;end&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;We can continue to reuse that &lt;code&gt;subject&lt;/code&gt; variable, which holds an instance of &lt;code&gt;Coffee&lt;/code&gt; for all of our relevant tests. It can save us a lot of repetitive typing!&lt;/p&gt;
-
-&lt;p&gt;For the rest of the day continue exploring RSpec. Try to write some tests that define your future code's expectations, and then write the code to help those tests pass.&lt;/p&gt;
-
-&lt;p&gt;See you tomorrow!&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Come back tomorrow for the next installment of 49 Days of Ruby! You can join the conversation on Twitter with the hashtag &lt;a href="https://twitter.com/hashtag/49daysofruby"&gt;#49daysofruby&lt;/a&gt;.&lt;/strong&gt;&lt;/p&gt;
-
-</description>
-      <category>ruby</category>
-    </item>
-    <item>
-      <title>⭐Angular 12 Now Available ⭐</title>
-      <author>Sandeep Balachandran</author>
-      <pubDate>Thu, 13 May 2021 05:39:44 +0000</pubDate>
-      <link>https://dev.to/sandeepbalachandran/angular-12-now-available-1004</link>
-      <guid>https://dev.to/sandeepbalachandran/angular-12-now-available-1004</guid>
-      <description>&lt;p&gt;Hey there,&lt;/p&gt;
-
-&lt;p&gt;Version 12.0.0 is here and it has some great updates for Angular developers everywhere. 🎉🎉&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#tldr"&gt;
-  &lt;/a&gt;
-  TL;DR 🙌
-&lt;/h1&gt;
-
-&lt;p&gt;✅ &lt;strong&gt;Moving closer to IVY engine and get rid of view engine&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;✅ Getting rid of protractor. Adding support to Cypress, WebdriverIO, and TestCafe&lt;/p&gt;
-
-&lt;p&gt;✅ &lt;strong&gt;Nullish Coalescing in templates&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;✅ Docs Updated | Docs updating | Docs will be updated&lt;/p&gt;
-
-&lt;p&gt;✅ Stylish improvements&lt;/p&gt;
-
-&lt;p&gt;✅ Strict mode by default&lt;/p&gt;
-
-&lt;p&gt;✅ Ivy-based Language Service&lt;/p&gt;
-
-&lt;p&gt;✅ Experimental support for Webpack 5&lt;/p&gt;
-
-&lt;p&gt;✅ supporting TypeScript version to 4.2 ( 4.3 is in beta)&lt;/p&gt;
-
-&lt;p&gt;✅ Bye bye IE11 - New deprecation warning message in Angular v12 — and remove support for IE11 in Angular v13&lt;/p&gt;
-
-&lt;p&gt;✅ PR merges from community&lt;/p&gt;
-
-&lt;h1&gt; How to update to version 12&lt;/h1&gt;
-
-&lt;p&gt;Visit &lt;a href="https://update.angular.io"&gt;update.angular.io&lt;/a&gt; for detailed information and guidance. To have the best update experience,&lt;/p&gt;
-
-&lt;p&gt;Update to 12&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;ng update @angular/cli @angular/core
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;In order to update your global angular,&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;npm i -g @angular/cli
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h1&gt;
-  &lt;a href="#whats-in-this-release"&gt;
-  &lt;/a&gt;
-  What’s in this release?
-&lt;/h1&gt;
-
-&lt;h2&gt;
-  &lt;a href="#moving-closer-to-ivy-engine"&gt;
-  &lt;/a&gt;
-  ✅ Moving closer to IVY engine 👌
-&lt;/h2&gt;
-
-&lt;ul&gt;
-&lt;li&gt;&lt;p&gt;View Engine is basically deprecated, it will be removed in a future major release&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;Current libraries using View Engine will still work with Ivy apps (no work is required by developers), but library authors should start planning to transition to Ivy.&lt;/p&gt;&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;👉 Read about this from &lt;a href="https://blog.angular.io/upcoming-improvements-to-angular-library-distribution-76c02f782aa4"&gt;Minko Gechev&lt;/a&gt;  right &lt;a href="https://blog.angular.io/upcoming-improvements-to-angular-library-distribution-76c02f782aa4"&gt;here&lt;/a&gt;&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#goodbye-to-protractor"&gt;
-  &lt;/a&gt;
-  ✅ Goodbye to Protractor
-&lt;/h2&gt;
-
-&lt;ul&gt;
-&lt;li&gt;&lt;p&gt;Angular 12 opted to not include protractor in new projects and, instead, provide options with popular 3rd party solutions in the Angular CLI. Angular team currently working with Cypress, WebdriverIO, and TestCafe&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;New things to learn 🎉🎉&lt;/p&gt;&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h2&gt;
-  &lt;a href="#nullish-coalescing"&gt;
-  &lt;/a&gt;
-  ✅ Nullish Coalescing
-&lt;/h2&gt;
-
-&lt;ul&gt;
-&lt;li&gt;We can use nullish coalescing in angular components
-&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--jmB83wVn--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/0eet0uiqhiswdmd5pbje.png" alt="nullish"&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h1&gt;
-  &lt;a href="#documentation-updates"&gt;
-  &lt;/a&gt;
-  ✅ Documentation updates
-&lt;/h1&gt;
-
-&lt;ul&gt;
-&lt;li&gt;&lt;p&gt;👉 &lt;a href="https://v12.angular.io/guide/content-projection"&gt;Content projection guide&lt;/a&gt;&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;👉 &lt;a href="https://angular.io/guide/contributors-guide-overview"&gt;Contriubtors guide&lt;/a&gt; &lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;👉 &lt;a href="https://blog.angular.io/angular-debugging-guides-dfe0ef915036"&gt;Guides and videos&lt;/a&gt;&lt;/p&gt;&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h2&gt;
-  &lt;a href="#stylish-improvements"&gt;
-  &lt;/a&gt;
-  ✅ Stylish Improvements
-&lt;/h2&gt;
-
-&lt;ul&gt;
-&lt;li&gt;&lt;p&gt;Angular components will now support inline Sass . Previously, Sass was only available in external resources due to the Angular compiler&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;To enable this feature in your existing applications add&lt;br&gt;
-&lt;br&gt;
-&lt;code&gt;"inlineStyleLanguage": "scss”&lt;/code&gt;&lt;br&gt;
-&lt;br&gt;
-to angular.json. Otherwise, it will be available to new projects using SCSS&lt;/p&gt;&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h3&gt;
-  &lt;a href="#in-the-v112-release-added-support-for-tailwind-css"&gt;
-  &lt;/a&gt;
-  In the v11.2 release,  added support for Tailwind CSS.
-&lt;/h3&gt;
-
-&lt;ul&gt;
-&lt;li&gt;&lt;p&gt;install the tailwindcss package from npm &lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;initialize Tailwind to create the &lt;code&gt;tailwind.config.js&lt;/code&gt;in your project. &lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;Now, teams are ready to start using Tailwind in Angular.&lt;/p&gt;&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h2&gt;
-  &lt;a href="#great-features"&gt;
-  &lt;/a&gt;
-  ✅ Great Features
-&lt;/h2&gt;
-
-&lt;ul&gt;
-&lt;li&gt;&lt;p&gt;👉&lt;code&gt; ng build &lt;/code&gt; now defaults to production which saves teams some extra steps and helps to prevent accidental development builds in production . ng build === ng build --prod&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;👉 Strict mode is enabled by default in the CLI&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;👉 The Ivy-based Language Service is moving from opt-in to on by default&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;👉 Added experimental support for Webpack 5&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;👉  Updating the supported TypeScript version to 4. &lt;/p&gt;&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h2&gt;
-  &lt;a href="#bye-bye-ie11"&gt;
-  &lt;/a&gt;
-  ✅ Bye Bye IE11
-&lt;/h2&gt;
-
-&lt;ul&gt;
-&lt;li&gt;👉 New IE11 deprecation warning message in Angular v12 — and remove support for IE11 in Angular v13&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h2&gt;
-  &lt;a href="#multiple-code-merges"&gt;
-  &lt;/a&gt;
-  ✅ Multiple code merges
-&lt;/h2&gt;
-
-&lt;ul&gt;
-&lt;li&gt;👉 &lt;a href="https://github.com/angular/angular/pull/25839"&gt;#25839&lt;/a&gt;
-&lt;/li&gt;
-&lt;li&gt;👉 &lt;a href="https://github.com/angular/angular/pull/25751"&gt;#25751&lt;/a&gt;
-&lt;/li&gt;
-&lt;li&gt;👉 &lt;a href="https://github.com/angular/angular/pull/39063"&gt;#39063&lt;/a&gt;
-&lt;/li&gt;
-&lt;li&gt;👉 &lt;a href="https://github.com/angular/angular/pull/33222"&gt;#33222&lt;/a&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;For more let us hear it from the creators&lt;/p&gt;
-
-&lt;p&gt;Credits : &lt;a href="https://blog.angular.io/angular-v12-is-now-available-32ed51fbfd49"&gt;Official Announcement 😄&lt;/a&gt;&lt;/p&gt;
-
-</description>
-      <category>javascript</category>
-      <category>angular</category>
-      <category>beginners</category>
-      <category>webdev</category>
     </item>
   </channel>
 </rss>
