@@ -7,6 +7,839 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>Redis:  Exploring Redis as Serverless Database to solve idempotence in APIs</title>
+      <author>Ibrahim Cesar</author>
+      <pubDate>Fri, 14 May 2021 12:53:12 +0000</pubDate>
+      <link>https://dev.to/aws-builders/redis-exploring-redis-as-serverless-database-to-solve-idempotence-in-apis-2gma</link>
+      <guid>https://dev.to/aws-builders/redis-exploring-redis-as-serverless-database-to-solve-idempotence-in-apis-2gma</guid>
+      <description>&lt;p&gt;&lt;strong&gt;Redis means fast.&lt;/strong&gt; This was the  impression I always had. But, at the same time, for me, Redis was “just” (as if this wasn't  enough) a cache store. To my surprise, Redis is much more versatile than this.&lt;/p&gt;
+
+&lt;p&gt;This will be the first in a series exploring &lt;a href="https://dev.to/aws-builders/the-state-of-serverless-databases-in-aws-part-0-162c"&gt;The State of Serverless Databases in AWS&lt;/a&gt; and for it I picked Redis , you know, just to try something other than the usual suspect (DynamoDB) (and to give  a third-party offering a try). In the following weeks, my plan is to explore some database offerings used along with serverless at AWS and explore their particular tradeoffs.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#serverless-redis"&gt;
+  &lt;/a&gt;
+  Serverless Redis
+&lt;/h2&gt;
+
+&lt;p&gt;As &lt;a href="https://redis.io/"&gt;self-defined, Redis is&lt;/a&gt;:&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;...an open source (BSD licensed), in-memory data structure store, used as a database, cache, and message broker. Redis provides data structures such as strings, hashes, lists, sets, sorted sets with range queries, bitmaps, hyperloglogs, geospatial indexes, and streams.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;You can take &lt;a href="https://redislabs.com/redis-enterprise/data-structures/"&gt;a look in several in-depth papers&lt;/a&gt; describing each data structure in order to make a better informed decision. Since it's open source we could theoretically implement it in a server but it would be a strange, if not wrong turn, in keeping in the Serverless lane. Here enters &lt;a href="https://upstash.com/"&gt;Uptash, a Serverless database&lt;/a&gt; offering for Redis. In &lt;a href="https://dev.to/fllstck/microblogging-with-serverless-redis-2nl3"&gt;Microblogging with Serverless Redis&lt;/a&gt; you can take a look how CRUD works and more framework-oriented, you could checkout &lt;a href="https://twitter.com/leeerob"&gt;Lee Robinson&lt;/a&gt; has a great video on how to use it with Next.js:&lt;/p&gt;
+
+&lt;p&gt;&lt;iframe width="710" height="399" src="https://www.youtube.com/embed/FytxaSVQROc"&gt;
+&lt;/iframe&gt;
+&lt;/p&gt;
+
+&lt;p&gt;As I promised in the opening article, I want to do in-depth explorations. Not just our run-of-the-mill &lt;code&gt;foo&lt;/code&gt; / &lt;code&gt;bar&lt;/code&gt; examples (for which the official docs of Upstash is guilty, BTW). For Redis, I almost stuck at the key/value store type, but there are several use cases you can unlock with this solution since it gives you access to a GraphQL API, for which you can have an explorer for you, documented. &lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--3Lq63c02--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/u6l30fgh7caphace4j6p.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--3Lq63c02--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/u6l30fgh7caphace4j6p.png" alt="Upstash offering"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Before jumping in: for me, the argument of having a &lt;strong&gt;price cap&lt;/strong&gt; and no surprises in a bill is always a &lt;em&gt;feature&lt;/em&gt;, and in this case you don't even need to give your credit card details. I have spoken about this issue in a previous post, &lt;a href="https://dev.to/aws-builders/open-letter-to-aws-please-give-us-price-cap-4ge6"&gt;Open letter to AWS: Please, give us a price cap&lt;/a&gt;,  and for me at least, as a developer and living in Brazil, it is an extremely overlooked matter by AWS.&lt;/p&gt;
+
+&lt;p&gt;My objective is to try to take use-cases with some value and at the same time explores a deep more about dealing with the data and I want to tackle a very important one, at least, for me: &lt;em&gt;idempotence&lt;/em&gt;. So there will be nothing fancy than a &lt;code&gt;key&lt;/code&gt;/&lt;code&gt;value&lt;/code&gt; store but I think explore an important feature for any production-grade function. Also, please note that while this is a feature in &lt;code&gt;NodeJS&lt;/code&gt;, I'm following the steps of the official &lt;code&gt;Python&lt;/code&gt; Powertools library. I hope if you are not from the &lt;code&gt;Node&lt;/code&gt; ecosystem could get some value as well.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#idempotence-doing-by-myself"&gt;
+  &lt;/a&gt;
+  Idempotence: doing by myself
+&lt;/h2&gt;
+
+&lt;p&gt;An idempotent operation can repeat an arbitrary number of times, and the result will always be the same. In arithmetic, adding zero to a number is idempotent. Some kinds of requests into AWS lambda should run more than once, generating inconsistency problems when your function isn’t idempotent. AWS has a &lt;a href="https://aws.amazon.com/premiumsupport/knowledge-center/lambda-function-idempotent/"&gt;page in how to address this much needed feature&lt;/a&gt;. And, yes, it is canon, there is a really important reason to &lt;a href="https://docs.aws.amazon.com/lambda/latest/dg/invocation-retries.html"&gt;make your API idempotent&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;Making an API idempotent is not as &lt;a href="https://awslabs.github.io/aws-lambda-powertools-python/develop/utilities/idempotency/"&gt;trivial as many people think&lt;/a&gt;. You could start out by looking at &lt;em&gt;Lambda Powertools for Python&lt;/em&gt; from AWS that does a magnificent job of explaining this use case and a concrete way to implement. There’s also this great article from &lt;a href="https://twitter.com/mfeatonby"&gt;Malcolm Featonby&lt;/a&gt;, &lt;a href="https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/"&gt;Making retries safe with idempotent APIs&lt;/a&gt; featured in the Amazon Builder’s Library as &lt;a href="https://aws.amazon.com/blogs/architecture/category/learning-levels/advanced-300/"&gt;Architecture level 300&lt;/a&gt; which falls in the &lt;em&gt;advanced&lt;/em&gt; classification.&lt;/p&gt;
+
+&lt;p&gt;Let’s start with our scope from the &lt;em&gt;Lambda Powertools&lt;/em&gt;:&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;&lt;strong&gt;Idempotency key&lt;/strong&gt; is a hash representation of either the entire event or a specific configured subset of the event, and invocation results are JSON serialized and stored in your persistence storage layer.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;First, I create a new database. I’m from the famous ‘5 minutes install’ from WordPress. Upstash claims a 30-second installation, and they are not joking):&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s---qGItALP--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/4rq8ela06752l03a1rhp.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s---qGItALP--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/4rq8ela06752l03a1rhp.png" alt="Creating a Database"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Here you can see I chose to enable the &lt;strong&gt;Strong Consistency Mode&lt;/strong&gt;. &lt;strong&gt;strong consistence&lt;/strong&gt;. Strong Consistency offers up-to-date data but at the cost of high latency. Eventual consistency offers low latency but may reply to read requests with stale data since all nodes of the database may not have the updated data. Since this is a highly complex topic, and this brief explanation only very briefly begins to scratch at its surface, I recommend you read the book &lt;a href="https://amzn.to/3f2LKTS"&gt;&lt;strong&gt;Designing Data-Intensive Applications&lt;/strong&gt;: &lt;em&gt;The Big Ideas Behind Reliable, Scalable, and Maintainable Systems&lt;/em&gt;&lt;/a&gt; by &lt;a href="https://twitter.com/martinkl"&gt;Martin Kleppmann&lt;/a&gt;. I usually work with eventual consistency &lt;em&gt;most of the time&lt;/em&gt;. I’m picking strong here because I want to make the best effort to be as idempotent as possible, because otherwise we could get false negatives.&lt;/p&gt;
+
+&lt;p&gt;Each Lambda receives an &lt;a href="https://github.com/DefinitelyTyped/DefinitelyTyped/blob/3c5d54b997a28dba42c10b01dfb7c0d8d30231e8/types/aws-lambda/trigger/api-gateway-proxy.d.ts#L186"&gt;&lt;code&gt;event&lt;/code&gt;&lt;/a&gt; as part of their request.&lt;/p&gt;
+
+&lt;p&gt;So, the first thing we are going to do on our lambda function is to create a hash representation of the whole object &lt;code&gt;event&lt;/code&gt;. I'll use the Node native &lt;a href="https://nodejs.org/api/crypto.html"&gt;&lt;code&gt;crypto&lt;/code&gt;&lt;/a&gt; lib.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;hash&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;crypto&lt;/span&gt;
+               &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;createHash&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="err"&gt;‘&lt;/span&gt;&lt;span class="nx"&gt;sha256&lt;/span&gt;&lt;span class="err"&gt;’&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+               &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;update&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;event&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+               &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;digest&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="err"&gt;‘&lt;/span&gt;&lt;span class="nx"&gt;base64&lt;/span&gt;&lt;span class="err"&gt;’&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;This will generate a unique identifier for that given event and this is going to be used as our unique key in the Redis database.&lt;/p&gt;
+
+&lt;p&gt;I’ll leverage &lt;a href="https://middy.js.org/"&gt;&lt;strong&gt;Middy&lt;/strong&gt;&lt;/a&gt;, a lightweight middleware for Lambda in Node, which has a particularly cool feature (and a really helpful one for the task at hand) that is its &lt;em&gt;onion-like&lt;/em&gt; middleware pattern implementation and the ability to create a middleware that can read the function &lt;em&gt;after&lt;/em&gt; and &lt;em&gt;before&lt;/em&gt; the handler, which is essential for idempotent APIs.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--luRMfSId--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/qmwmjxqpw3tjzgpx7ucn.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--luRMfSId--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/qmwmjxqpw3tjzgpx7ucn.png" alt="Middy Middlewares"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;In the &lt;em&gt;before&lt;/em&gt; we had to turn the &lt;code&gt;event&lt;/code&gt; into a hash;&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;createHash&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;event&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;any&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt; &lt;span class="kr"&gt;string&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;crypto&lt;/span&gt;
+           &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;createHash&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="err"&gt;“&lt;/span&gt;&lt;span class="nx"&gt;sha256&lt;/span&gt;&lt;span class="err"&gt;”&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+           &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;update&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;JSON&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;stringify&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;event&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;
+           &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;digest&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="err"&gt;“&lt;/span&gt;&lt;span class="nx"&gt;base64&lt;/span&gt;&lt;span class="err"&gt;”&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="p"&gt;};&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;Note that there’s an &lt;strong&gt;explicit any&lt;/strong&gt; there—the mythical, non-existent in production &lt;code&gt;any&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;Then, check at the Redis database if that hash already exists in the table. We’ll do this using the lib &lt;a href="https://github.com/luin/ioredis"&gt;&lt;code&gt;ioredis&lt;/code&gt;&lt;/a&gt;. That we’ll pass an option to the middleware we are creating.&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="c1"&gt;//in the handler&lt;/span&gt;
+&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="nx"&gt;Redis&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="err"&gt;“&lt;/span&gt;&lt;span class="nx"&gt;ioredis&lt;/span&gt;&lt;span class="err"&gt;”&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="c1"&gt;// handler code&lt;/span&gt;
+&lt;span class="nx"&gt;handler&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;use&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;jsonBodyParser&lt;/span&gt;&lt;span class="p"&gt;()).&lt;/span&gt;&lt;span class="nx"&gt;use&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+ &lt;span class="nx"&gt;idempotent&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt;
+   &lt;span class="na"&gt;client&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;Redis&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;process&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;env&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;UPSTASH_REDISS&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+ &lt;span class="p"&gt;})&lt;/span&gt;
+&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;The Redis instance is receiving the &lt;code&gt;rediss://&lt;/code&gt; string with your user and password credentials through the environment. This is &lt;strong&gt;not&lt;/strong&gt;  the most secure way to do so, you can store this URL in &lt;a href="https://docs.aws.amazon.com/systems-manager/index.html"&gt;AWS Systems Manager&lt;/a&gt; and then import in a secure way that will even let you rotate the credentials if needed. I’m taking this shortcut here for the purpose of this test, but I'm sure you'd &lt;em&gt;never&lt;/em&gt; do this in production, right?&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://i.giphy.com/media/6ra84Uso2hoir3YCgb/giphy.gif" class="article-body-image-wrapper"&gt;&lt;img src="https://i.giphy.com/media/6ra84Uso2hoir3YCgb/giphy.gif" alt="Wink"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Anyway, we then need to parse the result since we’ll save them as string in the next stage of execution.&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// in the middleware&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;hash&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;createHash&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;request&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;event&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;getByHash&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;options&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;client&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="kd"&gt;get&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;hash&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+
+&lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;getByHash&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;JSON&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;parse&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;getByHash&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;In case of a miss, we get a &lt;code&gt;null&lt;/code&gt; response, which is great to a really simple check. If we get &lt;code&gt;null&lt;/code&gt;, we don’t need to do anything, the function will then proceed to other middlewares, the handler and then to the &lt;em&gt;after&lt;/em&gt; execution order. If this get is not &lt;em&gt;null&lt;/em&gt;, we have to return the response stored by our &lt;em&gt;after&lt;/em&gt; function.&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight json"&gt;&lt;code&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+  &lt;/span&gt;&lt;span class="err"&gt;statusCode:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;200&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+  &lt;/span&gt;&lt;span class="err"&gt;body:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;‘&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="err"&gt;\n&lt;/span&gt;&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="err"&gt;“data”:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="err"&gt;\n&lt;/span&gt;&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="err"&gt;“message”:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;“Hello&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;from&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;the&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;other&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;Side!”\n&lt;/span&gt;&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="err"&gt;\n&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="err"&gt;’&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;Then we’ll invoke &lt;code&gt;return response&lt;/code&gt; in your middleware.This will halt the execution early and it will not pass for any other part of the lambda, so this middleware needs to be one of the first, if not the first to avail. &lt;/p&gt;
+
+&lt;p&gt;In the &lt;em&gt;after&lt;/em&gt; we had to save the response from that event hash.&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;hash&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;createHash&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;request&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;event&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;responseStr&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;JSON&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;stringify&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;request&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;response&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;options&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;client&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="kd"&gt;set&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;hash&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;responseStr&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;And nothing more. Pay attention that this phase and execution happens after the handler send the response through the handler.&lt;/p&gt;
+
+&lt;p&gt;And that's that. Pay attention that this phase and execution happens after the handler sends the response through the handler.&lt;/p&gt;
+
+&lt;p&gt;And yes, &lt;em&gt;it is fast&lt;/em&gt;. There’s a post from Upstash’s own blog, &lt;a href="https://blog.upstash.com/latency-comparison"&gt;Latency Comparison Among Serverless Databases&lt;/a&gt; followed by a &lt;a href="https://news.ycombinator.com/item?id=26799074"&gt;discussion on Hacker News&lt;/a&gt;. I did not make a benchmark or even plan to do so, but as a user, I felt it was as instantaneous as could be. And this is certainly a feature that meets my purposes.&lt;/p&gt;
+
+&lt;p&gt;And well folks, “that’s all”.&lt;/p&gt;
+
+&lt;p&gt;Just kidding, of course it's not. But it is a start. Since the chance of collision is nearly impossible (i.e., two hash being equal) only exact the same request will get the same response, but if we want to check some keys like a &lt;code&gt;x-idempotence&lt;/code&gt; key in the header or even a field in the body of the request, we could target it as well.&lt;/p&gt;
+
+&lt;p&gt;If you wanna that a look at this implementation and help, I wrapped this code and made available for your use in NodeJS Lambdas, as a middleware for &lt;strong&gt;Middy&lt;/strong&gt;. The lib accepts options to target headers, keys in the body and path:&lt;/p&gt;
+
+
+&lt;div class="ltag-github-readme-tag"&gt;
+  &lt;div class="readme-overview"&gt;
+    &lt;h2&gt;
+      &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--i3JOwpme--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/github-logo-ba8488d21cd8ee1fee097b8410db9deaa41d0ca30b004c0c63de0a479114156f.svg" alt="GitHub logo"&gt;
+      &lt;a href="https://github.com/ibrahimcesar"&gt;
+        ibrahimcesar
+      &lt;/a&gt; / &lt;a href="https://github.com/ibrahimcesar/middy-idempotent"&gt;
+        middy-idempotent
+      &lt;/a&gt;
+    &lt;/h2&gt;
+    &lt;h3&gt;
+      🛵 📬  Idempotence Middy middleware for yours AWS Lambdas
+    &lt;/h3&gt;
+  &lt;/div&gt;
+  &lt;div class="ltag-github-body"&gt;
+    
+&lt;div id="readme" class="md"&gt;
+&lt;div&gt;
+  &lt;h1&gt;
+🛵 📬  Idempotent Middleware for Middy&lt;/h1&gt;
+  &lt;blockquote&gt;An Idempotent Middy middleware for your AWS Lambdas&lt;/blockquote&gt;
+&lt;p&gt;&lt;a href="https://github.com/ellerbrock/typescript-badges/"&gt;&lt;img src="https://camo.githubusercontent.com/1d1f56c37cf5dfd1b9c3782a8d1d6fe07f8764e8c35f53ec90460e5b38cd8f7d/68747470733a2f2f6261646765732e66726170736f66742e636f6d2f747970657363726970742f636f64652f747970657363726970742e7376673f763d313031" alt="TypeScript"&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;&lt;a href="https://www.npmjs.com/package/middy-idempotent" rel="nofollow"&gt;&lt;img src="https://camo.githubusercontent.com/5521f6897c23f45d705b93de8db313ac85eb9cca29efb8e16f631bfb80be0355/68747470733a2f2f696d672e736869656c64732e696f2f6e706d2f762f6d696464792d6964656d706f74656e743f6c6162656c3d6c617465737425323076657273696f6e" alt="Version"&gt;&lt;/a&gt;   &lt;a href="https://raw.githubusercontent.com/ibrahimcesar/middy-idempotent/main/./LICENSE"&gt;&lt;img src="https://camo.githubusercontent.com/dca6ec83d124b54d28a6fa5b10654f1b16dffd605256c5a612cef8a005dd5115/68747470733a2f2f62616467656e2e6e65742f6769746875622f6c6963656e73652f6962726168696d63657361722f6d696464792d6964656d706f74656e74" alt="License"&gt;&lt;/a&gt;   &lt;a rel="noopener noreferrer" href="https://camo.githubusercontent.com/15afcb69901659112f63b7e6f7579ca5392089b821fdf8b1778995bc7c58907e/68747470733a2f2f696d672e736869656c64732e696f2f6769746875622f6973737565732f6962726168696d63657361722f6d696464792d6964656d706f74656e742f627567"&gt;&lt;img src="https://camo.githubusercontent.com/15afcb69901659112f63b7e6f7579ca5392089b821fdf8b1778995bc7c58907e/68747470733a2f2f696d672e736869656c64732e696f2f6769746875622f6973737565732f6962726168696d63657361722f6d696464792d6964656d706f74656e742f627567" alt="GitHub issues by-label"&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;Developed in 🇧🇷 &lt;span&gt;Brazil&lt;/span&gt;&lt;/p&gt;
+&lt;/div&gt;
+
+&lt;h2&gt;
+🛵 What is does&lt;/h2&gt;
+
+&lt;p&gt;&lt;a href="https://middy.js.org/" rel="nofollow"&gt;Middy&lt;/a&gt; is a very simple middleware engine that allows you to simplify your AWS Lambda code when using Node.js. This middleware aims to simplify the implementations of a idempotent API.&lt;/p&gt;
+
+&lt;p&gt;Making an API idempotent is &lt;a href="https://awslabs.github.io/aws-lambda-powertools-python/develop/utilities/idempotency/" rel="nofollow"&gt;not trivial as much people think&lt;/a&gt;, and you could take a look at &lt;em&gt;Lambda Powertools for Python&lt;/em&gt; from AWS that does a great job to explain this use case and a concrete way to implement. There's also this great article from &lt;a href="https://twitter.com/mfeatonby" rel="nofollow"&gt;Malcolm Featonby&lt;/a&gt;, &lt;a href="https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/" rel="nofollow"&gt;Making retries safe with idempotent APIs&lt;/a&gt; featured in the Amazon Builder's Library as &lt;a href="https://aws.amazon.com/blogs/architecture/category/learning-levels/advanced-300/" rel="nofollow"&gt;Architecture level 300&lt;/a&gt; which falls ins the &lt;em&gt;advanced&lt;/em&gt; classification.&lt;/p&gt;
+
+&lt;h2&gt;
+🚀 Install&lt;/h2&gt;
+
+&lt;p&gt;Use your favorite package manager:&lt;/p&gt;
+
+&lt;div class="highlight highlight-source-shell position-relative js-code-highlight"&gt;
+&lt;pre&gt;yarn add middy-idempotent&lt;/pre&gt;
+&lt;div class="zeroclipboard-container position-absolute right-0 top-0"&gt;
+  
+    
+
+    
+
+  
+&lt;/div&gt;
+
+
+
+&lt;/div&gt;
+
+&lt;div class="highlight highlight-source-shell position-relative js-code-highlight"&gt;
+&lt;pre&gt;npm install middy-idempotent -S&lt;/pre&gt;
+&lt;div class="zeroclipboard-container position-absolute right-0 top-0"&gt;
+  
+    
+
+    
+    
+
+  
+&lt;/div&gt;
+
+
+
+&lt;/div&gt;
+
+&lt;h2&gt;
+Usage&lt;/h2&gt;
+
+&lt;p&gt;Besides &lt;code&gt;@middy/core&lt;/code&gt;, you must also use &lt;code&gt;@middy/http-json-body-parser&lt;/code&gt; since this middleware…&lt;/p&gt;
+&lt;/div&gt;
+
+
+&lt;/div&gt;
+&lt;br&gt;
+  &lt;div class="gh-btn-container"&gt;&lt;a class="gh-btn" href="https://github.com/ibrahimcesar/middy-idempotent"&gt;View on GitHub&lt;/a&gt;&lt;/div&gt;
+&lt;br&gt;
+&lt;/div&gt;
+&lt;br&gt;
+
+
+
+
+
+&lt;p&gt;As for the lib above, you can implement the SSM so it won't  place your secret string in the environment for your infrastructure, but I plan to add another storage provider, DynamoDB at least in the next days.&lt;/p&gt;
+
+&lt;p&gt;Following that I’ll test another serverless database offering in a not so “Hello World” example but with practical and more valuable use cases -  or at least, this is my hope!&lt;/p&gt;
+
+
+&lt;div class="ltag__link"&gt;
+  &lt;a href="/ibrahimcesar" class="ltag__link__link"&gt;
+    &lt;div class="ltag__link__pic"&gt;
+      &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--kfkWRBf2--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://res.cloudinary.com/practicaldev/image/fetch/s--0zkQIbKi--/c_fill%2Cf_auto%2Cfl_progressive%2Ch_150%2Cq_auto%2Cw_150/https://dev-to-uploads.s3.amazonaws.com/uploads/user/profile_image/189167/695f3dd9-b865-4c57-a097-5cfe07cca488.jpg" alt="ibrahimcesar image"&gt;
+    &lt;/div&gt;
+  &lt;/a&gt;
+  &lt;a href="/aws-builders/the-state-of-serverless-databases-in-aws-part-0-162c" class="ltag__link__link"&gt;
+    &lt;div class="ltag__link__content"&gt;
+      &lt;h2&gt;The State of Serverless Databases in AWS&lt;/h2&gt;
+      &lt;h3&gt;Ibrahim Cesar ・ Apr 29 ・ 2 min read&lt;/h3&gt;
+      &lt;div class="ltag__link__taglist"&gt;
+        &lt;span class="ltag__link__tag"&gt;#serverless&lt;/span&gt;
+        &lt;span class="ltag__link__tag"&gt;#database&lt;/span&gt;
+        &lt;span class="ltag__link__tag"&gt;#aws&lt;/span&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/a&gt;
+&lt;/div&gt;
+
+
+</description>
+      <category>serverless</category>
+      <category>redis</category>
+      <category>aws</category>
+      <category>upstash</category>
+    </item>
+    <item>
+      <title>What is TypeScript and why should you use it?</title>
+      <author>Coderslang: Become a Software Engineer</author>
+      <pubDate>Fri, 14 May 2021 12:49:52 +0000</pubDate>
+      <link>https://dev.to/coderslang/what-is-typescript-and-why-should-you-use-it-3mfd</link>
+      <guid>https://dev.to/coderslang/what-is-typescript-and-why-should-you-use-it-3mfd</guid>
+      <description>&lt;h2&gt;
+  &lt;a href="#what-is-typescript"&gt;
+  &lt;/a&gt;
+  What is &lt;strong&gt;TypeScript&lt;/strong&gt;?
+&lt;/h2&gt;
+
+&lt;p&gt;&lt;strong&gt;TypeScript&lt;/strong&gt; is a programming language developed and maintained by &lt;strong&gt;Microsoft&lt;/strong&gt;. It introduces additional features like strict type binding (variables are bound to specific data types) to &lt;strong&gt;JavaScript&lt;/strong&gt; and can also be compiled down to &lt;strong&gt;JavaScript&lt;/strong&gt; as well.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;TypeScript&lt;/strong&gt; is an Open Source Project, and the source code for it is available on GitHub.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#what-additional-features-does-typescript-introduce"&gt;
+  &lt;/a&gt;
+  What additional features does &lt;strong&gt;TypeScript&lt;/strong&gt; introduce?
+&lt;/h2&gt;
+
+&lt;p&gt;&lt;strong&gt;TypeScript&lt;/strong&gt; adds several additional features to JavaScript. The most important one is strict typing (it is turned on by default, but can be turned off in case the developer doesn't want to use it).&lt;/p&gt;
+
+&lt;p&gt;Apart from strict typing, &lt;strong&gt;TypeScript&lt;/strong&gt; introduces a plethora of features like &lt;em&gt;Interfaces&lt;/em&gt;, &lt;em&gt;Mixin classes&lt;/em&gt;, &lt;em&gt;Enums&lt;/em&gt; and much more, as discussed later in the article.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#why-should-you-use-typescript"&gt;
+  &lt;/a&gt;
+  Why should you use &lt;strong&gt;TypeScript&lt;/strong&gt;?
+&lt;/h2&gt;
+
+&lt;p&gt;If the features mentioned above weren't enough to convince you to use &lt;strong&gt;TypeScript&lt;/strong&gt;, the following reason would definitely do so. &lt;strong&gt;TypeScript&lt;/strong&gt; overcomes the largest issue with &lt;strong&gt;JavaScript&lt;/strong&gt;; which is: a problem can only be detected during runtime in &lt;strong&gt;JavaScript&lt;/strong&gt;, which may result in applications with bugs being shipped to the end-user. This will affect any business negatively by hampering the &lt;em&gt;user experience&lt;/em&gt;. &lt;strong&gt;TypeScript&lt;/strong&gt; removes this problem by checking for any issue at compile time.&lt;/p&gt;
+
+&lt;p&gt;The following script will not raise any errors when using &lt;strong&gt;JavaScript&lt;/strong&gt;, but if you use &lt;strong&gt;TypeScript&lt;/strong&gt;, the compiler will point out that &lt;code&gt;nonExistentProperty&lt;/code&gt; doesn't exist on object &lt;code&gt;obj&lt;/code&gt;&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;obj&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="na"&gt;foo&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;baz&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+&lt;span class="p"&gt;};&lt;/span&gt;
+
+&lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;obj&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;nonExistentProperty&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Even if you are using an editor, using &lt;strong&gt;TypeScript&lt;/strong&gt; provides you with better suggestions and linting as shown below:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--ICLD3YuD--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://learn.coderslang.com/ts-debug.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ICLD3YuD--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://learn.coderslang.com/ts-debug.png" alt="TypeScript Debug"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--CDcWlHzG--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://learn.coderslang.com/js-debug.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--CDcWlHzG--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://learn.coderslang.com/js-debug.png" alt="JavaScript Debug"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;getWeatherDetails()&lt;/code&gt; will accept a boolean value which &lt;strong&gt;TypeScript&lt;/strong&gt; points out, but &lt;strong&gt;JavaScript&lt;/strong&gt; fails to do so.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#getting-started-with-typescript"&gt;
+  &lt;/a&gt;
+  Getting Started with &lt;strong&gt;TypeScript&lt;/strong&gt;
+&lt;/h2&gt;
+
+&lt;p&gt;Enough theoretical stuff. Now let's get our hands dirty writing our first &lt;strong&gt;TypeScript&lt;/strong&gt; script.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;NOTE&lt;/strong&gt;: You will need a &lt;strong&gt;Node.js&lt;/strong&gt; and a package manager (&lt;strong&gt;npm&lt;/strong&gt; or &lt;strong&gt;yarn&lt;/strong&gt;, in this article, we will be using &lt;strong&gt;npm&lt;/strong&gt;) installed to use &lt;strong&gt;TypeScript&lt;/strong&gt; locally. You may use an online compiler like typescript playground for compiling, but it is not a good idea in the case of a large project.&lt;/p&gt;
+
+&lt;p&gt;To install &lt;strong&gt;TypeScript&lt;/strong&gt; globally (replace the &lt;code&gt;-g&lt;/code&gt; tag with &lt;code&gt;-D&lt;/code&gt; to add it as a &lt;em&gt;dev dependency&lt;/em&gt; in a &lt;strong&gt;Node&lt;/strong&gt; package), use the following command:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;npm &lt;span class="nb"&gt;install&lt;/span&gt; &lt;span class="nt"&gt;-g&lt;/span&gt; typescript
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Now you will be able to compile any &lt;strong&gt;TypeScript&lt;/strong&gt; code to &lt;strong&gt;JavaScript&lt;/strong&gt;. Let's test it using a basic snippet:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;obj&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="na"&gt;foo&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;baz&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+&lt;span class="p"&gt;};&lt;/span&gt;
+
+&lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;obj&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;To compile the file use (you can also use the commands without installing &lt;strong&gt;TypeScript&lt;/strong&gt; by adding &lt;code&gt;npx&lt;/code&gt; before every command):&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;tsc &amp;lt;filename&amp;gt;.ts
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;You will find a new file &lt;code&gt;&amp;lt;filename&amp;gt;.js&lt;/code&gt; created in the same folder, which can be run like any &lt;strong&gt;JavaScript&lt;/strong&gt; file.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#typescript-vs-javascript-dilemma"&gt;
+  &lt;/a&gt;
+  &lt;strong&gt;TypeScript&lt;/strong&gt; vs &lt;strong&gt;JavaScript&lt;/strong&gt; dilemma
+&lt;/h2&gt;
+
+&lt;p&gt;Now you might come up with 2 questions:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;Why does the &lt;strong&gt;TypeScript&lt;/strong&gt; code have to be compiled to &lt;strong&gt;JavaScript&lt;/strong&gt;?&lt;/li&gt;
+&lt;li&gt;If the code compiles down to &lt;strong&gt;JavaScript&lt;/strong&gt;, why would we bother writing it in &lt;strong&gt;TypeScript&lt;/strong&gt;?&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;The answer to the first question is &lt;strong&gt;TypeScript&lt;/strong&gt; isn't understood by any browser, so it has to be converted to &lt;strong&gt;JavaScript&lt;/strong&gt; so that browsers can execute the code.&lt;/p&gt;
+
+&lt;p&gt;The answer to the second question would be, same as why you should use &lt;strong&gt;TypeScript&lt;/strong&gt; over &lt;strong&gt;JavaScript&lt;/strong&gt;, it offers type check at compile time as opposed to runtime. If you try to compile the &lt;code&gt;test.ts&lt;/code&gt; with the error (as shown in &lt;em&gt;Why should you use &lt;strong&gt;TypeScript&lt;/strong&gt;?&lt;/em&gt; section) the compiler would throw an error and warn you about the incorrect code.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#typescript-features"&gt;
+  &lt;/a&gt;
+  &lt;strong&gt;TypeScript&lt;/strong&gt; features
+&lt;/h2&gt;
+
+&lt;p&gt;As mentioned earlier, &lt;strong&gt;TypeScript&lt;/strong&gt; has several additional features compared to &lt;strong&gt;JavaScript&lt;/strong&gt;, we will be going over a few of them in this section.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#type-system"&gt;
+  &lt;/a&gt;
+  &lt;strong&gt;Type System&lt;/strong&gt;
+&lt;/h3&gt;
+
+&lt;p&gt;The default types available in &lt;strong&gt;TypeScript&lt;/strong&gt; are given below:&lt;/p&gt;
+
+&lt;div class="table-wrapper-paragraph"&gt;&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;Data&lt;/th&gt;
+&lt;th&gt;Type&lt;/th&gt;
+&lt;th&gt;Keyword Description&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;Number&lt;/td&gt;
+&lt;td&gt;&lt;strong&gt;number&lt;/strong&gt;&lt;/td&gt;
+&lt;td&gt;Double-precision 64-bit floating-point values. It can be used to represent both, integers and fractions.&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;String&lt;/td&gt;
+&lt;td&gt;&lt;strong&gt;string&lt;/strong&gt;&lt;/td&gt;
+&lt;td&gt;Represents a sequence of Unicode characters&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;Boolean&lt;/td&gt;
+&lt;td&gt;&lt;strong&gt;boolean&lt;/strong&gt;&lt;/td&gt;
+&lt;td&gt;Represents logical values, true and false&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;Void&lt;/td&gt;
+&lt;td&gt;&lt;strong&gt;void&lt;/strong&gt;&lt;/td&gt;
+&lt;td&gt;Used on function return types to represent non-returning functions&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;Null&lt;/td&gt;
+&lt;td&gt;&lt;strong&gt;null&lt;/strong&gt;&lt;/td&gt;
+&lt;td&gt;Represents an intentional absence of an object value.&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;Undefined&lt;/td&gt;
+&lt;td&gt;&lt;strong&gt;undefined&lt;/strong&gt;&lt;/td&gt;
+&lt;td&gt;Denotes value given to all uninitialized variables&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;&lt;/div&gt;
+
+&lt;p&gt;&lt;strong&gt;TypeScript&lt;/strong&gt; also allows you to combine 2 or more data types to create a &lt;strong&gt;Union&lt;/strong&gt;&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;union&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;number&lt;/span&gt; &lt;span class="o"&gt;|&lt;/span&gt; &lt;span class="kr"&gt;string&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="nx"&gt;union&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="mi"&gt;10&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="nx"&gt;union&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Hello World&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="c1"&gt;// union = true // ERROR!!! `union` can only be a number or a string&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;In the case of &lt;strong&gt;JavaScript&lt;/strong&gt;, an error would have not been pointed out and might lead to bugs down the line.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#interfaces"&gt;
+  &lt;/a&gt;
+  &lt;strong&gt;Interfaces&lt;/strong&gt;
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;strong&gt;TypeScript&lt;/strong&gt; &lt;strong&gt;Interface&lt;/strong&gt; allows you to describe how an object would look like, something that is not possible in &lt;strong&gt;JavaScript&lt;/strong&gt;.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// Interfaces for Objects&lt;/span&gt;
+&lt;span class="kr"&gt;interface&lt;/span&gt; &lt;span class="nx"&gt;IObjectDefination&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="nl"&gt;foo&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;number&lt;/span&gt;&lt;span class="p"&gt;[];&lt;/span&gt; &lt;span class="c1"&gt;// foo is a number array&lt;/span&gt;
+    &lt;span class="nl"&gt;baz&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;Date&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; &lt;span class="c1"&gt;// baz is a date&lt;/span&gt;
+    &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;key&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;number&lt;/span&gt;&lt;span class="p"&gt;]:&lt;/span&gt; &lt;span class="kr"&gt;string&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; &lt;span class="c1"&gt;// any other key (only numbers) can contain a string as its value&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;obj&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;IObjectDefination&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="c1"&gt;// Interfaces for Classes&lt;/span&gt;
+&lt;span class="kr"&gt;interface&lt;/span&gt; &lt;span class="nx"&gt;IClassDefination&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="nl"&gt;data&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;string&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+    &lt;span class="nl"&gt;func&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="k"&gt;void&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="kd"&gt;class&lt;/span&gt; &lt;span class="nx"&gt;Class&lt;/span&gt; &lt;span class="k"&gt;implements&lt;/span&gt; &lt;span class="nx"&gt;IClassDefination&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="nl"&gt;data&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;string&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+    &lt;span class="nx"&gt;func&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="k"&gt;return&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#enums"&gt;
+  &lt;/a&gt;
+  &lt;strong&gt;Enums&lt;/strong&gt;
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;strong&gt;Enums&lt;/strong&gt; allow a developer to define a set of named constants, making it easier to document intent or create a set of distinct cases.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="kr"&gt;enum&lt;/span&gt; &lt;span class="nx"&gt;Direction&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="nx"&gt;Up&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="nx"&gt;Down&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="nx"&gt;Left&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="nx"&gt;Right&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;move&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;direction&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;Direction&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="c1"&gt;// ...&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="nx"&gt;move&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;Direction&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Up&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="nx"&gt;move&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;Direction&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Down&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Achieving a &lt;em&gt;similar&lt;/em&gt; result with &lt;strong&gt;JavaScript&lt;/strong&gt; would require you to create an object with the respective keys. Even then we would not be able to specify the data type of &lt;code&gt;direction&lt;/code&gt; in &lt;code&gt;move()&lt;/code&gt;.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;Direction&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="na"&gt;Up&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Up&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="na"&gt;Down&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Down&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="na"&gt;Left&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Left&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="na"&gt;Right&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Right&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+&lt;span class="p"&gt;};&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#streamlining-typescript-compilation"&gt;
+  &lt;/a&gt;
+  Streamlining &lt;strong&gt;TypeScript&lt;/strong&gt; compilation
+&lt;/h2&gt;
+
+&lt;p&gt;Earlier we used &lt;code&gt;tsc&lt;/code&gt; to compile a single &lt;strong&gt;TypeScript&lt;/strong&gt; file. This may become a problem in the case of a large project with thousands of files. In that case, you can set up a listener to watch for changes.&lt;/p&gt;
+
+&lt;p&gt;For watching for changes, you need to create a &lt;code&gt;tsconfig.json&lt;/code&gt; file in the root directory of your project and add the following:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight json"&gt;&lt;code&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"compilerOptions"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="nl"&gt;"target"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"es5"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="nl"&gt;"module"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"commonjs"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="nl"&gt;"strict"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="nl"&gt;"outDir"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"dist"&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="p"&gt;},&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"include"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s2"&gt;"src"&lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"exclude"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s2"&gt;"node_modules"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"dist"&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Alternately, you may use &lt;code&gt;tsc --init&lt;/code&gt; to create the file (it is generated pre-configured and with all options, the unnecessary ones commented out).&lt;/p&gt;
+
+&lt;p&gt;Now you can set up the listener&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;tsc &lt;span class="nt"&gt;-w&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Now, any &lt;strong&gt;TypeScript&lt;/strong&gt; file you create or modify in the &lt;code&gt;src&lt;/code&gt; (&lt;em&gt;tsconfig.include&lt;/em&gt;) folder will be compiled to &lt;strong&gt;JavaScript&lt;/strong&gt; file in the &lt;code&gt;dist&lt;/code&gt; (&lt;em&gt;tsconfig.compilerOptions.outDir&lt;/em&gt;) folder whenever you make any changes.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;NOTE&lt;/strong&gt;: You can add the &lt;code&gt;tsconfig.json&lt;/code&gt; to any of your &lt;strong&gt;Node&lt;/strong&gt; packages and convert it from a &lt;strong&gt;JavaScript&lt;/strong&gt; project to a &lt;strong&gt;TypeScript&lt;/strong&gt; one.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#conclusion"&gt;
+  &lt;/a&gt;
+  Conclusion
+&lt;/h2&gt;
+
+&lt;p&gt;In this article, we went through what &lt;strong&gt;TypeScript&lt;/strong&gt; is and how it can help you write better code. We saw some features it offers and how certain features like &lt;em&gt;Enums&lt;/em&gt; and &lt;em&gt;Interfaces&lt;/em&gt; can make your life a little easier. Now it's time for you to add &lt;strong&gt;TypeScript&lt;/strong&gt; to your very own project!&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://js.coderslang.com"&gt;Learn Full-Stack Web Development&lt;/a&gt;&lt;/p&gt;
+
+</description>
+      <category>beginners</category>
+      <category>javascript</category>
+      <category>typescript</category>
+      <category>codenewbie</category>
+    </item>
+    <item>
+      <title>What is Jaro-Winkler Similarity?</title>
+      <author>Dave Saunders</author>
+      <pubDate>Fri, 14 May 2021 12:20:30 +0000</pubDate>
+      <link>https://dev.to/davejsaunders/what-is-jaro-winkler-similarity-pdp</link>
+      <guid>https://dev.to/davejsaunders/what-is-jaro-winkler-similarity-pdp</guid>
+      <description>&lt;p&gt;Jaro-Winkler similarity is a way of measuring how similar two strings are. It is fairly easy to understand and quick &lt;br&gt;
+to implement.&lt;/p&gt;
+
+&lt;p&gt;(this was originally sent to my &lt;a href="https://www.baseclass.io/newsletter"&gt;newsletter&lt;/a&gt; subscribers)&lt;/p&gt;
+
+
+
+
+&lt;h2&gt;
+  &lt;a href="#why-should-i-care"&gt;
+  &lt;/a&gt;
+  Why should I care?
+&lt;/h2&gt;
+
+&lt;p&gt;String similarity metrics have various uses; from user-facing search functionality to spell checkers.&lt;/p&gt;
+
+&lt;p&gt;There are a few common string similarity metrics. Knowing a little about each will help you to choose the right one, &lt;br&gt;
+should you ever need to implement something like this yourself.&lt;/p&gt;
+
+&lt;p&gt;Jaro Similarity, and the modified version - Jaro-Winkler - are two common ones.&lt;/p&gt;
+
+
+
+
+&lt;h2&gt;
+  &lt;a href="#in-5-minutes-or-less"&gt;
+  &lt;/a&gt;
+  In 5 minutes or less:
+&lt;/h2&gt;
+
+&lt;p&gt;Imagine we're building the search functionality for an app store. &lt;/p&gt;
+
+&lt;p&gt;If a user misspells their search, we'd like to be able to suggest the app we &lt;em&gt;think&lt;/em&gt; they were looking for.&lt;/p&gt;
+
+&lt;p&gt;For example; the user is searching for the 2009 viral hit &lt;code&gt;farmville&lt;/code&gt;, but badly mistypes it as:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--RwXnSNct--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://www.baseclass.io/newsletter/jaro-winkler/search.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--RwXnSNct--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://www.baseclass.io/newsletter/jaro-winkler/search.png" alt="'faremviel' in search box"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;If we could compare this search string to all of the titles in our app store, we could show the user the apps that &lt;br&gt;
+most closely match what they typed.&lt;/p&gt;
+
+&lt;p&gt;This is where the Jaro Similarity metric comes in...&lt;/p&gt;
+
+
+
+
+&lt;h3&gt;
+  &lt;a href="#jaro-similarity"&gt;
+  &lt;/a&gt;
+  Jaro Similarity
+&lt;/h3&gt;
+
+&lt;p&gt;Let's calculate the similarity between the user's search string and the correct app title:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--eY4Gevod--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://www.baseclass.io/newsletter/jaro-winkler/both_strings.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--eY4Gevod--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://www.baseclass.io/newsletter/jaro-winkler/both_strings.png" alt="farmville vs farmville"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Created by Matthew A. Jaro in 1989, the Jaro Similarity metric compares two strings and gives us a score that &lt;br&gt;
+represents how similar they are.&lt;/p&gt;
+
+&lt;p&gt;The result is a number between &lt;code&gt;0&lt;/code&gt; and &lt;code&gt;1&lt;/code&gt;, where &lt;code&gt;0&lt;/code&gt; means the strings are completely different and &lt;code&gt;1&lt;/code&gt; means they match exactly.&lt;/p&gt;
+
+&lt;p&gt;The first step to calculating the Jaro similarity is to &lt;strong&gt;count the characters that match between the two strings&lt;/strong&gt;.&lt;/p&gt;
+
+&lt;p&gt;But, &lt;strong&gt;to be considered a 'match', the characters do not need to be in the same place in both strings - &lt;br&gt;
+they just need to be &lt;em&gt;near&lt;/em&gt; to each other&lt;/strong&gt;.&lt;/p&gt;
+
+&lt;p&gt;This accounts for the common typing mistake where you accidentally enter some characters in the wrong order.&lt;/p&gt;
+
+&lt;p&gt;How near those characters need to be before we consider them a match is calculated as follows:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--gXHzFNiv--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://www.baseclass.io/newsletter/jaro-winkler/window.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--gXHzFNiv--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://www.baseclass.io/newsletter/jaro-winkler/window.png" alt="(length of longest string/2)-1"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Both of our strings are &lt;code&gt;9&lt;/code&gt; characters long. That gives us a result of &lt;code&gt;3&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;That means that any two characters in our strings 'match' if they are either:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;In the same place in both strings&lt;/li&gt;
+&lt;li&gt;No further than &lt;code&gt;3&lt;/code&gt; characters away from each other&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Here's what it looks like if we draw these matches:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Z48Ms8Ow--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://www.baseclass.io/newsletter/jaro-winkler/matches.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Z48Ms8Ow--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://www.baseclass.io/newsletter/jaro-winkler/matches.png" alt="matching characters"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;If there were no matches, we wouldn't need to go any further - the Jaro Similarity would simply be &lt;code&gt;0&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;We have &lt;code&gt;8&lt;/code&gt; matching characters though, so the next step is to calculate the number of 'transpositions'.&lt;/p&gt;
+
+&lt;p&gt;Transpositions are  &lt;strong&gt;the characters that match, but are in the wrong order&lt;/strong&gt;. We count them, and then we &lt;strong&gt;half that number&lt;/strong&gt;.&lt;/p&gt;
+
+&lt;p&gt;Our strings have &lt;code&gt;2&lt;/code&gt; matching characters that are in a different order (the final &lt;code&gt;e&lt;/code&gt; and &lt;code&gt;l&lt;/code&gt; are backwards in the user's search term). &lt;br&gt;
+Halving this gives us  &lt;code&gt;1&lt;/code&gt; 'transposition'.&lt;/p&gt;
+
+&lt;p&gt;Now all we have to do is plug these numbers into the following formula &lt;br&gt;
+(we use the term &lt;code&gt;simj&lt;/code&gt; to mean 'Jaro Similarity' - the thing we're calculating):&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--6va2cAbd--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://www.baseclass.io/newsletter/jaro-winkler/jaro.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--6va2cAbd--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://www.baseclass.io/newsletter/jaro-winkler/jaro.png" alt="jaro formula"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;This looks complex, but we really only need a few values:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;
+&lt;code&gt;|S1|&lt;/code&gt; and &lt;code&gt;|S2|&lt;/code&gt; are the lengths of the two strings we are comparing (ours are both &lt;code&gt;9&lt;/code&gt; characters long)&lt;/li&gt;
+&lt;li&gt;
+&lt;code&gt;m&lt;/code&gt; is the number of matches - we have &lt;code&gt;8&lt;/code&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;code&gt;t&lt;/code&gt; is the number of 'transpositions' - we have &lt;code&gt;1&lt;/code&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Given those values, this is the Jaro Similarity for &lt;code&gt;faremviel&lt;/code&gt; vs &lt;code&gt;farmville&lt;/code&gt;:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--sBwbWfD4--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://www.baseclass.io/newsletter/jaro-winkler/our_result.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--sBwbWfD4--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://www.baseclass.io/newsletter/jaro-winkler/our_result.png" alt="jaro formula with our values = 0.88"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Our strings have a similarity of &lt;code&gt;0.88&lt;/code&gt;, which means that they are very similar. &lt;/p&gt;
+
+&lt;p&gt;If we calculate the Jaro Similarity of the user's search term against other games in our app store, &lt;br&gt;
+it becomes clear what the user was intending to search for:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;'faremviel' vs 'farmville': &lt;code&gt;0.88&lt;/code&gt;
+&lt;/li&gt;
+&lt;li&gt;'faremviel' vs 'farmville 2': &lt;code&gt;0.83&lt;/code&gt;
+&lt;/li&gt;
+&lt;li&gt;'faremviel' vs 'clash of clans': &lt;code&gt;0.46&lt;/code&gt;
+&lt;/li&gt;
+&lt;li&gt;'faremviel' vs 'minecraft': &lt;code&gt;0.31&lt;/code&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+
+
+
+
+&lt;h3&gt;
+  &lt;a href="#jarowinkler-similarity"&gt;
+  &lt;/a&gt;
+  Jaro-Winkler Similarity
+&lt;/h3&gt;
+
+&lt;p&gt;This modification of Jaro Similarity was proposed in 1990 by William E. Winkler.&lt;/p&gt;
+
+&lt;p&gt;The 'Jaro-Winkler' metric takes the Jaro Similarity above, and increases the score if the characters at the start of both strings are the same.&lt;/p&gt;
+
+&lt;p&gt;In other words, &lt;strong&gt;Jaro-Winkler favours two strings that have the same beginning&lt;/strong&gt;.&lt;/p&gt;
+
+&lt;p&gt;This is the formula for the 'Jaro-Winkler Similarity':&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--8746W0yx--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://www.baseclass.io/newsletter/jaro-winkler/jaro_winkler.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--8746W0yx--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://www.baseclass.io/newsletter/jaro-winkler/jaro_winkler.png" alt="jaro winkler formula"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;We need the following values to use it:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;
+&lt;code&gt;simj&lt;/code&gt; is the Jaro Similarity of our comparison above (&lt;code&gt;0.88&lt;/code&gt;)&lt;/li&gt;
+&lt;li&gt;
+&lt;code&gt;l&lt;/code&gt; is the number of characters that are the same at the start of both strings (up to a maximum of 4). 
+Our strings both start with &lt;code&gt;f&lt;/code&gt; &lt;code&gt;a&lt;/code&gt; &lt;code&gt;r&lt;/code&gt;, so we use a value of &lt;code&gt;3&lt;/code&gt; for this.&lt;/li&gt;
+&lt;li&gt;
+&lt;code&gt;p&lt;/code&gt; is the 'scaling factor'. &lt;code&gt;0.1&lt;/code&gt; is usually used.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;This is the Jaro-Winkler calculation for &lt;code&gt;faremviel&lt;/code&gt; vs &lt;code&gt;farmville&lt;/code&gt;:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--yp6ea1Sf--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://www.baseclass.io/newsletter/jaro-winkler/our_result_jaro_winkler.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--yp6ea1Sf--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://www.baseclass.io/newsletter/jaro-winkler/our_result_jaro_winkler.png" alt="our jaro winkler calculation = 0.92"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Two strings with &lt;em&gt;no&lt;/em&gt; matching characters at the start would keep the same score, but because our &lt;br&gt;
+strings have letters in common at the beginning, this version of the metric has boosted our score &lt;br&gt;
+from &lt;code&gt;0.88&lt;/code&gt; up to &lt;code&gt;0.92&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;Whether Jaro or Jaro-Winkler is the right choice depends on your specific use case. Try both (and other string similarity algorithms), and see what &lt;br&gt;
+works best for your data.&lt;/p&gt;
+
+
+
+
+&lt;h3&gt;
+  &lt;a href="#want-to-know-more"&gt;
+  &lt;/a&gt;
+  Want to know more?
+&lt;/h3&gt;
+
+&lt;p&gt;Check out these links:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="https://rosettacode.org/wiki/Jaro_distance"&gt;Examples of these two metrics implemented in common programming languages&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://medium.com/@appaloosastore/string-similarity-algorithms-compared-3f7b4d12f0ff"&gt;An interesting Medium post comparing string similarity algorithms for app store search&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://asecuritysite.com/forensics/simstring"&gt;An online strings similarity comparison, using various metrics&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+</description>
+      <category>computerscience</category>
+      <category>algorithms</category>
+      <category>programming</category>
+    </item>
+    <item>
       <title>Create a circular gradient in CSS</title>
       <author>Maxime Guilbert</author>
       <pubDate>Fri, 14 May 2021 11:55:38 +0000</pubDate>
@@ -2421,6 +3254,20 @@ If you're using &lt;strong&gt;git&lt;/strong&gt;, do add &lt;code&gt;node_module
       <category>mixin</category>
     </item>
     <item>
+      <title>I think there is too much to learn in programming</title>
+      <author>91sameer</author>
+      <pubDate>Fri, 14 May 2021 10:01:33 +0000</pubDate>
+      <link>https://dev.to/91sameer/i-think-there-is-too-much-to-learn-in-programming-16l6</link>
+      <guid>https://dev.to/91sameer/i-think-there-is-too-much-to-learn-in-programming-16l6</guid>
+      <description>&lt;p&gt;I am confused there is soo many things to learn. I don't think I can learn enough to become a good programmer&lt;/p&gt;
+
+</description>
+      <category>programming</category>
+      <category>webdev</category>
+      <category>javascript</category>
+      <category>css</category>
+    </item>
+    <item>
       <title>🚀 Flutter CI/CD using Git Tags in 5 minutes</title>
       <author>Julien</author>
       <pubDate>Fri, 14 May 2021 09:50:20 +0000</pubDate>
@@ -2646,945 +3493,6 @@ git push origin 1.0.0
       <category>git</category>
       <category>codemagic</category>
       <category>android</category>
-    </item>
-    <item>
-      <title>4 ways to perfectly center content using CSS
-</title>
-      <author>Rajat Kapoor </author>
-      <pubDate>Fri, 14 May 2021 09:48:58 +0000</pubDate>
-      <link>https://dev.to/rajatkapoor/4-ways-to-perfectly-center-content-using-css-5hfi</link>
-      <guid>https://dev.to/rajatkapoor/4-ways-to-perfectly-center-content-using-css-5hfi</guid>
-      <description>&lt;p&gt;Centering content in CSS is something that beginners struggle a lot with. CSS provides a lot of options that allow you to center content inside a container. We'll try some of the most commonly used ones.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#centering-text"&gt;
-  &lt;/a&gt;
-  Centering text
-&lt;/h2&gt;
-
-&lt;p&gt;Let's start by learning how to center text in a container&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;&amp;lt;!--  our html has a container and text content inside --&amp;gt;
-&amp;lt;div class="container center"&amp;gt;
-  this text should be centered
-&amp;lt;/div&amp;gt;
-
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;We can center the text content using &lt;code&gt;text-align: center&lt;/code&gt;. Here's is how our CSS looks&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;/* Just to see how big the container is*/
-.container {
-  background: black;
-  font-size: 2rem;
-  color: turquoise;
-  height: 400px;
-}
-
-.center {
-  text-align: center;  /* horizontally center aligns the text */
-
-  vertical-align: middle;  /* aligns the text in the middle of the `line-height` of the text*/
-}
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;See it in action:&lt;/p&gt;
-
-&lt;p&gt;&lt;iframe height="600" src="https://codepen.io/rajatkapoor/embed/VwpvGMZ?height=600&amp;amp;default-tab=result&amp;amp;embed-version=2"&gt;
-&lt;/iframe&gt;
-&lt;/p&gt;
-
-&lt;p&gt;If you want to place the text at the center of the screen, wrap it in a &lt;code&gt;div&lt;/code&gt; and follow any of the techniques below.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#centering-a-div-inside-another"&gt;
-  &lt;/a&gt;
-  Centering a div inside another
-&lt;/h2&gt;
-
-&lt;p&gt;There are multiple ways to do it. Check out all of these and let me know your favorite one in the comments. For the next few examples, we'll use this common HTML and CSS and highlight only the CSS changes needed to center the contents&lt;/p&gt;
-
-&lt;h4&gt;
-  &lt;a href="#html"&gt;
-  &lt;/a&gt;
-  HTML:
-&lt;/h4&gt;
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;&amp;lt;!--  our html has a container which contains a div we wish to center--&amp;gt;
-&amp;lt;div class="container center"&amp;gt;
-  &amp;lt;div class="inner"&amp;gt;
-  &amp;lt;/div&amp;gt;
-&amp;lt;/div&amp;gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;#### CSS:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;html,
-body {
-  height: 100%;
-}
-.container {
-  background: black;
-  width: 100%;
-  height: 100%;
-  font-size: 2rem;
-}
-
-.inner {
-  background: turquoise;
-  width: 50px;
-  height: 50px;
-  border-radius: 50%;
-}
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h3&gt;
-  &lt;a href="#using-raw-margin-endraw-"&gt;
-  &lt;/a&gt;
-  Using &lt;code&gt;margin&lt;/code&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;We can horizontally center the inner div using margin&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;.inner{
-  margin: auto;
-}
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;See it in action here&lt;/p&gt;
-
-&lt;p&gt;&lt;iframe height="600" src="https://codepen.io/rajatkapoor/embed/yLMYQYN?height=600&amp;amp;default-tab=result&amp;amp;embed-version=2"&gt;
-&lt;/iframe&gt;
-&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#using-raw-flex-endraw-"&gt;
-  &lt;/a&gt;
-  Using &lt;code&gt;flex&lt;/code&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;To center this using flex, we need the following CSS:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;.center{
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;See it in action here&lt;/p&gt;
-
-&lt;p&gt;&lt;iframe height="600" src="https://codepen.io/rajatkapoor/embed/qBrOJQR?height=600&amp;amp;default-tab=result&amp;amp;embed-version=2"&gt;
-&lt;/iframe&gt;
-&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#using-raw-grid-endraw-"&gt;
-  &lt;/a&gt;
-  Using &lt;code&gt;grid&lt;/code&gt;
-&lt;/h3&gt;
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;.center{
-  display: grid;
-  place-items: center;
-}
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;See it in action here&lt;/p&gt;
-
-&lt;p&gt;&lt;iframe height="600" src="https://codepen.io/rajatkapoor/embed/RwpWqwy?height=600&amp;amp;default-tab=result&amp;amp;embed-version=2"&gt;
-&lt;/iframe&gt;
-&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#conclusion"&gt;
-  &lt;/a&gt;
-  Conclusion
-&lt;/h2&gt;
-
-&lt;p&gt;This is not all of it. There are many other ways to center content. Post your favorite way of centering content in the comments.&lt;/p&gt;
-
-</description>
-      <category>css</category>
-      <category>cssgrid</category>
-      <category>flexbox</category>
-      <category>html</category>
-    </item>
-    <item>
-      <title>How to support your team during the pandemic</title>
-      <author>Neha Sharma </author>
-      <pubDate>Fri, 14 May 2021 09:44:29 +0000</pubDate>
-      <link>https://dev.to/hellonehha/how-to-manage-a-team-during-a-pandemic-48ee</link>
-      <guid>https://dev.to/hellonehha/how-to-manage-a-team-during-a-pandemic-48ee</guid>
-      <description>&lt;p&gt;It is more than a year we are in the pandemic. Everyone is working remotely and slowly we are losing the touch of humans, cafeteria breaks, lunch walks, sharing food, or having offline parties.&lt;/p&gt;
-
-&lt;p&gt;Even now we reached where the fun-Friday, online concerts, or annual functions are not motivating. &lt;/p&gt;
-
-&lt;p&gt;People are losing their loved ones and mental health is at the worst.&lt;/p&gt;
-
-&lt;p&gt;I remember when I started giving interviews at the start of the pandemic a director of an MNC company asked me:&lt;/p&gt;
-
-&lt;blockquote&gt;
-&lt;blockquote&gt;
-&lt;p&gt;Question: "How you will motivate your team in a WFH situation?"&lt;/p&gt;
-
-&lt;p&gt;(For me, at that time it was easy to answer this question)&lt;/p&gt;
-
-&lt;p&gt;My Answer: As a leader no matters what will happen I have to be there for them every morning with positive energy.  &lt;/p&gt;
-&lt;/blockquote&gt;
-
-
-&lt;/blockquote&gt;
-
-&lt;p&gt;Now, after a year I can see that this is very challenging when you are 9 AM - 6 PM sitting in front of the laptop, moving from one meeting to other, living with just your calendar. Even public holidays and weekends are not exciting anymore.&lt;/p&gt;
-
-&lt;p&gt;So, what to do? This is one question I am asking myself since the 2nd wave hit India.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#1-accept"&gt;
-  &lt;/a&gt;
-  1) Accept
-&lt;/h2&gt;
-
-&lt;p&gt;Accept that there is a problem. You cannot deny that there is a problem remote work during pandemic vs pre-pandemic is very different. &lt;/p&gt;
-
-&lt;p&gt;The reason is pre-pandemic we can at least meet our friends in person after office or monthly/yearly meet our team in person. In the current situation - we cannot. &lt;/p&gt;
-
-&lt;p&gt;So, better to accept that there is a problem that people are not as excited about the work as they used to before and we cannot do much about it.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#2-avoid-overdoing"&gt;
-  &lt;/a&gt;
-  2) Avoid over-doing
-&lt;/h2&gt;
-
-&lt;p&gt;Do not...I repeat DO NOT overdo anything to excite your team or to have fun activities. It is better to give your team free time to relax, sleep, or whatever they want to do rather than having online game time. Keep things optional if someone wants to join they will, if they don't want to it is fine.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#3-understand"&gt;
-  &lt;/a&gt;
-  3) Understand
-&lt;/h2&gt;
-
-&lt;p&gt;We need to understand that everyone is working from their home. We have no clue what is going at their end. So, try to understand if someone is not giving 100% for a few days. This is a very hard time. &lt;/p&gt;
-
-&lt;p&gt;The office is used to be an excuse to escape from our problems but now there is no line between home and office. Hence, it is very important to understand that there could be a &lt;strong&gt;LOT&lt;/strong&gt; going in their life and we might not able to do anything and they might not share with us. All we can do is understand and let it go but be always there just in case they want to talk about it.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#4-fewer-meetings-amp-only-scheduled-one"&gt;
-  &lt;/a&gt;
-  4) Fewer meetings &amp;amp; only scheduled one
-&lt;/h2&gt;
-
-&lt;p&gt;This is very important to always plan your week and avoid unplanned meetings as well as have only fewer meetings.&lt;/p&gt;
-
-&lt;p&gt;I am sure you must have heard this a lot - &lt;em&gt;"There are so many meetings since we went WFH".&lt;/em&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;em&gt;Yes, over-communication is important.&lt;/em&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;em&gt;Yes, meetings are the only mode of communicating with the team.&lt;/em&gt;&lt;/p&gt;
-
-&lt;p&gt;But, plan your meetings and have fewer meetings. &lt;strong&gt;Why?&lt;/strong&gt; this will balance the work and meetings, the team will be less on calls, the team can plan their day well.&lt;/p&gt;
-
-&lt;p&gt;Also, trust your team. Just because they are not on calls doesn't mean they are not working.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#5-no-question-asked-timeoff"&gt;
-  &lt;/a&gt;
-  5) No question asked time-off
-&lt;/h2&gt;
-
-&lt;p&gt;Stop asking why people are taking off. Mental health is at the worst for most folks. It is important to give folks time off. Make them understand that work is not an excuse to escape from reality now. Accept and find your escape in something else as this could impact your mental health.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#6-fixed-working-hours"&gt;
-  &lt;/a&gt;
-  6) Fixed working hours
-&lt;/h2&gt;
-
-&lt;p&gt;As everyone knows we all are stuck at home so it is very common to expect that everyone is available 24/7. As a manager, set up fixed working hours and make sure no meetings, calls are getting schedules after that hours. As well as, encourage your team not to work after those hours. The reason is this will set up an example and helps the team to have a work-life balance.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#7-live-by-calendar"&gt;
-  &lt;/a&gt;
-  7) Live by calendar
-&lt;/h2&gt;
-
-&lt;p&gt;Encourage your time to have the calendar blocked for lunch, short breaks. This will helps in people blocking your calendar at your lunchtime or breaks. Encourage them to say No or Decline meetings but write a small note while declining (to be polite). &lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#8-informal-11"&gt;
-  &lt;/a&gt;
-  8) Informal 1:1
-&lt;/h2&gt;
-
-&lt;p&gt;1:1 should not be only focused on the work. Have the light 1:1 talk about anything apart from the work. This is a nice way of having a break from day-to-day work conversation.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#9-lead-by-example"&gt;
-  &lt;/a&gt;
-  9) Lead by example
-&lt;/h2&gt;
-
-&lt;p&gt;Always remember you are setting an example for your team. So, lead by example. Take off, keep fewer meetings, have some time for yourself, work within fixed working hours, take care of your mental and physical health.&lt;/p&gt;
-
-&lt;p&gt;Stay Safe!!&lt;/p&gt;
-
-&lt;p&gt;Let me know what you are doing to keep your team motivated at this time or what you expect your employer to do for you?&lt;/p&gt;
-
-</description>
-      <category>motivation</category>
-      <category>management</category>
-      <category>webdev</category>
-    </item>
-    <item>
-      <title>Build a Jamstack subscription form with Netlify forms and Fauna - Part 1</title>
-      <author>Tapas Adhikary</author>
-      <pubDate>Fri, 14 May 2021 09:42:49 +0000</pubDate>
-      <link>https://dev.to/atapas/build-a-jamstack-subscription-form-with-netlify-forms-and-fauna-part-1-3aj1</link>
-      <guid>https://dev.to/atapas/build-a-jamstack-subscription-form-with-netlify-forms-and-fauna-part-1-3aj1</guid>
-      <description>&lt;p&gt;What are a few things you wish for as a software/solution/product developer? In case you are thinking to answer, your list may contain some of these,&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;It is fun when we have to do less to achieve more.&lt;/li&gt;
-&lt;li&gt;It is more worthy when we have to pay less to build something great.&lt;/li&gt;
-&lt;li&gt;It is relaxing when we don't have to worry much about the security, patching, upgrading, and maintaining many libraries.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;In a nutshell, we are happy and confident developers when we have support for these three pillars of software development and delivery,&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--SBApoDjO--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620701304536/vYFlcvLTa.png%3Fborder%3D1%2CCCCCCC%26auto%3Dcompress" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--SBApoDjO--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620701304536/vYFlcvLTa.png%3Fborder%3D1%2CCCCCCC%26auto%3Dcompress" alt="Jamstack Pillars - Speed Cost Security"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;code&gt;Jamstack&lt;/code&gt; is a web development architecture that helps us achieve these with client-side JavaScript, reusable APIs, and prebuilt Markup. In this article, we will see the usage of the Jamstack architecture to build a super-fast, low-cost, easily maintainable &lt;code&gt;Subscription Form&lt;/code&gt;.&lt;/p&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;You will be able to follow this article and build the subscription form without any prior knowledge to Jamstack. Of course, it would help if you had a basic understanding of &lt;code&gt;HTML&lt;/code&gt; and &lt;code&gt;JavaScript&lt;/code&gt;. However, if you are looking for an in-depth understanding of Jamstack, this series may help you: &lt;a href="https://blog.greenroots.info/series/jamstack-for-all"&gt;Jamstack for All&lt;/a&gt;.&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;To keep it simple and focused, let's split the topic into two articles. It is &lt;code&gt;part - 1&lt;/code&gt; to get things working with Netlify Forms. In &lt;code&gt;part - 2&lt;/code&gt;, we will learn about the functions and data store.&lt;/p&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;At any point in time, you can access the source code from here: &lt;a href="https://github.com/atapas/jamstack-subscription-form"&gt;https://github.com/atapas/jamstack-subscription-form&lt;/a&gt;&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;Alright, now relax and enjoy the article 🧘‍♀️.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#subscription-form"&gt;
-  &lt;/a&gt;
-  Subscription Form
-&lt;/h1&gt;
-
-&lt;p&gt;Let's take a simple subscription form that asks a user to subscribe to a newsletter by providing the following details,&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Full Name&lt;/li&gt;
-&lt;li&gt;E-mail address&lt;/li&gt;
-&lt;li&gt;Frequency to get the newsletter(daily, weekly)&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;Once the user fill-up the form and submits it, we show the user a success page with a note of thanks. We will develop it using basic HTML and CSS.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--2DLvIex6--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620571808013/Y4EShkCdr.png%3Fborder%3D1%2CCCCCCC%26auto%3Dcompress" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--2DLvIex6--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620571808013/Y4EShkCdr.png%3Fborder%3D1%2CCCCCCC%26auto%3Dcompress" alt="form.png"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;But that's not all. What about the nuisances of handling the form data? What about an e-mail notification every time someone subscribes? How about storing the data in a store? What are the options of performing some analytics on top of the stored data? &lt;/p&gt;
-
-&lt;p&gt;Right, there are many essential and exciting use-cases involved in the form handling.  We will use the &lt;code&gt;Netlify Forms&lt;/code&gt; for better form handling. We will also use &lt;code&gt;Fauna&lt;/code&gt; as a data store to store the information of the subscribers. The Fauna part is optional for a simple form handling like this, but I was greedy to try it out and found it super cool.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#create-a-form-using-html-and-css"&gt;
-  &lt;/a&gt;
-  Create a Form using HTML and CSS
-&lt;/h1&gt;
-
-&lt;p&gt;Let us now create the subscription form using &lt;code&gt;HTML&lt;/code&gt; and &lt;code&gt;CSS&lt;/code&gt;. First, create a project folder with the name of your choice(something like &lt;code&gt;jamstack-subscription-form&lt;/code&gt;). Then, open a command prompt/terminal window and change the directory to the project folder. &lt;/p&gt;
-
-&lt;p&gt;Initiate a node project using the following command,&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;npm init
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-&lt;p&gt;Provide the required details and create the &lt;code&gt;package.json&lt;/code&gt; file. Here is a sample package.json file,&lt;br&gt;
-&lt;/p&gt;
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight json"&gt;&lt;code&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="nl"&gt;"name"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"jamstack-subscription-form"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="nl"&gt;"version"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"1.0.0"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="nl"&gt;"description"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;""&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="nl"&gt;"main"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"index.js"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="nl"&gt;"scripts"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"test"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"echo &lt;/span&gt;&lt;span class="se"&gt;\"&lt;/span&gt;&lt;span class="s2"&gt;Error: no test specified&lt;/span&gt;&lt;span class="se"&gt;\"&lt;/span&gt;&lt;span class="s2"&gt; &amp;amp;&amp;amp; exit 1"&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="p"&gt;},&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="nl"&gt;"author"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"Tapas Adhikary"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="nl"&gt;"license"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"MIT"&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-&lt;p&gt;Create a folder called &lt;code&gt;src&lt;/code&gt; at the root of the project folder. Now, create two empty files, &lt;code&gt;index.js&lt;/code&gt; and &lt;code&gt;index.css&lt;/code&gt; respectively, inside the &lt;code&gt;src&lt;/code&gt; folder. At this stage, your folder structure should look like this,&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--yQraovVL--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620569860875/C-jT700L4.png%3Fborder%3D1%2CCCCCCC%26auto%3Dcompress" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--yQraovVL--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620569860875/C-jT700L4.png%3Fborder%3D1%2CCCCCCC%26auto%3Dcompress" alt="image.png"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Let's add the HTML part now. Copy the below code to the &lt;code&gt;index.html&lt;/code&gt; file. It has the code to,&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Link to the &lt;code&gt;index.css&lt;/code&gt; file.&lt;/li&gt;
-&lt;li&gt;HTML structure to have a form with required input fields and a button.&lt;/li&gt;
-&lt;li&gt;Other HTML elements to show a header, paragraph to explain the purpose of the page.
-&lt;/li&gt;
-&lt;/ul&gt;
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="cp"&gt;&amp;lt;!DOCTYPE html&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;html&lt;/span&gt; &lt;span class="na"&gt;lang=&lt;/span&gt;&lt;span class="s"&gt;"en"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;head&amp;gt;&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;meta&lt;/span&gt; &lt;span class="na"&gt;charset=&lt;/span&gt;&lt;span class="s"&gt;"UTF-8"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;meta&lt;/span&gt; &lt;span class="na"&gt;http-equiv=&lt;/span&gt;&lt;span class="s"&gt;"X-UA-Compatible"&lt;/span&gt; &lt;span class="na"&gt;content=&lt;/span&gt;&lt;span class="s"&gt;"IE=edge"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;meta&lt;/span&gt; &lt;span class="na"&gt;name=&lt;/span&gt;&lt;span class="s"&gt;"viewport"&lt;/span&gt; &lt;span class="na"&gt;content=&lt;/span&gt;&lt;span class="s"&gt;"width=device-width, initial-scale=1.0"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;link&lt;/span&gt; &lt;span class="na"&gt;rel=&lt;/span&gt;&lt;span class="s"&gt;"stylesheet"&lt;/span&gt; &lt;span class="na"&gt;href=&lt;/span&gt;&lt;span class="s"&gt;"./index.css"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;title&amp;gt;&lt;/span&gt;Monthly Bytes&lt;span class="nt"&gt;&amp;lt;/title&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;/head&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;body&amp;gt;&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;header&amp;gt;&lt;/span&gt;
-        &lt;span class="nt"&gt;&amp;lt;h1&amp;gt;&lt;/span&gt;Monthly Bytes&lt;span class="nt"&gt;&amp;lt;/h1&amp;gt;&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;/header&amp;gt;&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;div&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"content"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-        &lt;span class="nt"&gt;&amp;lt;p&amp;gt;&lt;/span&gt;Please fill-up the form below to subscribe to our &lt;span class="nt"&gt;&amp;lt;b&amp;gt;&lt;/span&gt;M&lt;span class="nt"&gt;&amp;lt;/b&amp;gt;&lt;/span&gt;onthly &lt;span class="nt"&gt;&amp;lt;b&amp;gt;&lt;/span&gt;B&lt;span class="nt"&gt;&amp;lt;/b&amp;gt;&lt;/span&gt;ytes newsletter.
-            We send you the quality content every month.&lt;span class="nt"&gt;&amp;lt;/p&amp;gt;&lt;/span&gt;
-        &lt;span class="nt"&gt;&amp;lt;form&lt;/span&gt; &lt;span class="na"&gt;action=&lt;/span&gt;&lt;span class="s"&gt;"/success"&lt;/span&gt; &lt;span class="na"&gt;method=&lt;/span&gt;&lt;span class="s"&gt;"POST"&lt;/span&gt; &lt;span class="na"&gt;name=&lt;/span&gt;&lt;span class="s"&gt;"subscription"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-            &lt;span class="nt"&gt;&amp;lt;label&lt;/span&gt; &lt;span class="na"&gt;for=&lt;/span&gt;&lt;span class="s"&gt;"fullName"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;Full name&lt;span class="nt"&gt;&amp;lt;/label&amp;gt;&lt;/span&gt;
-            &lt;span class="nt"&gt;&amp;lt;input&lt;/span&gt; 
-                &lt;span class="na"&gt;type=&lt;/span&gt;&lt;span class="s"&gt;"text"&lt;/span&gt; 
-                &lt;span class="na"&gt;name=&lt;/span&gt;&lt;span class="s"&gt;"fullName"&lt;/span&gt; 
-                &lt;span class="na"&gt;id=&lt;/span&gt;&lt;span class="s"&gt;"fullName"&lt;/span&gt; 
-                &lt;span class="na"&gt;placeholder=&lt;/span&gt;&lt;span class="s"&gt;"We want to know your name"&lt;/span&gt; &lt;span class="nt"&gt;/&amp;gt;&lt;/span&gt;
-
-            &lt;span class="nt"&gt;&amp;lt;label&lt;/span&gt; &lt;span class="na"&gt;for=&lt;/span&gt;&lt;span class="s"&gt;"email"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;E-mail&lt;span class="nt"&gt;&amp;lt;/label&amp;gt;&lt;/span&gt;
-            &lt;span class="nt"&gt;&amp;lt;input&lt;/span&gt; 
-                &lt;span class="na"&gt;type=&lt;/span&gt;&lt;span class="s"&gt;"email"&lt;/span&gt; 
-                &lt;span class="na"&gt;name=&lt;/span&gt;&lt;span class="s"&gt;"email"&lt;/span&gt; 
-                &lt;span class="na"&gt;id=&lt;/span&gt;&lt;span class="s"&gt;"email"&lt;/span&gt; 
-                &lt;span class="na"&gt;placeholder=&lt;/span&gt;&lt;span class="s"&gt;"Tell us your e-mail id"&lt;/span&gt; &lt;span class="nt"&gt;/&amp;gt;&lt;/span&gt;
-
-            &lt;span class="nt"&gt;&amp;lt;div&amp;gt;&lt;/span&gt;
-                &lt;span class="nt"&gt;&amp;lt;h2&amp;gt;&lt;/span&gt;I want to get it&lt;span class="nt"&gt;&amp;lt;/h2&amp;gt;&lt;/span&gt;
-                &lt;span class="nt"&gt;&amp;lt;label&amp;gt;&lt;/span&gt;
-                    &lt;span class="nt"&gt;&amp;lt;input&lt;/span&gt; 
-                        &lt;span class="na"&gt;type=&lt;/span&gt;&lt;span class="s"&gt;"radio"&lt;/span&gt; 
-                        &lt;span class="na"&gt;name=&lt;/span&gt;&lt;span class="s"&gt;"frequency"&lt;/span&gt; 
-                        &lt;span class="na"&gt;value=&lt;/span&gt;&lt;span class="s"&gt;"daily"&lt;/span&gt; &lt;span class="na"&gt;checked&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt; Daily
-                &lt;span class="nt"&gt;&amp;lt;/label&amp;gt;&lt;/span&gt;
-                &lt;span class="nt"&gt;&amp;lt;label&amp;gt;&lt;/span&gt;
-                    &lt;span class="nt"&gt;&amp;lt;input&lt;/span&gt; 
-                        &lt;span class="na"&gt;type=&lt;/span&gt;&lt;span class="s"&gt;"radio"&lt;/span&gt; 
-                        &lt;span class="na"&gt;name=&lt;/span&gt;&lt;span class="s"&gt;"frequency"&lt;/span&gt; 
-                        &lt;span class="na"&gt;value=&lt;/span&gt;&lt;span class="s"&gt;"weekly"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt; Weekly
-                &lt;span class="nt"&gt;&amp;lt;/label&amp;gt;&lt;/span&gt;
-            &lt;span class="nt"&gt;&amp;lt;/div&amp;gt;&lt;/span&gt;
-
-            &lt;span class="nt"&gt;&amp;lt;button&lt;/span&gt; &lt;span class="na"&gt;type=&lt;/span&gt;&lt;span class="s"&gt;"submit"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;Subscribe&lt;span class="nt"&gt;&amp;lt;/button&amp;gt;&lt;/span&gt;
-        &lt;span class="nt"&gt;&amp;lt;/form&amp;gt;&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;/div&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;/body&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;/html&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-&lt;p&gt;Now we are ready to load and run this HTML file in the browser. If you are using an editor like &lt;code&gt;VS Code&lt;/code&gt;, you can use the extensions(like Live Server) to run it. Alternatively, use this command from the root of the project folder to run the app and see the index.html rendered in the browser.&lt;br&gt;
-&lt;/p&gt;
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;npx serve src/
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-&lt;p&gt;You can now access the app @&lt;a href="http://localhost:5000"&gt;http://localhost:5000&lt;/a&gt;.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--oiFW6btQ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620570473567/fzaynIZ1X.png%3Fborder%3D1%2CCCCCCC%26auto%3Dcompress" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--oiFW6btQ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620570473567/fzaynIZ1X.png%3Fborder%3D1%2CCCCCCC%26auto%3Dcompress" alt="image.png"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;As you see, the page has all the required elements, but it misses the styles. Let us now add a few styles to make the page look better. Copy the below CSS styles to the &lt;code&gt;index.css&lt;/code&gt; file.&lt;br&gt;
-&lt;/p&gt;
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="nt"&gt;body&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;margin&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="m"&gt;0&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;padding&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="m"&gt;0&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="nt"&gt;header&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;background-color&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;  &lt;span class="m"&gt;#e351ad&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;color&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;#FFFFFF&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;padding&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.4rem&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="nc"&gt;.content&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;padding&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;7px&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="nt"&gt;h1&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;margin&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="m"&gt;0&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="nt"&gt;h2&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;margin&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;2rem&lt;/span&gt; &lt;span class="m"&gt;0&lt;/span&gt; &lt;span class="m"&gt;0.5rem&lt;/span&gt; &lt;span class="m"&gt;0&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="nt"&gt;p&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;padding&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0&lt;/span&gt; &lt;span class="m"&gt;0&lt;/span&gt; &lt;span class="m"&gt;0&lt;/span&gt; &lt;span class="m"&gt;0.4rem&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;font-size&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;1.2rem&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="nt"&gt;form&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;display&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;flex&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;flex-flow&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;column&lt;/span&gt; &lt;span class="n"&gt;wrap&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;max-width&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;410px&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;margin&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0&lt;/span&gt; &lt;span class="nb"&gt;auto&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="nt"&gt;label&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;margin-top&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.6rem&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;margin-bottom&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.2rem&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;font-size&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;1.3rem&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="nt"&gt;input&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;font-size&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;1rem&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;padding&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.5rem&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="nt"&gt;input&lt;/span&gt;&lt;span class="o"&gt;[&lt;/span&gt;&lt;span class="nt"&gt;type&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s1"&gt;"radio"&lt;/span&gt;&lt;span class="o"&gt;]&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;width&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;17px&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;height&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;17px&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="nt"&gt;button&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;margin&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;1rem&lt;/span&gt; &lt;span class="nb"&gt;auto&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;padding&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;5px&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;border-radius&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;4px&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;border-color&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;#9a00ff&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;background-color&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;#9a00ff&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;color&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;#FFFFFF&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;font-weight&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;600&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;font-size&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;2rem&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;cursor&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;pointer&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-&lt;p&gt;Now you should see the browser tab refreshes to load the latest app with the style changes. Looks better, huh?&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--zHGKe7bp--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620571063700/y2qFPlXKA.png%3Fborder%3D1%2CCCCCCC%26auto%3Dcompress" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--zHGKe7bp--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620571063700/y2qFPlXKA.png%3Fborder%3D1%2CCCCCCC%26auto%3Dcompress" alt="image.png"&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;h1&gt;
-  &lt;a href="#create-a-success-page"&gt;
-  &lt;/a&gt;
-  Create a Success page
-&lt;/h1&gt;
-
-&lt;p&gt;Now it's time to create a success page to thank our subscribers with a message. First, create a file called &lt;code&gt;success.html&lt;/code&gt; inside the &lt;code&gt;src&lt;/code&gt; folder with the following content.&lt;br&gt;
-&lt;/p&gt;
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="cp"&gt;&amp;lt;!DOCTYPE html&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;html&lt;/span&gt; &lt;span class="na"&gt;lang=&lt;/span&gt;&lt;span class="s"&gt;"en"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;head&amp;gt;&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;meta&lt;/span&gt; &lt;span class="na"&gt;charset=&lt;/span&gt;&lt;span class="s"&gt;"UTF-8"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;meta&lt;/span&gt; &lt;span class="na"&gt;http-equiv=&lt;/span&gt;&lt;span class="s"&gt;"X-UA-Compatible"&lt;/span&gt; &lt;span class="na"&gt;content=&lt;/span&gt;&lt;span class="s"&gt;"IE=edge"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;meta&lt;/span&gt; &lt;span class="na"&gt;name=&lt;/span&gt;&lt;span class="s"&gt;"viewport"&lt;/span&gt; &lt;span class="na"&gt;content=&lt;/span&gt;&lt;span class="s"&gt;"width=device-width, initial-scale=1.0"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;link&lt;/span&gt; &lt;span class="na"&gt;rel=&lt;/span&gt;&lt;span class="s"&gt;"stylesheet"&lt;/span&gt; &lt;span class="na"&gt;href=&lt;/span&gt;&lt;span class="s"&gt;"./index.css"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;title&amp;gt;&lt;/span&gt;Success&lt;span class="nt"&gt;&amp;lt;/title&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;/head&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;body&amp;gt;&lt;/span&gt;
-   &lt;span class="nt"&gt;&amp;lt;div&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"success"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-       Hey, Thanks for subscribing. You are awesome!
-   &lt;span class="nt"&gt;&amp;lt;/div&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;/body&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;/html&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-&lt;p&gt;Also, add the following style to the &lt;code&gt;index.css&lt;/code&gt; page to make the message look better.&lt;br&gt;
-&lt;/p&gt;
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="nc"&gt;.success&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;margin&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;2rem&lt;/span&gt; &lt;span class="nb"&gt;auto&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;width&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;90%&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;border&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;3px&lt;/span&gt; &lt;span class="nb"&gt;solid&lt;/span&gt; &lt;span class="m"&gt;#e351ad&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;padding&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;10px&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;background-color&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;#e351ad&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;border-radius&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;10px&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;color&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;#FFF&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;font-size&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;2.5rem&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-&lt;p&gt;Great! Now try out the subscription form. Once you fill up the details and hit the &lt;code&gt;Subscribe&lt;/code&gt; button, we will see a success page.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--yVu6L82R--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620708456549/yi9yokj3e.gif%3Fborder%3D1%2CCCCCCC%26auto%3Dcompress" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--yVu6L82R--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620708456549/yi9yokj3e.gif%3Fborder%3D1%2CCCCCCC%26auto%3Dcompress" alt="demo_1.gif"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Please note, we have not done many form validations here. That's purely intentional and out of the scope of the article. However, I encourage you to include it as you wish.&lt;/p&gt;
-
-&lt;p&gt;At this stage, please create a repository in your favorite Git provider(like GitHub) and push the source code done so far. Here is mine, &lt;a href="https://github.com/atapas/jamstack-subscription-form"&gt;https://github.com/atapas/jamstack-subscription-form&lt;/a&gt;&lt;/p&gt;
-&lt;h1&gt;
-  &lt;a href="#set-up-netlify"&gt;
-  &lt;/a&gt;
-  Set up Netlify
-&lt;/h1&gt;
-
-&lt;p&gt;We have a working subscription form, but we are not doing anything with the form data yet. Next, we will use the &lt;code&gt;Netlify Form&lt;/code&gt; to perform all the heavy lifting to handle data and perform actions using it. Before that, let us set up &lt;code&gt;Netlify&lt;/code&gt; to use.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://www.netlify.com/"&gt;Netlify&lt;/a&gt; is a powerful serverless platform to build, deploy web applications with all the advantages of CI/CD and scalable hosting. It has a Git-based workflow that keeps your code changes integrated continuously with the deployment. In addition, the services like functions, forms are there to use instantly without having them built in-house.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://app.netlify.com/signup"&gt;Create an account&lt;/a&gt; with Netlify and log in. Now click on the button to create a new site from Git.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--xCyjW-yT--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620572256286/lwNYja6VX.png%3Fborder%3D1%2CCCCCCC%26auto%3Dcompress" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--xCyjW-yT--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620572256286/lwNYja6VX.png%3Fborder%3D1%2CCCCCCC%26auto%3Dcompress" alt="1_netlify.png"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Select your Git provider.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--LshhTJp_--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620572266507/C5m4eiAsD.png%3Fborder%3D1%2CCCCCCC%26auto%3Dcompress" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--LshhTJp_--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620572266507/C5m4eiAsD.png%3Fborder%3D1%2CCCCCCC%26auto%3Dcompress" alt="2_netlify.png"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Now, select the project you want to deploy to Netlify. In this case, it is the &lt;code&gt;jamstack-subscription-form&lt;/code&gt; project.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--T0O9z67h--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620572276031/MVs7zRX_Z.png%3Fborder%3D1%2CCCCCCC%26auto%3Dcompress" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--T0O9z67h--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620572276031/MVs7zRX_Z.png%3Fborder%3D1%2CCCCCCC%26auto%3Dcompress" alt="3_netlify.png"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;In the setting window, provide the base directory as &lt;code&gt;src&lt;/code&gt; and click on the &lt;code&gt;Deploy site&lt;/code&gt; button.  &lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--XpUrUar---/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620572289768/PP1BmSMdu.png%3Fborder%3D1%2CCCCCCC%26auto%3Dcompress" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--XpUrUar---/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620572289768/PP1BmSMdu.png%3Fborder%3D1%2CCCCCCC%26auto%3Dcompress" alt="4_netlify.png"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;It will take a few seconds and make your site available to use. Now you can access the subscription form using a URL provided by Netlify.&lt;/p&gt;
-&lt;h2&gt;
-  &lt;a href="#netlify-forms"&gt;
-  &lt;/a&gt;
-  Netlify Forms
-&lt;/h2&gt;
-
-&lt;p&gt;Netlify's built-in form handling is enabled for your account by default. However, we need to make a couple of changes in our form for netlify to recognize and parse it correctly.&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Add &lt;code&gt;data-netlify="true"&lt;/code&gt; or a &lt;code&gt;netlify&lt;/code&gt; attribute to the &lt;code&gt;&amp;lt;form&amp;gt;&lt;/code&gt; tag. It will enable form submissions in your Netlify site admin panel.&lt;/li&gt;
-&lt;li&gt;You must have a &lt;code&gt;name&lt;/code&gt; attribute for your form. It determines the form name to show in the netlify interface.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;So, let's edit our subscription form to include &lt;code&gt;data-netlify="true"&lt;/code&gt;. Also, notice the form name is &lt;code&gt;subscription&lt;/code&gt;.&lt;br&gt;
-&lt;/p&gt;
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;form&lt;/span&gt; 
-   &lt;span class="na"&gt;action=&lt;/span&gt;&lt;span class="s"&gt;"/success"&lt;/span&gt; 
-   &lt;span class="na"&gt;method=&lt;/span&gt;&lt;span class="s"&gt;"POST"&lt;/span&gt; 
-   &lt;span class="na"&gt;name=&lt;/span&gt;&lt;span class="s"&gt;"subscription"&lt;/span&gt; 
-   &lt;span class="na"&gt;data-netlify=&lt;/span&gt;&lt;span class="s"&gt;"true"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-&lt;p&gt;That's it. Now push your changes to the source code repository. You will see the build started in Netlify. Once the build is over and your recent changes are published, please access the app(using the app URL provided by Netlify) in the browser. Now fill in the form details and submit it.&lt;/p&gt;
-
-&lt;p&gt;Browse to the &lt;code&gt;Forms&lt;/code&gt; tab from the Netlify interface.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--ybCzfw71--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620723018913/hXg3_aq56.png%3Fborder%3D1%2CCCCCCC%26auto%3Dcompress" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ybCzfw71--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620723018913/hXg3_aq56.png%3Fborder%3D1%2CCCCCCC%26auto%3Dcompress" alt="image.png"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;You will see an entry with the form name. In our case, it is &lt;code&gt;subscription&lt;/code&gt; under the &lt;code&gt;Active forms&lt;/code&gt; section.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--8pOBDIYi--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620723106093/w7Ro4a30A.png%3Fborder%3D1%2CCCCCCC%26auto%3Dcompress" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--8pOBDIYi--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620723106093/w7Ro4a30A.png%3Fborder%3D1%2CCCCCCC%26auto%3Dcompress" alt="image.png"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Click on it to see the form data we have submitted a while back. You can find the form data and a few valuable options like &lt;code&gt;Download as CSV&lt;/code&gt;, &lt;code&gt;Mark as spam&lt;/code&gt;.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--KQnN1dY0--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620724435971/mYXXokxo6.png%3Fborder%3D1%2CCCCCCC%26auto%3Dcompress" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--KQnN1dY0--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620724435971/mYXXokxo6.png%3Fborder%3D1%2CCCCCCC%26auto%3Dcompress" alt="image.png"&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;h2&gt;
-  &lt;a href="#handling-spam-filters"&gt;
-  &lt;/a&gt;
-  Handling Spam Filters
-&lt;/h2&gt;
-
-&lt;p&gt;Netlify uses &lt;a href="https://akismet.com/"&gt;Akismet&lt;/a&gt; to provide spam filters for all your form submissions. The integration with Akismet, the industry leader in spam detection, is enabled by default. However, we can add a &lt;code&gt;honeypot field&lt;/code&gt;, a &lt;code&gt;reCAPTCHA 2&lt;/code&gt;, or both for extra protection. Let us see an example of adding a honeypot field.&lt;/p&gt;
-
-&lt;p&gt;A &lt;code&gt;honeypot field&lt;/code&gt; is a hidden form field that a bot will fill up along with other fields in the form. As humans can not see this field, we can safely reject the submission that has the honeypot field filled up. We can add the &lt;code&gt;netlify-honeypot&lt;/code&gt; attribute to our &lt;code&gt;&amp;lt;form&amp;gt;&lt;/code&gt; with the name of our hidden field. &lt;/p&gt;
-
-&lt;p&gt;Let's add a hidden field anywhere inside the form. Add a &lt;code&gt;&amp;lt;p&amp;gt;&lt;/code&gt; tag and an &lt;code&gt;&amp;lt;input&amp;gt;&lt;/code&gt; text field inside it with the name &lt;code&gt;bot-field&lt;/code&gt;. Also, add a class called &lt;code&gt;hidden&lt;/code&gt; to the &lt;code&gt;&amp;lt;p&amp;gt;&lt;/code&gt; element to hide it.&lt;br&gt;
-&lt;/p&gt;
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;p&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"hidden"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-   &lt;span class="nt"&gt;&amp;lt;label&amp;gt;&lt;/span&gt;Don’t fill this out if you’re human: 
-        &lt;span class="nt"&gt;&amp;lt;input&lt;/span&gt; &lt;span class="na"&gt;name=&lt;/span&gt;&lt;span class="s"&gt;"bot-field"&lt;/span&gt; &lt;span class="nt"&gt;/&amp;gt;&lt;/span&gt;
-   &lt;span class="nt"&gt;&amp;lt;/label&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;/p&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-&lt;p&gt;Next, add &lt;code&gt;netlify-honeypot="bot-field"&lt;/code&gt; to the form. Now the &lt;code&gt;&amp;lt;form&amp;gt;&lt;/code&gt; has following attributes,&lt;br&gt;
-&lt;/p&gt;
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;form&lt;/span&gt; 
-    &lt;span class="na"&gt;action=&lt;/span&gt;&lt;span class="s"&gt;"/success"&lt;/span&gt; 
-    &lt;span class="na"&gt;method=&lt;/span&gt;&lt;span class="s"&gt;"POST"&lt;/span&gt; 
-    &lt;span class="na"&gt;name=&lt;/span&gt;&lt;span class="s"&gt;"subscription"&lt;/span&gt; 
-    &lt;span class="na"&gt;data-netlify=&lt;/span&gt;&lt;span class="s"&gt;"true"&lt;/span&gt; 
-    &lt;span class="na"&gt;netlify-honeypot=&lt;/span&gt;&lt;span class="s"&gt;"bot-field"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-&lt;p&gt;Last, add the CSS style for the class &lt;code&gt;hidden&lt;/code&gt; in the &lt;code&gt;index.css&lt;/code&gt; file,&lt;br&gt;
-&lt;/p&gt;
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="nc"&gt;.hidden&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;display&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;none&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-&lt;p&gt;That's it. We have enabled the extra protection with the &lt;code&gt;honeypot field&lt;/code&gt;.&lt;/p&gt;
-&lt;h2&gt;
-  &lt;a href="#enable-notifications"&gt;
-  &lt;/a&gt;
-  Enable Notifications
-&lt;/h2&gt;
-
-&lt;p&gt;We can enable notifications such that when a form is submitted, we get an email, a notification in the slack channel, or an external service of our choice. Let's enable the e-mail notification for our subscription form.&lt;/p&gt;
-
-&lt;p&gt;Click on the &lt;code&gt;Settings and usage&lt;/code&gt; button inside the &lt;code&gt;Forms&lt;/code&gt; tab.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--m7xb5bpf--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620727271225/1WpNEDV80.png%3Fborder%3D1%2CCCCCCC%26auto%3Dcompress" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--m7xb5bpf--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620727271225/1WpNEDV80.png%3Fborder%3D1%2CCCCCCC%26auto%3Dcompress" alt="image.png"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Go to the &lt;code&gt;Form notifications&lt;/code&gt; section and click on the &lt;code&gt;Add notification&lt;/code&gt; menu.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--WpgcAjl2--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620727382015/Imiu-IpVZ.png%3Fborder%3D1%2CCCCCCC%26auto%3Dcompress" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--WpgcAjl2--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620727382015/Imiu-IpVZ.png%3Fborder%3D1%2CCCCCCC%26auto%3Dcompress" alt="image.png"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Select the &lt;code&gt;Email notification&lt;/code&gt; option. Then, please fill-up the details with an e-mail address, form name, and save it.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--0mqaitUx--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620727899040/GOYcCZ4X2.png%3Fborder%3D1%2CCCCCCC%26auto%3Dcompress" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--0mqaitUx--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620727899040/GOYcCZ4X2.png%3Fborder%3D1%2CCCCCCC%26auto%3Dcompress" alt="image.png"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;That's all. Whenever someone fills up the subscription form and submits it, you will receive an email notification on the configured e-mail id. Here is a sample e-mail,&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--yHGu199k--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620727635177/ZYxu32vAT.png%3Fborder%3D1%2CCCCCCC%26auto%3Dcompress" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--yHGu199k--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1620727635177/ZYxu32vAT.png%3Fborder%3D1%2CCCCCCC%26auto%3Dcompress" alt="image.png"&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;h1&gt;
-  &lt;a href="#whats-next"&gt;
-  &lt;/a&gt;
-  What's Next?
-&lt;/h1&gt;
-
-&lt;p&gt;Thank you for reading so far. I hope you enjoyed following it and made the subscription form working with &lt;code&gt;Netlify Forms&lt;/code&gt;. In the next part, we will use &lt;code&gt;Fauna&lt;/code&gt; to store the form data. We will also see the &lt;code&gt;Netlify Function&lt;/code&gt; play an important role there.&lt;/p&gt;
-
-&lt;p&gt;Please feel free to clone/fork the repository and try it out. Then, stay tuned for part 2.&lt;/p&gt;
-
-
-&lt;div class="ltag-github-readme-tag"&gt;
-  &lt;div class="readme-overview"&gt;
-    &lt;h2&gt;
-      &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--i3JOwpme--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/github-logo-ba8488d21cd8ee1fee097b8410db9deaa41d0ca30b004c0c63de0a479114156f.svg" alt="GitHub logo"&gt;
-      &lt;a href="https://github.com/atapas"&gt;
-        atapas
-      &lt;/a&gt; / &lt;a href="https://github.com/atapas/jamstack-subscription-form"&gt;
-        jamstack-subscription-form
-      &lt;/a&gt;
-    &lt;/h2&gt;
-    &lt;h3&gt;
-      Let's build a subscription form with the Jamstack concept using Netlify Forms, Functions, and Fauna data-store.
-    &lt;/h3&gt;
-  &lt;/div&gt;
-  &lt;div class="ltag-github-body"&gt;
-    
-&lt;div id="readme" class="md"&gt;
-&lt;h1&gt;
-jamstack-subscription-form&lt;/h1&gt;
-&lt;p&gt;Let's build a subscription form using the &lt;code&gt;Jamstack&lt;/code&gt; concept. &lt;code&gt;Netlify&lt;/code&gt; comes with the form handling capability that allows you achieve the power of Jamstack for form handling.&lt;/p&gt;
-&lt;p&gt;With this project, we will build a simple(yet powerful) &lt;code&gt;Subscription&lt;/code&gt; form and submit it using the Netlify forms capability. We will use the &lt;code&gt;Netlify Functions&lt;/code&gt; to handle the form data and store it in a serverless data store called &lt;code&gt;Fauna&lt;/code&gt;.&lt;/p&gt;
-&lt;h1&gt;
-Want to Motivate?&lt;/h1&gt;
-&lt;p&gt;Have you foint this project helpful? You can give a star(⭐) to let me know, you care.&lt;/p&gt;
-&lt;h2&gt;
-Many Thanks to all the &lt;code&gt;Stargazers&lt;/code&gt; who has supported this project with stars(⭐)&lt;/h2&gt;
-&lt;p&gt;&lt;a href="https://github.com/atapas/jamstack-subscription-form/stargazers"&gt;&lt;img src="https://camo.githubusercontent.com/8b7e5091a622ccc4472108711fdbe09d57f6a9a8b5417b2d17bb53ba366e8ec9/68747470733a2f2f7265706f726f737465722e636f6d2f73746172732f6174617061732f6a616d737461636b2d737562736372697074696f6e2d666f726d" alt="Stargazers repo roster for @atapas/jamstack-subscription-form"&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;h1&gt;
-How to run this project?&lt;/h1&gt;
-&lt;ul&gt;
-&lt;li&gt;Clone this repository and change the directory to &lt;code&gt;jamstack-subscription-form&lt;/code&gt;.&lt;/li&gt;
-&lt;li&gt;Install &lt;code&gt;netlify-cli&lt;/code&gt;. &lt;a href="https://docs.netlify.com/cli/get-started/" rel="nofollow"&gt;Use this link&lt;/a&gt; to create an account with Netlify and install the CLI tool.&lt;/li&gt;
-&lt;li&gt;Create an account with &lt;a href="https://fauna.com/" rel="nofollow"&gt;Fauna&lt;/a&gt;. Create a database. Upload the &lt;a href="https://raw.githubusercontent.com/atapas/jamstack-subscription-form/main//db/schema.gql"&gt;schema&lt;/a&gt;…&lt;/li&gt;
-&lt;/ul&gt;
-&lt;/div&gt;
-  &lt;/div&gt;
-  &lt;div class="gh-btn-container"&gt;&lt;a class="gh-btn" href="https://github.com/atapas/jamstack-subscription-form"&gt;View on GitHub&lt;/a&gt;&lt;/div&gt;
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Here are a few additional reads you may find helpful,&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;&lt;a href="https://docs.netlify.com/forms/setup/"&gt;Netlify Forms - Official documentation&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://blog.greenroots.info/series/jamstack-for-all"&gt;Jamstack for All - The series&lt;/a&gt;&lt;/li&gt;
-&lt;/ul&gt;
-
-
-
-&lt;br&gt;
-If you enjoyed this article or found it helpful, let's connect. You can find me on &lt;a href="https://twitter.com/tapasadhikary"&gt;Twitter(@tapasadhikary)&lt;/a&gt; sharing thoughts, tips, and code practices. 
-
-&lt;p&gt;Do you know, you can support my work by sponsoring me? Please &lt;a href="https://blog.greenroots.info/sponsor"&gt;check this out&lt;/a&gt;.&lt;/p&gt;
-
-</description>
-      <category>jamstack</category>
-      <category>javascript</category>
-      <category>html</category>
-      <category>netlify</category>
-    </item>
-    <item>
-      <title>JS interview in 2 minutes / Currying 🥘</title>
-      <author>Nikita Kozlov</author>
-      <pubDate>Fri, 14 May 2021 09:21:47 +0000</pubDate>
-      <link>https://dev.to/kozlovzxc/js-interview-in-2-minutes-currying-2hko</link>
-      <guid>https://dev.to/kozlovzxc/js-interview-in-2-minutes-currying-2hko</guid>
-      <description>&lt;p&gt;&lt;strong&gt;Question:&lt;/strong&gt;&lt;br&gt;
-What is currying in JavaScript?&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Quick answer:&lt;/strong&gt;&lt;br&gt;
-It is a technique used to convert a function that takes multiple arguments into a chain of functions where every only takes one argument.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Longer answer:&lt;/strong&gt;&lt;br&gt;
-Currying is basically all about &lt;a href="https://dev.to/kozlovzxc/js-interview-in-2-minutes-higher-order-functions-38kb"&gt;Higher Order Functions&lt;/a&gt;. It is an application of JavaScript's ability to return functions from other functions.&lt;/p&gt;
-
-&lt;p&gt;We are replacing a function that takes &lt;code&gt;n&lt;/code&gt; arguments with a set of &lt;code&gt;n&lt;/code&gt; functions, which applied one by one gives exactly the same answer as original functions.&lt;/p&gt;
-
-&lt;p&gt;We can learn it by example right away. Btw it feels like this one is the most common one.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// regular implementation&lt;/span&gt;
-&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;add1&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;b&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;a&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="nx"&gt;b&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;add1&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;5&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt; &lt;span class="c1"&gt;// 7&lt;/span&gt;
-
-&lt;span class="c1"&gt;// curried implementation&lt;/span&gt;
-&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;add2&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="kd"&gt;function&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;b&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;a&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="nx"&gt;b&lt;/span&gt;
-  &lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;add2&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;)(&lt;/span&gt;&lt;span class="mi"&gt;5&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt; &lt;span class="c1"&gt;// 7&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;That is it. This is what currying is.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Real-life applications:&lt;/strong&gt;&lt;br&gt;
-At first glance, it may look a bit weird 🤯 Why do we ever need to call a function separating arguments?&lt;/p&gt;
-
-&lt;p&gt;You can think of it as a function preparation for execution. If you have some common operation, e.g. getting an object property, you can move it to a curried version.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;searchUser&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="c1"&gt;// ...&lt;/span&gt;
-  &lt;span class="nx"&gt;user&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;id&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
-  &lt;span class="c1"&gt;// ...&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;updateUser&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="c1"&gt;// ...&lt;/span&gt;
-  &lt;span class="nx"&gt;user&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;id&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
-  &lt;span class="c1"&gt;// ...&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;span class="c1"&gt;// user['id'] can be refactored with&lt;/span&gt;
-&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;getUserId&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;user&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;user&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;id&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
-
-&lt;span class="c1"&gt;// Or you can go even further and implement generic getter&lt;/span&gt;
-&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;pluck&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;name&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;object&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;object&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;name&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
-&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;getUserId&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;pluck&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;id&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;getUserName&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;pluck&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;name&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-
-&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;name&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;getUserName&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;user&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;So functions like this can be joined to some helpers library. And here is &lt;a href="https://www.learnrxjs.io/learn-rxjs/operators/transformation/pluck"&gt;RxJS.pluck&lt;/a&gt; and here is &lt;a href="https://ramdajs.com/docs/#pluck"&gt;Ramda.pluck&lt;/a&gt;.&lt;/p&gt;
-
-&lt;p&gt;Have a good curry 🥘&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Resources:&lt;/strong&gt;&lt;br&gt;
-&lt;a href="https://en.wikipedia.org/wiki/Currying"&gt;wiki/Currying&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Other posts:&lt;/strong&gt;&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;&lt;a href="https://dev.to/kozlovzxc/js-interview-in-2-minutes-promise-4fhl"&gt;JS interview in 2 minutes / Promise&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://dev.to/kozlovzxc/js-interview-in-2-minutes-this-3hlm"&gt;JS interview in 2 minutes / this 🤯&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://dev.to/kozlovzxc/js-interview-in-2-minutes-encapsulation-oop-2ico"&gt;JS interview in 2 minutes / Encapsulation (OOP)&lt;/a&gt;&lt;/li&gt;
-&lt;/ul&gt;
-
-
-
-
-&lt;p&gt;Btw, I will post more fun stuff here and on &lt;a href="https://twitter.com/kozlovzxc"&gt;Twitter&lt;/a&gt;. Let's be friends 👋&lt;/p&gt;
-
-</description>
-      <category>javascript</category>
-      <category>typescript</category>
-      <category>beginners</category>
-      <category>career</category>
     </item>
   </channel>
 </rss>
