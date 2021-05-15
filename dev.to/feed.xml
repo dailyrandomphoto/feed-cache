@@ -7,6 +7,1027 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>Working with the RedshiftToS3Transfer operator and Amazon Managed Workflows for Apache Airflow</title>
+      <author>Ricardo Sueiras</author>
+      <pubDate>Sat, 15 May 2021 18:40:31 +0000</pubDate>
+      <link>https://dev.to/aws/working-with-the-redshifttos3transfer-operator-and-amazon-managed-workflows-for-apache-airflow-56n9</link>
+      <guid>https://dev.to/aws/working-with-the-redshifttos3transfer-operator-and-amazon-managed-workflows-for-apache-airflow-56n9</guid>
+      <description>&lt;h3&gt;
+  &lt;a href="#introduction"&gt;
+  &lt;/a&gt;
+  Introduction
+&lt;/h3&gt;
+
+&lt;p&gt;In this post I am going to take a look at in more detail the launch post of Amazon Managed Workflows for Apache Airflow (MWAA). In the post, a workflow was created to take some source files (in this case, my old friends the Movielens data set) and then move them into Amazon Athena where they were transformed and then uploaded into Amazon Redshift. In this post I am going to add an additional step of taking the tables from that Amazon Redshift database and exporting them to Amazon S3, a common use case that data engineers are asked to do.&lt;/p&gt;
+
+&lt;p&gt;So, we will use Apache Airflow to take a file, transform it, store it in our data warehouse and then export it to our data lake. Let's get started.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;What will you need&lt;/strong&gt;&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;An AWS account with the right level of privileges&lt;/li&gt;
+&lt;li&gt;The latest/up to date aws cli - at least version 1.19.73 / 2.24&lt;/li&gt;
+&lt;li&gt;A MWAA environment up and running - may I suggest you check out some of my earlier blogs&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;You will find source code for this post at the usual place, &lt;a href="https://github.com/094459/blog-mwaa-redshift"&gt;my residence over on GitHub&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Costs&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;When I ran this and took a look at my AWS bill, it was around $50 for the 5-6 hours I was playing around putting this blog post together. Make sure you cleanup/delete all the resources after you have finished!&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#getting-started"&gt;
+  &lt;/a&gt;
+  Getting Started
+&lt;/h3&gt;
+
+&lt;p&gt;The first thing we need to do is setup the Amazon Redshift cluster. To make this easy, I have created a CDK app that builds everything you need.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;├── app.py
+├── files
+│   └── readme.txt
+├── mwaa_redshift
+│   ├── mwaa_redshift_stack.py
+│   └── mwaa_redshift_vpc.py
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;If you look at the &lt;strong&gt;app.py&lt;/strong&gt; file, it contains the following configuration options you will need to change for your own environment.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;env_EU=core.Environment(region="eu-west-1", account="XXXXXXXXXX")
+props = {
+    'redshifts3location': 'mwaa-redshift-blog',
+    'mwaadag' : 'airflow-094459',
+    'mwaa-sg':'sg-01f25764ea72db0f2',
+    'mwaa-vpc-id':'vpc-001c3b06c3e39c278',
+    'redshiftclustername':'mwaa-redshift-clusterxxx'
+    }
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;I have commented the code, but the first parameter (redshifts3location) is the name of the NEW S3 bucket you will create. This should not exist or the deployment will fail. The next one (mwaadag) is the location of the MWAA Dags folder, the (mwaa-sg) is the name of the security group for your MWAA environment, which the deployment will amend to add an additional ingress rule for Redshift, and finally (mwaa-vpc-id) the VPC id which is used to populate the Redshift subnet group to enable connectivity. Finally, make sure you adjust your environment details (region/account) to reflect your own environment.&lt;/p&gt;
+
+&lt;p&gt;Once you have changed this values for your own environment, you can deploy the stack.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;$ cdk deploy MWAA-Redshift-VPC
+$ cdk deploy MWAA-Redshift-Cluster
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;If the deployment has been successful, you should see output which you will use later on.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt; ✅  MWAA-RedShift-Cluster
+
+Outputs:
+MWAA-RedShift-Cluster.MWAAVPCESG = mwaa-redshift-cluster-mwaavperedshiftxxx-1n5aroq4bokge
+MWAA-RedShift-Cluster.RedshiftClusterEndpoint = mwaa-redshift-clusterxxx.cq7hpqttbcoc.eu-west-1.redshift.amazonaws.com
+MWAA-RedShift-Cluster.RedshiftIAMARN = arn:aws:iam::XXXXXXXXXX:role/MWAA-RedShift-Cluster-mwaaredshiftservicerole2nd63-1HKOCE7NNXXXX
+MWAA-RedShift-Cluster.RedshiftSecretARN = arn:aws:secretsmanager:eu-west-1: XXXXXXXXXX:secret:MWAARedshiftClusterSecret9B-SBoNAJOCWZFN-xXxXxX
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;You can have a look at the Amazon Redshift console if you want and you should see the new cluster ready to go.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Update permissions for your MWAA environment&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;Now that the Amazon Redshift cluster has been setup, we have a new Amazon S3 bucket (in my demo, it is called "mwaa-redshift-blog" - it should have a folder called "files") that will be used to download data from the web, transform it and then ingest into Amazon Redshift.&lt;/p&gt;
+
+&lt;p&gt;We need to add some additional permissions to the MWAA Execution policy so that it can read/write files in the new S3 bucket we are going to be using to download the files (and then later exporting them back). In my MWAA environment, I amend my policy as follows, by adding "mwaa-redshift-blog" to the resources MWAA can access ():&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;        {
+            "Effect": "Allow",
+            "Action": [
+                "s3:*"
+            ],
+            "Resource": [
+                "arn:aws:s3:::airflow-094459",
+                "arn:aws:s3:::airflow-094459/*",
+                "arn:aws:s3:::mwaa-redshift-094459",
+                "arn:aws:s3:::mwaa-redshift-094459/*",
+                "arn:aws:s3:::mwaa-redshift-blog",
+                "arn:aws:s3:::mwaa-redshift-blog/*"
+            ]
+        },    
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Whist we are talking about permissions, as part of the Redshift cluster deployment, a new IAM Role is created (you can see the name in the outputs once the CDK app has completed). If you take a look at the permissions, you will see it looks like the following:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Action": "s3:*",
+            "Resource": [
+                "arn:aws:s3:::mwaa-redshift-blog/*",
+                "arn:aws:s3:::mwaa-redshift-blog",
+                "arn:aws:s3:::airflow-094459/*",
+                "arn:aws:s3:::airflow-094459"
+            ],
+            "Effect": "Allow"
+        }
+    ]
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We have only given it access to our new folder as well as the MWAA Dags folder. We could tighten this up further by removing the specific S3 actions needed, so experiment removing those until you get something that works. &lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#uploading-and-running-the-movielens-dag"&gt;
+  &lt;/a&gt;
+  Uploading and running the movielens DAG
+&lt;/h3&gt;
+
+&lt;p&gt;Now that we have all the infrastructure ready to go, it is time to create our workflow/DAG. I have modified the original DAG from the blog post slightly, and you will need to do a few things before we are ready to go.&lt;/p&gt;
+
+&lt;p&gt;You can find the DAG here, &lt;strong&gt;movielens-redshift.py&lt;/strong&gt;. If we take a look at the DAG, we can see the following section:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;test_http = Variable.get("test_http", default_var="undefined")
+download_http = Variable.get("download_http", default_var="undefined")
+s3_bucket_name = Variable.get("s3_bucket_name", default_var="undefined")
+s3_key = Variable.get("s3_key", default_var="undefined")
+
+redshift_cluster = Variable.get("redshift_cluster", default_var="undefined")
+redshift_db = Variable.get("redshift_db", default_var="undefined") 
+redshift_dbuser = Variable.get("redshift_dbuser", default_var="undefined")
+redshift_table_name = Variable.get("redshift_table_name", default_var="undefined")
+redshift_iam_arn = Variable.get("redshift_iam_arn", default_var="undefined")
+redshift_secret_arn = Variable.get("redshift_secret_arn", default_var="undefined")
+
+athena_db = Variable.get("demo_athena_db", default_var="undefined")
+athena_results = Variable.get("athena_results", default_var="undefined")
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;So we do not have to hard code references, we use Apache Airflow variables to store the configuration details. This makes this workflow much easier to re-purpose.&lt;/p&gt;
+
+&lt;p&gt;In the GitHub repo you will find a file called &lt;strong&gt;variables.json&lt;/strong&gt; which when you look at it:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;{
+    "athena_results": "athena-results/",
+    "download_http": "http://files.grouplens.org/datasets/movielens/ml-latest-small.zip",
+    "s3_key": "files/",
+    "test_http": "https://grouplens.org/datasets/movielens/latest/",
+    "aws_connection": "aws_redshift",
+    "demo_athena_db": "demo_athena_db",
+    "redshift_airflow_connection": "redshift_default",
+    "redshift_cluster": "mwaa-redshift",
+    "redshift_db": "mwaa",
+    "redshift_dbuser": "awsuser",
+    "redshift_table_name": "movie_demo",
+    "redshift_iam_arn": "arn:aws:iam::XXXXXXXXXXX:role/RedShift-MWAA-Role",
+    "redshift_secret_arn": "arn:aws:secretsmanager:eu-west-1:XXXXXXXXXX:secret:mwaa-redshift-cluster-XXXXX",
+    "s3_bucket_name": "mwaa-redshift-blog"
+
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;You &lt;strong&gt;WILL&lt;/strong&gt; need to modify the last three variables (redshift_iam_arn, redshift_secret_arn and s3_bucket_name) using the values that were output as part of the Redshift cluster build. Once amended you can then import these into MWAA via the Apache Airflow UI. Once you have done this, you should have a list of the variables with the values listed. MWAA stores these securely in the MWAA metstore database. If you prefer, you could change the configuration of MWAA to look for variables in AWS Secrets Manager, and then manage these values via CDK perhaps - for this post I am keeping it simple and just using standard variables through the Apache Airflow UI.&lt;/p&gt;
+
+&lt;p&gt;The rest of the DAG is the same as the blog post, and you should deploy this to your DAGS folder via your preferred method (I use a very simple CI/CD system which you can replicate for yourself in my blog post, &lt;a href="https://aws-oss.beachgeek.co.uk/4t"&gt;A simple CI/CD system for your Amazon Managed Workflows for Apache Airflow development workflow&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Once you have uploaded it you should see it in the main Apache Airflow UI.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Triggering the DAG&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;We should be ready to go now. From the UI you can turn on/enable and then trigger the DAG called &lt;strong&gt;movielens-refshift&lt;/strong&gt; and the workflow should take around 5-10 minutes to complete. If the workflow looks all dark green, then you should be good. &lt;/p&gt;
+
+&lt;p&gt;&lt;/p&gt;
+
+&lt;p&gt;If you look at the logs you should see something like:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;[2021-05-14 23:01:41,762] {{logging_mixin.py:112}} INFO - Running %s on host %s &amp;lt;TaskInstance: movielens-redshift.transfer_to_redshift 2021-05-14T23:00:03.351510+00:00 [running]&amp;gt; ip-10-192-21-59.eu-west-1.compute.internal
+[2021-05-14 23:01:41,873] {{logging_mixin.py:112}} INFO - b8535f99-89a3-4036-9cb3-502a19397f8d
+[2021-05-14 23:01:41,898] {{logging_mixin.py:112}} INFO - s3://mwaa-redshift-blog/athena-results/join_athena_tables/b8535f99-89a3-4036-9cb3-502a19397f8d_clean.csv
+[2021-05-14 23:01:41,921] {{logging_mixin.py:112}} INFO - copy movie_demo from 's3://mwaa-redshift-blog/athena-results/join_athena_tables/b8535f99-89a3-4036-9cb3-502a19397f8d_clean.csv' iam_role 'arn:aws:iam::704533066374:role/MWAA-RedShift-Cluster-mwaaredshiftservicerole2nd63-1WNFQCTTKXXXX' CSV IGNOREHEADER 1;
+[2021-05-14 23:01:42,144] {{logging_mixin.py:112}} INFO - {'ClusterIdentifier': 'mwaa-redshift-clusterxxx', 'CreatedAt': datetime.datetime(2021, 5, 14, 23, 1, 42, 24000, tzinfo=tzlocal()), 'Database': 'mwaa', 'Id': 'cf455937-21ab-4399-95fa-cf3c60703688', 'SecretArn': 'arn:aws:secretsmanager:eu-west-1:xxxxxxxxx:secret:MWAARedshiftClusterSecret9B-687wkB7p4hID-xxxxx', 'ResponseMetadata': {'RequestId': '3c1c47c5-a3b4-4e4f-91a6-a15dd33610b7', 'HTTPStatusCode': 200, 'HTTPHeaders': {'x-amzn-requestid': '3c1c47c5-a3b4-4e4f-91a6-a15dd33610b7', 'content-type': 'application/x-amz-json-1.1', 'content-length': '254', 'date': 'Fri, 14 May 2021 23:01:42 GMT'}, 'RetryAttempts': 0}}
+[2021-05-14 23:01:42,173] {{python_operator.py:114}} INFO - Done. Returned value was: OK
+[2021-05-14 23:01:42,216] {{taskinstance.py:1070}} INFO - Marking task as SUCCESS.dag_id=movielens-redshift, task_id=transfer_to_redshift, execution_date=20210514T230003, start_date=20210514T230140, end_date=20210514T230142
+[2021-05-14 23:01:45,644] {{logging_mixin.py:112}} INFO - [2021-05-14 23:01:45,644] {{local_task_job.py:102}} INFO - Task exited with return code 0
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;If you look at your Amazon S3&lt;/p&gt;
+
+&lt;p&gt;Finally, if you look at Queries from the Redshift console, you should see a successful query appear:&lt;/p&gt;
+
+&lt;p&gt;&lt;/p&gt;
+
+&lt;p&gt;The part of the DAG that does the move of the data to Redshift is as follows:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;def s3_to_redshift(**kwargs):    
+    ti = kwargs['task_instance']
+    queryId = ti.xcom_pull(key='return_value', task_ids='join_athena_tables' )
+    print(queryId)
+    athenaKey='s3://'+s3_bucket_name+"/"+athena_results+"join_athena_tables/"+queryId+"_clean.csv"
+    print(athenaKey)
+    sqlQuery="copy "+redshift_table_name+" from '"+athenaKey+"' iam_role '"+redshift_iam_arn+"' CSV IGNOREHEADER 1;"
+    print(sqlQuery)
+    rsd = boto3.client('redshift-data')
+    resp = rsd.execute_statement(
+        ClusterIdentifier=redshift_cluster,
+        Database=redshift_db,
+        #DbUser=redshift_dbuser,
+        SecretArn=redshift_secret_arn,
+        Sql=sqlQuery,
+    )
+    print(resp)
+    return "OK"
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;In essence, we are not using an Apache Airflow operator but some Python code and boto3 and the redshift-data apis.&lt;/p&gt;
+
+&lt;p&gt;Congratulations, you have now replicated the original launch blog post for MWAA. Now lets take a look at how we move that data to S3.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#uploading-and-running-the-movielenss3-dag"&gt;
+  &lt;/a&gt;
+  Uploading and running the movielens-s3 DAG
+&lt;/h3&gt;
+
+&lt;p&gt;You can find the DAG here, &lt;strong&gt;movielens-redshift-s3.py&lt;/strong&gt;. If we take a look at the DAG, we can see the following section looks familiar. We are using the same variables, so nothing new to create:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;s3_bucket_name = Variable.get("s3_bucket_name", default_var="undefined")
+s3_key = Variable.get("s3_key", default_var="undefined")
+redshift_table_name = Variable.get("redshift_table_name", default_var="undefined")
+redshift_airflow_connection = Variable.get("redshift_airflow_connection", default_var="undefined")
+aws_connection = Variable.get("aws_connection", default_var="undefined")
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;What we DO need to do however, is create an Apache Airflow connection, which will be used by this DAG to understand how to connect to the Redshift cluster we created. In the first DAG, we used boto3 and called the redshift-data apis (constructing the information that allowed us to run the unload task). &lt;/p&gt;
+
+&lt;p&gt;In this DAG we are going to use an operator called &lt;strong&gt;RedshiftToS3Transfer&lt;/strong&gt; and we see in the very simple DAG,&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;    unload_to_S3 = RedshiftToS3Transfer(
+    task_id='unload_to_S3',
+    schema='public',
+    table=redshift_table_name,
+    s3_bucket=s3_bucket_name,
+    s3_key=s3_key,
+    redshift_conn_id=redshift_airflow_connection,
+    unload_options = ['CSV'],
+    aws_conn_id = aws_connection
+  )
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;In order for this to work we need to create a new connection which contains the details of the Redshift cluster.&lt;/p&gt;
+
+&lt;p&gt;When creating this we will give it a name (Conn ID) which is how we will refer to it in the code. If you look up at the variables, we configured this to be &lt;strong&gt;redshift_default&lt;/strong&gt; (from the variables.json entry "redshift_airflow_connection": "redshift_default"), so we will give it that name.&lt;/p&gt;
+
+&lt;p&gt;For the Conn Type we select Amazon Web Services.&lt;/p&gt;
+
+&lt;p&gt;For the Host, we use the Redshift cluster endpoint - again this was set in the variables above and is output as part of the CDK app deployment.&lt;/p&gt;
+
+&lt;p&gt;For schema we set this to "mwaa" as this is the name of the database we created (so change if you have deviated from the above)&lt;/p&gt;
+
+&lt;p&gt;For username and password, enter "awsuser" (change if you changed yours from the defaults) and then for password, you will need to retrieve the password from the AWS Secret Manager (it will be a randomised string).&lt;/p&gt;
+
+&lt;p&gt;Finally, port should be set to 5439. It should look a little like this&lt;/p&gt;
+
+
+
+&lt;p&gt;Save the connection, and it you are now ready to go.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Triggering the DAG&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;From the UI you can turn on/enable and then trigger the DAG called &lt;strong&gt;movielens-refshift-s3&lt;/strong&gt;. If we try and now run the export, what happens? It looks like it hangs, but after a few seconds we see the following in the logs.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;[2021-05-12 16:53:23,303] {{redshift_to_s3_operator.py:124}} INFO - Executing UNLOAD command...
+[2021-05-12 16:53:23,333] {{logging_mixin.py:112}} INFO - [2021-05-12 16:53:23,333] {{base_hook.py:89}} INFO - Using connection to: id: redshift_default3. Host: mwaa-redshift-clusterxxx.cq7hpqttXXXX.eu-west-1.redshift.amazonaws.com, Port: None, Schema: mwaa, Login: awsuser, Password: XXXXXXXX, extra: None
+[2021-05-12 16:55:34,323] {{taskinstance.py:1150}} ERROR - could not connect to server: Connection timed out
+    Is the server running on host "mwaa-redshift-clusterxxx.cq7hpqttbcoc.eu-west-1.redshift.amazonaws.com" (10.192.X.XXX) and accepting
+    TCP/IP connections on port 5432?
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This is to be expected. The MWAA and Amazon Redshift clusters are in two different VPCs, and by default there is no access. So what are our options? Well, we have a few..&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;we could create a VPC and then deploy both MWAA and our Amazon Redshift cluster in that VPC and use security groups to control access at the network level&lt;/li&gt;
+&lt;li&gt;we could enable Amazon Redshift in Public mode, and then use security groups to control who can access at the network level&lt;/li&gt;
+&lt;li&gt;you could configure your own networking solution to enable connectivity between the MWAA VPC and the Amazon Redshift VPC, for example setting up VPC Peering between the two VPCs&lt;/li&gt;
+&lt;li&gt;we could configure Redshift-managed VPC endpoints&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;In this post I am going to look at the last option to addressing this, configuring Amazon Redshift-managed VPC endpoints. You can dive deeper into this topic by checking out this post, &lt;a href="https://aws-oss.beachgeek.co.uk/is"&gt;Enable private access to Amazon Redshift from your client applications in another VPC&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Configuring Amazon Redshift-managed VPC endpoints&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;The first thing we need to do is enable a feature within our Redshift cluster called Cluster Relocation, which we can do through the aws cli - adjust for your cluster name and the aws region you are in.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;$ aws redshift modify-cluster --cluster-identifier {your-cluster-name} --availability-zone-relocation --region={your region}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Which should produce output like the following:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;{
+    "Cluster": {
+        "ClusterIdentifier": "mwaa-redshift-clusterxxx",
+        "NodeType": "ra3.4xlarge",
+        "ClusterStatus": "available",
+        "ClusterAvailabilityStatus": "Available",
+        "MasterUsername": "awsuser",
+        "DBName": "mwaa",
+        "Endpoint": {
+            "Address": "mwaa-redshift-clusterxxx.cq7hpqttXXXX.eu-west-1.redshift.amazonaws.com",
+            "Port": 5439
+        },
+        "ClusterCreateTime": "2021-05-12T15:45:57.316Z",
+        "AutomatedSnapshotRetentionPeriod": 1,
+        "ManualSnapshotRetentionPeriod": -1,
+        "ClusterSecurityGroups": [],
+        "VpcSecurityGroups": [
+            {
+                "VpcSecurityGroupId": "sg-0a3c2ec446bf3XXX",
+                "Status": "active"
+            }
+        ],
+        "ClusterParameterGroups": [
+            {
+                "ParameterGroupName": "default.redshift-1.0",
+                "ParameterApplyStatus": "in-sync"
+            }
+        ],
+        "ClusterSubnetGroupName": "mwaa-redshift-cluster-mwaaredshiftclustersubnets12b38881-18687maiqstqw",
+        "VpcId": "vpc-009458f3af3d0XXXX",
+        "AvailabilityZone": "eu-west-1b",
+        "PreferredMaintenanceWindow": "fri:23:30-sat:00:00",
+        "PendingModifiedValues": {},
+        "ClusterVersion": "1.0",
+        "AllowVersionUpgrade": true,
+        "NumberOfNodes": 2,
+        "PubliclyAccessible": false,
+        "Encrypted": true,
+        "Tags": [],
+        "KmsKeyId": "arn:aws:kms:eu-west-1:XXXXXXXXXX:key/3644d5bf-b7c1-489b-95d1-e4ebb9816982",
+        "EnhancedVpcRouting": false,
+        "IamRoles": [
+            {
+                "IamRoleArn": "arn:aws:iam:: XXXXXXXXXX:role/MWAA-RedShift-Cluster-mwaaredshiftservicerole26FEF-IJCNHR9TMXBN",
+                "ApplyStatus": "in-sync"
+            }
+        ],
+        "MaintenanceTrackName": "current",
+        "DeferredMaintenanceWindows": [],
+        "NextMaintenanceWindowStartTime": "2021-05-14T23:30:00Z"
+    }
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;You can check that this change has taken effect with the following command (if you do not use jq, then look for the "AvailabilityZoneRelocationStatus" parameter set to "enabled"):&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;$ aws redshift describe-clusters --cluster-identifier {your-cluster-name} --region={your region} | jq -r '.Clusters[] | .AvailabilityZoneRelocationStatus'
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;And you should get "enabled" if it is working ok.&lt;/p&gt;
+
+&lt;p&gt;The CDK app will have created a new Subnet group, the name of which you can see in the outputs. This Subnet group contains the subnet ids for the MWAA VPC, so grab that info as you will need it in the next step when creating the VPC Endpoint itself.&lt;/p&gt;
+
+&lt;p&gt;We can setup the VPC Endpoint connection. Replace the parameters below with:&lt;/p&gt;
+
+&lt;p&gt;{your-cluster-name} - the name of your Redshift cluster&lt;br&gt;
+{your-aws-account} - the name of your aws account&lt;br&gt;
+{your-subnet-group} - the name of the Redshift subnet group that was mentioned above&lt;br&gt;
+{your-vpc-sg} - this is the MWAA security group&lt;/p&gt;
+
+&lt;p&gt;If you want you can change the endpoint-name, when running this it will create one called "mwaa-redshift-endpoint".&lt;/p&gt;
+
+&lt;p&gt;To make this easier, if you check the outputs you should see the command line you need to execute as part of the outputs.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;$ aws redshift create-endpoint-access --cluster-identifier {your-cluster-name} --resource-owner {your-aws-account} --endpoint-name mwaa-redshift-endpoint --subnet-group-name {your-subnet-group} --vpc-security-group-ids {your-vpc-sg} --region={your region}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Which should output the following&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;{
+    "ClusterIdentifier": "mwaa-redshift-clusterxxx",
+    "ResourceOwner": "704533066374",
+    "SubnetGroupName": "mwaa-redshift-cluster-mwaavperedshiftcsg-1n5aroq4bokge",
+    "EndpointStatus": "creating",
+    "EndpointName": "mwaa-redshift-endpoint",
+    "Port": 5439,
+    "VpcSecurityGroups": [
+        {
+            "VpcSecurityGroupId": "sg-01f25764ea72db0f2",
+            "Status": "active"
+        }
+    ]
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;It will take around 5 minutes to create this and when finished, the output of this will be to create a new VPC Endpoint, which our MWAA environment will have access to. &lt;/p&gt;
+
+&lt;p&gt;This will create a new Redshift endpoint which we will need to use to replace the Apache Airflow connection we created earlier on. To find this endpoint, we use the following command (change the "mwaa-redshift-endpoint" if you used a different name):&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;$ aws redshift describe-endpoint-access --endpoint-name mwaa-redshift-endpoint | jq '.EndpointAccessList[] | .Address'
+
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Which should display something like&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;"mwaa-redshift-endpoint-endpoint-amwgdyw5zgkicyjnwvnc.cq7hpqttbcoc.eu-west-1.redshift.amazonaws.com"
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;And we can now update the Connection value in the Apache Airflow UI with this updated Redshift connection value.&lt;/p&gt;
+
+&lt;p&gt;When we try again, we can now see that it works...progress! Alas, we get a different error. You will see something like the following:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;[2021-05-15 18:15:15,428] {{logging_mixin.py:112}} INFO - [2021-05-15 18:15:15,428] {{base_hook.py:89}} INFO - Using connection to: id: redshift_default3. Host: mwaa-redshift-endpoint-endpoint-amwgdyw5zgkicyjnwvnc.cq7hpqttbcoc.eu-west-1.redshift.amazonaws.com, Port: 5439, Schema: mwaa, Login: awsuser, Password: XXXXXXXX, extra: None
+[2021-05-15 18:15:16,273] {{logging_mixin.py:112}} INFO - [2021-05-15 18:15:16,273] {{dbapi_hook.py:174}} INFO - 
+                    UNLOAD ('SELECT * FROM public.movie_demo')
+                    TO 's3://mwaa-redshift-blog/files//movie_demo_'
+                    with credentials
+                    'aws_access_key_id=ASIA2ICLROKDMYHWTXM3;aws_secret_access_key=QSC6FHRvEIy/I5Vgw+a4aGxatJHdEhUEtXAGYs35'
+                    CSV;
+
+[2021-05-15 18:15:16,419] {{taskinstance.py:1150}} ERROR - S3ServiceException:The AWS Access Key Id you provided does not exist in our records.,Status 403,Error InvalidAccessKeyId,Rid DXZAZJB2A16RSAHZ,ExtRid 5rTDV6AnoE8pM8fsx3PTyeJozEUtdPHaxxwsKKJ3ODd5hgb3HvEf9EGoMcge8gKsEhBYqqAMar0=,CanRetry 1
+DETAIL:  
+  -----------------------------------------------
+  error:  S3ServiceException:The AWS Access Key Id you provided does not exist in our records.,Status 403,Error InvalidAccessKeyId,Rid DXZAZJB2A16RSAHZ,ExtRid 5rTDV6AnoE8pM8fsx3PTyeJozEUtdPHaxxwsKKJ3ODd5hgb3HvEf9EGoMcge8gKsEhBYqqAMar0=,CanRetry 1
+  code:      8001
+  context:   Listing bucket=mwaa-redshift-blog prefix=files//movie_demo_
+  query:     0
+  location:  s3_utility.cpp:840
+  process:   padbmaster [pid=19490]
+  -----------------------------------------------
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;It turns out we need to do one more thing to get this working.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Configuring AWS credentials for RedshiftToS3Transfer&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;We now need to configure credentials that the Amazon Redshift cluster will use when running the unload operation. We have a couple of options:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;we can store the aws credentials as a json tuple in the Apache Airflow Connections&lt;/li&gt;
+&lt;li&gt;we can store the same credentials but use the native integration with AWS Secrets Manager to do the same&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;To keep things simple, I am going to use the Apache Airflow (but will create a follow on post that shows how to do the other)&lt;/p&gt;
+
+&lt;p&gt;You will need to create or use an existing IAM user that will be configured to connect to the Redshift cluster to perform the unload transaction. You should create a user with the minimal permissions. You will need to have to hand the "aws_access_key_id" and the "aws_secret_access_key" as you are going to add these to the Apache Airflow connection document.&lt;/p&gt;
+
+&lt;p&gt;From the Connections in the Apache Airflow UI, find the connection document you have configured (if you are following along in this example, I have used one called "aws_redshift" and configured the DAGs to use this too. This is currently empty, so all I need to do is add your keys in the following format in the extras field:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;{
+"aws_access_key_id" : "XASDASDSADSAFDFDSF", "aws_secret_access_key": "7DSFDSFDSFDSdsfdsfdskfjklsdjfkldsjf"
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;After saving this, we can try again.&lt;/p&gt;
+
+&lt;p&gt;Success, the workflow should show dark green, and when we look at the logs we can see:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;[2021-05-15 18:23:26,049] {{redshift_to_s3_operator.py:124}} INFO - Executing UNLOAD command...
+[2021-05-15 18:23:26,080] {{logging_mixin.py:112}} INFO - [2021-05-15 18:23:26,079] {{base_hook.py:89}} INFO - Using connection to: id: redshift_default3. Host: mwaa-redshift-endpoint-endpoint-amwgdyw5zgkicyjnwvnc.cq7hpqttbcoc.eu-west-1.redshift.amazonaws.com, Port: 5439, Schema: mwaa, Login: awsuser, Password: XXXXXXXX, extra: None
+[2021-05-15 18:23:26,953] {{logging_mixin.py:112}} INFO - [2021-05-15 18:23:26,953] {{dbapi_hook.py:174}} INFO - 
+                    UNLOAD ('SELECT * FROM public.movie_demo')
+                    TO 's3://mwaa-redshift-blog/files//movie_demo_'
+                    with credentials
+                    'aws_access_key_id=AKIA2ICLROKDLG3XWX47;aws_secret_access_key=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'
+                    CSV;
+
+[2021-05-15 18:23:27,446] {{redshift_to_s3_operator.py:126}} INFO - UNLOAD command complete...
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;And if we look at the S3 bucket, we can see the files, in parque format, that have been exported from Redshift.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#troubleshooting"&gt;
+  &lt;/a&gt;
+  Troubleshooting
+&lt;/h3&gt;
+
+&lt;p&gt;As I was testing this out, I came across a couple of errors that you may see so thought I would document what the errors were and how I resolved the issue.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;AWS cli version&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;When I was running the "aws redshift create-endpoint-access" I got errors and looking at the available options, the "create-endpoint-access" was not available. I was using 1.18.209, so upgraded and the problem was resolved.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;S3 Folder issues&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;The CDK application creates the bucket and a folder called files, which is used as part of the first DAG. I got the following errors:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;[2021-05-15 15:20:24,340] {{standard_task_runner.py:78}} INFO - Job 117232: Subtask check_s3_for_key
+[2021-05-15 15:20:24,434] {{logging_mixin.py:112}} INFO - Running %s on host %s &amp;lt;TaskInstance: movielens-redshift.check_s3_for_key 2021-05-15T15:20:19.064158+00:00 [running]&amp;gt; ip-10-192-21-59.eu-west-1.compute.internal
+[2021-05-15 15:20:24,581] {{s3_key_sensor.py:88}} INFO - Poking for key : s3://mwaa-redshift-blog/files/
+[2021-05-15 15:20:45,206] {{s3_key_sensor.py:88}} INFO - Poking for key : s3://mwaa-redshift-blog/files/
+..
+..
+[2021-05-15 15:20:45,333] {{taskinstance.py:1150}} ERROR - Snap. Time is OUT.
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Even though the folder was their, MWAA and specifically this operator could not see it. In the end I realised that I had forgotten to add the trailing "/" in the destination_key_prefix= part of CDK application&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;destination_key_prefix="files/",
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Once I did that, it worked fine.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Amazon Redshift username password error&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;When triggering the Amazon Redshift to S3 DAG, I got the following error.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;[2021-05-15 11:03:44,466] {{standard_task_runner.py:78}} INFO - Job 117231: Subtask unload_to_S3
+[2021-05-15 11:03:44,569] {{logging_mixin.py:112}} INFO - Running %s on host %s &amp;lt;TaskInstance: movielens-redshift-s3.unload_to_S3 2021-05-15T11:03:39.979947+00:00 [running]&amp;gt; ip-10-192-21-59.eu-west-1.compute.internal
+[2021-05-15 11:03:44,693] {{redshift_to_s3_operator.py:124}} INFO - Executing UNLOAD command...
+[2021-05-15 11:03:44,722] {{logging_mixin.py:112}} INFO - [2021-05-15 11:03:44,722] {{base_hook.py:89}} INFO - Using connection to: id: redshift_default3. Host: www-endpoint-smz89t0ahk5ieuxze2yq.cq7hpqttbcoc.eu-west-1.redshift.amazonaws.com, Port: 5439, Schema: mwaa, Login: awsuser, Password: XXXXXXXX, extra: None
+[2021-05-15 11:03:45,493] {{taskinstance.py:1150}} ERROR - FATAL:  password authentication failed for user "awsuser"
+FATAL:  password authentication failed for user "awsuser"
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The resolution was simple, I had forgotten to add the password to the connection document in MWAA, so all I had to do was obtain the password from AWS Secrets Manager, and then store that in the password field.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Amazon Redshift connection times out&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;While I was getting the Redshift-managed VPC endpoint setup, when I triggered the Amazon Redshift to S3 DAG, the task stayed green (running) for a while, and eventually failed with the following error.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;[2021-05-14 23:40:34,440] {{logging_mixin.py:112}} INFO - Running %s on host %s &amp;lt;TaskInstance: movielens-redshift-s3.unload_to_S3 2021-05-14T23:40:29.106506+00:00 [running]&amp;gt; ip-10-192-21-59.eu-west-1.compute.internal
+[2021-05-14 23:40:34,602] {{redshift_to_s3_operator.py:124}} INFO - Executing UNLOAD command...
+[2021-05-14 23:40:34,636] {{logging_mixin.py:112}} INFO - [2021-05-14 23:40:34,635] {{base_hook.py:89}} INFO - Using connection to: id: redshift_default3. Host: aaa-endpoint-bg5whiw3h4rvuimskvn2.cq7hpqttbcoc.eu-west-1.redshift.amazonaws.com, Port: 5439, Schema: mwaa, Login: awsuser, Password: XXXXXXXX, extra: None
+[2021-05-14 23:42:44,915] {{taskinstance.py:1150}} ERROR - could not connect to server: Connection timed out
+    Is the server running on host "aaa-endpoint-bg5whiw3h4rvuimskvn2.cq7hpqttbcoc.eu-west-1.redshift.amazonaws.com" (10.192.21.140) and accepting
+    TCP/IP connections on port 5439?
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;It took me a while to figure this out, but the solution involved a few things:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;setup a Redshift Subnet Group with the subnets from the MWAA environment&lt;/li&gt;
+&lt;li&gt;enable the MWAA security group to allow inbound Redshift traffic (port 5439)&lt;/li&gt;
+&lt;li&gt;setup the Redshift-managed VPC endpoint setup with the correct environment - you need to do this AFTER the subnet group has been setup, otherwise only the existing Redshift VPC will appear&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3&gt;
+  &lt;a href="#conclusion"&gt;
+  &lt;/a&gt;
+  Conclusion
+&lt;/h3&gt;
+
+&lt;p&gt;In this post I have shown you how you can use and integrate Apache Airflow to orchestrate data engineering tasks across a number of AWS services, importing data from origin to Amazon S3, transforming it via Amazon Athena, creating tables in Amazon Redshift before exporting it to an Amazon S3 bucket.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#clean-up"&gt;
+  &lt;/a&gt;
+  Clean up
+&lt;/h3&gt;
+
+&lt;p&gt;Make sure you delete all the resources, which you can do quickly by running these commands.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;
+$ cdk destroy MWAA-Redshift-Cluster
+$ cdk destroy MWAA-Redshift-VPC
+
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;And then emptying/deleting the Amazon S3 bucket.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Survey&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;Please &lt;a href="https://eventbox.dev/survey/7RROR4Q"&gt;complete this very short survey&lt;/a&gt; to let me know if you found this useful and how I can make them even better. &lt;/p&gt;
+
+&lt;p&gt;Many thanks!&lt;/p&gt;
+
+</description>
+      <category>aws</category>
+      <category>opensource</category>
+    </item>
+    <item>
+      <title>VimGore : an interactive game to learn vim </title>
+      <author>Pratham Sharma</author>
+      <pubDate>Sat, 15 May 2021 18:13:44 +0000</pubDate>
+      <link>https://dev.to/ps173/vimgore-an-interactive-game-to-learn-vim-10kn</link>
+      <guid>https://dev.to/ps173/vimgore-an-interactive-game-to-learn-vim-10kn</guid>
+      <description>&lt;p&gt;So I wanted to try MERN stack and thus started out with this idea of creating a game that will provide you with snippets of code which will be corrected by the user using vim mode. So this idea was enough to give me motivation to jump into the project state.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--aQB62dbe--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/nfd54mffjm6ondg69lzk.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--aQB62dbe--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/nfd54mffjm6ondg69lzk.png" alt="VimGore"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;So below is the link to the app. It is not fully featured and I think that it is missing lot of stuff but will be happy to get a overall feedback. &lt;/p&gt;
+
+&lt;p&gt;If you have any issues then report in repo :)&lt;/p&gt;
+
+&lt;p&gt;For now this is vimgore&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="https://github.com/ps173/VimGore"&gt;source code&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://vimgore.netlify.app/"&gt;live site&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;(also this was my first proper full-stack project)&lt;br&gt;
+Thanks For Reading 😁️&lt;br&gt;
+and keep up the hardwork 💪&lt;/p&gt;
+
+</description>
+      <category>vim</category>
+      <category>react</category>
+      <category>node</category>
+      <category>showdev</category>
+    </item>
+    <item>
+      <title>10 Storybook Best Practices</title>
+      <author>Rafael Rozon</author>
+      <pubDate>Sat, 15 May 2021 17:55:25 +0000</pubDate>
+      <link>https://dev.to/rafaelrozon/10-storybook-best-practices-5a97</link>
+      <guid>https://dev.to/rafaelrozon/10-storybook-best-practices-5a97</guid>
+      <description>&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--hGmG0J4O--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/2lrouk11aqd8t768cv1j.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--hGmG0J4O--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/2lrouk11aqd8t768cv1j.png" alt="Storybook Best Practices Cover Image"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;This is a post about Storybook and conventions. It is based on my experience using Storybook over several years and from the experiences of other developers. The best practices I define here aren't silver bullets that will fix and improve every project. They're a baseline of ideas and conventions that I think are worth trying. Hopefully, they can help you and your team have a better developer experience and ultimately deliver better software to the world.&lt;br&gt;
+I assume you know what Storybook is and that you have some experience with it. The ideas here can be applied to apps of any size and are not particular to any specific framework (e.g. React or Vue), but I wrote them with a large app in mind with a large team and multiple contributors.&lt;/p&gt;
+
+
+&lt;h2&gt;
+  &lt;a href="#1-one-storybook-file-per-component"&gt;
+  &lt;/a&gt;
+  1. One Storybook File Per Component
+&lt;/h2&gt;
+
+&lt;p&gt;The story file should have:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;one Default story&lt;/li&gt;
+&lt;li&gt;a Playground story&lt;/li&gt;
+&lt;li&gt;and other stories that reflect a specific state or API of the component.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;The default story displays the component with only its required props defined. It creates a visual baseline representation for everyone. So, ideally, when people think about a specific component, they will remember what's reproduced by the default story.&lt;br&gt;
+The playground story is used to help consumers of the component try different combinations of props and see how the component responds. This can be implemented in Storybook version 5 and below using &lt;a href="https://www.npmjs.com/package/@storybook/addon-knobs"&gt;the knobs add-on&lt;/a&gt;. You provide knobs for all props of the component:&lt;/p&gt;
+
+
+&lt;div class="ltag_gist-liquid-tag"&gt;
+  
+&lt;/div&gt;
+
+
+&lt;p&gt;For the latest version of Storybook (version 6), the playground story can be written using the new &lt;a href="https://storybook.js.org/docs/react/writing-stories/args"&gt;Args feature&lt;/a&gt;. It looks something like this:&lt;/p&gt;
+
+
+&lt;div class="ltag_gist-liquid-tag"&gt;
+  
+&lt;/div&gt;
+
+
+&lt;p&gt;Finally, the other stories should reflect a specific state or API of the component. For example, if we have a button component with a type property that accepts the values &lt;code&gt;primary&lt;/code&gt;, &lt;code&gt;secondary&lt;/code&gt;, &lt;code&gt;tertiary&lt;/code&gt;, or &lt;code&gt;error&lt;/code&gt;. Then, we would have four stories: &lt;code&gt;Button/Primary&lt;/code&gt;, &lt;code&gt;Button/Secondary&lt;/code&gt;, &lt;code&gt;Button/Tertiary&lt;/code&gt;, and &lt;code&gt;Button/Error&lt;/code&gt;. There are a few reasons to follow this pattern:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;It is easier to share a link of a component that precisely defines a state that you want to reference, which is useful when communicating with QA and designers.&lt;/li&gt;
+&lt;li&gt;If Storybook is combined with testing tools, like snapshot testing or visual regression testing, each story becomes a unit testing. If one of them fails, you know exactly which one.&lt;/li&gt;
+&lt;li&gt;By making the stories explicit, we avoid hiding components states under the knobs.&lt;/li&gt;
+&lt;/ul&gt;
+
+
+
+
+&lt;h2&gt;
+  &lt;a href="#2-colocation-a-storybook-file-should-stay-with-its-component"&gt;
+  &lt;/a&gt;
+  2. Co-location: A Storybook File Should Stay With Its Component
+&lt;/h2&gt;
+
+&lt;p&gt;Code that changes for the same reasons should be kept together. In that sense, the Storybook file for a given component will very likely change when that component changes — so keep them together. Also, if the component folder is moved to another place in the project or even to another project, it will be easier to move the Storybook file along.&lt;/p&gt;
+
+
+
+
+&lt;h2&gt;
+  &lt;a href="#3-naming-convention"&gt;
+  &lt;/a&gt;
+  3. Naming Convention
+&lt;/h2&gt;
+
+&lt;p&gt;Name the storybook files &lt;code&gt;[ComponentName].stories.[js|jsx|tsx]&lt;/code&gt;. Honestly, the important thing is that you and your team agree on a naming convention, and everyone follows it. I like to include the name of the component in the file name because it makes it easier to find in the code editor. Otherwise, I could end up with five files called &lt;code&gt;index.stories.tsx,&lt;/code&gt; and then I'd have to open each one or perform a search to find the right one.&lt;/p&gt;
+
+
+
+
+&lt;h2&gt;
+  &lt;a href="#4-new-components-must-have-a-storybook"&gt;
+  &lt;/a&gt;
+  4. New Components Must Have a Storybook
+&lt;/h2&gt;
+
+&lt;p&gt;It helps to create a library of components and gain the benefits of having one. If your team has a PR checklist, Storybook could be one of the items to check before merging the code into master.&lt;/p&gt;
+
+
+
+
+&lt;h2&gt;
+  &lt;a href="#5-prefer-the-component-story-format"&gt;
+  &lt;/a&gt;
+  5. Prefer the Component Story Format
+&lt;/h2&gt;
+
+&lt;p&gt;&lt;a href="https://storybook.js.org/docs/react/api/csf"&gt;Component Story Format or CSF&lt;/a&gt; is the recommended way to write stories according to the Storybook maintainers. It's basically a set of conventions to be used in the story files. Instead of using the &lt;code&gt;storiesOf&lt;/code&gt; API, you write regular JavaScript functions and export them. Storybook converts the named and the default exports to stories. One big advantage of the CSF format is that the code looks cleaner and is easier to read. Instead of the Storybook boilerplate, you can focus on what your code is actually doing.&lt;/p&gt;
+
+
+
+
+&lt;h2&gt;
+  &lt;a href="#6-architect-stories-as-you-architect-your-codebase"&gt;
+  &lt;/a&gt;
+  6. Architect Stories as You Architect Your Codebase
+&lt;/h2&gt;
+
+&lt;p&gt;When you use Storybook, you should have a clear idea of how your app is organized. I got this from &lt;a href="https://dev.to/loicgoyet"&gt;Loïc Goyet&lt;/a&gt; in the awesome post &lt;a href="https://dev.to/loicgoyet/how-i-manage-to-make-my-storybook-project-the-most-efficient-possible-2d8o"&gt;How I manage to make my Storybook project the most efficient possible&lt;/a&gt;. His idea is to make the stories menu reflect the location of the stories in the app:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--7jLINmzO--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ja8tei1a4qb168dr1uqv.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--7jLINmzO--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ja8tei1a4qb168dr1uqv.png" alt="Storybook Menu Structure"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Do you see how the menu in Storybook above aligns with the app folder structure?&lt;br&gt;
+This structure will help you to:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Find stories more easily&lt;/li&gt;
+&lt;li&gt;Understand how the code is organized.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;If co-location is used in your app, keeping related items together, the folder structure gives you an idea of how the app is structured. But do not confuse folder structure with architecture. They're not the same thing.&lt;/p&gt;
+
+
+&lt;h2&gt;
+  &lt;a href="#7-consistent-environment"&gt;
+  &lt;/a&gt;
+  7. Consistent Environment
+&lt;/h2&gt;
+
+&lt;p&gt;When we develop in Storybook, we want isolation, but it is very likely that we still use some resources shared with the app, such as images, data, CSS, icons, translations, etc. And, this is good because we want to make sure that our components will behave in the same way when used in the context of the app. For example, if a localization library is used in the app, it can probably be reused with the same configuration inside Storybook. Another example: If third-party CSS is used, it should be included inside Storybook because we want to determine if that CSS will conflict with our CSS. The objective is to avoid surprises when using the component in the app.&lt;/p&gt;
+
+
+&lt;h2&gt;
+  &lt;a href="#8-keep-data-under-control"&gt;
+  &lt;/a&gt;
+  8. Keep Data Under Control
+&lt;/h2&gt;
+
+&lt;p&gt;If you notice that you need the same data in many different stories, it may be good to create a mocks folder and add JavaScript files that export factory functions that will create reusable data. Let us suppose that we have an avatar component that displays the user image, name, anchor, and this component is used in multiple places. We could have a file named mocks/user.js which has something like this:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;getUser&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;overrides&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{})&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;defaultValues&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="na"&gt;username&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Some User&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+        &lt;span class="na"&gt;anchor&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;@someuser&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+        &lt;span class="na"&gt;image&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;https://webapp/static/images/someuser.png&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
+    &lt;span class="p"&gt;};&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nb"&gt;Object&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;assign&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;defaultValues&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;overrides&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="p"&gt;};&lt;/span&gt;
+&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="k"&gt;default&lt;/span&gt; &lt;span class="nx"&gt;getUser&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Why the factory function? To make sure we are getting a new object every time. If we imported an object, we could accidentally modify it and cause wrong results. I have seen it. Also, here I'm using &lt;code&gt;Object.assign&lt;/code&gt; as an example, but you may need something more sophisticated that handles the merging of arrays and objects. &lt;a href="https://lodash.com/docs/4.17.15#mergeWith"&gt;Lodash&lt;/a&gt; and &lt;a href="https://ramdajs.com/docs/#merge"&gt;RamdaJS&lt;/a&gt; have functions for that — RamdaJS is awesome!&lt;/p&gt;
+
+
+
+
+&lt;h2&gt;
+  &lt;a href="#9-create-your-own-decorators-and-addons-when-it-makes-sense"&gt;
+  &lt;/a&gt;
+  9. Create Your Own Decorators and Add-ons ( When it Makes Sense)
+&lt;/h2&gt;
+
+&lt;p&gt;&lt;a href="https://storybook.js.org/docs/react/writing-stories/decorators"&gt;Decorators&lt;/a&gt; are basically functions that wrap another piece of code and give it extra functionality. In Storybook decorators can be applied to individual stories (called Story decorators), all stories of a component (called Component Decorators), or to all stories in the project (called Global Decorators). The baseline is this:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;myDecorator&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;Story&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nt"&gt;div&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;
+        &lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nc"&gt;Story&lt;/span&gt; &lt;span class="p"&gt;/&amp;gt;&lt;/span&gt;
+    &lt;span class="p"&gt;&amp;lt;/&lt;/span&gt;&lt;span class="nt"&gt;div&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;
+&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;It is common in React apps to have providers wrapping the app or portions of the app. If you need, for example, to wrap your components in a provider, a decorator is the way to go. Or, if you want to add a margin to some component so that it does not touch the borders of the canvas, you could have a decorator like this one:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;withMargin&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;Story&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nt"&gt;div&lt;/span&gt; &lt;span class="na"&gt;style&lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;margin&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;3em&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;
+        &lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nc"&gt;Story&lt;/span&gt;&lt;span class="p"&gt;/&amp;gt;&lt;/span&gt;
+    &lt;span class="p"&gt;&amp;lt;/&lt;/span&gt;&lt;span class="nt"&gt;div&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;
+&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;a href="https://storybook.js.org/docs/react/api/addons"&gt;Add-ons&lt;/a&gt; are extensions to Storybook that can help you to configure and extend Storybook in many fancy ways. It's more involving to develop add-ons, but it's not hard, and you have more power and flexibility.&lt;/p&gt;
+
+
+
+
+&lt;h2&gt;
+  &lt;a href="#10-take-storybook-use-and-maintenance-seriously"&gt;
+  &lt;/a&gt;
+  10. Take Storybook Use and Maintenance Seriously
+&lt;/h2&gt;
+
+&lt;p&gt;Storybook can be of huge help in developing a UI because it encourages you to focus on the interface of your components, which will help you have more generic and lean components. Generic and lean components are flexible and can be used in different contexts. In the end, you may need fewer components if you have some flexible components. Fewer components mean less code; less code means less chance of bugs; less chance of bugs means happier users and happier developers. So, maintain and keep Storybook running and well oiled, don't let broken stories stick around, and refactor and rearrange things when they get messy.&lt;br&gt;
+In my experience, things only are improved when people take ownership. If there's no group of people responsible for taking care of Storybook, it won't be easy to keep it evolving and benefit from using it. Everyone is responsible for contributing and following the team's conventions, but it may be helpful to assign someone, or a group of people, as a Storybook maintainer. The Storybook maintainer can hold others accountable for following the conventions — they can improve the use of Storybook in your team.&lt;/p&gt;
+
+
+
+
+&lt;h2&gt;
+  &lt;a href="#conclusion"&gt;
+  &lt;/a&gt;
+  Conclusion
+&lt;/h2&gt;
+
+&lt;p&gt;I collected some ideas after using Storybook for five years and from the experience of other developers smarter than me. I truly hope you learned something new and are excited to try Storybook or make it better for you and your team. If you have any questions or suggestions to make this article better, let me know in the comments below.&lt;/p&gt;
+
+&lt;p&gt;Thanks!&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#references"&gt;
+  &lt;/a&gt;
+  References
+&lt;/h3&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="https://storybook.js.org/"&gt;https://storybook.js.org/&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://www.learnstorybook.com/"&gt;https://www.learnstorybook.com/&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://dev.to/loicgoyet/how-i-manage-to-make-my-storybook-project-the-most-efficient-possible-2d8o"&gt;https://dev.to/loicgoyet/how-i-manage-to-make-my-storybook-project-the-most-efficient-possible-2d8o&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://blog.hichroma.com/the-delightful-storybook-workflow-b322b76fd07?gi=48bcfdd9231b"&gt;https://blog.hichroma.com/the-delightful-storybook-workflow-b322b76fd07?gi=48bcfdd9231b&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://www.learnstorybook.com/design-systems-for-developers/react/en/distribute/"&gt;https://www.learnstorybook.com/design-systems-for-developers/react/en/distribute/&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://www.richsoni.com/posts/2019-01-29-storybook-architecture-audit/"&gt;https://www.richsoni.com/posts/2019-01-29-storybook-architecture-audit/&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://github.com/lauthieb/awesome-storybook"&gt;https://github.com/lauthieb/awesome-storybook&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+</description>
+      <category>storybook</category>
+      <category>javascript</category>
+      <category>react</category>
+      <category>programming</category>
+    </item>
+    <item>
       <title>Introduction to the Jamstack - the New Frontier in Web Development</title>
       <author>darrendube</author>
       <pubDate>Sat, 15 May 2021 17:33:49 +0000</pubDate>
@@ -290,6 +1311,238 @@
       <category>tailwindcss</category>
     </item>
     <item>
+      <title>Weather forecast card design using Jetpack Compose</title>
+      <author>Mahendran</author>
+      <pubDate>Sat, 15 May 2021 17:13:02 +0000</pubDate>
+      <link>https://dev.to/mahendranv/weather-forecast-card-design-using-jetpack-compose-2m1h</link>
+      <guid>https://dev.to/mahendranv/weather-forecast-card-design-using-jetpack-compose-2m1h</guid>
+      <description>&lt;p&gt;Cross posting from my &lt;a href="https://mahendranv.github.io/android/2021-05-15-weather-card-compose/"&gt;blog&lt;/a&gt;&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#weather-forecast-card-design-using-jetpack-compose"&gt;
+  &lt;/a&gt;
+  Weather forecast card design using Jetpack Compose
+&lt;/h1&gt;
+
+&lt;p&gt;Horizontal weather cards are the second portion in my forecast screen. It contains a message, relative timestamp and an image depicting the weather. Since I don't have images in handy, I picked one and used for all the cards. I got creative with messages though.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--eldisYLg--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/s5niaz21lg6kw8cyel06.gif" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--eldisYLg--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/s5niaz21lg6kw8cyel06.gif" alt="img"&gt;&lt;/a&gt;&lt;/p&gt;
+
+
+
+
+&lt;h2&gt;
+  &lt;a href="#why-box-layout"&gt;
+  &lt;/a&gt;
+  Why box layout?
+&lt;/h2&gt;
+
+&lt;p&gt;We have card and an image stacked in z order and they overlap. A constraint layout can be used to build this card, but I wanted to try box. It's like FrameLayout to me. Also using constraint layout for simple layout is an overkill. Be it android native UI or Compose.&lt;/p&gt;
+
+
+
+
+&lt;h2&gt;
+  &lt;a href="#designing-a-weather-card"&gt;
+  &lt;/a&gt;
+  Designing a Weather Card
+&lt;/h2&gt;
+
+&lt;p&gt;The overall composable blueprint looks like in below image. To understand better, let's build this layout bottom-up. &lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--77rGPrN2--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://i.imgur.com/2KDwWXj.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--77rGPrN2--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://i.imgur.com/2KDwWXj.png" alt="image-20210515164325569"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;...&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#card-content"&gt;
+  &lt;/a&gt;
+  Card content
+&lt;/h3&gt;
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight kotlin"&gt;&lt;code&gt;&lt;span class="c1"&gt;// card content&lt;/span&gt;
+&lt;span class="nc"&gt;Column&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;modifier&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="nc"&gt;Modifier&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;padding&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;16&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;dp&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+
+    &lt;span class="nc"&gt;Spacer&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;modifier&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="nc"&gt;Modifier&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;height&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;24&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;dp&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;
+
+    &lt;span class="c1"&gt;// Time&lt;/span&gt;
+    &lt;span class="nc"&gt;Text&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+        &lt;span class="n"&gt;text&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="n"&gt;time&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="c1"&gt;// "20 minutes ago",&lt;/span&gt;
+        &lt;span class="n"&gt;style&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="nc"&gt;MaterialTheme&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;typography&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;caption&lt;/span&gt;
+    &lt;span class="p"&gt;)&lt;/span&gt;
+
+    &lt;span class="nc"&gt;Spacer&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;modifier&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="nc"&gt;Modifier&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;height&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;8&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;dp&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;
+
+    &lt;span class="c1"&gt;// Message&lt;/span&gt;
+    &lt;span class="nc"&gt;Text&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+        &lt;span class="n"&gt;text&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="n"&gt;message&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="c1"&gt;// "If you don't want to get wet today, don't forget your umbrella.",&lt;/span&gt;
+        &lt;span class="n"&gt;style&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="nc"&gt;MaterialTheme&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;typography&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;body1&lt;/span&gt;
+    &lt;span class="p"&gt;)&lt;/span&gt;
+
+    &lt;span class="nc"&gt;Spacer&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;modifier&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="nc"&gt;Modifier&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;height&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;24&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;dp&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;Two labels wrapped in a &lt;code&gt;Column&lt;/code&gt; with spacer makes our card content. Spacers are added in between the elements to make up required spacing between the labels and the parent (&lt;code&gt;Column&lt;/code&gt;). &lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--4SCuqa6u--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://i.imgur.com/JYZ6UAQ.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--4SCuqa6u--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://i.imgur.com/JYZ6UAQ.png" alt="image-20210515165656824"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;...&lt;/p&gt;
+&lt;h3&gt;
+  &lt;a href="#card-design"&gt;
+  &lt;/a&gt;
+  Card design
+&lt;/h3&gt;
+
+&lt;p&gt;Now put a card around it and apply few modifiers to it. &lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;a shape —  &lt;code&gt;RoundedCornerShape&lt;/code&gt;
+&lt;/li&gt;
+&lt;li&gt;top padding — to make space for weather icon on top right
+&lt;/li&gt;
+&lt;/ul&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight kotlin"&gt;&lt;code&gt;&lt;span class="nc"&gt;Card&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+  &lt;span class="n"&gt;shape&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="nc"&gt;RoundedCornerShape&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;16&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;dp&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+  &lt;span class="n"&gt;modifier&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="nc"&gt;Modifier&lt;/span&gt;
+        &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;padding&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;top&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="mi"&gt;40&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;dp&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;start&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="mi"&gt;16&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;dp&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;end&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="mi"&gt;16&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;dp&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;bottom&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="mi"&gt;8&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;dp&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="nc"&gt;Column&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;..&lt;/span&gt;&lt;span class="p"&gt;.)&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--JtySHXtb--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://i.imgur.com/krP8dvl.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--JtySHXtb--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://i.imgur.com/krP8dvl.png" alt="image-20210515171455191"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;...&lt;/p&gt;
+&lt;h3&gt;
+  &lt;a href="#putting-all-in-a-box"&gt;
+  &lt;/a&gt;
+  Putting all in a Box
+&lt;/h3&gt;
+
+&lt;p&gt;Box layout stacks all the elements in given z order. Most recent one will be on the top. So, let's put the Card first then the Image.&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight kotlin"&gt;&lt;code&gt;&lt;span class="nc"&gt;Box&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; 
+    &lt;span class="nc"&gt;Card&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;..&lt;/span&gt;&lt;span class="p"&gt;.)&lt;/span&gt;
+    &lt;span class="nc"&gt;Image&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+        &lt;span class="n"&gt;painter&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="nf"&gt;painterResource&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;id&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="nc"&gt;R&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;drawable&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;cloudy&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+        &lt;span class="n"&gt;contentDescription&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="s"&gt;"weather overlap image"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+        &lt;span class="n"&gt;modifier&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="nc"&gt;Modifier&lt;/span&gt;
+            &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;size&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;100&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;dp&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;   
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--TiIwaXu1--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://i.imgur.com/nT9nSFd.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--TiIwaXu1--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://i.imgur.com/nT9nSFd.png" alt="image-20210515172249253"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Hmm... The rain wasn't supposed to shower there. Let's pull it to the right and shift a bit to the left. Children of Box has access to few properties to help with alignment inside the container.&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;alignment — &lt;code&gt;Alignment.TopEnd&lt;/code&gt;
+&lt;/li&gt;
+&lt;li&gt;offset         — &lt;code&gt;x = (-40).dp&lt;/code&gt; negative translation in horizontal direction
+&lt;/li&gt;
+&lt;/ul&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight kotlin"&gt;&lt;code&gt;&lt;span class="nc"&gt;Image&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="n"&gt;painter&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="nf"&gt;painterResource&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;id&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="nc"&gt;R&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;drawable&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;cloudy&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+    &lt;span class="n"&gt;contentDescription&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="s"&gt;"weather overlap image"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="n"&gt;modifier&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="nc"&gt;Modifier&lt;/span&gt;
+        &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;size&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;100&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;dp&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+        &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;align&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;alignment&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="nc"&gt;Alignment&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nc"&gt;TopEnd&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+        &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;offset&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;x&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(-&lt;/span&gt;&lt;span class="mi"&gt;40&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="n"&gt;dp&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--JJ_QgncR--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://i.imgur.com/ZZxXMPJ.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--JJ_QgncR--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://i.imgur.com/ZZxXMPJ.png" alt="image-20210515180739796"&gt;&lt;/a&gt;&lt;/p&gt;
+
+
+&lt;h2&gt;
+  &lt;a href="#horizontal-pager-implementation"&gt;
+  &lt;/a&gt;
+  Horizontal pager implementation
+&lt;/h2&gt;
+
+&lt;p&gt;&lt;a href="https://google.github.io/accompanist/"&gt;Google accompanist&lt;/a&gt; has an incredibly good set of extension for compose. To implement the pager &amp;amp; indicator, we need corresponding dependencies added to our codebase.&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight groovy"&gt;&lt;code&gt;&lt;span class="n"&gt;implementation&lt;/span&gt; &lt;span class="s2"&gt;"com.google.accompanist:accompanist-pager:0.9.0"&lt;/span&gt;
+&lt;span class="n"&gt;implementation&lt;/span&gt; &lt;span class="s2"&gt;"com.google.accompanist:accompanist-pager-indicators:0.9.0"&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;Next step is to wrap the pager and indicator inside a Column and provide a list of mock objects to the render in WeatherCard that we built in above section.&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight kotlin"&gt;&lt;code&gt;&lt;span class="k"&gt;fun&lt;/span&gt; &lt;span class="nf"&gt;WeatherCardCarousal&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;cards&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nc"&gt;List&lt;/span&gt;&lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nc"&gt;WeatherCard&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;val&lt;/span&gt; &lt;span class="py"&gt;pagerState&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="nf"&gt;rememberPagerState&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;pageCount&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="n"&gt;cards&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;size&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="nc"&gt;Column&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="nc"&gt;HorizontalPager&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+            &lt;span class="n"&gt;state&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="n"&gt;pagerState&lt;/span&gt;
+        &lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="n"&gt;page&lt;/span&gt; &lt;span class="p"&gt;-&amp;gt;&lt;/span&gt;
+            &lt;span class="nc"&gt;WeatherUpdateCard&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;cards&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;page&lt;/span&gt;&lt;span class="p"&gt;])&lt;/span&gt;
+        &lt;span class="p"&gt;}&lt;/span&gt;
+
+        &lt;span class="nc"&gt;HorizontalPagerIndicator&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+            &lt;span class="n"&gt;pagerState&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="n"&gt;pagerState&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+            &lt;span class="n"&gt;modifier&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="nc"&gt;Modifier&lt;/span&gt;
+                &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;align&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nc"&gt;Alignment&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nc"&gt;CenterHorizontally&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+                &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;padding&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;16&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;dp&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+        &lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;ul&gt;
+&lt;li&gt;&lt;p&gt;&lt;code&gt;pagerState&lt;/code&gt; provides the current index of element for the &lt;code&gt;HorizontalPager&lt;/code&gt;&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;&lt;code&gt;WeatherUpdateCard(cards[page])&lt;/code&gt; with the given index, corresponding element picked from mock data and rendered in WeatherCard&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;&lt;code&gt;HorizontalPagerIndicator&lt;/code&gt; placed below the pager to react with page swipes in Pager. If it needs to be overlapped on the Pager. We'll wrap them inside a Box and align it.&lt;/p&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;This is again an example for &lt;a href="https://developer.android.com/jetpack/compose/mental-model"&gt;thinking in compose&lt;/a&gt;. Pager updates the &lt;code&gt;pagerState&lt;/code&gt;, and &lt;code&gt;PagerIndicator&lt;/code&gt; reads the same. Both of 'em doesn't know other component exist. Decoupled and yet communicating. &lt;/p&gt;
+
+
+
+&lt;p&gt;Here, the complete gist.&lt;/p&gt;
+
+
+&lt;div class="ltag_gist-liquid-tag"&gt;
+  
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Happy composing!!&lt;/p&gt;
+
+</description>
+      <category>android</category>
+      <category>kotlin</category>
+      <category>compose</category>
+      <category>uiweekly</category>
+    </item>
+    <item>
       <title>Open Source Best Practices</title>
       <author>Pragati Verma</author>
       <pubDate>Sat, 15 May 2021 17:10:04 +0000</pubDate>
@@ -453,6 +1706,314 @@
       <category>webdev</category>
       <category>computerscience</category>
       <category>codenewbie</category>
+    </item>
+    <item>
+      <title>Functional Programming: Composition of Functions</title>
+      <author>Pratik sharma</author>
+      <pubDate>Sat, 15 May 2021 17:03:03 +0000</pubDate>
+      <link>https://dev.to/pratiksharm/composition-of-functions-178g</link>
+      <guid>https://dev.to/pratiksharm/composition-of-functions-178g</guid>
+      <description>&lt;blockquote&gt;
+&lt;p&gt;Input of one function comes from the output of another function.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;👆 simple defination of function composition that i could find. &lt;/p&gt;
+
+&lt;p&gt;In functiona Programming, Composition takes the place of inheritance in OOP. &lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#composition-gt-inheritance"&gt;
+  &lt;/a&gt;
+  composition &amp;gt; inheritance.
+&lt;/h3&gt;
+
+&lt;p&gt;it's just better to use composition from the start. It's more flexible, it's more powerful, and it's really easy to do. &lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#creating-a-compose-function"&gt;
+  &lt;/a&gt;
+  Creating a Compose Function
+&lt;/h1&gt;
+
+&lt;p&gt;A lot of Javascript FP libraries like ramda,  provide &lt;code&gt;pipe()&lt;/code&gt; and   &lt;code&gt;compose()&lt;/code&gt; , which  help us in creating composition of functions. Before moving to those,let's create our own example functions. &lt;/p&gt;
+
+&lt;p&gt;Here is an example of compose function which take two functions as argument.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;compose&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="kd"&gt;function&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;fn1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;fn2&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+&lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;fn2&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;fn1&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="c1"&gt;//or&lt;/span&gt;
+
+&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;compose&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;fn1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="nx"&gt;fn2&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;fn2&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;fn1&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#compose-vs-curry"&gt;
+  &lt;/a&gt;
+  Compose Vs Curry
+&lt;/h2&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;Curry functions are always unary functions which take one argument per application.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;Currying functions looks a lot similar pattern to composition, which often causes them to be mistaken for each other. &lt;/p&gt;
+
+&lt;p&gt;example of a curry function&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;sum&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;a&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;b&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;a&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="nx"&gt;b&lt;/span&gt;
+&lt;span class="nx"&gt;sum&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;3&lt;/span&gt;&lt;span class="p"&gt;)(&lt;/span&gt;&lt;span class="mi"&gt;5&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;// 8&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#are-currying-and-composition-the-same-concept-in-javascript"&gt;
+  &lt;/a&gt;
+  Are 'Currying' and 'Composition' the same concept in javascript?
+&lt;/h2&gt;
+
+&lt;p&gt;No.&lt;/p&gt;
+
+&lt;p&gt;First, currying is translating a function that takes multiple arguments into a sequence of functions, each accepting one argument.&lt;/p&gt;
+
+&lt;p&gt;here, Notice the distinct way in which a curried function is applied, one argument at a time.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="c1"&gt;// not curried&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;add&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;x&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="nx"&gt;y&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;x&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="nx"&gt;y&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="nx"&gt;add&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;3&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt; &lt;span class="c1"&gt;// =&amp;gt; 5&lt;/span&gt;
+
+&lt;span class="c1"&gt;// curried&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;add&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;x&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;y&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;x&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="nx"&gt;y&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="nx"&gt;add&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;)(&lt;/span&gt;&lt;span class="mi"&gt;3&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt; &lt;span class="c1"&gt;// =&amp;gt; 5&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Second, function composition is the combination of two functions into one, that when applied, returns the result of the chained functions.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;compose&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;f&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;g&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;x&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;f&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;g&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;x&lt;/span&gt;&lt;span class="p"&gt;));&lt;/span&gt;
+
+&lt;span class="nx"&gt;compose&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;x&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;x&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt; &lt;span class="mi"&gt;4&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;x&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;x&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="mi"&gt;3&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="c1"&gt;// (2 + 3) * 4&lt;/span&gt;
+&lt;span class="c1"&gt;// =&amp;gt; 20&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;blockquote&gt;
+&lt;p&gt;&lt;strong&gt;The two concepts are closely related as they play well with one another. Generic function composition works with unary functions (functions that take one argument) and curried functions also only accept one argument (per application).&lt;/strong&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;h2&gt;
+  &lt;a href="#function-composition"&gt;
+  &lt;/a&gt;
+  Function Composition
+&lt;/h2&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;Function composition is a way of combining pure functions to build more complicated ones. Like the usual composition of functions in mathematics, the result of one function is passed as the argument of the next, and the result of last one is the result of the whole.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;Composition is a fancy term which means "combining". &lt;/p&gt;
+
+&lt;p&gt;In other words, we can often "combine" multiple steps either into one line of code, or into a new function to contain them&lt;/p&gt;
+
+&lt;p&gt;For example, if we want to find the sine of 30 degrees (remember sine uses radians) we could "compose" these two items into the single line: result = sin( degrees_to_radians( 30 ) ). This is the same as in math where we often see f(g(x)).&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#example-of-a-compose-function-which-take-more-than-two-functions-and-applies-from-left-to-right-manner"&gt;
+  &lt;/a&gt;
+  Example of a compose function which take more than two functions, and applies from left to right manner
+&lt;/h3&gt;
+
+&lt;p&gt;We can write a function to compose as many functions as you like. In other words, compose() creates a pipeline of functions with the output of one function connected to the input of the next.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;compose&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(...&lt;/span&gt;&lt;span class="nx"&gt;fns&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;x&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;fns&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;reduceRight&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;y&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;fn&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;fn&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;y&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt; &lt;span class="nx"&gt;x&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This version takes any number of functions and returns a function which takes the initial value, and then uses reduceRight() to iterate right-to-left over each function, f, in fns, and apply it in turn to the accumulated value, y. What we're accumulating with the accumulator, y in this function is the return value for the function returned by compose().&lt;/p&gt;
+
+&lt;p&gt;Now we can write our composition like this:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;g&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;n&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;n&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;f&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;n&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;n&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt; &lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="c1"&gt;// replace `x =&amp;gt; f(g(x))` with `compose(f, g)`&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;h&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;compose&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;f&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;g&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="nx"&gt;h&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;20&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt; &lt;span class="c1"&gt;//=&amp;gt; 42 &lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h1&gt;
+  &lt;a href="#composition-in-react"&gt;
+  &lt;/a&gt;
+  Composition in React
+&lt;/h1&gt;
+
+&lt;p&gt;Creating a composition for Different buttons&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;Button&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;props&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nt"&gt;button&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;props&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;text&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="p"&gt;&amp;lt;/&lt;/span&gt;&lt;span class="nt"&gt;button&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;SubmitButton&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nc"&gt;Button&lt;/span&gt; &lt;span class="na"&gt;text&lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="s"&gt;"Submit"&lt;/span&gt; &lt;span class="p"&gt;/&amp;gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;LoginButton&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nc"&gt;Button&lt;/span&gt; &lt;span class="na"&gt;text&lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="s"&gt;"Login"&lt;/span&gt; &lt;span class="p"&gt;/&amp;gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h1&gt;
+  &lt;a href="#pass-methods-as-props"&gt;
+  &lt;/a&gt;
+  &lt;strong&gt;Pass methods as props&lt;/strong&gt;
+&lt;/h1&gt;
+
+&lt;p&gt;A component can focus on tracking a click event, for example, and what actually happens when the click event happens is up to the container component:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;Button&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;props&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nt"&gt;button&lt;/span&gt; &lt;span class="na"&gt;onClick&lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;props&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;onClickHandler&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;props&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;text&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="p"&gt;&amp;lt;/&lt;/span&gt;&lt;span class="nt"&gt;button&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;LoginButton&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;props&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nc"&gt;Button&lt;/span&gt; &lt;span class="na"&gt;text&lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="s"&gt;"Login"&lt;/span&gt; &lt;span class="na"&gt;onClickHandler&lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;props&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;onClickHandler&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt; &lt;span class="p"&gt;/&amp;gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;Container&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;onClickHandler&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="nx"&gt;alert&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;clicked&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="p"&gt;}&lt;/span&gt;
+
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nc"&gt;LoginButton&lt;/span&gt; &lt;span class="na"&gt;onClickHandler&lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;onClickHandler&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt; &lt;span class="p"&gt;/&amp;gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h1&gt;
+  &lt;a href="#using-children"&gt;
+  &lt;/a&gt;
+  &lt;strong&gt;Using children&lt;/strong&gt;
+&lt;/h1&gt;
+
+&lt;p&gt;The &lt;code&gt;props.children&lt;/code&gt; property allows you to inject components inside other components.&lt;/p&gt;
+
+&lt;p&gt;The component needs to output &lt;code&gt;props.children&lt;/code&gt; in its JSX:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;Sidebar&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;props&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nt"&gt;aside&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;props&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;children&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="p"&gt;&amp;lt;/&lt;/span&gt;&lt;span class="nt"&gt;aside&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;and you embed more components into it in a transparent way:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nc"&gt;Sidebar&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;
+  &lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nc"&gt;Link&lt;/span&gt; &lt;span class="na"&gt;title&lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="s"&gt;"First link"&lt;/span&gt; &lt;span class="p"&gt;/&amp;gt;&lt;/span&gt;
+  &lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nc"&gt;Link&lt;/span&gt; &lt;span class="na"&gt;title&lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="s"&gt;"Second link"&lt;/span&gt; &lt;span class="p"&gt;/&amp;gt;&lt;/span&gt;
+&lt;span class="p"&gt;&amp;lt;/&lt;/span&gt;&lt;span class="nc"&gt;Sidebar&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Notice how the &lt;code&gt;App&lt;/code&gt; component doesn't expose the structure of the data. &lt;code&gt;TodoList&lt;/code&gt; has no idea that there is &lt;code&gt;label&lt;/code&gt; or &lt;code&gt;status&lt;/code&gt; properties.&lt;/p&gt;
+
+&lt;p&gt;The so called &lt;em&gt;render prop&lt;/em&gt; pattern is almost the same except that we use the &lt;code&gt;render&lt;/code&gt; prop and not &lt;code&gt;children&lt;/code&gt; for rendering the todo.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;TodoList&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="nx"&gt;todos&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;children&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nt"&gt;section&lt;/span&gt; &lt;span class="na"&gt;className&lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="s"&gt;'main-section'&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;
+      &lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nt"&gt;ul&lt;/span&gt; &lt;span class="na"&gt;className&lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="s"&gt;'todo-list'&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;
+        &lt;span class="nx"&gt;todos&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;map&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;todo&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;i&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
+          &lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nt"&gt;li&lt;/span&gt; &lt;span class="na"&gt;key&lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;i&lt;/span&gt; &lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;children&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;todo&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="p"&gt;&amp;lt;/&lt;/span&gt;&lt;span class="nt"&gt;li&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;
+        &lt;span class="p"&gt;))&lt;/span&gt;
+      &lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="p"&gt;&amp;lt;/&lt;/span&gt;&lt;span class="nt"&gt;ul&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;
+    &lt;span class="p"&gt;&amp;lt;/&lt;/span&gt;&lt;span class="nt"&gt;section&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;
+  &lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;App&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;todos&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;
+    &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;label&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Write tests&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="na"&gt;status&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;done&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt; &lt;span class="p"&gt;},&lt;/span&gt;
+    &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;label&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Sent report&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="na"&gt;status&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;progress&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt; &lt;span class="p"&gt;},&lt;/span&gt;
+    &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;label&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Answer emails&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="na"&gt;status&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;done&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;
+  &lt;span class="p"&gt;];&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;isCompleted&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;todo&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;todo&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;status&lt;/span&gt; &lt;span class="o"&gt;===&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;done&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nc"&gt;TodoList&lt;/span&gt; &lt;span class="na"&gt;todos&lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;todos&lt;/span&gt; &lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;
+      &lt;span class="si"&gt;{&lt;/span&gt;
+        &lt;span class="nx"&gt;todo&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;isCompleted&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;todo&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;?&lt;/span&gt;
+          &lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nt"&gt;b&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;todo&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;label&lt;/span&gt; &lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="p"&gt;&amp;lt;/&lt;/span&gt;&lt;span class="nt"&gt;b&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;:&lt;/span&gt;
+          &lt;span class="nx"&gt;todo&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;label&lt;/span&gt;
+      &lt;span class="si"&gt;}&lt;/span&gt;
+    &lt;span class="p"&gt;&amp;lt;/&lt;/span&gt;&lt;span class="nc"&gt;TodoList&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;
+  &lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+</description>
+      <category>javascript</category>
+      <category>react</category>
+      <category>functional</category>
     </item>
     <item>
       <title>I Built this Dark UI</title>
@@ -1510,384 +3071,6 @@ jekyll 4.0.0
       <category>showdev</category>
       <category>portfolio</category>
       <category>jekyll</category>
-    </item>
-    <item>
-      <title>Top 5 machine learning courses on Youtube</title>
-      <author>Stokry</author>
-      <pubDate>Sat, 15 May 2021 15:20:46 +0000</pubDate>
-      <link>https://dev.to/stokry/top-5-machine-learning-courses-on-youtube-2g00</link>
-      <guid>https://dev.to/stokry/top-5-machine-learning-courses-on-youtube-2g00</guid>
-      <description>&lt;p&gt;Machine learning is an application of artificial intelligence (AI) that provides systems the ability to automatically learn and improve from experience without being explicitly programmed. &lt;strong&gt;Machine learning focuses on the development of computer programs&lt;/strong&gt; that can access data and use it to learn for themselves.&lt;/p&gt;
-
-&lt;p&gt;There are many resources from which you can learn right now, paid or free, below is my list of amazing machine learning courses that you can start using right now on Youtube. &lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;&lt;p&gt;&lt;a href="https://www.youtube.com/playlist?list=PL2UML_KCiC0UlY7iCQDSiGDMovaupqc83"&gt;Applied Machine Learning&lt;/a&gt; Lecture videos and materials from the Applied Machine Learning course at Cornell Tech, taught in Fall 2020. Course Materials on Github: &lt;a href="https://www.youtube.com/redirect?event=playlist_description&amp;amp;redir_token=QUFFLUhqbFpodzB4ak5iaUpMb1Rib21reGI1c2QyUjB1Z3xBQ3Jtc0tta1MzLUtLakptaGJrazJFbmw0Tm5halBTbFBhUjgtcFhKX0VYQlozNUJacHVCWS1CQlF1dndrd0NkdHd4bVYzMWNFaW9SdkYwVEZiYmpBOXZOVXNrVlZfSjhHQnJZa0RkZ29Db1hETFF2cjZpOG5hcw&amp;amp;q=https%3A%2F%2Fgithub.com%2Fkuleshov%2Fcornell-cs5785-applied-ml"&gt;https://github.com/kuleshov/cornell-c...&lt;/a&gt; Starting from the very basics, we cover all of the most important ML algorithms and how to apply them in practice.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;&lt;a href="https://www.youtube.com/playlist?list=PL05umP7R6ij1tHaOFY96m5uX3J21a6yNd"&gt;Probabilistic Machine Learning&lt;/a&gt;&lt;br&gt;
-This playlist collects the lectures on Probabilistic Machine Learning by Philipp Hennig at the University of Tübingen during the Summer Term of 2020. The lectures were recorded for online teaching during the Covid19 pandemic. They are publicly available under the Creative Commons license.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;&lt;a href="https://www.youtube.com/playlist?list=PLLHTzKZzVU9e6xUfG10TkTWApKSZCzuBI"&gt;NYU Deep Learning SP21&lt;/a&gt; Deep learning from scratch.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;&lt;a href="https://www.youtube.com/playlist?list=PLWnsVgP6CzadmQX6qevbar3_vDBioWHJL"&gt;Advanced NLP&lt;/a&gt; Videos for UMass CS685: Advanced Natural Language Processing (Fall 2020)&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;&lt;a href="https://www.youtube.com/playlist?list=PL5-TkQAfAZFbzxjBHtzdVCWE0Zbhomg7r"&gt;Deep Learning for Computer Vision&lt;/a&gt; Computer Vision has become ubiquitous in our society, with applications in search, image understanding, apps, mapping, medicine, drones, and self-driving cars. Core to many of these applications are visual recognition tasks such as image classification and object detection. Recent developments in neural network approaches have greatly advanced the performance of these state-of-the-art visual recognition systems. This course is a deep dive into details of neural-network based deep learning methods for computer vision. During this course, students will learn to implement, train and debug their own neural networks and gain a detailed understanding of cutting-edge research in computer vision. We will cover learning algorithms, neural network architectures, and practical engineering tricks for training and fine-tuning networks for visual recognition tasks.&lt;/p&gt;&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;p&gt;There are many options out there for learning topics associated with machine learning, this is just my list and I think that you can use one of these channels to dive into ML, if you have any other suggestions please tell me in the comments. &lt;/p&gt;
-
-&lt;p&gt;Thank you all. &lt;/p&gt;
-
-</description>
-      <category>python</category>
-      <category>productivity</category>
-      <category>machinelearning</category>
-      <category>computervision</category>
-    </item>
-    <item>
-      <title>Power of super in Java</title>
-      <author>Rahul kumar</author>
-      <pubDate>Sat, 15 May 2021 15:13:16 +0000</pubDate>
-      <link>https://dev.to/ats1999/power-of-super-in-java-1gk9</link>
-      <guid>https://dev.to/ats1999/power-of-super-in-java-1gk9</guid>
-      <description>&lt;h1&gt;
-  &lt;a href="#java"&gt;
-  &lt;/a&gt;
-  Java
-&lt;/h1&gt;
-
-&lt;p&gt;Java is a High Level, class-based, object-oriented programming language that is designed to have as few implementation dependencies as possible.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#inheritance"&gt;
-  &lt;/a&gt;
-  Inheritance
-&lt;/h1&gt;
-
-&lt;p&gt;In object-oriented programming, inheritance is the mechanism of basing an object or class upon another object or class, retaining similar implementation. Also defined as deriving new classes from existing ones such as super class or base class and then forming them into a hierarchy of classes. &lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#subclass-and-superclass"&gt;
-  &lt;/a&gt;
-  Subclass and Superclass
-&lt;/h1&gt;
-
-&lt;p&gt;In Java, it is possible to inherit attributes and methods from one class to another. We group the "inheritance concept" into two categories:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;subclass (child) - the class that inherits from another class&lt;/li&gt;
-&lt;li&gt;superclass (parent) - the class being inherited from
-To inherit from a class, use the extends keyword.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h1&gt;
-  &lt;a href="#-raw-super-endraw-keyword"&gt;
-  &lt;/a&gt;
-  &lt;code&gt;super&lt;/code&gt; keyword
-&lt;/h1&gt;
-
-&lt;p&gt;The super keyword refers to &lt;code&gt;superclass&lt;/code&gt; (parent) objects. It is used to call &lt;code&gt;superclass&lt;/code&gt; methods, and to access the &lt;code&gt;superclass&lt;/code&gt; constructor. The most common use of the super keyword is to eliminate the confusion between &lt;code&gt;superclasses&lt;/code&gt; and &lt;code&gt;subclasses&lt;/code&gt; that have methods with the same name.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#uses"&gt;
-  &lt;/a&gt;
-  Uses
-&lt;/h1&gt;
-
-&lt;p&gt;Suppose you have a class &lt;code&gt;A&lt;/code&gt; which  have a member &lt;code&gt;int top&lt;/code&gt;. You have another class &lt;code&gt;B&lt;/code&gt; which inherits &lt;code&gt;A&lt;/code&gt; and it also has a member &lt;code&gt;top&lt;/code&gt;. Now, if you are initiating an instance of &lt;code&gt;B&lt;/code&gt; and you want to get the &lt;code&gt;top&lt;/code&gt; member of &lt;code&gt;A&lt;/code&gt; from &lt;code&gt;B&lt;/code&gt; instance. Do you think you can get this without &lt;code&gt;super&lt;/code&gt;?&lt;/p&gt;
-
-&lt;p&gt;Let's see:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight java"&gt;&lt;code&gt;&lt;span class="kd"&gt;class&lt;/span&gt; &lt;span class="nc"&gt;A&lt;/span&gt;&lt;span class="o"&gt;{&lt;/span&gt;
-    &lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="n"&gt;a&lt;/span&gt;&lt;span class="o"&gt;;&lt;/span&gt;
-    &lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="n"&gt;top&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="mi"&gt;90&lt;/span&gt;&lt;span class="o"&gt;;&lt;/span&gt;
-    &lt;span class="no"&gt;A&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="n"&gt;a&lt;/span&gt;&lt;span class="o"&gt;){&lt;/span&gt;
-        &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;a&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;a&lt;/span&gt;&lt;span class="o"&gt;;&lt;/span&gt;
-    &lt;span class="o"&gt;}&lt;/span&gt;
-&lt;span class="o"&gt;}&lt;/span&gt;
-&lt;span class="kd"&gt;class&lt;/span&gt; &lt;span class="nc"&gt;B&lt;/span&gt; &lt;span class="kd"&gt;extends&lt;/span&gt; &lt;span class="no"&gt;A&lt;/span&gt;&lt;span class="o"&gt;{&lt;/span&gt;
-    &lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="n"&gt;b&lt;/span&gt;&lt;span class="o"&gt;;&lt;/span&gt;
-    &lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="n"&gt;top&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="mi"&gt;40&lt;/span&gt;&lt;span class="o"&gt;;&lt;/span&gt;
-    &lt;span class="no"&gt;B&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="n"&gt;a&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt; &lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="n"&gt;b&lt;/span&gt;&lt;span class="o"&gt;){&lt;/span&gt;
-        &lt;span class="kd"&gt;super&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="n"&gt;a&lt;/span&gt;&lt;span class="o"&gt;);&lt;/span&gt;
-        &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;b&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;b&lt;/span&gt;&lt;span class="o"&gt;;&lt;/span&gt;
-    &lt;span class="o"&gt;}&lt;/span&gt;
-&lt;span class="o"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;You have the class &lt;code&gt;A&lt;/code&gt; and &lt;code&gt;B&lt;/code&gt;. Let's create an object.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight java"&gt;&lt;code&gt;&lt;span class="no"&gt;B&lt;/span&gt; &lt;span class="n"&gt;obj&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="no"&gt;B&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;4&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;5&lt;/span&gt;&lt;span class="o"&gt;);&lt;/span&gt;
-
-&lt;span class="n"&gt;obj&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;a&lt;/span&gt; &lt;span class="c1"&gt;// 4&lt;/span&gt;
-&lt;span class="n"&gt;obj&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;b&lt;/span&gt; &lt;span class="c1"&gt;// 5&lt;/span&gt;
-&lt;span class="n"&gt;obj&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;top&lt;/span&gt; &lt;span class="c1"&gt;// 40&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Now, you want to get the &lt;code&gt;top&lt;/code&gt; member of &lt;code&gt;A&lt;/code&gt;. For this you need to use &lt;code&gt;super&lt;/code&gt; keyword. &lt;/p&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;Modify B as needed&lt;br&gt;
-&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight java"&gt;&lt;code&gt;&lt;span class="kd"&gt;class&lt;/span&gt; &lt;span class="nc"&gt;B&lt;/span&gt; &lt;span class="kd"&gt;extends&lt;/span&gt; &lt;span class="no"&gt;A&lt;/span&gt;&lt;span class="o"&gt;{&lt;/span&gt;
-    &lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="n"&gt;b&lt;/span&gt;&lt;span class="o"&gt;;&lt;/span&gt;
-    &lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="n"&gt;top&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="mi"&gt;40&lt;/span&gt;&lt;span class="o"&gt;;&lt;/span&gt;
-    &lt;span class="no"&gt;B&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="n"&gt;a&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt; &lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="n"&gt;b&lt;/span&gt;&lt;span class="o"&gt;){&lt;/span&gt;
-        &lt;span class="kd"&gt;super&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="n"&gt;a&lt;/span&gt;&lt;span class="o"&gt;);&lt;/span&gt;
-        &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;b&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;b&lt;/span&gt;&lt;span class="o"&gt;;&lt;/span&gt;
-    &lt;span class="o"&gt;}&lt;/span&gt;
-
-    &lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="nf"&gt;getATop&lt;/span&gt;&lt;span class="o"&gt;()&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
-        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="kd"&gt;super&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;top&lt;/span&gt;&lt;span class="o"&gt;;&lt;/span&gt;
-    &lt;span class="o"&gt;}&lt;/span&gt;
-&lt;span class="o"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Call the member:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight java"&gt;&lt;code&gt;&lt;span class="no"&gt;B&lt;/span&gt; &lt;span class="n"&gt;obj&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="no"&gt;B&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;4&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;5&lt;/span&gt;&lt;span class="o"&gt;);&lt;/span&gt;
-&lt;span class="n"&gt;obj&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;top&lt;/span&gt; &lt;span class="c1"&gt;// 40&lt;/span&gt;
-&lt;span class="n"&gt;obj&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;getATop&lt;/span&gt;&lt;span class="o"&gt;()&lt;/span&gt; &lt;span class="c1"&gt;// 90&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h1&gt;
-  &lt;a href="#note"&gt;
-  &lt;/a&gt;
-  Note
-&lt;/h1&gt;
-
-&lt;ul&gt;
-&lt;li&gt;
-&lt;code&gt;super&lt;/code&gt; can access members from any level of hierarchy&lt;/li&gt;
-&lt;li&gt;if inside hierarchy any member or method overriden by any class, then calling super will get the member or method from the class just one level up.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h1&gt;
-  &lt;a href="#thanku"&gt;
-  &lt;/a&gt;
-  Thanku
-&lt;/h1&gt;
-
-</description>
-      <category>java</category>
-    </item>
-    <item>
-      <title>Mongoose Unique Not Working</title>
-      <author>Akshat Singhania</author>
-      <pubDate>Sat, 15 May 2021 15:07:18 +0000</pubDate>
-      <link>https://dev.to/akshatsinghania/mongoose-unique-not-working-16bf</link>
-      <guid>https://dev.to/akshatsinghania/mongoose-unique-not-working-16bf</guid>
-      <description>&lt;p&gt;You have a user schema and you want the email field to be unique&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;Schema&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;mongoose&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-
-&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;userSchema&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;Schema&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt;
-    &lt;span class="na"&gt;password&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;type&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;String&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="na"&gt;required&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kc"&gt;true&lt;/span&gt; &lt;span class="p"&gt;},&lt;/span&gt;
-    &lt;span class="na"&gt;email&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;type&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;String&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="na"&gt;required&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="na"&gt;unique&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kc"&gt;true&lt;/span&gt; &lt;span class="p"&gt;},&lt;/span&gt;
-&lt;span class="p"&gt;});&lt;/span&gt;
-
-&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="k"&gt;default&lt;/span&gt; &lt;span class="nx"&gt;user&lt;/span&gt; &lt;span class="nx"&gt;schema&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;but it doesn't work! , here are some reasons because which this wouldn't work&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#1-duplicate-documents-already-created-in-db-before-defining-this-property"&gt;
-  &lt;/a&gt;
-  1. Duplicate documents already created in DB before defining this property
-&lt;/h2&gt;
-
-&lt;p&gt;You might have already added some duplicate data in the database so mongoose and MongoDB simply doesn't check unique field because it's already messed up&lt;/p&gt;
-
-&lt;p&gt;Delete the messed data from the MongoDB collections page to solve it&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#2-auto-indexing-or-create-index-is-false"&gt;
-  &lt;/a&gt;
-  2. Auto Indexing or Create index is false
-&lt;/h2&gt;
-
-&lt;p&gt;If you wouldn't have specified to auto index the data&lt;br&gt;
-which means to check for uniqueness, mongoose wouldn't do that&lt;/p&gt;
-
-&lt;p&gt;Simply make them to true while connecting to the database&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="nx"&gt;mongoose&lt;/span&gt;
-    &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;connect&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;connection url&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-        &lt;span class="na"&gt;useUnifiedTopology&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-        &lt;span class="na"&gt;useNewUrlParser&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-        &lt;span class="na"&gt;useCreateIndex&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="c1"&gt;//make this true&lt;/span&gt;
-        &lt;span class="na"&gt;autoIndex&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="c1"&gt;//make this also true&lt;/span&gt;
-    &lt;span class="p"&gt;})&lt;/span&gt;
-    &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;then&lt;/span&gt;&lt;span class="p"&gt;(()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-        &lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Connected to mongoDB&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-    &lt;span class="p"&gt;});&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Thanks for reading, hearts ❤️ , and unicorns 🦄 if you liked it, follow if you loved it&lt;/p&gt;
-
-</description>
-      <category>monogdb</category>
-      <category>mongoose</category>
-      <category>node</category>
-      <category>database</category>
-    </item>
-    <item>
-      <title>Amazing Button Hover Using HTML &amp; CSS</title>
-      <author>Nikhil Bobade </author>
-      <pubDate>Sat, 15 May 2021 15:07:10 +0000</pubDate>
-      <link>https://dev.to/nikhil27b/amazing-button-hover-using-html-css-4m86</link>
-      <guid>https://dev.to/nikhil27b/amazing-button-hover-using-html-css-4m86</guid>
-      <description>&lt;p&gt;Hello Guys,&lt;/p&gt;
-
-&lt;p&gt;Today I created a Glowing Button Hover Effect Using HTML &amp;amp; CSS. this hover effect is simple but it looks amazing. I hope you like this also comments about your thoughts.&lt;/p&gt;
-
-&lt;p&gt;For more content follow me on Instagram  &lt;a href="https://www.instagram.com/developer_nikhil27/"&gt;@developer_nikhil27&lt;/a&gt;.&lt;/p&gt;
-
-&lt;p&gt;Thank you!&lt;/p&gt;
-
-&lt;p&gt;&lt;iframe height="600" src="https://codepen.io/NikhilBobade/embed/vYxKLaP?height=600&amp;amp;default-tab=result&amp;amp;embed-version=2"&gt;
-&lt;/iframe&gt;
-&lt;/p&gt;
-
-</description>
-      <category>html</category>
-      <category>css</category>
-      <category>webdev</category>
-      <category>beginners</category>
-    </item>
-    <item>
-      <title>Headless CMS for beginners</title>
-      <author>Joel Olawanle</author>
-      <pubDate>Sat, 15 May 2021 14:59:00 +0000</pubDate>
-      <link>https://dev.to/olawanle_joel/headless-cms-for-beginners-13ae</link>
-      <guid>https://dev.to/olawanle_joel/headless-cms-for-beginners-13ae</guid>
-      <description>&lt;p&gt;For many, this might be your first time coming across the term “Headless CMS” and you will be forced to ask yourself - what makes a CMS headless? and what is CMS?&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--knBb_EYe--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/wyof51knuyxbpso9rk9l.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--knBb_EYe--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/wyof51knuyxbpso9rk9l.png" alt="image"&gt;&lt;/a&gt; &lt;/p&gt;
-
-&lt;p&gt;I once asked myself these questions, so it’s totally normal to ask but in this article, you will understand &lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;What headless CMS is all about&lt;/li&gt;
-&lt;li&gt;What it does&lt;/li&gt;
-&lt;li&gt;What differentiates it from the traditional content management systems&lt;/li&gt;
-&lt;li&gt;Finally, list some Headless CMSes you can get started with in your next project.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;For us to perfectly understand what the term “Headless CMS” means, we have to start by first explaining what CMS or Traditional CMS is all about.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#cms"&gt;
-  &lt;/a&gt;
-  CMS
-&lt;/h2&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--FtbgJ_gH--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/gsm8kdnp0zuib0rounvb.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--FtbgJ_gH--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/gsm8kdnp0zuib0rounvb.png" alt="image"&gt;&lt;/a&gt; &lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;CMS&lt;/strong&gt; stands for &lt;strong&gt;C&lt;/strong&gt;ontent &lt;strong&gt;M&lt;/strong&gt;anagement &lt;strong&gt;S&lt;/strong&gt;ystem. We can refer to it as “Traditional CMS”. Traditional CMSes have been around since the early days of web development. It is a tool that helps you build a website without needing to write all the code(s) from scratch or even know how to code at all. CMS gives everyone the privilege to build beautiful websites easily as long as you can read and operate a computer. &lt;/p&gt;
-
-&lt;p&gt;This has helped many people create awesome websites such as blogs, e-commerce, personal, and even organization websites without struggling to build their own system for creating web pages, storing images, and other functions. In other words, CMS helps you handle both the frontend and backend aspects of your websites. &lt;/p&gt;
-
-&lt;p&gt;As a developer, you will sometimes find yourself at the mercy of these platforms in terms of what you can build because with a traditional CMS, your frontend, backend, and database all live together as one tangled-up unit on your server (it puts everything in one big bucket such as your content, images, HTML, CSS). Some popular examples are WordPress, Wix, Drupal, Joomla, and lots more.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#headless-cms"&gt;
-  &lt;/a&gt;
-  Headless CMS
-&lt;/h2&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--F01VHFwe--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/lro3gjx6b4aahut0ls1v.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--F01VHFwe--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/lro3gjx6b4aahut0ls1v.png" alt="image"&gt;&lt;/a&gt; &lt;/p&gt;
-
-&lt;p&gt;Headless CMS gives you the privilege of taking charge of your website. It handles the backend while you handle the frontend meaning your frontend and your CMS are no longer permanently bound up together and would now make use of an &lt;a href="https://www.freecodecamp.org/news/what-is-an-api-in-english-please-b880a3214a82/"&gt;API&lt;/a&gt; (Application Programming Interface) to talk to each other. &lt;/p&gt;
-
-&lt;p&gt;In simpler terms, a &lt;strong&gt;headless CMS&lt;/strong&gt; is a back-end only content management system (CMS) that gives you as a developer the advantage of building the frontend website using whatever technology you like to customize it to your taste. &lt;strong&gt;This simply means you will need to manage both the frontend and the backend.&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;This gives developers the privilege of making use of their favorite frameworks (vue.js, react, angular) and JamStacks static sites generators (Nuxt.js, gatsby, Next.js, Gridsome) to build and then allows them to deploy such websites/ web apps to platforms like netlify, vercel, and lots more. &lt;/p&gt;
-
-&lt;p&gt;Headless CMS also allows developers to build native mobile apps  (iOS, Android, Windows Phone) meaning it is not limited to websites alone since &lt;strong&gt;headless CMS&lt;/strong&gt; delivers your content through an API to where you need it. This makes it a powerful option for mobile and web developers.&lt;/p&gt;
-
-&lt;p&gt;Understanding the term “headless CMS” alone will give you a proper understanding of what it is all about. According to &lt;a href="https://www.storyblok.com/tp/headless-cms-explained"&gt;storyblock&lt;/a&gt;, the term “headless” comes from the concept of chopping the “head” (the front end, i.e. the website) off the “body” (the back end, i.e. the content repository). &lt;/p&gt;
-
-&lt;p&gt;A headless CMS remains with an interface to add content and a RESTful API (JSON, XML) to deliver content wherever you need it. Due to this approach, a headless CMS does not care about how and where your content gets displayed. A headless CMS has only one focus: storing and delivering structured content.&lt;/p&gt;
-
-&lt;p&gt;Headless CMS is something everyone needs to know about now as the world of headless CMS development has gained quite a bit of momentum in the last few years. &lt;/p&gt;
-
-&lt;p&gt;At this point, You might start asking yourself - &lt;strong&gt;Do I need a headless CMS?&lt;/strong&gt; The truth is that no one is in the right position to help you answer this question except yourself. The very simple answer is - making use of a headless CMS &lt;strong&gt;depends completely on your requirements&lt;/strong&gt;.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--kLltvQU3--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/kwmdp9ausdc602sdn3h1.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--kLltvQU3--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/kwmdp9ausdc602sdn3h1.png" alt="image"&gt;&lt;/a&gt; &lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#some-popular-headless-cmses"&gt;
-  &lt;/a&gt;
-  Some Popular Headless CMSes
-&lt;/h2&gt;
-
-&lt;p&gt;After going through what Headless CMS is all about, you might want to try it out or even want to know some of these platforms.&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;&lt;a href="https://www.contentful.com/"&gt;Contentful&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://www.sanity.io/"&gt;Sanity&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://buttercms.com/"&gt;Butter CMS&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://www.storyblok.com/"&gt;StoryBlok&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://strapi.io/"&gt;Strapi&lt;/a&gt;&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;And lots more you can find &lt;a href="https://www.cosmicjs.com/blog/best-headless-cms-list"&gt;here&lt;/a&gt;.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#summary"&gt;
-  &lt;/a&gt;
-  Summary
-&lt;/h2&gt;
-
-&lt;p&gt;There are two major benefits of making use of a Headless CMS.&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;It allows Flexibility by serving content through an API to websites, mobile apps, or even billboards.&lt;/li&gt;
-&lt;li&gt;It encourages Creativity by Providing frontend developers the creative freedom to decide what frontend web framework to use for displaying content thereby taking out the limitation of dealing with ugly templates or bulky plugins offering limited features.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;In my next article, I will do a little comparison on the top 5, explaining their services and also drop links on how to get started with them.&lt;/p&gt;
-
-</description>
-      <category>javascript</category>
-      <category>beginners</category>
-      <category>headlesscms</category>
-      <category>jamstack</category>
     </item>
   </channel>
 </rss>
