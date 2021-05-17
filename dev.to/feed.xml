@@ -7,6 +7,395 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>The Easiest Way to Debug Kubernetes Workloads</title>
+      <author>Martin Heinz</author>
+      <pubDate>Mon, 17 May 2021 17:31:52 +0000</pubDate>
+      <link>https://dev.to/martinheinz/the-easiest-way-to-debug-kubernetes-workloads-1njg</link>
+      <guid>https://dev.to/martinheinz/the-easiest-way-to-debug-kubernetes-workloads-1njg</guid>
+      <description>&lt;p&gt;Debugging containerized workloads and &lt;em&gt;Pods&lt;/em&gt; is a daily task for every developer and DevOps engineer that works with Kubernetes. Oftentimes simple &lt;code&gt;kubectl logs&lt;/code&gt; or &lt;code&gt;kubectl describe pod&lt;/code&gt; is enough to find the culprit of some problem, but some issues are harder to hunt down. In those cases you might try to use &lt;code&gt;kubectl exec&lt;/code&gt; but even that might not be enough as some containers such as &lt;em&gt;Distroless&lt;/em&gt; don't even contain shell that you could SSH into. So what do we have left, if all of the above fails? ...&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#there-might-just-be-a-better-way"&gt;
+  &lt;/a&gt;
+  There Might Just Be a Better Way...
+&lt;/h2&gt;
+
+&lt;p&gt;Sometimes you need to grab a bigger hammer or just use more appropriate tool for the task at hand. In case of debugging workloads on Kubernetes, that appropriate tool would be &lt;code&gt;kubectl debug&lt;/code&gt;, which is a new command added not too long ago (v1.18) that allows you to debug running pods. It injects special type of container called &lt;em&gt;EphemeralContainer&lt;/em&gt; into problematic Pod allowing you to poke around and troubleshoot. This can be very useful for cases described in the intro or in any other situation where interactive debugging is preferable or more efficient. So, &lt;code&gt;kubectl debug&lt;/code&gt; looks like the way to go, but to use it we will need &lt;em&gt;ephemeral containers&lt;/em&gt;, so what exactly are these?&lt;/p&gt;
+
+&lt;p&gt;Ephemeral containers are a sub-resource in Pod similar to normal &lt;code&gt;containers&lt;/code&gt;. Unlike regular containers though, ephemeral containers are not meant for building applications, but rather for inspecting them. We don't define them at the creation time of a Pod, rather we inject them using special API into running Pod to run troubleshooting commands and to inspect environment of the Pod. Apart from these differences, ephemeral containers also lack some of the fields of basic containers, such as &lt;code&gt;ports&lt;/code&gt; or &lt;code&gt;resources&lt;/code&gt;. &lt;/p&gt;
+
+&lt;p&gt;Why do we need them, though? Can't we just use basic containers? Well, you cannot add containers to Pod as they're supposed to be disposable (or in other words - deleted and recreated at any time), which can make it difficult to troubleshoot hard to reproduce bugs that require inspection of Pod. That's why ephemeral containers were added to API - they allow you to add container to an existing pod, making it easier to inspect running pods.&lt;/p&gt;
+
+&lt;p&gt;Considering that ephemeral containers are part of Pod spec which is core of Kubernetes, how is that you (probably) haven't heard about it, yet? The reason why these are mostly unknown feature is because ephemeral containers are in early &lt;em&gt;Alpha&lt;/em&gt; stage, which means they're not enabled by default. Resources and features in this stage might undergo big changes or be removed entirely in future versions of Kubernetes. Therefore, to use them you have to explicitly enable them using &lt;em&gt;Feature Gates&lt;/em&gt; in &lt;code&gt;kubelet&lt;/code&gt;.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#configuring-feature-gates"&gt;
+  &lt;/a&gt;
+  Configuring Feature Gates
+&lt;/h2&gt;
+
+&lt;p&gt;We already established that we want to try &lt;code&gt;kubectl debug&lt;/code&gt; out, so how do we enable ephemeral containers feature gate? Well, it depends on your cluster setup. For example, if you're using &lt;code&gt;kubeadm&lt;/code&gt; to spin up create clusters, then you can use following &lt;em&gt;ClusterConfiguration&lt;/em&gt; to enable ephemeral containers:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;apiVersion&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;kubeadm.k8s.io/v1beta2&lt;/span&gt;
+&lt;span class="na"&gt;kind&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;ClusterConfiguration&lt;/span&gt;
+&lt;span class="na"&gt;kubernetesVersion&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;v1.20.2&lt;/span&gt;
+&lt;span class="na"&gt;apiServer&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;extraArgs&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;feature-gates&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;ephemeral containers=true&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;In the following examples though, we will use &lt;em&gt;KinD (Kubernetes in Docker)&lt;/em&gt; cluster for simplicity and testing purposes, which also allows us to specify Feature Gates that we want enabled. So, to create our playground cluster:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="c1"&gt;# File: config.yaml&lt;/span&gt;
+&lt;span class="c1"&gt;# Run:  kind create cluster --config ./config.yaml --name kind --image=kindest/node:v1.20.2&lt;/span&gt;
+&lt;span class="na"&gt;kind&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Cluster&lt;/span&gt;
+&lt;span class="na"&gt;apiVersion&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;kind.x-k8s.io/v1alpha4&lt;/span&gt;
+&lt;span class="na"&gt;featureGates&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;ephemeral containers&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="no"&gt;true&lt;/span&gt;
+&lt;span class="na"&gt;nodes&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+&lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;role&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;control-plane&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;With the cluster running, we should verify that it indeed worked. The simplest way to see if this configuration got applied, is to inspect Pod API which should now include the ephemeral containers section alongside the usual Containers:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;~ &lt;span class="nv"&gt;$ &lt;/span&gt;kubectl explain pod.spec.ephemeralContainers
+KIND:     Pod
+VERSION:  v1
+
+RESOURCE: ephemeralContainers &amp;lt;&lt;span class="o"&gt;[]&lt;/span&gt;Object&amp;gt;
+
+DESCRIPTION:
+     List of ephemeral containers run &lt;span class="k"&gt;in &lt;/span&gt;this pod....
+...
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This confirms that we have it and therefore we can start using &lt;code&gt;kubectl debug&lt;/code&gt;. So, let's start off with simple example:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;~ &lt;span class="nv"&gt;$ &lt;/span&gt;kubectl run some-app &lt;span class="nt"&gt;--image&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;k8s.gcr.io/pause:3.1 &lt;span class="nt"&gt;--restart&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;Never
+~ &lt;span class="nv"&gt;$ &lt;/span&gt;kubectl debug &lt;span class="nt"&gt;-it&lt;/span&gt; some-app &lt;span class="nt"&gt;--image&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;busybox &lt;span class="nt"&gt;--target&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;some-app
+Defaulting debug container name to debugger-tfqvh.
+If you don&lt;span class="s1"&gt;'t see a command prompt, try pressing enter.
+/ #
+
+# From other terminal...
+~ $ kubectl describe pod some-app
+...
+Containers:
+  some-app:
+    Container ID:   containerd://60cc537eee843cb38a1ba295baaa172db8344eea59de4d75311400436d4a5083
+    Image:          k8s.gcr.io/pause:3.1
+    Image ID:       k8s.gcr.io/pause@sha256:f78411e19d84a252e53bff71a4407a5686c46983a2c2eeed83929b888179acea
+...
+Ephemeral Containers:
+  debugger-tfqvh:
+    Container ID:   containerd://12efbbf2e46bb523ae0546b2369801b51a61e1367dda839ce0e02f0e5c1a49d6
+    Image:          busybox
+    Image ID:       docker.io/library/busybox@sha256:ce2360d5189a033012fbad1635e037be86f23b65cfd676b436d0931af390a2ac
+    Port:           &amp;lt;none&amp;gt;
+    Host Port:      &amp;lt;none&amp;gt;
+    State:          Running
+      Started:      Mon, 15 Mar 2021 20:33:51 +0100
+    Ready:          False
+    Restart Count:  0
+    Environment:    &amp;lt;none&amp;gt;
+    Mounts:         &amp;lt;none&amp;gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We first start a Pod called &lt;code&gt;some-app&lt;/code&gt; just so we have something to &lt;em&gt;"debug"&lt;/em&gt;. We then run &lt;code&gt;kubectl debug&lt;/code&gt; against this Pod, specifying &lt;code&gt;busybox&lt;/code&gt; as an image for the ephemeral container, as well as a target which is the original container. Additionally, we also include &lt;code&gt;-it&lt;/code&gt; arguments so that we immediately attach to container and get a shell session.&lt;/p&gt;
+
+&lt;p&gt;In the above snippet you can also see that if we describe the Pod after running &lt;code&gt;kubectl debug&lt;/code&gt; on it, then its description will include &lt;em&gt;Ephemeral Containers&lt;/em&gt; section with values we specified as command options earlier.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#process-namespace-sharing"&gt;
+  &lt;/a&gt;
+  Process Namespace Sharing
+&lt;/h2&gt;
+
+&lt;p&gt;&lt;code&gt;kubectl debug&lt;/code&gt; is quite powerful tool, but sometimes adding another container to a Pod might not be enough to get relevant information about the application running in Pod's other container. This might be the case when container being troubleshot doesn't include necessary debugging tools or even shell. In such situation we can use &lt;em&gt;Process Sharing&lt;/em&gt; to allow us to inspect Pod's original container using our injected ephemeral container.&lt;/p&gt;
+
+&lt;p&gt;One problem though with process sharing is that it cannot be applied to existing Pods, therefore we have to create a new one with &lt;code&gt;spec.shareProcessNamespace&lt;/code&gt; set to &lt;code&gt;true&lt;/code&gt; and inject an ephemeral container into it. Doing this would be quite cumbersome, especially if we have to debug multiple pods/containers or just perform this repeatedly. Luckily, &lt;code&gt;kubectl debug&lt;/code&gt; can do this for us using &lt;code&gt;--share-processes&lt;/code&gt; option:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;~ &lt;span class="nv"&gt;$ &lt;/span&gt;kubectl run some-app &lt;span class="nt"&gt;--image&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;nginx &lt;span class="nt"&gt;--restart&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;Never
+~ &lt;span class="nv"&gt;$ &lt;/span&gt;kubectl debug &lt;span class="nt"&gt;-it&lt;/span&gt; some-app &lt;span class="nt"&gt;--image&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;busybox &lt;span class="nt"&gt;--share-processes&lt;/span&gt; &lt;span class="nt"&gt;--copy-to&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;some-app-debug
+Defaulting debug container name to debugger-tkwst.
+If you don&lt;span class="s1"&gt;'t see a command prompt, try pressing enter.
+/ # ps ax
+PID   USER     TIME  COMMAND
+    1 root      0:00 /pause
+    8 root      0:00 nginx: master process nginx -g daemon off;
+   38 101       0:00 nginx: worker process
+   39 root      0:00 sh
+   46 root      0:00 ps ax
+
+~ $ cat /proc/8/root/etc/nginx/conf.d/default.conf 
+server {
+    listen       80;
+    listen  [::]:80;
+    server_name  localhost;
+...
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The above snippet shows that with process sharing we can see everything inside the other container in a Pod including its processes and files, which can definitely be very handy for debugging.&lt;/p&gt;
+
+&lt;p&gt;As you probably noticed, in addition to &lt;code&gt;--share-processes&lt;/code&gt; we also included &lt;code&gt;--copy-to=new-pod-name&lt;/code&gt; because - as was mentioned - we need to create a new pod whose name is specified by this flag. If we then list running pods from another terminal we will see the following:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="c"&gt;# From other terminal:&lt;/span&gt;
+~ &lt;span class="nv"&gt;$ &lt;/span&gt;kubectl get pods
+NAME             READY   STATUS    RESTARTS   AGE
+some-app         1/1     Running   0          23h
+some-app-debug   2/2     Running   0          20s
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;And that's our new debug Pod along the original application Pod. It has 2 containers in comparison to the original one as it also includes the ephemeral container.&lt;/p&gt;
+
+&lt;p&gt;Also, if you want to at any point verify whether the process sharing is allowed in some Pod, then you can run:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;~ &lt;span class="nv"&gt;$ &lt;/span&gt;kubectl get pod some-app-debug &lt;span class="nt"&gt;-o&lt;/span&gt; json  | jq .spec.shareProcessNamespace
+&lt;span class="nb"&gt;true&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#putting-it-to-good-use"&gt;
+  &lt;/a&gt;
+  Putting It To Good Use
+&lt;/h2&gt;
+
+&lt;p&gt;Now that we have the feature gate enabled and know how the command works, let's try to put it a good use and debug some application. Let's imagine the following scenario - we've got an application that's misbehaving and we need to troubleshoot networking related issues in its container. The application doesn't have necessary networking CLI tools which we could use. To solve this, we can use &lt;code&gt;kubectl debug&lt;/code&gt; in a following way:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;~ &lt;span class="nv"&gt;$ &lt;/span&gt;kubectl run distroless-python &lt;span class="nt"&gt;--image&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;martinheinz/distroless-python &lt;span class="nt"&gt;--restart&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;Never
+~ &lt;span class="nv"&gt;$ &lt;/span&gt;kubectl &lt;span class="nb"&gt;exec&lt;/span&gt; &lt;span class="nt"&gt;-it&lt;/span&gt; distroless-python &lt;span class="nt"&gt;--&lt;/span&gt; /bin/sh
+&lt;span class="c"&gt;# id&lt;/span&gt;
+/bin/sh: 1: &lt;span class="nb"&gt;id&lt;/span&gt;: not found
+&lt;span class="c"&gt;# ls&lt;/span&gt;
+/bin/sh: 2: &lt;span class="nb"&gt;ls&lt;/span&gt;: not found
+&lt;span class="c"&gt;# env&lt;/span&gt;
+/bin/sh: 3: &lt;span class="nb"&gt;env&lt;/span&gt;: not found
+&lt;span class="c"&gt;#&lt;/span&gt;
+...
+
+kubectl debug &lt;span class="nt"&gt;-it&lt;/span&gt; distroless-python &lt;span class="nt"&gt;--image&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;praqma/network-multitool &lt;span class="nt"&gt;--target&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;distroless-python &lt;span class="nt"&gt;--&lt;/span&gt; sh
+Defaulting debug container name to debugger-rvtd4.
+If you don&lt;span class="s1"&gt;'t see a command prompt, try pressing enter.
+/ # ping localhost
+PING localhost(localhost (::1)) 56 data bytes
+64 bytes from localhost (::1): icmp_seq=1 ttl=64 time=0.025 ms
+64 bytes from localhost (::1): icmp_seq=2 ttl=64 time=0.044 ms
+64 bytes from localhost (::1): icmp_seq=3 ttl=64 time=0.027 ms
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;After starting a pod we first try to get shell session into its container, which might seem like it worked, but when we try to run some basic commands we can see that there's literally nothing there. So, instead, we inject ephemeral container into the pod using &lt;code&gt;praqma/network-multitool&lt;/code&gt; image which contains tools like &lt;code&gt;curl&lt;/code&gt;, &lt;code&gt;ping&lt;/code&gt;, &lt;code&gt;telnet&lt;/code&gt;, etc. and now we can perform all the necessary troubleshooting.&lt;/p&gt;
+
+&lt;p&gt;In the above example it was enough for us to have another container in the Pod and poke around in there. But sometimes, you might need to look directly into the troubling container while not having a way to get into its shell. In that case we can take advantage of process sharing like so:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;~ &lt;span class="nv"&gt;$ &lt;/span&gt;kubectl run distroless-python &lt;span class="nt"&gt;--image&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;martinheinz/distroless-python &lt;span class="nt"&gt;--restart&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;Never
+~ &lt;span class="nv"&gt;$ &lt;/span&gt;kubectl debug &lt;span class="nt"&gt;-it&lt;/span&gt; distroless-python &lt;span class="nt"&gt;--image&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;busybox &lt;span class="nt"&gt;--share-processes&lt;/span&gt; &lt;span class="nt"&gt;--copy-to&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;distroless-python-debug
+Defaulting debug container name to debugger-l692h.
+If you don&lt;span class="s1"&gt;'t see a command prompt, try pressing enter.
+/ # ps ax
+PID   USER     TIME  COMMAND
+    1 root      0:00 /pause
+    8 root      0:00 /usr/bin/python3.5 sleep.py  # Original container is just sleeping forever
+   14 root      0:00 sh
+   20 root      0:00 ps ax
+/ # cat /proc/8/root/app/sleep.py 
+import time
+print("sleeping for 1 hour")
+time.sleep(3600)
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Here we once again ran container that uses Distroless image. Knowing that we wouldn't be able to do anything in its shell, we ran &lt;code&gt;kubectl debug&lt;/code&gt; with &lt;code&gt;--share-processes --copy-to=...&lt;/code&gt;, which creates a new Pod with additional ephemeral container which has access to all processes. When we then list running processes, we can see that our application container's process has PID 8, which we can use to explore its files and environment. To do that, we have to go through &lt;code&gt;/proc/&amp;lt;PID&amp;gt;/...&lt;/code&gt; directory - which in this case would be - &lt;code&gt;/proc/8/root/app/...&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;Another common situation is that application keeps crashing upon container start making it difficult to debug as there's not enough time to get shell session into the container and run some troubleshooting commands. In this case the solution would be to create container with different entry point/command, which would stop the application from crashing immediately and allowing us to perform debugging:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;~ &lt;span class="nv"&gt;$ &lt;/span&gt;kubectl get pods
+NAME                READY   STATUS             RESTARTS   AGE
+crashing-app        0/1     CrashLoopBackOff   1          8s
+
+~ &lt;span class="nv"&gt;$ &lt;/span&gt;kubectl debug crashing-app &lt;span class="nt"&gt;-it&lt;/span&gt; &lt;span class="nt"&gt;--copy-to&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;crashing-app-debug &lt;span class="nt"&gt;--container&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;crashing-app &lt;span class="nt"&gt;--&lt;/span&gt; sh
+If you don&lt;span class="s1"&gt;'t see a command prompt, try pressing enter.
+# id
+uid=0(root) gid=0(root) groups=0(root)
+#
+...
+
+# From another terminal
+~ $ kubectl get pods
+NAME                READY   STATUS             RESTARTS   AGE
+crashing-app        0/1     CrashLoopBackOff   3          2m7s
+crashing-app-debug  1/1     Running            0          16s
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#bonus-debugging-cluster-nodes"&gt;
+  &lt;/a&gt;
+  Bonus: Debugging Cluster Nodes
+&lt;/h2&gt;
+
+&lt;p&gt;This article was mainly focused on debugging of Pods and their containers - but as any cluster admin knows - oftentimes it's the nodes that need debugging and not the Pods. Luckily for us, &lt;code&gt;kubectl debug&lt;/code&gt; also allows for debugging of nodes by creating Pod that will run on specified node with node's root filesystem mounted in &lt;code&gt;/root&lt;/code&gt; directory. This essentially acts as a SSH connection into node, considering that we can even use &lt;code&gt;chroot&lt;/code&gt; to get access to host binaries:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;~ &lt;span class="nv"&gt;$ &lt;/span&gt;kubectl get nodes
+NAME                 STATUS   ROLES                  AGE   VERSION
+kind-control-plane   Ready    control-plane,master   25h   v1.20.2
+
+~ &lt;span class="nv"&gt;$ &lt;/span&gt;kubectl debug node/kind-control-plane &lt;span class="nt"&gt;-it&lt;/span&gt; &lt;span class="nt"&gt;--image&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;ubuntu
+Creating debugging pod node-debugger-kind-control-plane-hvljt with container debugger on node kind-control-plane.
+If you don&lt;span class="s1"&gt;'t see a command prompt, try pressing enter.
+root@kind-control-plane:/# chroot /host
+
+# head kind/kubeadm.conf
+apiServer:
+  certSANs:
+  - localhost
+  - 127.0.0.1
+  extraArgs:
+    feature-gates: EphemeralContainers=true
+    runtime-config: ""
+apiVersion: kubeadm.k8s.io/v1beta2
+clusterName: kind
+controlPlaneEndpoint: kind-control-plane:6443
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;In the above snippet we first identified the node which we want to debug, then we ran &lt;code&gt;kubectl debug&lt;/code&gt; explicitly using &lt;code&gt;node/...&lt;/code&gt;  as parameter to get access to our cluster's node. After that, when we get attached to the Pod, we use &lt;code&gt;chroot /host&lt;/code&gt; to break out of &lt;code&gt;chroot&lt;/code&gt; jail and gain full access to the host. Finally, to verify that we really can see everything on the host, we view part of &lt;code&gt;kubeadm.conf&lt;/code&gt; in which we can see the &lt;code&gt;feature-gates: EphemeralContainers=true&lt;/code&gt; which we configured in the beginning of the article.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#conclusion"&gt;
+  &lt;/a&gt;
+  Conclusion
+&lt;/h2&gt;
+
+&lt;p&gt;Being able to quickly and efficiently debug applications and services can save you a lot of time, but more importantly it can greatly help you with solving issues that might end-up costing you a lot of money if not resolved immediately. That's why it's important to have tools like &lt;code&gt;kubectl debug&lt;/code&gt; at your disposal and enabled, even when they're not GA or enabled by default yet.&lt;/p&gt;
+
+&lt;p&gt;If - for whatever reason - enabling ephemeral containers is not an option, then it's probably a good idea to try practicing alternative debugging approaches, such as using debug version of application's image which would include troubleshooting tools; or temporarily changing Pod's container's command directive to stop it from crashing.&lt;/p&gt;
+
+&lt;p&gt;With that said, &lt;code&gt;kubectl debug&lt;/code&gt; and ephemeral containers are only one of many useful - yet barely known - Kubernetes Feature Gates, so keep an eye out for followup article(s) that will dive into some other hidden features of Kubernetes.&lt;/p&gt;
+
+</description>
+      <category>devops</category>
+      <category>kubernetes</category>
+      <category>linux</category>
+      <category>debugging</category>
+    </item>
+    <item>
+      <title>🚀 I Built a React Landing Page Template using TypeScript and Tailwind CSS. Here is the result in video 🎥.</title>
+      <author>Remi W.</author>
+      <pubDate>Mon, 17 May 2021 17:31:15 +0000</pubDate>
+      <link>https://dev.to/ixartz/i-ve-built-a-react-landing-page-template-using-typescript-and-tailwind-css-here-is-the-result-in-video-4h2n</link>
+      <guid>https://dev.to/ixartz/i-ve-built-a-react-landing-page-template-using-typescript-and-tailwind-css-here-is-the-result-in-video-4h2n</guid>
+      <description>&lt;p&gt;Recently, I've built several Landing Page in React with modern and trendy technologies like Next JS, TypeScript and Tailwind. By building this template, I've learned so much about frontend development and user interface. Now, I am not ashamed anymore to show the result even if it isn't perfect. For your information, I have more a backend experience and building ugly interfaces was my standard.&lt;/p&gt;
+
+&lt;p&gt;Here is the result in the video:&lt;/p&gt;
+
+&lt;p&gt;&lt;iframe width="710" height="399" src="https://www.youtube.com/embed/azzey4RQ0xE"&gt;
+&lt;/iframe&gt;
+&lt;/p&gt;
+
+&lt;p&gt;Open to feedback and suggestion.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#next-js-landing-page-template-free"&gt;
+  &lt;/a&gt;
+  Next JS Landing Page Template Free
+&lt;/h2&gt;
+
+&lt;p&gt;If you want to learn more, I've open sourced a light version on GitHub at : &lt;a href="https://github.com/ixartz/Next-JS-Landing-Page-Starter-Template"&gt;Next JS Landing Page Template GitHub&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;And you can find a &lt;a href="https://creativedesignsguru.com/demo/nextjs-landing-page/"&gt;Next JS Landing Page Template Free Live Demo&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Built with developer experience in mind:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Next JS with TypeScript&lt;/li&gt;
+&lt;li&gt;Styling with Tailwind CSS&lt;/li&gt;
+&lt;li&gt;ESLint, Prettier and Husky included out-of-the-box&lt;/li&gt;
+&lt;li&gt;SEO friendly&lt;/li&gt;
+&lt;li&gt;Production-ready&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;It includes several React components:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Navigation&lt;/li&gt;
+&lt;li&gt;Hero&lt;/li&gt;
+&lt;li&gt;Features&lt;/li&gt;
+&lt;li&gt;Call to action banner&lt;/li&gt;
+&lt;li&gt;Footer&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;More than 100+ ⭐ stars on GitHub.&lt;/p&gt;
+
+</description>
+      <category>showdev</category>
+      <category>react</category>
+      <category>webdev</category>
+      <category>nextjs</category>
+    </item>
+    <item>
       <title>Reflection of a Coding Bootcamp Grad</title>
       <author>Chuck Choi</author>
       <pubDate>Mon, 17 May 2021 17:04:27 +0000</pubDate>
@@ -924,7 +1313,102 @@ You can also find and use this &lt;a href="https://github.com/Pwd9000-ML/Azure-V
       <category>agile</category>
     </item>
     <item>
-      <title>React: useState para dummies con una analogía simple </title>
+      <title>App 101: What is a Work Queue and how to make one in Node</title>
+      <author>Zack Sheppard</author>
+      <pubDate>Mon, 17 May 2021 15:16:00 +0000</pubDate>
+      <link>https://dev.to/zackdotcomputer/app-101-what-is-a-work-queue-and-how-to-make-one-in-node-26n0</link>
+      <guid>https://dev.to/zackdotcomputer/app-101-what-is-a-work-queue-and-how-to-make-one-in-node-26n0</guid>
+      <description>&lt;blockquote&gt;
+&lt;p&gt;A lot of the details about building an app are mysterious, even if you've been a programmer for years. So, I'm going to bundle up some of the discussions I've had with friends who are starting their own apps into these App101 posts. Follow along and we'll bring you up to speed on the decisions that you'll have to make when building a web-based app today.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+
+
+
+&lt;p&gt;If you boil it down far enough, most internet programming follows this cycle:&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;Receive HTTP Request -&amp;gt; Do Work -&amp;gt; Deliver HTTP Response&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;This works fine 99% of the time because usually the work we're doing is simple: update a record in the database, pull some data and return it as json, and so on. However, once in a rare while this cycle breaks down. Maybe you find yourself in a situation where the "do work" step is too time- or resource-consuming to finish before the requester times out. Or maybe the &lt;em&gt;actual&lt;/em&gt; work is only being scheduled by this request and can't start until its scheduled time. These are classic cases where you might want to build a work queue on your backend.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#what-is-a-work-queue"&gt;
+  &lt;/a&gt;
+  What is a Work Queue?
+&lt;/h2&gt;
+
+&lt;p&gt;A work queue is like a todo list for your server. You put &lt;strong&gt;messages&lt;/strong&gt; into the queue, which are often no more than simple dictionary objects. You assign one or more &lt;strong&gt;workers&lt;/strong&gt; to the top of the queue. Your workers then peel a message off the queue one-by-one, does some work, and then marks them as processed.&lt;/p&gt;
+
+&lt;p&gt;You can process these messages in whatever order you want. Most queues start with first-in, first-out processing (FIFO) processing, where the oldest message in the queue is the next to be processed. However, many queue tools support additional features like scheduling messages - so they can't be processed before a certain time - and adding priority values - so that higher priority messages can jump the queue like a first class passenger at the airport.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#so-why-use-queues"&gt;
+  &lt;/a&gt;
+  So Why Use Queues?
+&lt;/h2&gt;
+
+&lt;p&gt;So now we know how a queue works, let's get back to the &lt;strong&gt;why&lt;/strong&gt; of using one. The main benefit of queues is that &lt;strong&gt;they allow you to constrain resources and not constrain time&lt;/strong&gt;. &lt;/p&gt;
+
+&lt;p&gt;What do I mean by that? Well, when you are handling an HTTP request, you are time constrained - you only have so many seconds to return a value before the connection to your client times out or breaks. You're not, though, resource constrained - if you're using a serverless architecture or a load balancer your host might just spin up ever more instances of your API server to handle additional traffic. This is bad in both directions when you have heavy work to do, though.&lt;/p&gt;
+
+&lt;p&gt;Let's imagine you have a request that is really hard to process and takes 60 seconds, for example calculating some complex AI response. As the time needed to handle that request goes up then not only does your failure rate go up (since connections time out while your working), &lt;em&gt;but also&lt;/em&gt; your infrastructure costs go up because you need more web servers to handle your traffic (since your existing instances are spending all their time doing this heavy work).&lt;/p&gt;
+
+&lt;p&gt;Queues solve this problem in two ways. First, they escape your time constraint by moving the work to another process. Your web server can now return a "working on it" message almost immediately. Plus, because you pulled the processing out of your web server and into the queue worker, this heavy work no longer runs the risk of slowing or crashing your server. The second way they solve the constraint issue is that they allow you to constrain your infrastructure costs. Now you can control the number of workers who are working on the queue without causing failures. If your traffic goes up, it just means the queue takes longer to do the work rather than necessitating more infrastructure to handle that traffic.&lt;/p&gt;
+
+&lt;p&gt;That is, though, also why you may &lt;em&gt;not&lt;/em&gt; want to use a queue. When you have more work coming in, the time to handle each job goes up because the queue gets longer. Additionally, you've added complexity to your API - now your client is dealing with an asynchronous process, so it will need to call back later to check "is my job done yet?" However, if you have heavy work that necessitates this, queues are often the better solution than just hoping the connection doesn't time out.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#how-to-queue"&gt;
+  &lt;/a&gt;
+  How to Queue
+&lt;/h2&gt;
+
+&lt;p&gt;It can take years to truly master the administration and tuning of queues. (Indeed, I am far from a master here.) However, it takes only minutes to &lt;em&gt;start&lt;/em&gt; learning those skills. I found two easy ways to start experimenting with queues today:&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#option-1-serverless-queues"&gt;
+  &lt;/a&gt;
+  Option 1: Serverless Queues
+&lt;/h3&gt;
+
+&lt;p&gt;The quickest way to start experimenting with queues is with a serverless queue manager like &lt;a href="https://aws.amazon.com/sqs/"&gt;AWS SQS&lt;/a&gt; or &lt;a href="https://cloud.google.com/tasks"&gt;GCP Cloud Tasks&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;These services are cheap (both will handle &lt;strong&gt;billions&lt;/strong&gt; of messages per month for free), and both can be configured to run your worker a serverless FaaS process (Amazon's documentation for that is &lt;a href="https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-configure-lambda-function-trigger.html"&gt;here&lt;/a&gt;, and Google's is &lt;a href="https://cloud.google.com/tasks/docs/creating-appengine-handlers"&gt;here&lt;/a&gt;).&lt;/p&gt;
+
+&lt;p&gt;They have two downsides, though. First, like many GCP and AWS products, they both have a bit of a painful learning curve as you learn to configure the tool. The main one, though, is that both of these have time limits to how long your worker can run. They are long - Google's is 10 minutes and Amazon's is 15 - but you should consider this if your work might approach that threshold. That was, eventually, why I went with Option 2 during my own experimentation.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#option-2-roll-it-yourself"&gt;
+  &lt;/a&gt;
+  Option 2: Roll it Yourself
+&lt;/h3&gt;
+
+&lt;p&gt;The other choice is to roll your queue yourself. This is the route I took for my current side project,  &lt;a href="https://tweetsweep.app"&gt;Tweet Sweep&lt;/a&gt;, because I really wanted to learn how the system worked under the hood and I was worried my queue workers might take longer than 15 minutes.&lt;/p&gt;
+
+&lt;p&gt;If you're working in Node, I'd recommend using one of the two most maintained open source projects: &lt;a href="https://github.com/bee-queue/bee-queue"&gt;bee-queue&lt;/a&gt; and &lt;a href="https://github.com/taskforcesh/bullmq"&gt;BullMQ&lt;/a&gt;. Both have the features I've mentioned here, so you can get started with priorities and scheduling. Personally, I chose bee-queue because its api for creating parallelized workers was more straight-forward.&lt;/p&gt;
+
+&lt;p&gt;With these packages (and, most likely, with any similar package in your preferred language), setting up the queue has two steps. First, you need a location for the queue messages to be stored while they're awaiting processing. Usually, this is a Redis datastore, since it's very fast and it is generally accepted as OK that you might lose queue messages if your infrastructure fails and needs to restart. Second, you will need a computer acting as your worker. Usually, this is process on a server that attaches to your queue(s) in the datastore and, when a new message is published to one, pulls it down and processes it.&lt;/p&gt;
+
+&lt;p&gt;A hot tip: while learning to build my own queue, I found &lt;a href="https://fly.io"&gt;fly.io&lt;/a&gt; really useful. Its free tier comes with both a preconfigured Redis store and enough CPU budget to run two processes full-time, so you can run your API server and queue worker side by side.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#go-out-and-get-in-line"&gt;
+  &lt;/a&gt;
+  Go out and get in line
+&lt;/h2&gt;
+
+&lt;p&gt;I've used queues at every company I've worked at. Indeed, Foursquare had tens of queues handling tasks like score calculation on a check-in or resizing profile images that were uploaded. Even this month, I'm helping a current client explore them for a long application processing step during onboarding. They're a tremendously useful tool and they can, when appropriately used, take a huge amount of strain off of your API servers and network hardware. But the first step to being able to use them in your own apps is learning the basics - let me know how you get on with queues down in the comments.&lt;/p&gt;
+
+</description>
+      <category>webdev</category>
+      <category>beginners</category>
+      <category>node</category>
+      <category>serverless</category>
+    </item>
+    <item>
+      <title>React: state para dummies con una analogía simple </title>
       <author>dux</author>
       <pubDate>Mon, 17 May 2021 15:13:26 +0000</pubDate>
       <link>https://dev.to/duxtech/react-usestate-para-dummies-analogia-ccm</link>
@@ -1546,761 +2030,6 @@ THEN the other two are safe
       <category>career</category>
       <category>beginners</category>
       <category>computerscience</category>
-    </item>
-    <item>
-      <title>Testing Your Website for Visual Regressions With BackstopJS</title>
-      <author>Mattsi-Jansky</author>
-      <pubDate>Mon, 17 May 2021 15:01:08 +0000</pubDate>
-      <link>https://dev.to/mattsijansky/testing-your-website-for-visual-regressions-with-backstopjs-bn2</link>
-      <guid>https://dev.to/mattsijansky/testing-your-website-for-visual-regressions-with-backstopjs-bn2</guid>
-      <description>&lt;p&gt;&lt;em&gt;First posted on &lt;a href="https://codurance.com/2020/01/16/backstopjs-tutorial/"&gt;the Codurance blog&lt;/a&gt;. Cover photo by Photo by Alexander Popov on &lt;a href="https://unsplash.com/photos/-1qb8SIBzKY"&gt;Unsplash&lt;/a&gt;&lt;/em&gt;&lt;/p&gt;
-
-&lt;p&gt;Snapshot testing compares a "snapshot" of the output of a prior version of your software to output from the latest version, to check for unintended changes. When a difference is found you either approve it, by updating the expected output snapshot, or fix the cause of the difference.&lt;/p&gt;
-
-&lt;p&gt;Visual regression testing is a form of snapshot testing that tests a web front-end. It goes beyond testing the markup or layout by testing the rendered page captured in an emulated browser. As such they can "catch CSS Curve Balls" &lt;a href="https://garris.github.io/BackstopJS/"&gt;as BackstopJS says&lt;/a&gt;.&lt;/p&gt;
-
-&lt;p&gt;BackstopJS is a framework for visual regression testing, written in Javascript. It treats your web service as a black box, so your website doesn't need to be written in Javascript to work with BackstopJS. One of the benefits it offers is a very comprehensive and helpful diff between your snapshots, embedded in a HTML report that it generates. An example below shows how the scrubber diff method allows you to see both test and reference snapshots simultaneously. You can move the red line to change where the boundry lies.&lt;/p&gt;
-
-&lt;p&gt;This article will explain how to set up BackstopJS and some good practices I've picked up from using it in anger. You'll need to have some awareness of Docker Compose and Yarn or NPM.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--GM8iZwDT--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Mattsi-Jansky/matt.si/master/content/blog/2020-01/backstopjs-tutorial/backstopjs-scrubber.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--GM8iZwDT--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Mattsi-Jansky/matt.si/master/content/blog/2020-01/backstopjs-tutorial/backstopjs-scrubber.png" alt=""&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#why"&gt;
-  &lt;/a&gt;
-  Why
-&lt;/h2&gt;
-
-&lt;p&gt;Why use visual regression testing? I'll assume that you appreciate why testing as a general practice is necessary, so here are several scenarios that visual regression tests will catch and other testing techniques won't:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;CSS regressions: Often we'll make a change to a CSS style to move that one button into the space we'd like it to be, but how do we know that it hasn't had an undesirable knock-on effect on some other part of the website that uses the same CSS class? Instead of checking every element that may match your CSS selector manually (which we will most often forget to do), run your visual regression tests.&lt;/li&gt;
-&lt;li&gt;Responsiveness: Most often we're working on a 1080p screen, but many (perhaps most) of our users will be using their smartphones. Visual regression tests can test an assortment of different screen sizes, giving you confidence that your changes haven't broken the responsive page at other sizes and saving you time manually testing the page at different resolutions.&lt;/li&gt;
-&lt;li&gt;Dependabot: It's a wonderful tool that saves you from manually keeping all of your dependencies up-to-date. In my current team &lt;a href="https://www.codurance.com/publications/2019/02/24/taming-dependabot"&gt;we use dependabot aggressively&lt;/a&gt; - we have extensive testing and auto-merge any Dependabot PRs that pass all our tests. In fact, in terms of PRs or commits it's the most active member of our team by far. However, you can't place your trust in Dependabot's auto-merge in the front-end if you aren't testing for visual regressions. Before we introduced visual regression testing we had instances where Dependabot would automatically update to a new version of a dependency that introduced a visual change (at one point even removing a prominent navigation link), and it would be automatically merged and deployed to production. We trust Dependabot to change our software's behaviour because we have extensive tests of that behaviour, and we trust it to change our software's visual appearance because we have visual regression tests.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h2&gt;
-  &lt;a href="#how"&gt;
-  &lt;/a&gt;
-  How
-&lt;/h2&gt;
-
-&lt;p&gt;Setting up BackstopJS isn't difficult. But I'm going to make it more difficult because we want to set it up in a way that's repeatable (ie it always has the same result for the same version of the software) and automated. You don't want your visual regression tests to be "flaky", to pass some times and not others. It's worth putting extra effort in to get this right, otherwise they may be less than useful. And you want them to be automated because that way you can trust yourself and others not to forget to run the test or update the snapshots, and you can use them as checks for Dependabot's auto-merge.&lt;/p&gt;
-
-&lt;p&gt;Ultimately, your workflow should look like:&lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;You push some horribly misguided code, introducing an unintended visual change.&lt;/li&gt;
-&lt;li&gt;Your CI runs the visual regression tests and they fail, turning your build red.&lt;/li&gt;
-&lt;li&gt;You look at BackstopJS's test report from your CI, and spot the problem.&lt;/li&gt;
-&lt;li&gt;You decide whether this change is acceptable, and either update the snapshots to this change or fix the code that caused this change.&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;h3&gt;
-  &lt;a href="#docker"&gt;
-  &lt;/a&gt;
-  Docker
-&lt;/h3&gt;
-
-&lt;p&gt;The first step to creating a repeatable visual regression test is to run the tests on the same platform every time. Otherwise, you're in for trouble. Small changes in things like font rendering between operating systems can prevent the reference snapshots generated on your local machine from matching the test snapshots generated on your CI server. And if your CI server has multiple test runners on different platforms you've got even more unpredictability on your hands. To get around issues like these we use Docker containers via Docker Compose. This guarantees the same platform for every test run. This approach also has the advantage that you don't need to install BackstopJS locally and end up with different versions of it on each developer's machine; instead you have one consistent version, and Dependabot can keep it up-to-date. The disadvantage is of course that it's slower.&lt;/p&gt;
-
-&lt;p&gt;Add the following entry to your root &lt;code&gt;docker-compose.yml&lt;/code&gt; (&lt;a href="https://docs.docker.com/compose/gettingstarted/"&gt;create one&lt;/a&gt; if necessary):&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight yaml"&gt;&lt;code&gt;  &lt;span class="na"&gt;visual_regression_tests&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
-    &lt;span class="na"&gt;image&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;backstopjs/backstopjs:4.4.2&lt;/span&gt;
-    &lt;span class="na"&gt;volumes&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
-      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;./test/visual:/src&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;This describes a &lt;code&gt;visual_regression_tests&lt;/code&gt; Docker container using the official &lt;code&gt;backstopjs&lt;/code&gt; image, version &lt;code&gt;4.4.2&lt;/code&gt;. The version can be left out, but it's important that it be there for repeatability. You can use Dependabot to keep it up-to-date by creating a Dockerfile for it (until &lt;a href="https://github.com/dependabot/feedback/issues/82"&gt;Dependabot adds Docker Compose support&lt;/a&gt;), which is &lt;a href="#customfonts"&gt;described below&lt;/a&gt;. Of course, you should copy the latest version number from &lt;a href="https://hub.docker.com/r/backstopjs/backstopjs/builds"&gt;the BackstopJS Docker image releases&lt;/a&gt; and use that; &lt;code&gt;4.4.2&lt;/code&gt; may be outdated at time of reading. If you're using a Docker container for your website as well you should add &lt;a href="https://docs.docker.com/compose/compose-file/#depends_on"&gt;a depends_on entry&lt;/a&gt; to that container.&lt;/p&gt;
-
-&lt;p&gt;The last part is the key; the volume configuration &lt;code&gt;./test/visual:/src&lt;/code&gt;. This maps the local relative path &lt;code&gt;./test/visual&lt;/code&gt; to &lt;code&gt;/src&lt;/code&gt; in the container. You may change &lt;code&gt;./test/visual&lt;/code&gt; to any relative path you like, but &lt;code&gt;/src&lt;/code&gt; must be constant because that is where BackstopJS will look inside the container for it's configuration.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#backstopjs"&gt;
-  &lt;/a&gt;
-  BackstopJS
-&lt;/h3&gt;
-
-&lt;p&gt;Previously, I said that with Docker developers don't need to install a local instance of BackstopJS on their machines. This is true, but with one exception: You. That's because for our next step we're going to create the BackstopJS configuration, and you'll need to use Backstop to create a default instance of the configuration. So try this:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;yarn global add backstopjs
-&lt;span class="nb"&gt;mkdir&lt;/span&gt; ./test/visual
-&lt;span class="nb"&gt;cd&lt;/span&gt; ./test/visual
-backstop init
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;First we install BackstopJS (NPM alternative: &lt;code&gt;npm install -g backstopjs&lt;/code&gt;) and then create the folder where our container expects to find the configuration (so change this as you like, but ensure it's consistent with the Docker Compose volume). Then we open the folder and initialise a BackstopJS config there. This creates a few files; &lt;code&gt;backstop.json&lt;/code&gt;, and &lt;code&gt;backstop_data/engine_scripts&lt;/code&gt;. The engine scripts are basic defaults that determine how to run the browser emulator. Unless you're doing something unusual you shouldn't need to change most of them.&lt;/p&gt;
-
-&lt;p&gt;Before going any further, create a &lt;code&gt;.gitignore&lt;/code&gt; in your BackstopJS folder with the following entries:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;backstop_data/bitmaps_test
-backstop_data/html_report
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;This will ensure that the test snapshots and HTML reports generated by Backstop are ignored by Git. You don't want to commit these to version control, but you &lt;em&gt;do&lt;/em&gt; want to commit the other folder it generates; the snapshot references to test against.&lt;/p&gt;
-
-&lt;p&gt;The &lt;code&gt;backstop.json&lt;/code&gt; file is your main means of interacting with BackstopJS and to start with should look something like this:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight json"&gt;&lt;code&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="nl"&gt;"id"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"backstop_default"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="nl"&gt;"viewports"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
-      &lt;/span&gt;&lt;span class="nl"&gt;"label"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"phone"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-      &lt;/span&gt;&lt;span class="nl"&gt;"width"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;320&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-      &lt;/span&gt;&lt;span class="nl"&gt;"height"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;480&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="err"&gt;…&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="nl"&gt;"onBeforeScript"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"puppet/onBefore.js"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="nl"&gt;"onReadyScript"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"puppet/onReady.js"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="nl"&gt;"scenarios"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
-      &lt;/span&gt;&lt;span class="nl"&gt;"label"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"BackstopJS Homepage"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-      &lt;/span&gt;&lt;span class="nl"&gt;"cookiePath"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"backstop_data/engine_scripts/cookies.json"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-      &lt;/span&gt;&lt;span class="nl"&gt;"url"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"https://garris.github.io/BackstopJS/"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-      &lt;/span&gt;&lt;span class="nl"&gt;"referenceUrl"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;""&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-      &lt;/span&gt;&lt;span class="nl"&gt;"readyEvent"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;""&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-      &lt;/span&gt;&lt;span class="nl"&gt;"readySelector"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;""&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-      &lt;/span&gt;&lt;span class="nl"&gt;"delay"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-      &lt;/span&gt;&lt;span class="nl"&gt;"hideSelectors"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[],&lt;/span&gt;&lt;span class="w"&gt;
-      &lt;/span&gt;&lt;span class="nl"&gt;"removeSelectors"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[],&lt;/span&gt;&lt;span class="w"&gt;
-      &lt;/span&gt;&lt;span class="nl"&gt;"hoverSelector"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;""&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-      &lt;/span&gt;&lt;span class="nl"&gt;"clickSelector"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;""&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-      &lt;/span&gt;&lt;span class="nl"&gt;"postInteractionWait"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-      &lt;/span&gt;&lt;span class="nl"&gt;"selectors"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[],&lt;/span&gt;&lt;span class="w"&gt;
-      &lt;/span&gt;&lt;span class="nl"&gt;"selectorExpansion"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-      &lt;/span&gt;&lt;span class="nl"&gt;"expect"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-      &lt;/span&gt;&lt;span class="nl"&gt;"misMatchThreshold"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mf"&gt;0.1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-      &lt;/span&gt;&lt;span class="nl"&gt;"requireSameDimensions"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="nl"&gt;"paths"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"bitmaps_reference"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"backstop_data/bitmaps_reference"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"bitmaps_test"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"backstop_data/bitmaps_test"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"engine_scripts"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"backstop_data/engine_scripts"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"html_report"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"backstop_data/html_report"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"ci_report"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"backstop_data/ci_report"&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="p"&gt;},&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="err"&gt;…&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;The first thing I'd advise changing is the &lt;code&gt;viewports&lt;/code&gt; property. This property determines the resolutions that the site will be tested at. The default is not very extensive, and in my current team we've settled on the following viewport configuration:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight json"&gt;&lt;code&gt;&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="nl"&gt;"viewports"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
-      &lt;/span&gt;&lt;span class="nl"&gt;"label"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"small"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-      &lt;/span&gt;&lt;span class="nl"&gt;"width"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;640&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-      &lt;/span&gt;&lt;span class="nl"&gt;"height"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;480&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="p"&gt;},&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
-      &lt;/span&gt;&lt;span class="nl"&gt;"label"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"medium"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-      &lt;/span&gt;&lt;span class="nl"&gt;"width"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;814&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-      &lt;/span&gt;&lt;span class="nl"&gt;"height"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;768&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="p"&gt;},&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
-      &lt;/span&gt;&lt;span class="nl"&gt;"label"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"large"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-      &lt;/span&gt;&lt;span class="nl"&gt;"width"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;1066&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-      &lt;/span&gt;&lt;span class="nl"&gt;"height"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;814&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="p"&gt;},&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
-      &lt;/span&gt;&lt;span class="nl"&gt;"label"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"xlarge"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-      &lt;/span&gt;&lt;span class="nl"&gt;"width"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;1400&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-      &lt;/span&gt;&lt;span class="nl"&gt;"height"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;1050&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="p"&gt;},&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
-      &lt;/span&gt;&lt;span class="nl"&gt;"label"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"xxlarge"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-      &lt;/span&gt;&lt;span class="nl"&gt;"width"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;1600&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-      &lt;/span&gt;&lt;span class="nl"&gt;"height"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;1200&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;The next interesting property is &lt;code&gt;scenarios&lt;/code&gt;. A scenario defines a test, and you'll want to add one for each major section of your website. With a blog for example you may want to test the blog page and the blog list page, so you would have two scenarios. &lt;/p&gt;
-
-&lt;p&gt;The real trick here that will lead you to either jubilation or despair is figuring out &lt;em&gt;when&lt;/em&gt; to take the snapshot. Browsers, Javascript, web services and HTTP are all such fickle beasts; they may load slightly faster or slower each time you create a snapshot. For your visual regression tests to be repeatable you need them to create the snapshot only when the page has finished loading. If you don't you'll find many test failures caused because the font hadn't loaded in yet, or a pop-up hasn't appeared yet, or a HTTP request to an AJAX dependency hadn't completed yet, et cetra. As such &lt;em&gt;a lot&lt;/em&gt; of the scenario configuration options are about &lt;em&gt;when&lt;/em&gt; to decide that the page has finished loading. This is the real meat of the configuration and each possible option is documented in &lt;a href="https://github.com/garris/BackstopJS#using-backstopjs"&gt;BackstopJS's readme&lt;/a&gt;, but a few key ones to highlight are:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;
-&lt;code&gt;cookiePath&lt;/code&gt;: This enables you to enter faked cookies into the browser emulator, this can be useful to send a token to an authenticated web service. Just set it to a relative path to a JSON file; the expected format is described in a sample file, &lt;code&gt;engine_scripts/cookies.json&lt;/code&gt;.&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;url&lt;/code&gt;: This is the full address of the web page being tested. If you're using a Docker container to host your site you may use the name of the container, like &lt;code&gt;http://website:8080/myPage&lt;/code&gt;. Otherwise, you may run it locally and use something like &lt;code&gt;http://localhost:8080/myPage&lt;/code&gt;.&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;readyEvent&lt;/code&gt;: Listen out for a console log telling you the page is fully loaded before starting. This is useful for repeatability.&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;readySelector&lt;/code&gt;: Similar to the above, this configures Backstop to wait until a particular element (defined by CSS selector) is appearing before starting. &lt;strong&gt;I recommend using this setting and setting it to something that won't appear on any of your error pages&lt;/strong&gt;. If your service doesn't work during a visual regression test you may not know until after you get the report and are staring at a diff between your reference and a 404 page. But if your &lt;code&gt;readySelector&lt;/code&gt; fails you get a timeout error in the output that lets you know that the expected page hasn't loaded, so you get the feedback sooner.&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;delay&lt;/code&gt;: &lt;strong&gt;Avoid using this setting if you can&lt;/strong&gt;. It allows you to set an arbitrary time to wait for the page to load before assuming it'll be ready to test. By default it is 0, which means no delay. If you find yourself using this setting, it's because you haven't found a reliable method to tell the browser that the page is loaded. You should only use this as an absolute last resort.&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;hideSelectors&lt;/code&gt;/&lt;code&gt;removeSelectors&lt;/code&gt;: If you have some problematic element on the page that you either can't rely on to load in a reliable, timely fashion, or which has some random element that changes each time it's loaded then you can hide those elements using either of these properties.&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;scrollToSelector&lt;/code&gt;: BackstopJS will capture the entire document, not just the visible section (unless configured otherwise). However, you may want to trigger some event via scrolling. This setting makes Backstop scroll to a particular selector.&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;selectors&lt;/code&gt;: By default BackstopJS will capture the entire document. But if you want to test a specific set of regions, you can use this to limit the elements used to generate the snapshot. It's the opposite of &lt;code&gt;hideSelectors&lt;/code&gt;/&lt;code&gt;removeSelectors&lt;/code&gt; (but they can be used together). It's especially useful when you want to break a complex page down into smaller parts; you'll get more specific feedback on individual components, making regressions easier to identify.&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;misMatchThreshold&lt;/code&gt;: The degree to which two snapshots must be different before the scenario fails. This defaults to &lt;code&gt;0.1&lt;/code&gt; (That's 0.1%, not 10%) and I wouldn't increase it without good reason.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h3&gt;
-  &lt;a href="#running-the-tests"&gt;
-  &lt;/a&gt;
-  Running the tests
-&lt;/h3&gt;
-
-&lt;p&gt;At this point you should be able to run your tests. From the root of the project do &lt;code&gt;docker-compse run visual_regression_tests reference&lt;/code&gt;; this will generate your first reference images. Then try &lt;code&gt;docker-compose run visual_regression_tests test&lt;/code&gt;; this will generate new references and test them against the last ones you captured. I suggest recording these commands as scripts, so that every developer doesn't have to remember them. In Yarn/NPM we add a script to &lt;code&gt;package.json&lt;/code&gt; for run these commands, otherwise we create a shell script inside a &lt;code&gt;./scripts&lt;/code&gt; folder.&lt;/p&gt;
-
-&lt;p&gt;Don't worry if your tests aren't passing the first time; I'll explain some ways that you can improve their consistency and reliabiliy.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#dependencies"&gt;
-  &lt;/a&gt;
-  Dependencies
-&lt;/h3&gt;
-
-&lt;p&gt;Just in case I haven't said this enough times: &lt;strong&gt;Repeatability is key&lt;/strong&gt;. One of the obstacles to this repeatability is ensuring that your dependencies are consistent. If you depend on a web service or a database that sends you some data to display on the page, then that service needs to send the same data every time the visual regression tests are run. This means that you need the capability to fake your dependencies. If you depend on a database, then you may want to achieve this by creating a Docker container of your particular database dependency with some minimal fake data. If you're dependent on web services, then I'd recommend using &lt;a href="https://github.com/quii/mockingjay-server"&gt;Mockingjay Server&lt;/a&gt;. It's a Docker container around the mocking service Mockingjay. This makes for a painless and platform agnostic way to fake your dependencies with web services that respond with fake data. Just add something like the following to your &lt;code&gt;docker-compose.yml&lt;/code&gt;:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight yaml"&gt;&lt;code&gt;  &lt;span class="na"&gt;fake_my_service&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
-    &lt;span class="na"&gt;image&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;quii/mockingjay-server:1.10.4&lt;/span&gt;
-    &lt;span class="na"&gt;volumes&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
-      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;./test/fakes:/fakes&lt;/span&gt;
-    &lt;span class="na"&gt;command&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;-config=/fakes/my_service.yaml -port=9099&lt;/span&gt;
-    &lt;span class="na"&gt;ports&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
-      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;9099:9099"&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;For this to work you have to have a directory, here specified as &lt;code&gt;./test/fakes&lt;/code&gt;, with a YML file that specifies the endpoints to fake &lt;a href="https://github.com/quii/mockingjay-server#Running-a-fake-server"&gt;following Mockingjay-Server's format&lt;/a&gt;. This may include multiple fakes for different services. We specify which fake file to use in the &lt;code&gt;command&lt;/code&gt; property. Then, we just configure our web service to talk to this fake service when the tests are run. This way we know that our service will reliably, repeatably generate the same output and that's a huge benefit to our testing.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#custom-fonts"&gt;
-  &lt;/a&gt;
-  Custom Fonts
-&lt;/h3&gt;
-
-&lt;p&gt;Downloading a non-default font from some server somewhere will take an unpredictable amount of time, so it harms our repeatability. Rather than reaching for that unreliable &lt;code&gt;delay&lt;/code&gt; setting, however, we can pre-install the fonts on the Docker image to get around this problem altogether. Simply create a &lt;code&gt;Dockerfile&lt;/code&gt; inside your BackstopJS directory with an entry like the following:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight docker"&gt;&lt;code&gt;&lt;span class="k"&gt;FROM&lt;/span&gt;&lt;span class="s"&gt; backstopjs/backstopjs:4.4.2&lt;/span&gt;
-&lt;span class="k"&gt;RUN &lt;/span&gt;apt-get update &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; apt-get &lt;span class="nb"&gt;install&lt;/span&gt; &lt;span class="nt"&gt;-y&lt;/span&gt; fonts-lato
-&lt;span class="k"&gt;RUN &lt;/span&gt;apt-get update &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; apt-get &lt;span class="nb"&gt;install&lt;/span&gt; &lt;span class="nt"&gt;-y&lt;/span&gt; fonts-font-awesome
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;This is a very basic Dockerfile that extends the official BackstopJS image (remember to include the version!) and uses &lt;code&gt;apt-get&lt;/code&gt; to install the requisite fonts. This way the browser emulator won't need to download the fonts as they're already installed. You should be able to find the package name of any font you need by searching &lt;a href="https://www.debian.org/distrib/packages"&gt;Debian's package registry&lt;/a&gt;. Then you just need to change your docker-compose entry to build your BackstopJS directory, like so:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight yaml"&gt;&lt;code&gt;  &lt;span class="na"&gt;visual_regression_tests&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
-    &lt;span class="na"&gt;image&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="na"&gt;build&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;./tests/visual&lt;/span&gt;
-    &lt;span class="na"&gt;volumes&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
-      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;./test/visual:/src&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h3&gt;
-  &lt;a href="#continuous-integration"&gt;
-  &lt;/a&gt;
-  Continuous Integration
-&lt;/h3&gt;
-
-&lt;p&gt;You'll want to add a step to your build to run the visual regression tests. If you created a script to run the tests earlier then you can simply plug it in here. Because we're using Docker you needn't install BackstopJS on your CI server, and it will play nicely with Docker-based CI systems like CircleCI. There is an important extra step though; you need to extract the build artifact from  BackstopJS. Otherwise, you won't be able to see why your tests have failed.&lt;/p&gt;
-
-&lt;p&gt;For Jenkins you can achieve this with the &lt;a href="https://wiki.jenkins.io/display/JENKINS/HTML+Publisher+Plugin"&gt;HTML Publisher Plugin&lt;/a&gt;. Though the &lt;a href="https://github.com/garris/BackstopJS/tree/master/examples/Jenkins"&gt;official jenkins support guide&lt;/a&gt; involves setting up a Jenkins job in the traditional web interface, I'd advise against that and use &lt;a href="https://jenkins.io/blog/2017/02/10/declarative-html-publisher/"&gt;the declarative Jenkinsfile method&lt;/a&gt;. If you already have a declarative Jenkinsfile just add something like the following to your &lt;code&gt;always&lt;/code&gt; post-step in your Jenkinsfile:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight groovy"&gt;&lt;code&gt;&lt;span class="n"&gt;post&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
-  &lt;span class="n"&gt;always&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
-    &lt;span class="n"&gt;publishHTML&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="nl"&gt;target:&lt;/span&gt; &lt;span class="o"&gt;[&lt;/span&gt;
-      &lt;span class="nl"&gt;allowMissing:&lt;/span&gt; &lt;span class="kc"&gt;false&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt;
-      &lt;span class="nl"&gt;alwaysLinkToLastBuild:&lt;/span&gt; &lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt;
-      &lt;span class="nl"&gt;keepAll:&lt;/span&gt; &lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt;
-      &lt;span class="nl"&gt;reportDir:&lt;/span&gt; &lt;span class="s1"&gt;'./test/visual/backstop_data'&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt;
-      &lt;span class="nl"&gt;reportFiles:&lt;/span&gt; &lt;span class="s1"&gt;'html_report/index.html'&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt;
-      &lt;span class="nl"&gt;reportName:&lt;/span&gt; &lt;span class="s1"&gt;'Visual Regression Tests Report'&lt;/span&gt;
-    &lt;span class="o"&gt;])&lt;/span&gt;
-  &lt;span class="o"&gt;}&lt;/span&gt;
-&lt;span class="o"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#testing-repeatability"&gt;
-  &lt;/a&gt;
-  Testing Repeatability
-&lt;/h2&gt;
-
-&lt;p&gt;Lastly, to ensure repeatability you can actually &lt;em&gt;repeat&lt;/em&gt; the tests. When first setting up any tests involving browser emulation or browser automation I won't accept a passing test as correct unless it passes many times, so I can be confident that it isn't going to prove unreliable ("flaky") in the future. A simple Bash script like the following will suffice:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nb"&gt;set&lt;/span&gt; &lt;span class="nt"&gt;-e&lt;/span&gt; &lt;span class="c"&gt;#ensures the script will halt if any of the test runs fail&lt;/span&gt;
-
-&lt;span class="k"&gt;for &lt;/span&gt;i &lt;span class="k"&gt;in&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;0..19&lt;span class="o"&gt;}&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; &lt;span class="k"&gt;do
-  &lt;/span&gt;yarn &lt;span class="nb"&gt;test&lt;/span&gt;:visual
-&lt;span class="k"&gt;done&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Sure, it may take a while to run. Just leave it running in the background while you're doing something else.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#conclusion"&gt;
-  &lt;/a&gt;
-  Conclusion
-&lt;/h2&gt;
-
-&lt;p&gt;There are a number of other approaches to running BackstopJS, but this is the best type of setup I've found. Hopefully I've equipped you with everything you'll need to get up and running with repeatable BackstopJS visual regression tests on your websites. &lt;a href="https://twitter.com/mattsijansky"&gt;Let me know&lt;/a&gt; how you get on.&lt;/p&gt;
-
-</description>
-      <category>testing</category>
-      <category>javascript</category>
-      <category>frontend</category>
-      <category>webdev</category>
-    </item>
-    <item>
-      <title>How I built Notion Playgrounds using Notion API and some Nextjs magic ✨ </title>
-      <author>jj_ranalli</author>
-      <pubDate>Mon, 17 May 2021 14:41:48 +0000</pubDate>
-      <link>https://dev.to/jjranalli/how-i-built-notion-playgrounds-using-notion-api-and-some-nextjs-magic-1cb5</link>
-      <guid>https://dev.to/jjranalli/how-i-built-notion-playgrounds-using-notion-api-and-some-nextjs-magic-1cb5</guid>
-      <description>&lt;p&gt;Now that the &lt;a href="https://developers.notion.com"&gt;Notion API&lt;/a&gt; is in beta, nothing could stop me anymore from trying it out. This quickly ended up in a weird experiment called &lt;a href="https://series.slice.so/playground"&gt;Notion Playgrounds&lt;/a&gt;.&lt;/p&gt;
-
-&lt;p&gt;Here's how I built it, using &lt;a href="https://nextjs.org"&gt;Nextjs&lt;/a&gt;, &lt;a href="https://tailwindcss.com"&gt;TailwindCSS&lt;/a&gt; and &lt;a href="https://github.com/jjranalli/nightwind"&gt;Nightwind&lt;/a&gt; to automatically generate the dark mode.&lt;/p&gt;
-
-
-
-
-&lt;h2&gt;
-  &lt;a href="#interacting-with-notion-api"&gt;
-  &lt;/a&gt;
-  Interacting with Notion API
-&lt;/h2&gt;
-
-&lt;p&gt;First of all, I created an api route to handle my Notion GET requests. In this case I was interested in retrieving the contents of a Notion page, so I needed the &lt;a href="https://developers.notion.com/reference/get-block-children"&gt;Retrieve block children endpoint&lt;/a&gt;.&lt;/p&gt;
-
-&lt;p&gt;I knew I wanted to build more than one page, so I built a &lt;a href="https://nextjs.org/docs/api-routes/dynamic-api-routes"&gt;dynamic API route&lt;/a&gt; that accepts a &lt;strong&gt;pageId&lt;/strong&gt; as the query parameter, and returns me the corresponding object from the Notion API.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// api/notion/[pageId].ts&lt;/span&gt;
-&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="k"&gt;default&lt;/span&gt; &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;handler&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;req&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;res&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;pageId&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;req&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;query&lt;/span&gt;
-  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;endpointBlocks&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s2"&gt;`https://api.notion.com/v1/blocks/&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;pageId&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;/children`&lt;/span&gt;
-
-  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;fetcher&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;url&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;options&lt;/span&gt;&lt;span class="p"&gt;?)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt;
-    &lt;span class="nx"&gt;fetch&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;url&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;options&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;then&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;res&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;res&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;json&lt;/span&gt;&lt;span class="p"&gt;())&lt;/span&gt;
-
-  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;data&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="na"&gt;headers&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-      &lt;span class="na"&gt;Authorization&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;`Bearer &lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;process&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;env&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;NOTION_KEY&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-      &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Content-Type&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;application/json&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-      &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Notion-Version&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;2021-05-13&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="p"&gt;},&lt;/span&gt;
-  &lt;span class="p"&gt;}&lt;/span&gt;
-
-  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;blocks&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;fetcher&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;endpointBlocks&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-  &lt;span class="nx"&gt;res&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;status&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;200&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;json&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="nx"&gt;blocks&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-
-
-&lt;h2&gt;
-  &lt;a href="#rendering-the-page-amp-the-swr-magic"&gt;
-  &lt;/a&gt;
-  Rendering the page &amp;amp; the swr magic ✨
-&lt;/h2&gt;
-
-&lt;p&gt;There were 3 things I wanted:&lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;
-&lt;strong&gt;Generate the pages statically&lt;/strong&gt;, to make everything lightning-fast and SEO friendly&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;Have dynamic routes&lt;/strong&gt;, so I could have all pages under the paths &lt;em&gt;/playground/1&lt;/em&gt;, &lt;em&gt;/playground/2&lt;/em&gt;, etc.&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;Fetching data from Notion in real-time&lt;/strong&gt;, with a &lt;a href="https://swr.vercel.app/"&gt;stale-while-revalidate pattern&lt;/a&gt;.&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;h3&gt;
-  &lt;a href="#dynamic-routes-amp-static-generation"&gt;
-  &lt;/a&gt;
-  Dynamic routes &amp;amp; Static Generation
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;a href="https://nextjs.org/docs/basic-features/data-fetching"&gt;Static generation in Nextjs&lt;/a&gt; happens through the &lt;em&gt;getStaticPaths&lt;/em&gt; and &lt;em&gt;getStaticProps&lt;/em&gt; functions.&lt;/p&gt;
-
-&lt;p&gt;GetStaticPaths is used to get the actual paths of the page, while getStaticProps returns the props to each page – in this case the &lt;strong&gt;slug&lt;/strong&gt; and the &lt;strong&gt;pageId&lt;/strong&gt; props.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// pages/playground/[slug].tsx&lt;/span&gt;
-
-&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;getStaticPaths&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="na"&gt;paths&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;
-      &lt;span class="p"&gt;{&lt;/span&gt;
-        &lt;span class="na"&gt;params&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-          &lt;span class="na"&gt;slug&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;1&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-        &lt;span class="p"&gt;},&lt;/span&gt;
-      &lt;span class="p"&gt;},&lt;/span&gt;
-      &lt;span class="p"&gt;{&lt;/span&gt;
-        &lt;span class="na"&gt;params&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-          &lt;span class="na"&gt;slug&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;2&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-        &lt;span class="p"&gt;},&lt;/span&gt;
-      &lt;span class="p"&gt;},&lt;/span&gt;
-      &lt;span class="p"&gt;{&lt;/span&gt;
-        &lt;span class="na"&gt;params&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-          &lt;span class="na"&gt;slug&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;3&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-        &lt;span class="p"&gt;},&lt;/span&gt;
-      &lt;span class="p"&gt;},&lt;/span&gt;
-    &lt;span class="p"&gt;],&lt;/span&gt;
-    &lt;span class="na"&gt;fallback&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kc"&gt;false&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;getStaticProps&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;context&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;slug&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;context&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;params&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;slug&lt;/span&gt;
-  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;pageIdArray&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;
-    &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;38fc182c459340b294fca3c99b88faae&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;9e569a521efc4f0fa2087de12fca5e81&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;59a5889031314f73a2c1bd268a486dff&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="p"&gt;]&lt;/span&gt;
-  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;pageId&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;pageIdArray&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;slug&lt;/span&gt; &lt;span class="o"&gt;-&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
-  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="na"&gt;props&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-      &lt;span class="nx"&gt;slug&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-      &lt;span class="nx"&gt;pageId&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="p"&gt;},&lt;/span&gt;
-  &lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h3&gt;
-  &lt;a href="#rendering-the-data-on-page"&gt;
-  &lt;/a&gt;
-  Rendering the data on page
-&lt;/h3&gt;
-
-&lt;p&gt;Getting the data to display on website is trivial when using Nextjs and the (amazing) &lt;a href="https://swr.vercel.app"&gt;SWR hook&lt;/a&gt;.&lt;/p&gt;
-
-&lt;p&gt;I simply have to make an API call to the API route I built in the first step, using SWR and a fetcher function. This will return me the data to display on page, while caching and revalidating automatically.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="k"&gt;default&lt;/span&gt; &lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;Play&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="nx"&gt;slug&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;pageId&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;fetcher&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;url&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;options&lt;/span&gt;&lt;span class="p"&gt;?)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt;
-    &lt;span class="nx"&gt;fetch&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;url&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;options&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;then&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;res&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;res&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;json&lt;/span&gt;&lt;span class="p"&gt;())&lt;/span&gt;
-
-  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;error&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;useSWR&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`/api/notion/&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;pageId&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;fetcher&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-
-  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
-    &lt;span class="c1"&gt;// Return page using data returned from the api&lt;/span&gt;
-  &lt;span class="p"&gt;)&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;At this point I just had to render what Notion was returning from my request.&lt;/p&gt;
-
-&lt;p&gt;In this case, that would be an array of &lt;a href="https://developers.notion.com/reference/block"&gt;block objects&lt;/a&gt;, each containing an array of &lt;a href="https://developers.notion.com/reference/rich-text"&gt;Rich text objects&lt;/a&gt; containing the styling properties.&lt;/p&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;Note: Some blocks appear to be unsupported at this time, and others have children blocks that would've needed to be retrieved recursively. I didn't build this feature yet, so I made sure such block returned either a line element or &lt;em&gt;null&lt;/em&gt;.&lt;br&gt;
-&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// ...&lt;/span&gt;
-&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;div&lt;/span&gt; &lt;span class="nx"&gt;className&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;prose&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
-  &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; &lt;span class="nx"&gt;data&lt;/span&gt; &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
-    &lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;blocks&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;results&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;map&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;line&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;key&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-      &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;line&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;paragraph&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
-          &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;p&lt;/span&gt; &lt;span class="nx"&gt;key&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;key&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
-            &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;line&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;paragraph&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;text&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;map&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;t&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;k&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-              &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;NotionSpan&lt;/span&gt; &lt;span class="nx"&gt;key&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;k&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="nx"&gt;t&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;t&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="sr"&gt;/&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
-&lt;/span&gt;            &lt;span class="p"&gt;})}&lt;/span&gt;
-          &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/p&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
-&lt;/span&gt;        &lt;span class="p"&gt;)&lt;/span&gt;
-      &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;else&lt;/span&gt; &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;line&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;heading_1&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
-          &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;h1&lt;/span&gt; &lt;span class="nx"&gt;key&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;key&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
-            &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;line&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;heading_1&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;text&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;map&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;t&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;k&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-              &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;NotionSpan&lt;/span&gt; &lt;span class="nx"&gt;key&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;k&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="nx"&gt;t&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;t&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="sr"&gt;/&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
-&lt;/span&gt;            &lt;span class="p"&gt;})}&lt;/span&gt;
-          &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/h1&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
-&lt;/span&gt;        &lt;span class="p"&gt;)&lt;/span&gt;
-      &lt;span class="p"&gt;}&lt;/span&gt;
-      &lt;span class="c1"&gt;// ... All elements that can be contained in the block objects&lt;/span&gt;
-      &lt;span class="k"&gt;else&lt;/span&gt; &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
-        &lt;span class="nx"&gt;line&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;type&lt;/span&gt; &lt;span class="o"&gt;===&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;unsupported&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt;
-        &lt;span class="nx"&gt;line&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;object&lt;/span&gt; &lt;span class="o"&gt;===&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;block&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt;
-        &lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="nx"&gt;line&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;has_children&lt;/span&gt;
-      &lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;hr&lt;/span&gt; &lt;span class="nx"&gt;key&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;key&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="sr"&gt;/&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
-&lt;/span&gt;      &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;else&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="kc"&gt;null&lt;/span&gt;
-      &lt;span class="p"&gt;}&lt;/span&gt;
-    &lt;span class="p"&gt;})&lt;/span&gt;
-  &lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
-    &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;p&lt;/span&gt; &lt;span class="nx"&gt;className&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;text-gray-500 text-center&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="nx"&gt;Ready&lt;/span&gt; &lt;span class="k"&gt;in&lt;/span&gt; &lt;span class="mi"&gt;3&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;...&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/p&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
-&lt;/span&gt;  &lt;span class="p"&gt;)}&lt;/span&gt;
-&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/div&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
-&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;To handle text styling I wanted to leverage the amazing TailwindCSS palette while automatically build a dark mode with Nightwind.&lt;/p&gt;
-
-&lt;p&gt;So I made a &lt;strong&gt;&amp;lt;NotionSpan&amp;gt;&lt;/strong&gt; component which returns the text content of the Rich text object, wrapped in a &lt;strong&gt;&amp;lt;span&amp;gt;&lt;/strong&gt; element with styling applied depending on the properties of the Rich text object.&lt;/p&gt;
-
-&lt;p&gt;I don't have to think about styling the dark mode because &lt;a href="https://github.com/jjranalli/nightwind"&gt;Nightwind does it automatically for me&lt;/a&gt;.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;FC&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;react&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
-
-&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kr"&gt;interface&lt;/span&gt; &lt;span class="nx"&gt;NotionSpanProps&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="nl"&gt;t&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;any&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;colors&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="na"&gt;text&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="na"&gt;gray&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;text-gray-600&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="na"&gt;brown&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;text-amber-700&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="na"&gt;orange&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;text-orange-600&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="na"&gt;yellow&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;text-yellow-600&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="na"&gt;green&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;text-green-600&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="na"&gt;blue&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;text-blue-600&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="na"&gt;purple&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;text-purple-500&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="na"&gt;pink&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;text-pink-600&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="na"&gt;red&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;text-red-500&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="p"&gt;},&lt;/span&gt;
-  &lt;span class="na"&gt;bg&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="na"&gt;gray&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;bg-gray-200&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="na"&gt;brown&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;bg-amber-200&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="na"&gt;orange&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;bg-orange-200&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="na"&gt;yellow&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;bg-yellow-200&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="na"&gt;green&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;bg-green-200&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="na"&gt;blue&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;bg-blue-200&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="na"&gt;purple&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;bg-purple-200&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="na"&gt;pink&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;bg-pink-200&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="na"&gt;red&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;bg-red-200&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="p"&gt;},&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;NotionSpan&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;FC&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;NotionSpanProps&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="nx"&gt;t&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
-    &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;span&lt;/span&gt;
-      &lt;span class="nx"&gt;className&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="s2"&gt;`
-      &lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;t&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;annotations&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;bold&lt;/span&gt; &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;font-bold &lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt; &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;""&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;
-      &lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;
-        &lt;span class="nx"&gt;t&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;annotations&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;code&lt;/span&gt;
-          &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;font-medium overflow-hidden shadow-md rounded-sm py-2.5 px-5 bg-gray-100 text-indigo-600&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
-          &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;""&lt;/span&gt;
-      &lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;
-      &lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;
-        &lt;span class="nx"&gt;t&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;annotations&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;color&lt;/span&gt; &lt;span class="o"&gt;!==&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;default&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
-          &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="nx"&gt;t&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;annotations&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;color&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;includes&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;background&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-            &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;colors&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;bg&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;t&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;annotations&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;color&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;split&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;_&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)[&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;]]}&lt;/span&gt;&lt;span class="s2"&gt; text-gray-900 `&lt;/span&gt;
-            &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;colors&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;text&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;t&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;annotations&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;color&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
-          &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;""&lt;/span&gt;
-      &lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;
-      &lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;t&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;annotations&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;italic&lt;/span&gt; &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;italic &lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt; &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;""&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;
-      &lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;t&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;annotations&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;strikethrough&lt;/span&gt; &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;line-through &lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt; &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;""&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;
-      &lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;t&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;annotations&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;underline&lt;/span&gt; &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;underline &lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt; &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;""&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;
-    &lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
-      &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;t&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;text&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;link&lt;/span&gt; &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
-        &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;a&lt;/span&gt; &lt;span class="nx"&gt;href&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;t&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;text&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;link&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;url&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="nx"&gt;target&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;_blank&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt; &lt;span class="nx"&gt;rel&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;noopener&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
-          &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;t&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;text&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;content&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;
-        &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/a&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
-&lt;/span&gt;      &lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
-        &lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;t&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;text&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;content&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;
-      &lt;span class="p"&gt;)}&lt;/span&gt;
-    &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/span&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
-&lt;/span&gt;  &lt;span class="p"&gt;)&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="k"&gt;default&lt;/span&gt; &lt;span class="nx"&gt;NotionSpan&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-
-
-&lt;h2&gt;
-  &lt;a href="#wrapping-up"&gt;
-  &lt;/a&gt;
-  Wrapping up
-&lt;/h2&gt;
-
-&lt;p&gt;And that's it! Notion API makes it really easy to get the data of a Notion page (and databases seem to be even more powerful, can't wait to try that too!), while Nextjs + swr spectacularly handle all the complex parts giving you the best possible experience.&lt;/p&gt;
-
-
-
-
-&lt;p&gt;If you liked this post or have any question, feel free to let me know on &lt;a href="https://twitter.com/jj_ranalli"&gt;Twitter!&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;And if you like this whole experiment, consider leaving a note on the &lt;a href="https://series.slice.so/playground"&gt;Notion Playgrounds&lt;/a&gt; and upvoting it on &lt;a href="https://www.producthunt.com/posts/notion-playground-slice-series"&gt;Product Hunt&lt;/a&gt;. Thanks! 🍩&lt;/p&gt;
-
-</description>
-      <category>programming</category>
-      <category>nextjs</category>
-      <category>tailwindcss</category>
-      <category>javascript</category>
-    </item>
-    <item>
-      <title>Automagically optimize your images with Squoosh</title>
-      <author>Tim Deschryver</author>
-      <pubDate>Mon, 17 May 2021 14:39:08 +0000</pubDate>
-      <link>https://dev.to/timdeschryver/automagically-optimize-your-images-with-squoosh-5fn3</link>
-      <guid>https://dev.to/timdeschryver/automagically-optimize-your-images-with-squoosh-5fn3</guid>
-      <description>&lt;p&gt;Follow me on Twitter at &lt;a href="https://timdeschryver.dev/twitter"&gt;@tim_deschryver&lt;/a&gt; | Subscribe to the &lt;a href="https://timdeschryver.dev/newsletter"&gt;Newsletter&lt;/a&gt; | Originally published on &lt;a href="https://timdeschryver.dev/blog/automagically-optimize-your-images-with-squoosh"&gt;timdeschryver.dev&lt;/a&gt;.&lt;/p&gt;
-
-
-
-
-&lt;p&gt;&lt;a href="https://timdeschryver.dev/blog/automagically-optimize-your-images-with-squoosh?tldr=true"&gt;Read the TLDR on timdeschryver.dev&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;For my blog, I used to use the &lt;a href="https://github.com/marketplace/actions/image-optimizer"&gt;Image Optimizer&lt;/a&gt; Github Action to optimize my images.&lt;/p&gt;
-
-&lt;p&gt;The downside to this approach was that the optimization was only performed on Pull Requests. When I'm publishing a new blog post, I usually just pushed to the &lt;code&gt;main&lt;/code&gt; branch, thus new images wouldn't be optimized. As a counter measurement, I also used &lt;a href="https://squoosh.app/"&gt;Squoosh&lt;/a&gt; to optimize the banner images as this was mostly the only image I used.&lt;/p&gt;
-
-&lt;p&gt;This task was done manually, every. single. time.&lt;br&gt;
-Until I stumbled onto the &lt;a href="https://www.npmjs.com/package/@squoosh/cli"&gt;Squoosh CLI&lt;/a&gt;.&lt;br&gt;
-Let's take a look at how we can automate this threaded task and optimize our images with ease!&lt;/p&gt;
-
-&lt;p&gt;I'm assuming you're already using &lt;a href="https://github.com/okonet/lint-staged"&gt;lint-staged&lt;/a&gt; to some extent, for example, to run a linter or prettier on touched files. We extend the &lt;code&gt;lint-staged&lt;/code&gt; configuration to run an optimization to images (&lt;code&gt;*.{jpg,jpeg,png,gif}&lt;/code&gt;), and re-add them to our commit with &lt;code&gt;git add&lt;/code&gt;.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight json"&gt;&lt;code&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"lint-staged"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="nl"&gt;"*.{js,ts,json,svelte}"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s2"&gt;"eslint --fix"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"git add"&lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="nl"&gt;"*.{prettier}"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s2"&gt;"prettier --write"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"git add"&lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="nl"&gt;"*.{jpg,jpeg,png,gif}"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s2"&gt;"node ./scripts/optimize-image.js"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"git add"&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;To run &lt;code&gt;lint-staged&lt;/code&gt; as a pre-commit step, I'm using &lt;a href="https://typicode.github.io/husky/#/"&gt;husky&lt;/a&gt; with a &lt;code&gt;pre-commit&lt;/code&gt; git hook.&lt;/p&gt;
-
-&lt;p&gt;The &lt;code&gt;optimize-image.js&lt;/code&gt; script, executes the Squoosh CLI to optimize the image.&lt;br&gt;
-Note that we don't need to pass an argument to this script, because lint-staged already passes the file's location as an argument.&lt;/p&gt;
-
-&lt;p&gt;The reason why we need a custom script is because we need to pass the image path to the Squoosh CLI twice. Once to specify the output directory, and the second time as the argument to be optimized. In this case, we just want to overwrite the original image, so we use the &lt;code&gt;dirname&lt;/code&gt; method to get the directory of te image.&lt;/p&gt;
-
-&lt;p&gt;If the Squoosh CLI would overwrite the initial image (or have a config flag for it), we could have simply executed the Squoosh CLI without the need to create a custom script for it.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;execSync&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;child_process&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;dirname&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;path&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;writeFileSync&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;fs&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-
-&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;img&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;process&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;argv&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;slice&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-
-&lt;span class="k"&gt;try&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nx"&gt;execSync&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`npx @squoosh/cli --mozjpeg auto --output-dir "&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;dirname&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;img&lt;/span&gt;&lt;span class="p"&gt;)}&lt;/span&gt;&lt;span class="s2"&gt;" "&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;img&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;"`&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;catch&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nx"&gt;writeFileSync&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;optimize-image.log&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;message&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;encoding&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;utf8&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="na"&gt;flag&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;w&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt; &lt;span class="p"&gt;});&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;blockquote&gt;
-&lt;p&gt;I'm using the auto optimizer, if you want to tweak the arguments take a look at the &lt;a href="https://www.npmjs.com/package/@squoosh/cli"&gt;options&lt;/a&gt;.&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;And that's it, with some configuration and just a couple lines of code, all of the images on my blog will be optimized.&lt;/p&gt;
-
-&lt;p&gt;The profit is that I save a couple of minutes every time I add images, and visitors don't need to download the whole image.&lt;/p&gt;
-
-
-
-
-&lt;p&gt;Follow me on Twitter at &lt;a href="https://timdeschryver.dev/twitter"&gt;@tim_deschryver&lt;/a&gt; | Subscribe to the &lt;a href="https://timdeschryver.dev/newsletter"&gt;Newsletter&lt;/a&gt; | Originally published on &lt;a href="https://timdeschryver.dev/blog/automagically-optimize-your-images-with-squoosh"&gt;timdeschryver.dev&lt;/a&gt;.&lt;/p&gt;
-
-</description>
-      <category>javascript</category>
-      <category>tools</category>
-      <category>optimization</category>
-      <category>node</category>
     </item>
   </channel>
 </rss>
