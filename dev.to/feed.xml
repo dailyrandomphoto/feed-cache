@@ -7,6 +7,375 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>How we resolved a memory leak on our website</title>
+      <author>Craig Taub</author>
+      <pubDate>Thu, 20 May 2021 09:40:58 +0000</pubDate>
+      <link>https://dev.to/fiit/how-we-resolved-a-memory-leak-on-our-website-1kf0</link>
+      <guid>https://dev.to/fiit/how-we-resolved-a-memory-leak-on-our-website-1kf0</guid>
+      <description>&lt;p&gt;The &lt;a href="https://fiit.tv"&gt;fiit website&lt;/a&gt; is used for creating subscriptions as well as helping users log into the app on TV platforms such as Sky and Amazon. As such it is an important asset to the business, but ultimately does not change very often.&lt;/p&gt;
+
+&lt;p&gt;For some time there has been a memory leak on the website. How can we be sure? I think the memory graphs below are pretty self explanatory. This is the memory usage over a normal week (shows min/max and average in green). &lt;br&gt;
+You can see every 1-2 days it would increase up to 100% before it eventually crashes and then starts the process all over again. &lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--C-wHAxRx--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/6br6mly3khgemusns6eu.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--C-wHAxRx--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/6br6mly3khgemusns6eu.png" alt="Memory leak"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;The stack is out of date, with some node modules being 3 years behind, and NodeJS being version 10 (which was released in October 2018). At time of writing LTS is 14.17.&lt;/p&gt;
+
+&lt;p&gt;So we know there is a leak, it could be our code or it could be an out of date version. Where to start?&lt;/p&gt;
+&lt;h2&gt;
+  &lt;a href="#plan-a-local-profiling"&gt;
+  &lt;/a&gt;
+  Plan A - Local profiling
+&lt;/h2&gt;
+
+&lt;p&gt;We thought we would start by analysing our code. We would run the application in production mode, and take memory snapshots with Chrome dev-tools at various times. Comparing the difference between the snapshots should hopefully highlight the cause.&lt;/p&gt;
+
+&lt;p&gt;However there were a couple of other problems to solve first...&lt;/p&gt;
+&lt;h3&gt;
+  &lt;a href="#problem-1-how-to-thrash-the-server-locally"&gt;
+  &lt;/a&gt;
+  Problem #1 - How to thrash the server locally?
+&lt;/h3&gt;
+
+&lt;p&gt;We used Apache Benchmark to do this. It is pretty great, you can set the total number of requests and number in parallel. E.g&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;ab -c 50 -n 5000 -k &lt;a href="http://localhost:8080/"&gt;http://localhost:8080/&lt;/a&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;h3&gt;
+  &lt;a href="#problem-2-which-pages-to-thrash"&gt;
+  &lt;/a&gt;
+  Problem #2 - Which pages to thrash?
+&lt;/h3&gt;
+
+&lt;p&gt;Now we have a tool which we can use to replicate high user volume, where should we target?&lt;/p&gt;
+
+&lt;p&gt;The website uses GA, so I grabbed the 2 most popular pages, one of which is the homepage, and planned to use both of those.&lt;/p&gt;
+&lt;h3&gt;
+  &lt;a href="#problem-3-how-to-capture-the-memory-of-a-server-run-via-docker-containers"&gt;
+  &lt;/a&gt;
+  Problem #3 - How to capture the memory of a server run via docker containers?
+&lt;/h3&gt;
+
+&lt;p&gt;This has 3 steps&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;On the docker image expose the NodeJS debugger port (this is 9229). e.g &lt;code&gt;9229:7001&lt;/code&gt;
+&lt;/li&gt;
+&lt;li&gt;On the docker image start the application with the debugger on. E.g. &lt;code&gt;--inspect=0.0.0.0&lt;/code&gt; and garbage collection exposed  &lt;code&gt;--expose-gc&lt;/code&gt; (the reason is so we can trigger GC before we collect a snapshot, therefore isolating the parts of memory which are not being collected properly)&lt;/li&gt;
+&lt;li&gt;Open Chrome inspector (&lt;code&gt;chrome://inspect/#devices&lt;/code&gt;) and add a target to &lt;code&gt;localhost:7001&lt;/code&gt; (our remote debugging port) &lt;/li&gt;
+&lt;li&gt;Find the application you want to profile running in the list, click it and you will get an open Chrome dev-tools. From here we can use the "memory" tab to take heap snapshots.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;Now we are running our server application on a docker container, and can connect to the box's memory.&lt;/p&gt;
+&lt;h3&gt;
+  &lt;a href="#local-profiling"&gt;
+  &lt;/a&gt;
+  Local profiling
+&lt;/h3&gt;
+
+&lt;p&gt;We decided to start with 1000 requests, 30 at a time.&lt;br&gt;
+We would take a memory heap snapshot every 2 minutes for about 8 minutes, forcing a GC (&lt;code&gt;global.gc()&lt;/code&gt;) each time.&lt;br&gt;
+Then at the end compare the different snapshot, looking for items with a large footprint i.e. 1% or greater.&lt;/p&gt;
+
+&lt;p&gt;What we immediately found was an issue with how we used Lodash, and more specifically the &lt;code&gt;memoize()&lt;/code&gt; function. &lt;br&gt;
+We were handing unique keys each time and thus creating a new instance of the function every single time. So the internal Map would just keep growing. This counts as a leak. &lt;br&gt;
+The 2 culprits were found in the below snapshots, note the first internal array is the “node_modules”, and removed from code.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--3Vv7HnaW--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/3ixz18cwiyyy6fgictdn.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--3Vv7HnaW--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/3ixz18cwiyyy6fgictdn.png" alt="Memoize 3"&gt;&lt;/a&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Q5yzwYrF--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/m8k7claq6sogo0867rdu.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Q5yzwYrF--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/m8k7claq6sogo0867rdu.png" alt="Memoize 2"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;There was also a 3rd instance of this which was actually worse than the others, so this was also removed.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--SbzFevuD--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/3i06x0a8p8hg5oscnsm0.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--SbzFevuD--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/3i06x0a8p8hg5oscnsm0.png" alt="Memoize 1"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Removing the memoize function fixed these particular problems. &lt;/p&gt;
+
+&lt;p&gt;However the overall problem on production remained and the boxes continued to leak memory in the same way. &lt;/p&gt;
+
+&lt;p&gt;At this point we felt it might be useful to get more insights to the leak on production.&lt;/p&gt;
+&lt;h2&gt;
+  &lt;a href="#plan-b-more-production-visibility"&gt;
+  &lt;/a&gt;
+  Plan B - More production visibility
+&lt;/h2&gt;
+
+&lt;p&gt;We decided there were 2 ways to gather production box information.&lt;/p&gt;
+&lt;h3&gt;
+  &lt;a href="#1-prometheus"&gt;
+  &lt;/a&gt;
+  1. Prometheus
+&lt;/h3&gt;
+
+&lt;p&gt;Add Prometheus to the box - it is fantastic at capturing all kinds of low level metrics and might prove insightful at helping us locate the source of the leak.&lt;br&gt;
+The idea is we add a /metrics endpoint for the app which exposes certain stats, and we can gather and display them on our Grafana.&lt;/p&gt;
+
+&lt;p&gt;This is an example of the /metrics output.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--QhXN1icm--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/d1r55pkqqv5vdfd60ios.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--QhXN1icm--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/d1r55pkqqv5vdfd60ios.png" alt="Prometheus"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;With the Koa library, the change looks something like this, using the popular library &lt;a href="https://www.npmjs.com/package/prom-client"&gt;prom-client&lt;/a&gt;. &lt;/p&gt;
+
+&lt;p&gt;Once this change was live we were able to analyse the results. &lt;br&gt;
+One of the most interesting metrics is called "NodeJS heap space size used". It lets you examine the performance of different memory spaces.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;metricsRouter&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;Router&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+
+&lt;span class="nx"&gt;metricsRouter&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="kd"&gt;get&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;/metrics&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;ctx&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="nx"&gt;ctx&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="kd"&gt;set&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Content-Type&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;register&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;contentType&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+  &lt;span class="nx"&gt;ctx&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;body&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;register&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;metrics&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+  &lt;span class="nx"&gt;ctx&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;status&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="mi"&gt;200&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;});&lt;/span&gt;
+
+&lt;span class="nx"&gt;router&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;use&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;metricsRouter&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;routes&lt;/span&gt;&lt;span class="p"&gt;());&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;What we found was that the "old space" is where the leak resides.&lt;/p&gt;
+
+&lt;p&gt;To demonstrate the difference in memory space here is the "new space" in a period of time.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--xxmNmgit--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/g6la4o23gnuyaxbgedz9.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--xxmNmgit--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/g6la4o23gnuyaxbgedz9.png" alt="Heap space"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;And here is the same period of time with the "old space". A clear leak.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--u2N1OLNq--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ed80n64bi97dh1nqgdwj.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--u2N1OLNq--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ed80n64bi97dh1nqgdwj.png" alt="Old space"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;What this suggests is that we have objects surviving being garbage collected, the top 2 reasons for this is that we have pointers to other objects still in memory or we have raw data being continually written to. Both those reasons are typically caused by bad code.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#2-heapdump"&gt;
+  &lt;/a&gt;
+  2. Heapdump
+&lt;/h3&gt;
+
+&lt;p&gt;Using the &lt;a href="https://www.npmjs.com/package/heapdump"&gt;heapdump&lt;/a&gt; package we can capture and download snapshots from production, put them into the Chrome memory profiler locally and try to locate the source of the leak. &lt;br&gt;
+The idea is that the real box memory would contain the real leak, whereas local attempts to replicate had mostly failed to be consistent.&lt;/p&gt;
+
+&lt;p&gt;There were 3 problems with this, most come from the fact we use AWS ECS Fargate on production distributing requests across multiple containers.&lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#problem-1"&gt;
+  &lt;/a&gt;
+  Problem #1
+&lt;/h4&gt;
+
+&lt;p&gt;We could not connect directly to a running box via terminal (ala a "docker exec" like command) as they are not exposed this way. Any "ECS" command is run in a new container and therefore would be useless at providing a memory snapshot we can use.&lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#problem-2"&gt;
+  &lt;/a&gt;
+  Problem #2
+&lt;/h4&gt;
+
+&lt;p&gt;Given "Problem #1" we knew we had to go with exposing a URL to download the snapshot. However we could not reliably hit the URL of the same box. The load balancer would keep moving us around boxes (we have not enabled sticky sessions) so we would take memory dumps of the different boxes which would prove useless once compared.&lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#problem-3"&gt;
+  &lt;/a&gt;
+  Problem #3
+&lt;/h4&gt;
+
+&lt;p&gt;Building a memory snapshot uses a heck of a lot of CPU and memory in itself. It is a very intensive task. So we had to make sure any URL that exposed this ability was behind some sort of authentication.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#solution"&gt;
+  &lt;/a&gt;
+  Solution
+&lt;/h3&gt;
+
+&lt;p&gt;We added a url to the website and added authentication via time sensitive 1-way hash to ensure nobody could hit the page without our permission.&lt;/p&gt;
+
+&lt;p&gt;The process to download the memory heap snapshot file was below.&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;
+&lt;p&gt;Generate a valid hash locally, its tied to the start of the hour (I have omitted the real value)&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;node -e "const moment = require('moment'); console.log(crypto.createHmac('sha256', 'secret-key').update(JSON.stringify({ date: moment.utc().startOf('hour').toISOString(), value: '[obfuscated]' })).digest('hex'));"&lt;/p&gt;
+&lt;/blockquote&gt;
+&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Hit website url with &lt;code&gt;/heapdump?hash=&amp;lt;hash&amp;gt;&lt;/code&gt; to download the file&lt;/p&gt;&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;The same hash code is run on the server and as long as they match the current memory snapshot is taken, this took care of Problem #1 and Problem #3.&lt;br&gt;
+The snapshot filename is the ECS task-id (more details on how to capture that in &lt;a href="https://docs.aws.amazon.com/AmazonECS/latest/userguide/task-metadata-endpoint-v4-fargate.html"&gt;AWS docs here&lt;/a&gt;), so hitting it a couple of times should get around Problem #2 and generate profiles from the same box.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#analyse-production-snapshots"&gt;
+  &lt;/a&gt;
+  Analyse production snapshots
+&lt;/h2&gt;
+
+&lt;p&gt;We followed the same process as with our local profiling i.e. hitting a box then waiting a couple of minutes to hit it again. Then comparing the memory allocated between them.&lt;br&gt;
+The 2 tasks profiled are shown in google dev-tools below.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--6o9j_e9s--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/v23q7k1p9zw7vqxth3bt.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--6o9j_e9s--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/v23q7k1p9zw7vqxth3bt.png" alt="Snap 1"&gt;&lt;/a&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s---2KcY-ey--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/oslhzhkwou6avty2yo0u.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s---2KcY-ey--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/oslhzhkwou6avty2yo0u.png" alt="Snap 2"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;The good news is that the snapshots highlight the clear signs of a leak. The memory always starts around 50mb, after 10-15 minutes has moved to 85mb then another 10-15 minutes later is 122mb. Generating the snapshot will incur a memory cost, but it should not be that much.&lt;br&gt;
+This is not something we were able to see locally.&lt;/p&gt;
+
+&lt;p&gt;By looking at the “objects allocated” between the snaps with the large gaps (see below)  we found that an internal array was increasing by 4-5% (note: the top item is the snapshot itself, it requires memory to generate the snapshot). &lt;br&gt;
+This applies to the &lt;strong&gt;retained memory&lt;/strong&gt;, which is important as it lets us know how much memory would be freed if this object was garbage collected. &lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--RytNlO1j--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/m8gu9k7bditeefthn112.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--RytNlO1j--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/m8gu9k7bditeefthn112.png" alt="Internal array issue"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;As each entry was from a different library we decided it was possibly a NodeJS issue, perhaps maps/arrays were not as optimised in v10 as in v14?&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#upgrading-nodejs"&gt;
+  &lt;/a&gt;
+  Upgrading NodeJS
+&lt;/h2&gt;
+
+&lt;p&gt;Upgrading the version of NodeJS that the website uses was fairly straightforward as we were not using any deprecated features from v10. We had to update the Docker image, CircleCI config and our local NVM config. All of which to the latest at the time, which was v14.16.&lt;/p&gt;
+
+&lt;p&gt;The results were immediate..instead of a continual steep incline up, the memory remained stable, see below.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--vjP26CKO--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/gffeqs9llctd4jrwhy7y.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--vjP26CKO--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/gffeqs9llctd4jrwhy7y.png" alt="Mem fixed"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;The old space in the heap, which was previously the root cause, was looking much better after the upgrade too.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--sgsx547H--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/my734o2af9o0l9j4ht8b.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--sgsx547H--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/my734o2af9o0l9j4ht8b.png" alt="Old space fixed"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;So that was it 🙌🏻 ! We profiled production, found the root cause, applied a fix and since that day the website's memory usage has been stable.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#lessons-learned"&gt;
+  &lt;/a&gt;
+  Lessons learned
+&lt;/h2&gt;
+
+&lt;p&gt;We learnt a lot through this journey, here we detail a couple of points:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;When dealing with a leak local profiling is a good place to start, but don’t pin all your hopes on finding the cause there&lt;/li&gt;
+&lt;li&gt;Use prometheus to locate the memory space of a memory leak&lt;/li&gt;
+&lt;li&gt;Compare memory heap dumps in google dev-tools to locate the source of the memory leak&lt;/li&gt;
+&lt;li&gt;If you are considering collecting production memory snapshot, be aware of what your infrastructure can or cannot do&lt;/li&gt;
+&lt;li&gt;Keep your dependencies up to date, if you don't eventually there will be a price to pay&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;We hope you enjoyed this post. &lt;br&gt;
+If you think you would be interested to work with the engineering department at Fiit check out our &lt;a href="https://fiit.tv/careers/"&gt;careers page here&lt;/a&gt; to see what's available.&lt;/p&gt;
+
+&lt;p&gt;Thanks&lt;/p&gt;
+
+</description>
+      <category>javascript</category>
+      <category>memoryleak</category>
+      <category>performance</category>
+      <category>webdev</category>
+    </item>
+    <item>
+      <title>One Simple Trick to Reduce Your Memory Usage in Python</title>
+      <author>Connor</author>
+      <pubDate>Thu, 20 May 2021 08:18:07 +0000</pubDate>
+      <link>https://dev.to/connormcshane/one-simple-way-to-reduce-your-memory-usage-in-python-cdp</link>
+      <guid>https://dev.to/connormcshane/one-simple-way-to-reduce-your-memory-usage-in-python-cdp</guid>
+      <description>&lt;h1&gt;
+  &lt;a href="#table-of-contents"&gt;
+  &lt;/a&gt;
+  Table of Contents
+&lt;/h1&gt;
+
+&lt;ol&gt;
+&lt;li&gt;&lt;a href="#Intro"&gt;Intro&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="#List%20Comprehension"&gt;List Comprehension&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="#Generator%20Comprehension"&gt;Generator Comprehension&lt;/a&gt;&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;h3&gt;
+  &lt;a href="#intro"&gt;
+  &lt;/a&gt;
+  Intro
+&lt;/h3&gt;
+
+&lt;p&gt;Python is ultimate "getting things done" language, where you can soo easily write code and not worry too much about performance and memory. However once your program becomes large, large memory usage can significantly slow down your program. One easy way to reduce memory usage and speed up your programs is to &lt;strong&gt;switch your list comprehensions into generator comprehensions&lt;/strong&gt;.&lt;/p&gt;
+
+&lt;p&gt;Lets explore this with a simple example program to sum up a range of numbers.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#list-comprehension"&gt;
+  &lt;/a&gt;
+  List Comprehension
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;strong&gt;Code:&lt;/strong&gt;&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="nn"&gt;sys&lt;/span&gt;
+&lt;span class="n"&gt;my_large_list&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;i&lt;/span&gt; &lt;span class="k"&gt;for&lt;/span&gt; &lt;span class="n"&gt;i&lt;/span&gt; &lt;span class="ow"&gt;in&lt;/span&gt; &lt;span class="nb"&gt;range&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;100000&lt;/span&gt;&lt;span class="p"&gt;)]&lt;/span&gt;
+&lt;span class="k"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nb"&gt;sum&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;my_large_list&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;
+&lt;span class="k"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="sa"&gt;f&lt;/span&gt;&lt;span class="s"&gt;"My list is &lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="n"&gt;sys&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;getsizeof&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;my_large_list&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="s"&gt; bytes"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;strong&gt;Output:&lt;/strong&gt;&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;4999950000
+My list is 824456 bytes
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#generator-comprehension"&gt;
+  &lt;/a&gt;
+  Generator Comprehension
+&lt;/h3&gt;
+
+&lt;p&gt;My code is often filled with a lot of list comprehensions, where instead we could use generators instead. Generators operate like lists, except they are evaluated "lazily", so the values are grabbed when needed.&lt;/p&gt;
+
+&lt;p&gt;All we need to do is use curly braces on all of our list comprehensions.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Code:&lt;/strong&gt;&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="nn"&gt;sys&lt;/span&gt;
+&lt;span class="n"&gt;my_large_generator_list&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;i&lt;/span&gt; &lt;span class="k"&gt;for&lt;/span&gt; &lt;span class="n"&gt;i&lt;/span&gt; &lt;span class="ow"&gt;in&lt;/span&gt; &lt;span class="nb"&gt;range&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;100000&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;
+&lt;span class="k"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nb"&gt;sum&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;my_large_list&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;
+&lt;span class="k"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="sa"&gt;f&lt;/span&gt;&lt;span class="s"&gt;"My generator is &lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="n"&gt;sys&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;getsizeof&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;my_large_generator_list&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="s"&gt; bytes"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;strong&gt;Output:&lt;/strong&gt;&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;4999950000
+My list is 112 bytes
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;As we can see both give the same result, however the generator only uses a fraction of the memory (112 bytes instead of 824456). When you have hundreds of lists floating in your code, switching them to generators is an easy way to save on memory and increase your program's speed :).&lt;/p&gt;
+
+</description>
+      <category>python</category>
+      <category>beginners</category>
+    </item>
+    <item>
       <title>Solution: Binary Tree Level Order Traversal</title>
       <author>seanpgallivan</author>
       <pubDate>Thu, 20 May 2021 07:58:22 +0000</pubDate>
@@ -297,6 +666,263 @@
       <category>javascript</category>
       <category>java</category>
       <category>python</category>
+    </item>
+    <item>
+      <title>AWS Services must for Front-end developers - Part 1</title>
+      <author>Neha Sharma </author>
+      <pubDate>Thu, 20 May 2021 07:52:07 +0000</pubDate>
+      <link>https://dev.to/hellonehha/aws-services-must-for-front-end-developers-part-1-5g0d</link>
+      <guid>https://dev.to/hellonehha/aws-services-must-for-front-end-developers-part-1-5g0d</guid>
+      <description>&lt;p&gt;If you are a front-end developer and confuse about which service from AWS to learn and how it will help in your front-end career then this blog is for you.&lt;/p&gt;
+
+&lt;p&gt;Before you jump into the services a few important things you need to do or should aware of how to login to AWS, Billing, console, and SDKs. If you are aware of these then please jump directly to the content.&lt;/p&gt;
+
+&lt;h5&gt;
+  &lt;a href="#1-aws-account"&gt;
+  &lt;/a&gt;
+  1. &lt;a href="https://signin.aws.amazon.com/signin"&gt;AWS Account&lt;/a&gt;
+&lt;/h5&gt;
+
+&lt;p&gt;Creating an AWS account is free of cost but you need a credit card to link to your account. There are many free-service AWS provides as well as Free-tier is also provided.&lt;/p&gt;
+
+&lt;p&gt;1st step to start with AWS is to create your account. All it requires your email ID. &lt;/p&gt;
+
+&lt;p&gt;When you have an account you can access the AWS services by using the console (browser-based interactive dashboard), APIs, and SDKs.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--5xXhZUuv--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/33oc3whf1bzx2barw3ly.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--5xXhZUuv--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/33oc3whf1bzx2barw3ly.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h5&gt;
+  &lt;a href="#2-billing"&gt;
+  &lt;/a&gt;
+  2. &lt;a href="https://console.aws.amazon.com/billing/home"&gt;Billing&lt;/a&gt;
+&lt;/h5&gt;
+
+&lt;p&gt;Once you have created your AWS account and started using the AWS service the next important step is to check the billing service. &lt;/p&gt;
+
+&lt;p&gt;It is very common as a beginner you will end up billed for service you forgot to disable. Hence, the first task is to set the billing alert, and then the next step is to check billing to get insights into what is happening and where. &lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--NfjSQZQQ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/lnwnqvv1xdu0di7a0i8c.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--NfjSQZQQ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/lnwnqvv1xdu0di7a0i8c.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h5&gt;
+  &lt;a href="#3-aws-console"&gt;
+  &lt;/a&gt;
+  3. &lt;a href="https://console.aws.amazon.com/"&gt;AWS Console&lt;/a&gt;
+&lt;/h5&gt;
+
+&lt;p&gt;Once you logged into your account you will access the services from the AWS console. This is the browser-based console to easily access the AWS service.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--EK86T1EU--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/p8cc9aw7yi3hffoq6hef.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--EK86T1EU--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/p8cc9aw7yi3hffoq6hef.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h5&gt;
+  &lt;a href="#4-aws-sdk"&gt;
+  &lt;/a&gt;
+  4. &lt;a href="https://aws.amazon.com/tools/"&gt;AWS SDK&lt;/a&gt;
+&lt;/h5&gt;
+
+&lt;p&gt;As a developer, it would be common to use the AWS SDKs in your UI code to connect UI to the AWS. &lt;/p&gt;
+
+&lt;p&gt;Eg: to store user uploaded image to the S3. In such cases, we will use AWS SDKs.&lt;/p&gt;
+
+
+
+
+&lt;blockquote&gt;
+&lt;blockquote&gt;
+&lt;p&gt;For this blog I will access the services from the AWS console.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+
+&lt;/blockquote&gt;
+
+
+
+
+&lt;h3&gt;
+  &lt;a href="#1-s3"&gt;
+  &lt;/a&gt;
+  1. &lt;a href="https://s3.console.aws.amazon.com/s3"&gt;S3&lt;/a&gt;
+&lt;/h3&gt;
+
+&lt;p&gt;S3 stands for &lt;em&gt;Simple Storage service&lt;/em&gt;. This is an ideal service to host static content (eg, images), website, snapshot (backup). It is serverless storage.&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;blockquote&gt;
+&lt;p&gt;Static vs Dynamic website?&lt;/p&gt;
+&lt;/blockquote&gt;
+
+
+&lt;/blockquote&gt;
+
+&lt;p&gt;The difference between the static and dynamic website is in dynamic websites the code executes at the server not just at the client side. &lt;/p&gt;
+
+&lt;p&gt;Eg: Websites made on ReactJS mostly are static websites. Whereas if we create applications by using NextJS it would be dynamic. Reason: SPA all the execution happened at the client (browser) whereas NextJS will require the server to execute the code and send the response to the client (browser).&lt;/p&gt;
+
+&lt;p&gt;For the front-end developer, this is the first AWS service you can start easily. All you need to do is create an AWS Account to access the S3 service. &lt;/p&gt;
+
+&lt;p&gt;You can use the S3 from AWS Console, APIs, SDKs.To host any application you need to:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://youtu.be/KjKoHDppKU8"&gt;S3 Demo - Create your first Bucket&lt;/a&gt;&lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#cost"&gt;
+  &lt;/a&gt;
+  Cost
+&lt;/h4&gt;
+
+&lt;p&gt;Buckets are paid service. It charges you for both storage and retrieval. However, you can get some storage FREE under the free tier. &lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#best-practices"&gt;
+  &lt;/a&gt;
+  Best Practices
+&lt;/h4&gt;
+
+&lt;p&gt;1) The Bucket name should be unique&lt;/p&gt;
+
+&lt;p&gt;2) Control the access of the bucket by the Policy&lt;/p&gt;
+
+&lt;p&gt;3) Keep the versioning disable unless it is required.&lt;/p&gt;
+
+&lt;p&gt;4) Versioning is paid service&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#2-route53"&gt;
+  &lt;/a&gt;
+  2. &lt;a href="https://console.aws.amazon.com/route53/"&gt;Route53&lt;/a&gt;
+&lt;/h3&gt;
+
+&lt;p&gt;The next service is Route53. Once you have uploaded your website/app on AWS (S3 or EC2) we need to map our domain to our bucket or EC2.&lt;/p&gt;
+
+&lt;p&gt;AWS provides Route53 service which is a Domain name Service to map our domain to the AWS EC2 or S3 Bucket. This will helps in accessing our web content through the domain. &lt;/p&gt;
+
+&lt;p&gt;I have my domain &lt;a href="https://a11ytips.dev"&gt;a11ytips.dev&lt;/a&gt; from Google and mapped it to AWS through Route53.&lt;/p&gt;
+
+&lt;p&gt;All we need to map our Namespace from the domain vendor to Route53.&lt;/p&gt;
+
+&lt;p&gt;PS: After uploading your website on S3 you need to set the CloudFront, ACM, and Route53. We will learn about CloudFront and ACM in the next blog&lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#cost"&gt;
+  &lt;/a&gt;
+  Cost:
+&lt;/h4&gt;
+
+&lt;p&gt;This is a paid service but at a very nominal price. For now, I am paying USD 2.5/month (INR 183/month) for using Route 53&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#3-ec2"&gt;
+  &lt;/a&gt;
+  3. &lt;a href="https://console.aws.amazon.com/ec2"&gt;EC2&lt;/a&gt;
+&lt;/h3&gt;
+
+&lt;p&gt;For hosting static web apps or storing static content S3 is the service to use. What about dynamic websites? Eg: Where your NextJS apps will go? or NodeJS based applications? For such use cases, we have EC2. &lt;/p&gt;
+
+&lt;p&gt;EC2 is very useful when you need servers of different OS, applications that require high availability, or running all the time.&lt;/p&gt;
+
+&lt;p&gt;PS: EC2 is an easy way to get your billing clock running. So, if you are creating EC2 do delete it. Otherwise, you will end up paying for it.&lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#cost"&gt;
+  &lt;/a&gt;
+  Cost:
+&lt;/h4&gt;
+
+&lt;p&gt;EC2 you need to pay for the idle time too.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#4-lambda"&gt;
+  &lt;/a&gt;
+  4. &lt;a href="https://console.aws.amazon.com/lambda/"&gt;Lambda&lt;/a&gt;
+&lt;/h3&gt;
+
+&lt;p&gt;Lambda is I would say is the best friend of every front developer. Lambda is a service where you can put your code (which needs to do some task on an event eg: sending notifications on the availability of a product to the consumers, upload pictures in S3 on submit of a form, or many such use-cases).&lt;/p&gt;
+
+&lt;p&gt;Lambda is cost-effective, easy-to-use service for front-end developers. It is a computed service that is serverless and you will pay only when the lambda function (code) will execute. It could be in milliseconds too. &lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://youtu.be/PxlDH1zc3n4"&gt;Lambda Function Demo - Video Demo&lt;/a&gt;&lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#cost"&gt;
+  &lt;/a&gt;
+  Cost
+&lt;/h4&gt;
+
+&lt;p&gt;The cost of Lambda is lower as compare to EC2. We pay only for the time the lambda function is executing.&lt;/p&gt;
+
+
+
+
+&lt;h3&gt;
+  &lt;a href="#bonus-lambda-vs-ec2"&gt;
+  &lt;/a&gt;
+  Bonus: Lambda VS EC2
+&lt;/h3&gt;
+
+&lt;div class="table-wrapper-paragraph"&gt;&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;Area&lt;/th&gt;
+&lt;th&gt;Lambda&lt;/th&gt;
+&lt;th&gt;EC2&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;Server&lt;/td&gt;
+&lt;td&gt;Serverless&lt;/td&gt;
+&lt;td&gt;Serverful&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;Time&lt;/td&gt;
+&lt;td&gt;Ideal for tasks requires less time&lt;/td&gt;
+&lt;td&gt;Tasks requires a lot of time &amp;gt; 15mins&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;Idle time&lt;/td&gt;
+&lt;td&gt;Not charged for idle time&lt;/td&gt;
+&lt;td&gt;Charged for the idle time too&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;Infra&lt;/td&gt;
+&lt;td&gt;No need to think about infra&lt;/td&gt;
+&lt;td&gt;Infra setup is required&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;Cost&lt;/td&gt;
+&lt;td&gt;Less expensive compare to EC2&lt;/td&gt;
+&lt;td&gt;We get charge for idle time too&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;Trigger&lt;/td&gt;
+&lt;td&gt;Event-driven&lt;/td&gt;
+&lt;td&gt;It will keep running&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;HTTP response&lt;/td&gt;
+&lt;td&gt;In Some cases, additional cold start time to response back to HTTP request&lt;/td&gt;
+&lt;td&gt;No cold start is required&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;Languages Support&lt;/td&gt;
+&lt;td&gt;Only 8 languages support&lt;/td&gt;
+&lt;td&gt;open for any languages&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;&lt;/div&gt;
+
+
+
+
+&lt;p&gt;In the next blog, we will learn more services for the front developers. &lt;/p&gt;
+
+&lt;p&gt;Happy Learning!! &lt;/p&gt;
+
+&lt;p&gt;Follow me at &lt;a href="https://twitter.com/hellonehha"&gt;Twitter&lt;/a&gt;, &lt;a href="https://www.linkedin.com/in/nehha/"&gt;Linkedin&lt;/a&gt;&lt;/p&gt;
+
+</description>
+      <category>aws</category>
+      <category>cloudskills</category>
+      <category>webdev</category>
     </item>
     <item>
       <title>Scared about moving from Redux to Recoil? Use ReduxBridge!</title>
@@ -616,6 +1242,55 @@ If you land on an IAM user window somehow select the option below&lt;/li&gt;
       <category>webdev</category>
       <category>programming</category>
       <category>beginners</category>
+    </item>
+    <item>
+      <title>New Tailwind CSS blocks on Wickedblocks ( is 100% free ) a total of 72
+</title>
+      <author>michael-andreuzza</author>
+      <pubDate>Thu, 20 May 2021 06:25:05 +0000</pubDate>
+      <link>https://dev.to/michaelandreuzza/new-tailwind-css-blocks-on-wickedblocks-is-100-free-a-total-of-72-348b</link>
+      <guid>https://dev.to/michaelandreuzza/new-tailwind-css-blocks-on-wickedblocks-is-100-free-a-total-of-72-348b</guid>
+      <description>&lt;p&gt;Hello everyone!&lt;/p&gt;
+
+&lt;p&gt;I have been updating &lt;a href="http://www.wickedblocks.dev"&gt;www.wickedblocks.dev&lt;/a&gt; because, well it was time&lt;/p&gt;
+
+&lt;p&gt;So, what's new?&lt;/p&gt;
+
+&lt;p&gt;I removed classes that I was using for myself ( how dumb of to use them for the blocks, right? )&lt;/p&gt;
+
+&lt;p&gt;I redesigned these ones:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;navigation&lt;/li&gt;
+&lt;li&gt;bars -&lt;/li&gt;
+&lt;li&gt;footers&lt;/li&gt;
+&lt;li&gt;auth&lt;/li&gt;
+&lt;li&gt;forms&lt;/li&gt;
+&lt;li&gt;pricing&lt;/li&gt;
+&lt;li&gt;footers&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;then I have added new components, sections and blocks.&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;sidebars&lt;/li&gt;
+&lt;li&gt;cards&lt;/li&gt;
+&lt;li&gt;alerts&lt;/li&gt;
+&lt;li&gt;stats&lt;/li&gt;
+&lt;li&gt;content&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;I will be adding more as mentioned.&lt;/p&gt;
+
+&lt;p&gt;Have a great day everyone and if you guys have any question just ask me here or twitter @ Mike_Andreuzza&lt;/p&gt;
+
+&lt;p&gt;/mike&lt;/p&gt;
+
+</description>
+      <category>tailwindcss</category>
+      <category>uiweekly</category>
+      <category>html</category>
+      <category>css</category>
     </item>
     <item>
       <title>Testeando una Spring Boot App dockerizada</title>
@@ -2303,542 +2978,6 @@ Thank you so much for reading this article and do let me know your thoughts in c
       <category>linux</category>
       <category>productivity</category>
       <category>bash</category>
-    </item>
-    <item>
-      <title>How to Learn to Code</title>
-      <author>Hemanth Varma</author>
-      <pubDate>Thu, 20 May 2021 05:48:30 +0000</pubDate>
-      <link>https://dev.to/killingclown007/how-to-learn-to-code-429m</link>
-      <guid>https://dev.to/killingclown007/how-to-learn-to-code-429m</guid>
-      <description>&lt;p&gt;Software development is an incredibly rewarding skill that can be extremely valuable. It’s remote-work friendly, and no matter where you live in the world, if you get good enough, you can qualify for great paying work ranging from $100k/year — $200k+/year (USD). Some of the highest-paid JavaScript developers make close to $500k/year. But to qualify for those great salaries, you have to get undeniably good at what you do.&lt;br&gt;
-Even if you’re already a professional software developer, you need to learn how to learn to code. Choosing a career in software development is choosing a path of lifelong learning.&lt;br&gt;
-In my role as a mentor I’ve had a peek into the learning process of hundreds of developers. What shocked me most is how much faster some learn than others. Some with little or no coding background learn new concepts more than 10 times faster than others who may have 10+ year’s experience in the craft. The secret is, you can, too.&lt;br&gt;
-There are a handful of learning secrets that can put you on a rocket to mastery of the craft.&lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;Code
-The best way to learn to code is to code. Jump into a development environment, and write some code. If you’re reading a book or blog post and you encounter a code example, type it out in a code editor and try to make it work. Once you get it working, play with it. Change things up. Try to think of other ways to apply it, or other things you can do with the same technique. Play with the code.
-Book smarts will only get you so far. The best learning will come from doing.&lt;/li&gt;
-&lt;li&gt;Drive
-The best way to get great at something is to do it. A lot. You need to be motivated and determined to learn. One way to get motivated is to give yourself the time and patience to gain some mastery. You don’t need to be an expert right away. It’s like learning a musical instrument. You can’t sit down at a piano and immediately be the next Debussy, but you can master the C major scale in your first sitting.
-Likewise, you’re not going to sit down and immediately crank out the next Instagram, TikTok or Fortnite.
-As you begin to master each small lesson, you’ll realize you can do this. You can get good at this. You can start to see your goal begin to materialize, and you’ll be more motivated to drive toward that goal.
-Keep at it.&lt;/li&gt;
-&lt;li&gt;Focus
-I’ve seen a lot of developers try to master everything all at once and get nowhere, fast. Their progress slows to an excruciatingly glacial crawl rather than a gold medal sprint.
-If you want to learn something quickly, you can’t have your attention scattered everywhere except where you need it. Pick one language (start with JavaScript), one framework (start with React), one book, one course, one topic, etc. Whatever you pick, focus on that one thing until you have a sufficient mastery of it before you move on to something else.
-I tell people all the time, concentrate on one language full time for at least a year before you branch out and learn another language. Decades ago, it used to be that a typical software developer would actually need to learn many languages in the course of their career to stay competitive in the field.
-While it’s still true that learning more than one language can teach you different ways of seeing things, and even deepen your understanding of your primary language, these days a single language (JavaScript) can get you through the majority of your career.
-Tip from a hiring manager: The skills you specialize in are your most valuable skills. If you commit to being a lifelong generalist bouncing from language to language, you’ll put an artificial ceiling on your mastery and earning potential.&lt;/li&gt;
-&lt;li&gt;Read
-Many of the most useful insights available to software developers come from books. There are lots of good YouTube videos and courses online, but books are the standard bearers of software development culture and knowledge. In particular, I’ve found the following books extremely valuable:
-Eloquent JavaScript
-Composing Software (Disclaimer: I wrote this one. The printed version is available on Amazon.)
-Code Complete: 2nd Edition
-Clean Code: A Handbook for Agile Software Craftsmanship
-Test Driven Development By Example
-Refactoring: Improving the Design of Existing Code 2nd Edition&lt;/li&gt;
-&lt;li&gt;Review
-If you want to move a new concept from a familiar-sounding idea into long-term memory, reviewing a topic is your friend. The mistake most learners make is that they quickly read a book or a blog post, and then promptly forget what they read the next day. If you read something interesting that you want to remember, review it the next day. Test yourself. Then test yourself again the day after. And the day after. Do that 4 days in a row, and your chances of committing the learning to long-term memory increase dramatically.&lt;/li&gt;
-&lt;li&gt;Mix Mediums
-Some people learn best by reading, others by watching videos, but if you mix it up — watch a video, then do some reading, then practice with some interactive code sessions, you’ll repeat the concepts from multiple angles, and multiple examples. You’ll naturally drill some review, and get some practice in while you’re at it.&lt;/li&gt;
-&lt;li&gt;Build Projects
-Learning the concept doesn’t mean you’ll know how to use it in a real app. Once you’ve been coding with exercises for a few weeks, it’ll be time to build something of your own. Need an idea? Instead of the ubiquitous todo app, try implementing The Rejection App.&lt;/li&gt;
-&lt;li&gt;Value Principles Over Frameworks and Languages
-Frameworks and APIs change fast. Software design principles are evergreen. Learn principles that translate across language barriers.
-Examples:
-“A small change in requirements should lead to only a small change in implementation.” (Paraphrased from “A Practical Handbook for Software Development”)
-Do One Thing (DOT) — Simplified from Doug McIlroy’s “Do One Thing and Do It Well (DOTADIW)” — a function should have one job. It should not fetch data AND process data AND draw to the screen. It should only fetch data. Or only process data. Or only draw to the screen. (Time to split your React components into smaller parts!)
-“Program to an interface, not an implementation.” — Gang of Four, “Design Patterns”
-“Favor object composition over class inheritance.” — Gang of Four, “Design Patterns”
-Avoid shared mutable state.
-“Premature optimization is the root of all evil.” ~ Donald Knuth
-“You Aren’t Gonna Need It (YAGNI)” — Don’t write code for something that isn’t actually required, yet.&lt;/li&gt;
-&lt;li&gt;Share, Document, and Mentor
-“Dr. Hoenikker used to say that any scientist who couldn’t explain to an eight-year-old what he was doing was a charlatan.” ~ Kurt Vonnegut — Cat’s Cradle
-Learning how to code is just part of the equation. When you’re collaborating with other developers, your code will be reviewed by other people, and they will sometimes challenge your choices. As you try to explain yourself, you may find that you didn’t understand well enough to defend your position. Practice explaining, documenting, and teaching the concepts to your coworkers and other collaborators on your projects.&lt;/li&gt;
-&lt;li&gt;Practice, practice, practice!
-Anybody who’s ever learned an acquired skill can attest, practice is key. But to get better you can’t just practice the concepts you already know. You need to challenge yourself and extend beyond the realm of what is familiar. If you constantly practice at the edge of your current abilities, you will excel.
-The book, “Peak: The New Science of Expertise” delves into the study of deliberate practice and offers a wealth of insights that you can apply in your daily life to get better at practice. I strongly recommend reading it so that you can make your practice time and side-projects more productive.&lt;/li&gt;
-&lt;/ol&gt;
-
-</description>
-      <category>codenewbie</category>
-    </item>
-    <item>
-      <title>Spring Boot + Oracle example: Build a CRUD app</title>
-      <author>Tien Nguyen</author>
-      <pubDate>Thu, 20 May 2021 05:02:30 +0000</pubDate>
-      <link>https://dev.to/tienbku/spring-boot-oracle-example-build-a-crud-app-5g6a</link>
-      <guid>https://dev.to/tienbku/spring-boot-oracle-example-build-a-crud-app-5g6a</guid>
-      <description>&lt;p&gt;In this tutorial, we're gonna build a Spring Boot and Oracle example with database connection that uses Hibernate, Spring Data JPA to make CRUD Operations. You'll know:&lt;/p&gt;
-
-&lt;ul&gt;
-        &lt;li&gt;How to configure Spring Data, JPA, Hibernate to work with Oracle Database&lt;/li&gt;
-        &lt;li&gt;How to define Data Models and Repository interfaces&lt;/li&gt;
-    &lt;li&gt;Way to create Spring Rest Controller to process HTTP requests&lt;/li&gt;
-    &lt;li&gt;Way to use Spring Data JPA to interact with Oracle Database&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;Full Article at: &lt;a href="https://bezkoder.com/spring-boot-hibernate-oracle/"&gt;https://bezkoder.com/spring-boot-hibernate-oracle/&lt;/a&gt;&lt;/p&gt;
-
-&lt;h2&gt;Overview of Spring Boot and Oracle example&lt;/h2&gt;
-
-&lt;p&gt;We will build a Spring Boot + Hibernate + Oracle example that exports Rest CRUD API for a Tutorial application:&lt;/p&gt;
-
-&lt;ul&gt;
-    &lt;li&gt;Each Tutotial has id, title, description, published status.&lt;/li&gt;
-    &lt;li&gt;Apis help to create, retrieve, update, delete Tutorials.&lt;/li&gt;
-    &lt;li&gt;Apis also support custom finder methods such as find by published status or by title.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;These are APIs that we need to provide:&lt;/p&gt;
-
-&lt;div class="table-wrapper-paragraph"&gt;&lt;table&gt;
-&lt;thead&gt;
-&lt;tr&gt;
-&lt;th&gt;Methods&lt;/th&gt;
-&lt;th&gt;Urls&lt;/th&gt;
-&lt;th&gt;Actions&lt;/th&gt;
-&lt;/tr&gt;
-&lt;/thead&gt;
-&lt;tbody&gt;
-&lt;tr&gt;
-&lt;td&gt;POST&lt;/td&gt;
-&lt;td&gt;/api/tutorials&lt;/td&gt;
-&lt;td&gt;create new Tutorial&lt;/td&gt;
-&lt;/tr&gt;
-&lt;tr&gt;
-&lt;td&gt;GET&lt;/td&gt;
-&lt;td&gt;/api/tutorials&lt;/td&gt;
-&lt;td&gt;retrieve all Tutorials&lt;/td&gt;
-&lt;/tr&gt;
-&lt;tr&gt;
-&lt;td&gt;GET&lt;/td&gt;
-&lt;td&gt;/api/tutorials/:id&lt;/td&gt;
-&lt;td&gt;retrieve a Tutorial by &lt;code&gt;:id&lt;/code&gt;
-&lt;/td&gt;
-&lt;/tr&gt;
-&lt;tr&gt;
-&lt;td&gt;PUT&lt;/td&gt;
-&lt;td&gt;/api/tutorials/:id&lt;/td&gt;
-&lt;td&gt;update a Tutorial by &lt;code&gt;:id&lt;/code&gt;
-&lt;/td&gt;
-&lt;/tr&gt;
-&lt;tr&gt;
-&lt;td&gt;DELETE&lt;/td&gt;
-&lt;td&gt;/api/tutorials/:id&lt;/td&gt;
-&lt;td&gt;delete a Tutorial by &lt;code&gt;:id&lt;/code&gt;
-&lt;/td&gt;
-&lt;/tr&gt;
-&lt;tr&gt;
-&lt;td&gt;DELETE&lt;/td&gt;
-&lt;td&gt;/api/tutorials&lt;/td&gt;
-&lt;td&gt;delete all Tutorials&lt;/td&gt;
-&lt;/tr&gt;
-&lt;tr&gt;
-&lt;td&gt;GET&lt;/td&gt;
-&lt;td&gt;/api/tutorials/published&lt;/td&gt;
-&lt;td&gt;find all published Tutorials&lt;/td&gt;
-&lt;/tr&gt;
-&lt;tr&gt;
-&lt;td&gt;GET&lt;/td&gt;
-&lt;td&gt;/api/tutorials?title=[keyword]&lt;/td&gt;
-&lt;td&gt;find all Tutorials which title contains &lt;code&gt;keyword&lt;/code&gt;
-&lt;/td&gt;
-&lt;/tr&gt;
-&lt;/tbody&gt;
-&lt;/table&gt;&lt;/div&gt;
-
-&lt;ul&gt;
-&lt;li&gt;We make CRUD operations &amp;amp; finder methods with Hibernate and Spring Data JPA's &lt;code&gt;JpaRepository&lt;/code&gt;.&lt;/li&gt;
-&lt;li&gt;The database will be Oracle 12c/19c by configuring project dependency &amp;amp; datasource.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;When you run the Spring Boot + Oracle example, &lt;strong&gt;&lt;em&gt;tutorials&lt;/em&gt;&lt;/strong&gt; table will be automatically generated in Oracle Database.&lt;br&gt;
-You can see things like this:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--mP3-vvci--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/kzo9ywb1skwmid4ldh75.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--mP3-vvci--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/kzo9ywb1skwmid4ldh75.png" alt="spring-boot-oracle-example-database-table"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Create some Tutorials:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--q5lgNesy--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/dffyo2kup4hlmk9c10vw.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--q5lgNesy--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/dffyo2kup4hlmk9c10vw.png" alt="spring-boot-oracle-example-crud-create-tutorial"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Check Oracle database after create operation:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--F-SCknk_--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/cxujs4st4h79uuhxg8mw.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--F-SCknk_--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/cxujs4st4h79uuhxg8mw.png" alt="spring-boot-oracle-example-crud-database-create-tutorial"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Update some Tutorials:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--eVZU3gSX--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/puf1ewdah5y7mxm11is7.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--eVZU3gSX--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/puf1ewdah5y7mxm11is7.png" alt="spring-boot-oracle-example-crud-update-tutorial"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Check Oracle database after update operation:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--BsfPLhV7--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/jtevrg87d05ybgikfqmi.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--BsfPLhV7--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/jtevrg87d05ybgikfqmi.png" alt="spring-boot-oracle-example-crud-database-update-tutorial"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Get all Tutorials:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--BSlZVJMK--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/zk30sr91owi2pedviany.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--BSlZVJMK--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/zk30sr91owi2pedviany.png" alt="spring-boot-oracle-example-crud-retrieve-tutorial"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Get a Tutorial by Id:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--RrCQEwJQ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/cunnf1n4fq2b2uko94fs.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--RrCQEwJQ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/cunnf1n4fq2b2uko94fs.png" alt="spring-boot-oracle-example-crud-retrieve-one-tutorial"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Find all &lt;em&gt;&lt;strong&gt;published&lt;/strong&gt;&lt;/em&gt; Tutorials:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--TSXSAIiK--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/02m6atkpezs5iogy8yb6.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--TSXSAIiK--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/02m6atkpezs5iogy8yb6.png" alt="spring-boot-oracle-example-crud-search-tutorial-active"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Find all Tutorials which title contains 'ring':&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--1niONinP--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/wk53i5zzydc7bwy55k2c.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--1niONinP--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/wk53i5zzydc7bwy55k2c.png" alt="spring-boot-oracle-example-crud-search-tutorial-title"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Delete a Tutorial:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--0MsFgd86--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/flj0ngtwev2xt2o7d0b1.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--0MsFgd86--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/flj0ngtwev2xt2o7d0b1.png" alt="spring-boot-oracle-example-crud-delete-tutorial"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Check Oracle database after delete Operation:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--fz93eEXt--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/8ucpsnnoxkajn8ewcftk.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--fz93eEXt--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/8ucpsnnoxkajn8ewcftk.png" alt="spring-boot-oracle-example-crud-database-delete-tutorial"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Delete all Tutorials:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--YOJsF0Fl--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/8w1pzjrxfkql003y5kyj.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--YOJsF0Fl--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/8w1pzjrxfkql003y5kyj.png" alt="spring-boot-oracle-example-crud-delete-all-tutorial"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Now the table has no record:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Lrr_YQSq--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/3fjnpupux06xnuze8lgr.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Lrr_YQSq--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/3fjnpupux06xnuze8lgr.png" alt="spring-boot-oracle-example-crud-database-delete-all-tutorial"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;h2&gt;Technology&lt;/h2&gt;
-
-&lt;ul&gt;
-        &lt;li&gt;Java 8&lt;/li&gt;
-        &lt;li&gt;Spring Boot 2 (with Spring Web MVC, Spring Data JPA)&lt;/li&gt;
-        &lt;li&gt;Oracle 12c or 19c&lt;/li&gt;
-        &lt;li&gt;Maven 3.6.1&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h2&gt;Project Structure&lt;/h2&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--OhE1Pbhr--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ygmbkwywj36jxgi070p6.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--OhE1Pbhr--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ygmbkwywj36jxgi070p6.png" alt="spring-boot-oracle-example-project-structure"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Let me explain it briefly.&lt;/p&gt;
-
-&lt;p&gt;– &lt;code&gt;Tutorial&lt;/code&gt; data model class corresponds to entity and table &lt;em&gt;tutorials&lt;/em&gt;.&lt;br&gt;
-– &lt;code&gt;TutorialRepository&lt;/code&gt; is an interface that extends &lt;a href="https://docs.spring.io/spring-data/jpa/docs/current/api/org/springframework/data/jpa/repository/JpaRepository.html"&gt;JpaRepository&lt;/a&gt; for CRUD methods and custom finder methods. It will be autowired in &lt;code&gt;TutorialController&lt;/code&gt;.&lt;br&gt;
-– &lt;code&gt;TutorialController&lt;/code&gt; is a &lt;a href="https://docs.spring.io/spring/docs/current/javadoc-api/org/springframework/web/bind/annotation/RestController.html"&gt;RestController&lt;/a&gt; which has request mapping methods for RESTful requests such as: &lt;em&gt;getAllTutorials&lt;/em&gt;, &lt;em&gt;createTutorial&lt;/em&gt;, &lt;em&gt;updateTutorial&lt;/em&gt;, &lt;em&gt;deleteTutorial&lt;/em&gt;, &lt;em&gt;findByPublished&lt;/em&gt;...&lt;br&gt;
-– Configuration for Spring Datasource, JPA &amp;amp; Hibernate in &lt;strong&gt;application.properties&lt;/strong&gt;.&lt;br&gt;
-– &lt;strong&gt;pom.xml&lt;/strong&gt; contains dependencies for Spring Boot and Oracle.&lt;/p&gt;
-
-&lt;p&gt;For step by step and Github, please visit:&lt;br&gt;
-&lt;a href="https://bezkoder.com/spring-boot-hibernate-oracle/"&gt;https://bezkoder.com/spring-boot-hibernate-oracle/&lt;/a&gt;&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#further-reading"&gt;
-  &lt;/a&gt;
-  Further Reading
-&lt;/h2&gt;
-
-&lt;p&gt;If you want to add Pagination to this Spring project, you can find the instruction at:&lt;br&gt;
-&lt;a href="https://bezkoder.com/spring-boot-pagination-filter-jpa-pageable/"&gt;Spring Boot Pagination &amp;amp; Filter example | Spring JPA, Pageable&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;To sort/order by multiple fields:&lt;br&gt;
-&lt;a href="https://bezkoder.com/spring-data-sort-multiple-columns/"&gt;Spring Data JPA Sort/Order by multiple Columns | Spring Boot&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Handle Exception for this Rest APIs is necessary:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;&lt;a href="https://bezkoder.com/spring-boot-controlleradvice-exceptionhandler/"&gt;Spring Boot @ControllerAdvice &amp;amp; @ExceptionHandler example&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://bezkoder.com/spring-boot-restcontrolleradvice/"&gt;@RestControllerAdvice example in Spring Boot&lt;/a&gt;&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;Or way to write Unit Test for the JPA Repository:&lt;br&gt;
-&lt;a href="https://bezkoder.com/spring-boot-unit-test-jpa-repo-datajpatest/"&gt;Spring Boot Unit Test for JPA Repositiory with @DataJpaTest&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;More Practice:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;&lt;a href="https://bezkoder.com/spring-boot-rest-xml/"&gt;Spring Boot Rest XML example – Web service with XML Response&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://bezkoder.com/spring-boot-file-upload/"&gt;Spring Boot Multipart File upload example&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://bezkoder.com/spring-boot-pagination-sorting-example/"&gt;Spring Boot Pagination and Sorting example&lt;/a&gt;&lt;/li&gt;
-&lt;/ul&gt;
-
-</description>
-      <category>spring</category>
-      <category>oracle</category>
-      <category>java</category>
-      <category>webdev</category>
-    </item>
-    <item>
-      <title>Node.js : Determining the line count of a text file</title>
-      <author>Rajesh Kumar Yadav</author>
-      <pubDate>Thu, 20 May 2021 04:19:29 +0000</pubDate>
-      <link>https://dev.to/rajeshkumaryadavdotcom/node-js-determining-the-line-count-of-a-text-file-195l</link>
-      <guid>https://dev.to/rajeshkumaryadavdotcom/node-js-determining-the-line-count-of-a-text-file-195l</guid>
-      <description>&lt;p&gt;Create a new file as app.js and paste below code -&lt;/p&gt;
-
-&lt;p&gt;app.js&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;const readline = require('readline');
-const fs = require('fs');
-var file = 'path.to.file';
-var linesCount = 0;
-var rl = readline.createInterface({
- input: fs.createReadStream(file),
- output: process.stdout,
- terminal: false
-});
-rl.on('line', function (line) {
- linesCount++; // on each linebreak, add +1 to 'linesCount'
-});
-rl.on('close', function () {
- console.log(linesCount); // print the result when the 'close' event is called
-});
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Run below command -&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;node app.js
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;You will get the line count of text file.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://www.buymeacoffee.com/rkycom"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Rb9xKs4G--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;With all that being said, I highly recommend you keep learning!&lt;/p&gt;
-
-&lt;p&gt;Thank you for reading this article. Please feel free to connect with me on &lt;a href="https://www.linkedin.com/in/www-rajeshkumaryadav-com/"&gt;LinkedIn&lt;/a&gt; and &lt;a href="https://twitter.com/rky_com"&gt;Twitter&lt;/a&gt;.&lt;/p&gt;
-
-</description>
-      <category>node</category>
-      <category>programming</category>
-      <category>webdev</category>
-      <category>javascript</category>
-    </item>
-    <item>
-      <title>Verifying Cognito JWT tokens in go</title>
-      <author>C Turner</author>
-      <pubDate>Thu, 20 May 2021 04:07:25 +0000</pubDate>
-      <link>https://dev.to/catturner/verifying-cognito-jwt-tokens-in-go-17kk</link>
-      <guid>https://dev.to/catturner/verifying-cognito-jwt-tokens-in-go-17kk</guid>
-      <description>&lt;p&gt;You can use JSON Web Tokens (JWTs) as a part of OpenID Connect (OIDC) and OAuth 2.0 frameworks to limit client access to your APIs.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#background"&gt;
-  &lt;/a&gt;
-  Background
-&lt;/h2&gt;
-
-&lt;p&gt;Authorizing API requests should consist of a few &lt;a href="https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-jwt-authorizer.html"&gt;steps&lt;/a&gt;.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#validate-claims"&gt;
-  &lt;/a&gt;
-  Validate claims
-&lt;/h3&gt;
-
-&lt;ul&gt;
-&lt;li&gt;kid - The token must have a header claim that matches the key in the jwks_uri that signed the token.&lt;/li&gt;
-&lt;li&gt;iss – Must match the issuer that is configured for the authorizer.&lt;/li&gt;
-&lt;li&gt;exp – Must be before the current time in UTC.&lt;/li&gt;
-&lt;li&gt;nbf – Must be before the current time in UTC.&lt;/li&gt;
-&lt;li&gt;eat – Must be before the current time in UTC.&lt;/li&gt;
-&lt;li&gt;aud or client_id&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;The audience ("client_id") in the payload matches the app client ID created in the Cognito user pool.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#verify-the-signature"&gt;
-  &lt;/a&gt;
-  Verify the signature
-&lt;/h3&gt;
-
-&lt;p&gt;The Signature is created using the Header and Payload segments, a signing algorithm, and a secret or public key (depending on the chosen signing algorithm). You do this to verify that the token was signed by the sender and not altered in any way.&lt;/p&gt;
-
-&lt;p&gt;You can get the information you need from your public keys, which are available at address:&lt;br&gt;
-&lt;a href="https://cognito-idp.%7Bregion%7D.amazonaws.com/%7BuserPoolId%7D/.well-known/jwks.json"&gt;https://cognito-idp.{region}.amazonaws.com/{userPoolId}/.well-known/jwks.json&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;I used &lt;a href="https://github.com/auth0/go-jwt-middleware"&gt;Auth0's jwt middleware library&lt;/a&gt; because it has the ability to check the authorization header for a JWT and it decodes the JWT and sets the content to the request context.&lt;/p&gt;
-
-&lt;p&gt;You will also need the library &lt;code&gt;"github.com/form3tech-oss/jwt-go"&lt;/code&gt;.&lt;/p&gt;
-
-&lt;p&gt;I used &lt;code&gt;jwtmiddleware&lt;/code&gt; so that all my requests check the JWT token. Following along &lt;a href="https://github.com/auth0/go-jwt-middleware/blob/master/examples/http-example/main.go#L21"&gt;this example&lt;/a&gt;, I made two functions that &lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;validate the claims and &lt;/li&gt;
-&lt;li&gt;create the RSA public key, which will be used by &lt;a href="https://github.com/auth0/go-jwt-middleware/blob/master/jwtmiddleware.go#L99"&gt;&lt;code&gt;jwt-go&lt;/code&gt; CheckJWT()&lt;/a&gt; function to check the token's signature.&lt;/li&gt;
-&lt;/ol&gt;
-&lt;h2&gt;
-  &lt;a href="#validate-claims-with-a-function"&gt;
-  &lt;/a&gt;
-  Validate claims with a function
-&lt;/h2&gt;
-
-&lt;p&gt;Use this function as an argument to &lt;a href="https://github.com/auth0/go-jwt-middleware/blob/master/examples/http-example/main.go"&gt;ValidationKeyGetter&lt;/a&gt; argument.&lt;/p&gt;
-
-&lt;p&gt;Mine looked like this:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight go"&gt;&lt;code&gt;
-&lt;span class="k"&gt;type&lt;/span&gt; &lt;span class="n"&gt;Jwks&lt;/span&gt; &lt;span class="k"&gt;struct&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="n"&gt;Keys&lt;/span&gt; &lt;span class="p"&gt;[]&lt;/span&gt;&lt;span class="n"&gt;JSONWebKeys&lt;/span&gt; &lt;span class="s"&gt;`json:"keys"`&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;span class="k"&gt;type&lt;/span&gt; &lt;span class="n"&gt;JSONWebKeys&lt;/span&gt; &lt;span class="k"&gt;struct&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="n"&gt;Kty&lt;/span&gt; &lt;span class="kt"&gt;string&lt;/span&gt;   &lt;span class="s"&gt;`json:"kty"`&lt;/span&gt;
-    &lt;span class="n"&gt;Kid&lt;/span&gt; &lt;span class="kt"&gt;string&lt;/span&gt;   &lt;span class="s"&gt;`json:"kid"`&lt;/span&gt;
-    &lt;span class="n"&gt;Use&lt;/span&gt; &lt;span class="kt"&gt;string&lt;/span&gt;   &lt;span class="s"&gt;`json:"use"`&lt;/span&gt;
-    &lt;span class="n"&gt;N&lt;/span&gt;   &lt;span class="kt"&gt;string&lt;/span&gt;   &lt;span class="s"&gt;`json:"n"`&lt;/span&gt;
-    &lt;span class="n"&gt;E&lt;/span&gt;   &lt;span class="kt"&gt;string&lt;/span&gt;   &lt;span class="s"&gt;`json:"e"`&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;span class="k"&gt;func&lt;/span&gt; &lt;span class="n"&gt;validationGetter&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;token&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="n"&gt;jwt&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Token&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="k"&gt;interface&lt;/span&gt;&lt;span class="p"&gt;{},&lt;/span&gt; &lt;span class="kt"&gt;error&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-
-
-    &lt;span class="n"&gt;clientId&lt;/span&gt; &lt;span class="o"&gt;:=&lt;/span&gt; &lt;span class="s"&gt;"your client id"&lt;/span&gt;
-    &lt;span class="c"&gt;// AWS Cognito public keys are available at address:&lt;/span&gt;
-    &lt;span class="c"&gt;//https://cognito-idp.{region}.amazonaws.com/{userPoolId}/.well-known/jwks.json&lt;/span&gt;
-    &lt;span class="n"&gt;publicKeysURL&lt;/span&gt; &lt;span class="o"&gt;:=&lt;/span&gt; &lt;span class="s"&gt;"url to your public key"&lt;/span&gt;
-    &lt;span class="n"&gt;iss&lt;/span&gt; &lt;span class="o"&gt;:=&lt;/span&gt; &lt;span class="s"&gt;"your iss"&lt;/span&gt;
-
-
-    &lt;span class="n"&gt;resp&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;err&lt;/span&gt; &lt;span class="o"&gt;:=&lt;/span&gt; &lt;span class="n"&gt;http&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Get&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;publicKeysURL&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-
-    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="n"&gt;err&lt;/span&gt; &lt;span class="o"&gt;!=&lt;/span&gt; &lt;span class="no"&gt;nil&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="n"&gt;token&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;err&lt;/span&gt;
-    &lt;span class="p"&gt;}&lt;/span&gt;
-    &lt;span class="k"&gt;defer&lt;/span&gt; &lt;span class="n"&gt;resp&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Body&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Close&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
-
-    &lt;span class="k"&gt;var&lt;/span&gt; &lt;span class="n"&gt;jwks&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;Jwks&lt;/span&gt;&lt;span class="p"&gt;{}&lt;/span&gt;
-    &lt;span class="n"&gt;err&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;json&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;NewDecoder&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;resp&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Body&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Decode&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;jwks&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-
-    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="n"&gt;err&lt;/span&gt; &lt;span class="o"&gt;!=&lt;/span&gt; &lt;span class="no"&gt;nil&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="n"&gt;token&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;err&lt;/span&gt;
-    &lt;span class="p"&gt;}&lt;/span&gt;
-
-    &lt;span class="c"&gt;// Verify 'iss' claim&lt;/span&gt;
-    &lt;span class="n"&gt;checkIss&lt;/span&gt; &lt;span class="o"&gt;:=&lt;/span&gt; &lt;span class="n"&gt;token&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Claims&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;jwt&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;MapClaims&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;VerifyIssuer&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;iss&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="no"&gt;false&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="n"&gt;checkIss&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="n"&gt;token&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;gqlerror&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Errorf&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"invalid iss"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-    &lt;span class="p"&gt;}&lt;/span&gt;
-
-    &lt;span class="c"&gt;// Verify audience and make sure it matches client id&lt;/span&gt;
-
-    &lt;span class="n"&gt;aud&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;_&lt;/span&gt; &lt;span class="o"&gt;:=&lt;/span&gt; &lt;span class="n"&gt;token&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Claims&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;jwt&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;MapClaims&lt;/span&gt;&lt;span class="p"&gt;)[&lt;/span&gt;&lt;span class="s"&gt;"client_id"&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kt"&gt;string&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="n"&gt;aud&lt;/span&gt; &lt;span class="o"&gt;!=&lt;/span&gt; &lt;span class="n"&gt;clientId&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="n"&gt;token&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;gqlerror&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Errorf&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"invalid audience"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-    &lt;span class="p"&gt;}&lt;/span&gt;
-
-    &lt;span class="c"&gt;// Validates time based claims "exp, iat, nbf"&lt;/span&gt;
-    &lt;span class="n"&gt;err&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;token&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Claims&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;jwt&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;MapClaims&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Valid&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
-    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="n"&gt;err&lt;/span&gt; &lt;span class="o"&gt;!=&lt;/span&gt; &lt;span class="no"&gt;nil&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="n"&gt;token&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;errors&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;New&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"token expired"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-    &lt;span class="p"&gt;}&lt;/span&gt;
-
-    &lt;span class="n"&gt;checkKid&lt;/span&gt; &lt;span class="o"&gt;:=&lt;/span&gt; &lt;span class="no"&gt;false&lt;/span&gt;
-    &lt;span class="k"&gt;for&lt;/span&gt; &lt;span class="n"&gt;k&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;_&lt;/span&gt; &lt;span class="o"&gt;:=&lt;/span&gt; &lt;span class="k"&gt;range&lt;/span&gt; &lt;span class="n"&gt;jwks&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Keys&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-        &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="n"&gt;token&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Header&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s"&gt;"kid"&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt; &lt;span class="o"&gt;==&lt;/span&gt; &lt;span class="n"&gt;jwks&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Keys&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;k&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Kid&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-            &lt;span class="n"&gt;checkKid&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="no"&gt;true&lt;/span&gt;
-        &lt;span class="p"&gt;}&lt;/span&gt;
-    &lt;span class="p"&gt;}&lt;/span&gt;
-
-    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="n"&gt;checkKid&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="n"&gt;token&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;errors&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;New&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Invalid kid"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-    &lt;span class="p"&gt;}&lt;/span&gt;
-    &lt;span class="n"&gt;pk&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;err&lt;/span&gt; &lt;span class="o"&gt;:=&lt;/span&gt; &lt;span class="n"&gt;getPublicKey&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;token&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;jwks&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="n"&gt;err&lt;/span&gt; &lt;span class="o"&gt;!=&lt;/span&gt; &lt;span class="no"&gt;nil&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="no"&gt;nil&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;errors&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;New&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Something went wrong."&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-    &lt;span class="p"&gt;}&lt;/span&gt;
-    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="n"&gt;pk&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="no"&gt;nil&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Be sure to make your error messages less helpful so that you can not drop hints for devs who are trying to forge tokens. The constants &lt;code&gt;clientId&lt;/code&gt;, &lt;code&gt;iss&lt;/code&gt;, and &lt;code&gt;publicKeysURL&lt;/code&gt; should be fetched from your configuration file.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#create-a-public-key-that-can-be-used-to-verify-the-signature"&gt;
-  &lt;/a&gt;
-  Create a public key that can be used to verify the signature
-&lt;/h2&gt;
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight go"&gt;&lt;code&gt;&lt;span class="c"&gt;// getPublicKey ... function to return the public key&lt;/span&gt;
-&lt;span class="k"&gt;func&lt;/span&gt; &lt;span class="n"&gt;getPublicKey&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;token&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="n"&gt;jwt&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Token&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;jwks&lt;/span&gt; &lt;span class="n"&gt;Jwks&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="n"&gt;rsa&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;PublicKey&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="kt"&gt;error&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="k"&gt;var&lt;/span&gt; &lt;span class="n"&gt;pk&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="n"&gt;rsa&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;PublicKey&lt;/span&gt;
-
-    &lt;span class="k"&gt;for&lt;/span&gt; &lt;span class="n"&gt;k&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;_&lt;/span&gt; &lt;span class="o"&gt;:=&lt;/span&gt; &lt;span class="k"&gt;range&lt;/span&gt; &lt;span class="n"&gt;jwks&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Keys&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-        &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="n"&gt;token&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Header&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s"&gt;"kid"&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt; &lt;span class="o"&gt;==&lt;/span&gt; &lt;span class="n"&gt;jwks&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Keys&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;k&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Kid&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-            &lt;span class="c"&gt;// decode the base64 bytes for n&lt;/span&gt;
-            &lt;span class="n"&gt;nb&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;err&lt;/span&gt; &lt;span class="o"&gt;:=&lt;/span&gt; &lt;span class="n"&gt;base64&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;RawURLEncoding&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;DecodeString&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;jwks&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Keys&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;k&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;N&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-            &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="n"&gt;err&lt;/span&gt; &lt;span class="o"&gt;!=&lt;/span&gt; &lt;span class="no"&gt;nil&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-                &lt;span class="n"&gt;log&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Fatal&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;err&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-            &lt;span class="p"&gt;}&lt;/span&gt;
-            &lt;span class="n"&gt;e&lt;/span&gt; &lt;span class="o"&gt;:=&lt;/span&gt; &lt;span class="m"&gt;0&lt;/span&gt;
-            &lt;span class="c"&gt;// The default exponent is usually 65537, so just compare the&lt;/span&gt;
-            &lt;span class="c"&gt;// base64 for [1,0,1] or [0,1,0,1]&lt;/span&gt;
-            &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="n"&gt;jwks&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Keys&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;k&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;E&lt;/span&gt; &lt;span class="o"&gt;==&lt;/span&gt; &lt;span class="s"&gt;"AQAB"&lt;/span&gt; &lt;span class="o"&gt;||&lt;/span&gt; &lt;span class="n"&gt;jwks&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Keys&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;k&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;E&lt;/span&gt; &lt;span class="o"&gt;==&lt;/span&gt; &lt;span class="s"&gt;"AAEAAQ"&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-                &lt;span class="n"&gt;e&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="m"&gt;65537&lt;/span&gt;
-            &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;else&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-                &lt;span class="c"&gt;// need to decode "e" as a big-endian int&lt;/span&gt;
-                &lt;span class="n"&gt;log&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Fatal&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"need to deocde e:"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;jwks&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Keys&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;k&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;E&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-            &lt;span class="p"&gt;}&lt;/span&gt;
-            &lt;span class="n"&gt;pk&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;rsa&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;PublicKey&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;
-                &lt;span class="n"&gt;N&lt;/span&gt;&lt;span class="o"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;new&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;big&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Int&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;SetBytes&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;nb&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
-                &lt;span class="n"&gt;E&lt;/span&gt;&lt;span class="o"&gt;:&lt;/span&gt; &lt;span class="n"&gt;e&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-            &lt;span class="p"&gt;}&lt;/span&gt;
-            &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="n"&gt;pk&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="no"&gt;nil&lt;/span&gt;
-        &lt;span class="p"&gt;}&lt;/span&gt;
-    &lt;span class="p"&gt;}&lt;/span&gt;
-    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="n"&gt;pk&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;errors&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;New&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Could not find match"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Note that at the end of the function &lt;code&gt;validationGetter&lt;/code&gt; we actually return the public key (pk) after we have completed our checks. The public key will then be used by &lt;code&gt;jwtmiddleware&lt;/code&gt; to verify the signature of the token.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight go"&gt;&lt;code&gt;    &lt;span class="n"&gt;jwtMiddleware&lt;/span&gt; &lt;span class="o"&gt;:=&lt;/span&gt; &lt;span class="n"&gt;jwtmiddleware&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;New&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;jwtmiddleware&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Options&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;
-        &lt;span class="n"&gt;ValidationKeyGetter&lt;/span&gt;&lt;span class="o"&gt;:&lt;/span&gt; &lt;span class="n"&gt;validationGetter&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-        &lt;span class="n"&gt;SigningMethod&lt;/span&gt;&lt;span class="o"&gt;:&lt;/span&gt;       &lt;span class="n"&gt;jwt&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;SigningMethodRS256&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-        &lt;span class="n"&gt;Debug&lt;/span&gt;&lt;span class="o"&gt;:&lt;/span&gt;               &lt;span class="no"&gt;true&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="p"&gt;})&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;And that's it! What do you think? Can it be simplified? Drop a comment below.&lt;/p&gt;
-
-</description>
-      <category>go</category>
-      <category>jwt</category>
-      <category>cognito</category>
     </item>
   </channel>
 </rss>
