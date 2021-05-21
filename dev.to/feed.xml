@@ -7,6 +7,200 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>Basic auth with NGINX Ingress Controller on Kubernetes</title>
+      <author>Jordan Gregory</author>
+      <pubDate>Fri, 21 May 2021 21:52:40 +0000</pubDate>
+      <link>https://dev.to/sixgill/basic-auth-with-nginx-ingress-controller-on-kubernetes-4cof</link>
+      <guid>https://dev.to/sixgill/basic-auth-with-nginx-ingress-controller-on-kubernetes-4cof</guid>
+      <description>&lt;p&gt;&lt;em&gt;Note:&lt;/em&gt; This particular post will not try to explain the basics of Kubernetes Ingress controllers.&lt;/p&gt;
+
+&lt;p&gt;The &lt;em&gt;NGINX Ingress Controller&lt;/em&gt;, provided by F5 (the company that owns NGINX) is not the same thing as the &lt;em&gt;ingress-nginx&lt;/em&gt; controller (the ingress provided and maintained by the Kubernetes community).&lt;/p&gt;
+
+&lt;p&gt;We at Sixgill don't have anything against the &lt;em&gt;ingress-nginx&lt;/em&gt; controller, but there are a number of things that the &lt;em&gt;NGINX Ingress Controller&lt;/em&gt; does that &lt;em&gt;ingress-nginx&lt;/em&gt; does not, and we needed those particular features; if you would like a breakdown of the differences, feel free to request it in the comments, but we feel like F5 did a decent job with this post:&lt;br&gt;
+&lt;a href="https://www.nginx.com/blog/wait-which-nginx-ingress-controller-kubernetes-am-i-using/"&gt;Which NGINX Ingress Controller am I using?&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Both options are open source (but the &lt;em&gt;NGINX Ingress Controller&lt;/em&gt; has a paid support option).&lt;br&gt;
+It's worth noting that the following steps can probably be performed with the &lt;em&gt;ingress-nginx&lt;/em&gt; controller as well, but we have not tested it.&lt;/p&gt;
+
+&lt;p&gt;With that out of the way, here is what we did to enable &lt;strong&gt;BASIC AUTH&lt;/strong&gt; using the &lt;em&gt;NGINX Ingress Controller&lt;/em&gt; by F5.&lt;/p&gt;
+&lt;h2&gt;
+  &lt;a href="#assumptions-and-necessary-prework"&gt;
+  &lt;/a&gt;
+  Assumptions and Necessary Pre-Work
+&lt;/h2&gt;
+
+&lt;p&gt;So, the basic assumptions are these:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;You have a running Kubernetes cluster that you can access ... somewhere (KinD, minikube, GKE, AKS, EKS, etc...).&lt;/li&gt;
+&lt;li&gt;You have the &lt;em&gt;NGINX Ingress Controller&lt;/em&gt; installed (NGINX Plus is not necessary, but enabling snippets is necessary).&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;If you do not have the &lt;em&gt;NGINX Ingress Controller&lt;/em&gt; installed, just follow the steps in the guides:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="https://docs.nginx.com/nginx-ingress-controller/installation/installation-with-manifests/"&gt;Installation With Raw Kubernetes Manifests&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://docs.nginx.com/nginx-ingress-controller/installation/installation-with-helm/"&gt;Installation with Helm&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://docs.nginx.com/nginx-ingress-controller/installation/installation-with-operator/"&gt;Installation with the NGINX Ingress Controller Operator&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;The only real pre-work step is that you have to have a valid &lt;code&gt;.htpasswd&lt;/code&gt; file to provide to the controller pods.&lt;/p&gt;
+
+&lt;p&gt;In our case, we did the following in an Ubuntu container and wrote the output to a Secret which is kind of outside of the scope of this post, but the slightly more manual method is as follows:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;apt-get update
+apt-get &lt;span class="nb"&gt;install &lt;/span&gt;apache2-utils
+htpasswd &lt;span class="nt"&gt;-c&lt;/span&gt; .htpasswd &amp;lt;my_first_user&amp;gt;
+&lt;span class="o"&gt;&amp;lt;&amp;lt;&lt;/span&gt; &lt;span class="no"&gt;The&lt;/span&gt;&lt;span class="sh"&gt; utility will ask you to input the password for the user &amp;gt;&amp;gt;
+
+cat .htpasswd
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;If you need more than a single user, feel free to rinse//repeat the &lt;code&gt;htpasswd -c ...&lt;/code&gt; step for as many users as you need.&lt;/p&gt;
+
+&lt;p&gt;Then, just copy the contents of that file via &lt;code&gt;cat&lt;/code&gt; for later use.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#adding-the-htpasswd-file-to-the-existingfuture-nginx-ingress-controller-pods"&gt;
+  &lt;/a&gt;
+  Adding the .htpasswd file to the existing/future &lt;em&gt;NGINX Ingress Controller&lt;/em&gt; pods
+&lt;/h2&gt;
+
+&lt;p&gt;First, we have to add the contents of the .htpasswd file to either a ConfigMap or a Secret, and given the contents, we chose a Secret, so to do this, we created this resource:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="c1"&gt;# Contents of htpasswd.yaml&lt;/span&gt;
+&lt;span class="na"&gt;apiVersion&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;v1&lt;/span&gt;
+&lt;span class="na"&gt;kind&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Secret&lt;/span&gt;
+&lt;span class="na"&gt;type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Opaque&lt;/span&gt;
+&lt;span class="na"&gt;metadata&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;htpasswd&lt;/span&gt;
+  &lt;span class="na"&gt;namespace&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;nginx&lt;/span&gt;
+&lt;span class="na"&gt;stringData&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="s"&gt;.htpasswd&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="pi"&gt;|&lt;/span&gt;
+    &lt;span class="s"&gt;&amp;lt;&amp;lt; CONTENTS OF .HTPASSWD THAT YOU COPIED FROM PRE-WORK &amp;gt;&amp;gt;&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Then, simply apply it using &lt;code&gt;kubectl apply -f htpasswd.yaml&lt;/code&gt;, but feel free to call the file whatever you want.&lt;/p&gt;
+
+&lt;p&gt;If you happened to save the contents of the .htpasswd to a file before hand, you could have simply run &lt;code&gt;kubectl create secret generic htpasswd -n nginx --from-file=&amp;lt;your_file&amp;gt;&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;Now, we have to add this file the NGINX pods. To do this step, we need to get the deployment name that we have to edit:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;kubectl get deployments -n nginx
+
+NAME           READY  UP-TO-DATE  AVAILABLE  AGE
+nginx-ingress  1/1    1           1          15d
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Using this, we can simple edit the resource using the following command:&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;kubectl edit deployment nginx-ingress -n nginx&lt;/code&gt;&lt;/p&gt;
+
+&lt;p&gt;The modifications we have to make are as follows:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="nn"&gt;...&lt;/span&gt;
+&lt;span class="na"&gt;spec&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="s"&gt;...&lt;/span&gt;
+  &lt;span class="s"&gt;template&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="s"&gt;...&lt;/span&gt;
+    &lt;span class="s"&gt;spec&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;containers&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;nginx-ingress&lt;/span&gt;
+        &lt;span class="s"&gt;...&lt;/span&gt;
+        &lt;span class="c1"&gt;# THIS IS WHAT WE NEED TO ADD TO THE CONTAINER&lt;/span&gt;
+        &lt;span class="na"&gt;volumeMounts&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;mountPath&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;/etc/apache2&lt;/span&gt;
+          &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;htpasswd&lt;/span&gt;
+        &lt;span class="s"&gt;...&lt;/span&gt;
+      &lt;span class="c1"&gt;# AND THIS IS WHAT WE NEED TO ADD TO THE OVERALL SPEC&lt;/span&gt;
+      &lt;span class="na"&gt;volumes&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;secret&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+          &lt;span class="na"&gt;defaultMode&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;420&lt;/span&gt;
+          &lt;span class="na"&gt;items&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+          &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;key&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;.htpasswd&lt;/span&gt;
+            &lt;span class="na"&gt;path&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;.htpasswd&lt;/span&gt;
+          &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;htpasswd&lt;/span&gt;
+        &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;htpasswd&lt;/span&gt;
+      &lt;span class="s"&gt;...&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;em&gt;Note:&lt;/em&gt; If you are comfortable with patching Kubernetes resources, that would be a viable alternative to just editing.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#modifying-your-ingress-to-use-the-work"&gt;
+  &lt;/a&gt;
+  Modifying your ingress to use the work
+&lt;/h2&gt;
+
+&lt;p&gt;So now, the last step is you modify your ingress to actually use everything we have done up to this point. So again, we need to get the name of your ingress and edit it.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;kubectl get ingresses
+
+NAME        CLASS  HOSTS                      ADDRESS  PORTS AGE
+my-ingress  nginx  my-service.whatever.myTld  1.2.3.4  80,443  15d
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Go ahead and edit your ingress like so:&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;kubectl edit ingress my-ingress&lt;/code&gt;&lt;/p&gt;
+
+&lt;p&gt;The only changes we need to make are to the annotations of the ingress, and the annotations we need to add are:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;metadata&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="s"&gt;...&lt;/span&gt;
+  &lt;span class="s"&gt;annotations&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="s"&gt;...&lt;/span&gt;
+    &lt;span class="s"&gt;# THIS IS THE ADDITION&lt;/span&gt;
+    &lt;span class="s"&gt;nginx.org/server-snippets&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="pi"&gt;|&lt;/span&gt;
+      &lt;span class="s"&gt;auth_basic "my-ingress";&lt;/span&gt;
+      &lt;span class="s"&gt;auth_basic_user_file /etc/apache2/.htpasswd;&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Once you save the resource, go ahead and try to access you ingress ... and voila! you are presented with a login popup that we are all so familiar with.&lt;/p&gt;
+
+</description>
+      <category>kubernetes</category>
+      <category>k8s</category>
+      <category>nginx</category>
+      <category>auth</category>
+    </item>
+    <item>
       <title>Create your own octocat</title>
       <author>𝙼𝚊𝚗𝚞𝚃𝚑𝚎𝙲𝚘𝚍𝚎𝚛</author>
       <pubDate>Fri, 21 May 2021 21:42:16 +0000</pubDate>
@@ -23,6 +217,175 @@ Octocat library: &lt;a href="https://octodex.github.com/"&gt;https://octodex.git
       <category>octocat</category>
       <category>github</category>
       <category>discuss</category>
+    </item>
+    <item>
+      <title>Stamp Detection using Computer Vision and Python</title>
+      <author>Aravind Ramalingam</author>
+      <pubDate>Fri, 21 May 2021 20:38:34 +0000</pubDate>
+      <link>https://dev.to/6aravind/stamp-detection-using-computer-vision-and-python-1ghg</link>
+      <guid>https://dev.to/6aravind/stamp-detection-using-computer-vision-and-python-1ghg</guid>
+      <description>&lt;h1&gt;
+  &lt;a href="#background"&gt;
+  &lt;/a&gt;
+  Background
+&lt;/h1&gt;
+
+&lt;p&gt;A friend of mine reach out and asked me whether I could write a program to detect the number of Rubber stamps in an image. Apparently, these invoice receipts will be categorized based on the number of stamps on them. Initially, I thought of building a Deep Learning Segmentation model, but soon I realized that it is not worth the effort. &lt;/p&gt;
+
+&lt;p&gt;The images are generated in a controlled environment so few computer vision algorithms should do the trick. To illustrate the computer vision algorithms used in detecting the stamps, I will be using a sample image downloaded from Google as the original image is company property. The goal is to identify two stamps in the sample image.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--qUvOo6Uh--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/836aqc88lj5kycf5wn5r.gif" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--qUvOo6Uh--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/836aqc88lj5kycf5wn5r.gif" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#solution"&gt;
+  &lt;/a&gt;
+  Solution
+&lt;/h1&gt;
+
+&lt;p&gt;High level solution steps are:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;Read the image.&lt;/li&gt;
+&lt;li&gt;Blur &amp;amp; detect the edges.&lt;/li&gt;
+&lt;li&gt;Find all contours and remove the smaller contours.&lt;/li&gt;
+&lt;li&gt;Fill the area inside contours &amp;amp; Close the blobs.&lt;/li&gt;
+&lt;li&gt;Filter the stamps.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;Before we start let us import the necessary packages.&lt;/p&gt;
+
+
+&lt;div class="ltag_gist-liquid-tag"&gt;
+  
+&lt;/div&gt;
+
+
+&lt;h2&gt;
+  &lt;a href="#1-read-the%C2%A0image"&gt;
+  &lt;/a&gt;
+  1. Read the image
+&lt;/h2&gt;
+
+&lt;p&gt;Read the color image using imread function. To display the image we will use Matplotlib. Matplotlib expects the color image channels to be of the order RGB, but OpenCV reads the image as BGR, so we will write a helper function for the conversion.&lt;/p&gt;
+
+
+&lt;div class="ltag_gist-liquid-tag"&gt;
+  
+&lt;/div&gt;
+
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--XmqDuCJW--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/4alaedmpj9w673ei80cl.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--XmqDuCJW--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/4alaedmpj9w673ei80cl.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#2-blur-amp-detect-the-edges"&gt;
+  &lt;/a&gt;
+  2. Blur &amp;amp; detect the edges
+&lt;/h2&gt;
+
+&lt;p&gt;First, we need to convert the image to grayscale using &lt;a href="https://docs.opencv.org/3.4/d8/d01/group__imgproc__color__conversions.html#ga397ae87e1288a81d2363b61574eb8cab"&gt;cvtColor&lt;/a&gt; function. Then, we will use &lt;a href="https://docs.opencv.org/master/d4/d86/group__imgproc__filter.html#ga9d7064d478c95d60003cf839430737ed"&gt;bilateralFilter&lt;/a&gt; to reduce noise in the image. Bilateral filter is preferred over Gaussian because it preserves the edges much better. Finally, we will use &lt;a href="https://opencv-python-tutroals.readthedocs.io/en/latest/py_tutorials/py_imgproc/py_canny/py_canny.html"&gt;canny&lt;/a&gt; edge detector to threshold the image and detect edges. The normal canny edge detector requires two threshold parameters which is hard to tune so we will use the one from &lt;a href="https://www.pyimagesearch.com/2015/04/06/zero-parameter-automatic-canny-edge-detection-with-python-and-opencv"&gt;Zero-parameter, automatic Canny edge detection with Python and OpenCV&lt;/a&gt;&lt;/p&gt;
+
+
+&lt;div class="ltag_gist-liquid-tag"&gt;
+  
+&lt;/div&gt;
+
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s---Owfx6Pw--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/dgfhyfclqmuvchufwrc7.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s---Owfx6Pw--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/dgfhyfclqmuvchufwrc7.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#3-find-all-contours-and-remove-the-smaller-contours"&gt;
+  &lt;/a&gt;
+  3. Find all contours and remove the smaller contours
+&lt;/h2&gt;
+
+&lt;p&gt;&lt;a href="https://docs.opencv.org/3.4/d3/dc0/group__imgproc__shape.html#ga17ed9f5d79ae97bd4c7cf18403e1689a"&gt;findContours&lt;/a&gt; function can find all contours in the image. The outer most contours are good enough for our use case so we will use the retrieval mode &lt;strong&gt;RETR_EXTERNAL&lt;/strong&gt;. &lt;strong&gt;CHAIN_APPROX_NONE&lt;/strong&gt; mode is preferred as we don't want to lose any point on the contour due to approximation. To remove the unwanted smaller contours, we can filter the contours by area.&lt;/p&gt;
+
+
+&lt;div class="ltag_gist-liquid-tag"&gt;
+  
+&lt;/div&gt;
+
+
+&lt;blockquote&gt;
+&lt;p&gt;Total nr of contours found: 408&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;h2&gt;
+  &lt;a href="#4-fill-the-area-inside-contours-amp-close-the-blobs"&gt;
+  &lt;/a&gt;
+  4. Fill the area inside contours &amp;amp; Close the blobs
+&lt;/h2&gt;
+
+&lt;p&gt;Instead of working on the original binary image, we will draw the top contours on a image with black background and use this as base. Any disconnect in the contours are easier to identify when fill the area inside the contours using &lt;a href="https://docs.opencv.org/3.4/d6/d6e/group__imgproc__draw.html#ga746c0625f1781f1ffc9056259103edbc"&gt;drawContours&lt;/a&gt; function.&lt;/p&gt;
+
+
+&lt;div class="ltag_gist-liquid-tag"&gt;
+  
+&lt;/div&gt;
+
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--e6s0BGLK--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/cru5i8c1acge9zqb4epd.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--e6s0BGLK--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/cru5i8c1acge9zqb4epd.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;As suspected, the top stamp has a thin black line passing through it. We need to close this blob so that the top stamp is considered as one contour instead of two different ones. &lt;a href="https://docs.opencv.org/master/d4/d86/group__imgproc__filter.html#ga67493776e3ad1a3df63883829375201f"&gt;Morphological Closing&lt;/a&gt; operation is perfect for achieving this.&lt;/p&gt;
+
+
+&lt;div class="ltag_gist-liquid-tag"&gt;
+  
+&lt;/div&gt;
+
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--uXJj51nM--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ajy46hg5tkbocck3h6jo.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--uXJj51nM--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ajy46hg5tkbocck3h6jo.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#5-filter-the-stamps"&gt;
+  &lt;/a&gt;
+  5. Filter the stamps
+&lt;/h2&gt;
+
+&lt;p&gt;To isolate the stamp contours, we can identify all the contours from the latest binary image and filter for contours with more than 5 points as the stamp is an ellipse. &lt;/p&gt;
+
+
+&lt;div class="ltag_gist-liquid-tag"&gt;
+  
+&lt;/div&gt;
+
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--MeIEcxb5--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/3p14r126berlqccbsro2.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--MeIEcxb5--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/3p14r126berlqccbsro2.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#bonus-highlight-the-identified-stamps"&gt;
+  &lt;/a&gt;
+  Bonus - Highlight the identified stamps
+&lt;/h1&gt;
+
+&lt;p&gt;For demo of this program, wouldn't it be cool if we can highlight only the stamped area of the image? Since we agree that it is indeed cool, let us see how we can achieve that. The steps involved are:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;Duplicate the original image and blur the entire image.&lt;/li&gt;
+&lt;li&gt;Loop through the blurred image and for the points on or inside the image (using &lt;a href="https://docs.opencv.org/3.4/d3/dc0/group__imgproc__shape.html#ga1a539e8db2135af2566103705d7a5722"&gt;pointPolygonTest&lt;/a&gt; to check) we replace it with pixel values from the output image. We are using pixel values from the output image because we need the blue lines drawn over the stamps.&lt;/li&gt;
+&lt;/ol&gt;
+
+
+&lt;div class="ltag_gist-liquid-tag"&gt;
+  
+&lt;/div&gt;
+
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--SrEFlAFX--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/rdbontp5yipn7rebdc51.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--SrEFlAFX--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/rdbontp5yipn7rebdc51.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#conclusion"&gt;
+  &lt;/a&gt;
+  Conclusion
+&lt;/h1&gt;
+
+&lt;p&gt;Yep, that's it for this post. You can access this notebook from &lt;a href="https://github.com/6aravind/tidbits/blob/main/cv/Stamp%20detection%20using%20computer%20vision%20and%20python.ipynb"&gt;here&lt;/a&gt;.&lt;/p&gt;
+
+</description>
+      <category>python</category>
+      <category>computervision</category>
+      <category>programming</category>
+      <category>tutorial</category>
     </item>
     <item>
       <title>Laravel One of Many Eloquent Relationship Example</title>
@@ -1442,443 +1805,6 @@ For a deeper dive, I would recommend taking a look at Jonas Schmedtman's &lt;a h
       <category>beginners</category>
       <category>codenewbie</category>
       <category>css</category>
-    </item>
-    <item>
-      <title>〈file-size〉 Web Component, because size does matter</title>
-      <author>Danny Engelman</author>
-      <pubDate>Fri, 21 May 2021 17:31:39 +0000</pubDate>
-      <link>https://dev.to/dannyengelman/file-size-web-component-because-size-does-matter-3d3k</link>
-      <guid>https://dev.to/dannyengelman/file-size-web-component-because-size-does-matter-3d3k</guid>
-      <description>&lt;h2&gt;
-  &lt;a href="#the-ltfilesizegt-web-component"&gt;
-  &lt;/a&gt;
-  The &amp;lt;file-size&amp;gt; Web Component
-&lt;/h2&gt;
-
-&lt;p&gt;Keep a watch on how many bytes you send down the wire, &lt;br&gt;
-when you deliver Web Components.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="c"&gt;&amp;lt;!-- Load the &amp;lt;file-size&amp;gt; Web Component --&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;script &lt;/span&gt;&lt;span class="na"&gt;src=&lt;/span&gt;&lt;span class="s"&gt;"https://file-size.github.io/element.js"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&amp;lt;/script&amp;gt;&lt;/span&gt;
-
-&lt;span class="c"&gt;&amp;lt;!-- Use the &amp;lt;file-size&amp;gt; Web Component --&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;file-size&lt;/span&gt; &lt;span class="na"&gt;src=&lt;/span&gt;&lt;span class="s"&gt;"https://file-size.github.io/element.js"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&amp;lt;/file-size&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;✔️ displays the file &lt;code&gt;content-length&lt;/code&gt; in Bytes &lt;br&gt;
-(only if the server allows CORS requests and provides the header) &lt;/p&gt;
-
-&lt;p&gt;✔️ Displays a &lt;em&gt;thermal image&lt;/em&gt;, showing how well the file is &lt;strong&gt;GZIP&lt;/strong&gt; compressed &lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;(dark)blue = repetitive strings, optimal compression&lt;/li&gt;
-&lt;li&gt;red = can't be compressed, &lt;em&gt;one&lt;/em&gt; Byte used to encode &lt;em&gt;one&lt;/em&gt; Byte&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;✔️ &lt;code&gt;alt + click&lt;/code&gt; the IMG opens original source file in another Browser Tab&lt;/p&gt;
-
-&lt;p&gt;&lt;iframe src="https://jsfiddle.net/WebComponents/tmq6cao3/embedded/result,html,js//dark" width="100%" height="600"&gt;
-&lt;/iframe&gt;
-&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#optional-ltfilesizegt-attributes"&gt;
-  &lt;/a&gt;
-  Optional &amp;lt;file-size&amp;gt; attributes:
-&lt;/h2&gt;
-
-&lt;ul&gt;
-&lt;li&gt;
-&lt;p&gt;&lt;code&gt;gz&lt;/code&gt; - open GZthermal image by default&lt;/p&gt;
-
-&lt;p&gt;&lt;code&gt;&amp;lt;file-size gz src="https://file-size.github.io/element.js"&amp;gt;&amp;lt;/filesize&amp;gt;&lt;/code&gt;&lt;/p&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;&lt;code&gt;max=[bytes]&lt;/code&gt; - green/red display of file &lt;code&gt;content-length&lt;/code&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;code&gt;&amp;lt;file-size max="64000" src="https://file-size.github.io/element.js"&amp;gt;&amp;lt;/filesize&amp;gt;&lt;/code&gt;&lt;/p&gt;
-
-&lt;p&gt;default value is 48000 &lt;em&gt;&lt;strong&gt;Bytes&lt;/strong&gt;&lt;/em&gt; because the first computer I programmed in 1979, had 48 kiloBytes of RAM; and gzthermal errors on larger files.&lt;/p&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-
-
-
-&lt;h1&gt;
-  &lt;a href="#tips-for-better-compression"&gt;
-  &lt;/a&gt;
-  Tips for better compression
-&lt;/h1&gt;
-&lt;h2&gt;
-  &lt;a href="#online-tools-that-can-help"&gt;
-  &lt;/a&gt;
-  🤏 Online tools that can help
-&lt;/h2&gt;
-
-&lt;ul&gt;
-&lt;li&gt;&lt;p&gt;&lt;a href="https://try.terser.org/"&gt;https://try.terser.org/&lt;/a&gt; - minify your code&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;&lt;a href="https://dafrok.github.io/gzip-size-online/"&gt;https://dafrok.github.io/gzip-size-online/&lt;/a&gt; - paste your minified code&lt;/p&gt;&lt;/li&gt;
-&lt;/ul&gt;
-&lt;h2&gt;
-  &lt;a href="#look-for-repereperepetitions"&gt;
-  &lt;/a&gt;
-  🤏 Look for repereperepetitions
-&lt;/h2&gt;
-
-&lt;p&gt;DRY is great from a &lt;em&gt;Code Maintenance&lt;/em&gt; and &lt;em&gt;Repetitive Strain Injury&lt;/em&gt; Point of View&lt;/p&gt;
-
-&lt;p&gt;But when you deliver, you want &lt;strong&gt;as many repetitions as possible&lt;/strong&gt;.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;setAttribute&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;one&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;ONE&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;setAttribute&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;two&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;TWO&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;setAttribute&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;three&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;THREE&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;setAttribute&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;four&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;FOUR&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Compresses better (&lt;em&gt;and is faster!&lt;/em&gt;) than:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;setAttr&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;x&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="nx"&gt;y&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;setAttribute&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;x&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="nx"&gt;y&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="nx"&gt;setAttr&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;one&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;ONE&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="nx"&gt;setAttr&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;two&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;TWO&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="nx"&gt;setAttr&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;three&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;THREE&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="nx"&gt;setAttr&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;four&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;FOUR&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Sure, the &lt;em&gt;minified&lt;/em&gt; file is &lt;strong&gt;smaller&lt;/strong&gt;, but the compressed file is &lt;strong&gt;larger&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;But... compression is done on the &lt;strong&gt;whole&lt;/strong&gt; file, so your mileage may vary!&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#name-you-methods-well"&gt;
-  &lt;/a&gt;
-  🤏 Name you methods well
-&lt;/h2&gt;
-
-&lt;p&gt;If you already have the default boilerplate code&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="nx"&gt;customElements&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;define&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;file-size&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="kd"&gt;class&lt;/span&gt; &lt;span class="kd"&gt;extends&lt;/span&gt; &lt;span class="nx"&gt;HTMLElement&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nx"&gt;connectedCallback&lt;/span&gt;&lt;span class="p"&gt;(){}&lt;/span&gt;
-&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Then try to re-use those strings in your &lt;strong&gt;method&lt;/strong&gt; names and &lt;strong&gt;properties&lt;/strong&gt;&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;
-&lt;code&gt;defineSize&lt;/code&gt; &lt;em&gt;could&lt;/em&gt; be better than &lt;code&gt;initSize&lt;/code&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;extendsFile&lt;/code&gt; &lt;em&gt;could&lt;/em&gt; be better than &lt;code&gt;addtoFile&lt;/code&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;Again, compression is done on the &lt;strong&gt;whole&lt;/strong&gt; file, so your mileage may vary!&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#get-rid-of-capitals"&gt;
-  &lt;/a&gt;
-  🤏 Get rid of CAPITALS
-&lt;/h2&gt;
-
-&lt;p&gt;Not &lt;em&gt;because&lt;/em&gt; they are CAPITALS, but because CAPITALS are &lt;strong&gt;less used&lt;/strong&gt; in code.&lt;/p&gt;
-
-&lt;p&gt;Here is an example from Lit, where 7 Bytes are used to encode 7 Uppercase characters.&lt;/p&gt;
-
-&lt;p&gt;Changing them to lowercase would most likely save 2 or 3 bytes in this code fragment, and more in the whole file.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--KMbHoEEG--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://i.imgur.com/8De1hdo.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--KMbHoEEG--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://i.imgur.com/8De1hdo.png" alt=""&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#use-onevent-listeners"&gt;
-  &lt;/a&gt;
-  🤏 Use &lt;em&gt;&lt;strong&gt;on&lt;/strong&gt;event&lt;/em&gt; listeners
-&lt;/h2&gt;
-
-&lt;p&gt;prepend &lt;strong&gt;on&lt;/strong&gt; to all default Events.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="nx"&gt;details&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;ontoggle&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;e&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;details&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;open&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; &lt;span class="nx"&gt;gzthermal&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;does the same as:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="nx"&gt;details&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;addEventListener&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;toggle&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;e&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;details&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;open&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; &lt;span class="nx"&gt;gzthermal&lt;/span&gt;&lt;span class="p"&gt;());&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Note the difference; &lt;strong&gt;on&lt;/strong&gt;event sets/overwrites a &lt;strong&gt;single&lt;/strong&gt; handler; &lt;code&gt;addEventListener&lt;/code&gt; allows for &lt;strong&gt;multiple&lt;/strong&gt; handlers.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#be-careful-with-strings"&gt;
-  &lt;/a&gt;
-  🤏 Be careful with Strings
-&lt;/h2&gt;
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;html&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s2"&gt;`
-    &amp;lt;div&amp;gt;
-      content
-    &amp;lt;/div&amp;gt;
-`&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;looks great in your IDE, but the minified and GZipped files &lt;strong&gt;will&lt;/strong&gt; contain those &lt;strong&gt;totally useless&lt;/strong&gt; &lt;em&gt;EndOfLine&lt;/em&gt; and &lt;em&gt;Space&lt;/em&gt; characters&lt;/p&gt;
-
-&lt;p&gt;AFAIK, there is &lt;strong&gt;no tool&lt;/strong&gt; that &lt;em&gt;fixes&lt;/em&gt; this for you; you have to do it by hand:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;html&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s2"&gt;`&amp;lt;div&amp;gt;content&amp;lt;/div&amp;gt;`&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;A good minifier will &lt;strong&gt;concatenate&lt;/strong&gt; these type of String notations:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;html&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s2"&gt;`&amp;lt;div&amp;gt;`&lt;/span&gt;&lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="c1"&gt;// my&lt;/span&gt;
-    &lt;span class="s2"&gt;`content`&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="c1"&gt;// comments here&lt;/span&gt;
-    &lt;span class="s2"&gt;`&amp;lt;/div&amp;gt;`&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;output:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;html&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s2"&gt;`&amp;lt;div&amp;gt;content&amp;lt;/div&amp;gt;`&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#be-smart-hunt-for-longer-strings"&gt;
-  &lt;/a&gt;
-  🤏 Be smart, hunt for longer strings
-&lt;/h2&gt;
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;div&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"..."&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;div&lt;/span&gt; &lt;span class="na"&gt;onclick=&lt;/span&gt;&lt;span class="s"&gt;"..."&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"..."&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;div&lt;/span&gt; &lt;span class="na"&gt;style=&lt;/span&gt;&lt;span class="s"&gt;"..."&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"..."&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;can be written as:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;div&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"..."&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;div&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"..."&lt;/span&gt; &lt;span class="na"&gt;onclick=&lt;/span&gt;&lt;span class="s"&gt;"..."&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;div&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"..."&lt;/span&gt; &lt;span class="na"&gt;style=&lt;/span&gt;&lt;span class="s"&gt;"..."&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Pay close attention to CSS strings; a good order can save serious bytes&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#know-what-browsers-do"&gt;
-  &lt;/a&gt;
-  🤏 Know what Browsers do
-&lt;/h2&gt;
-
-&lt;p&gt;Browsers do not need &lt;em&gt;quotes&lt;/em&gt; for attributes, &lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;unless&lt;/strong&gt; the value contains spaces or &lt;strong&gt;%&lt;/strong&gt; characters (&lt;em&gt;and maybe more&lt;/em&gt;)&lt;/p&gt;
-
-&lt;p&gt;When parsing, Browsers will &lt;strong&gt;add&lt;/strong&gt; quotes&lt;/p&gt;
-
-&lt;p&gt;&lt;code&gt;&amp;lt;div class="fancy"&amp;gt;&lt;/code&gt; can be written as: &lt;code&gt;&amp;lt;div class=fancy&amp;gt;&lt;/code&gt;&lt;/p&gt;
-
-&lt;p&gt;A space will create another attribute:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;attrs&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;x&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="s2"&gt;`class=&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;className&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;html&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s2"&gt;`&amp;lt;div &lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;attrs&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;fancy style=display:none&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)}&lt;/span&gt;&lt;span class="s2"&gt;&amp;gt;`&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;outputs&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;div&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"fancy"&lt;/span&gt; &lt;span class="na"&gt;style=&lt;/span&gt;&lt;span class="s"&gt;"display:none"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;div&lt;/span&gt; &lt;span class="na"&gt;style=&lt;/span&gt;&lt;span class="s"&gt;"font:16px Arial"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;can be written as:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;div&lt;/span&gt; &lt;span class="na"&gt;style=&lt;/span&gt;&lt;span class="s"&gt;font:16px,arial&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#delete-the-last-"&gt;
-  &lt;/a&gt;
-  🤏 delete the last /
-&lt;/h2&gt;
-
-&lt;p&gt;Some HTML tags are selfclosing and do not need a closing slash&lt;/p&gt;
-
-&lt;p&gt;&lt;code&gt;&amp;lt;area&amp;gt;,&amp;lt;base&amp;gt;,&amp;lt;br&amp;gt;,&amp;lt;col&amp;gt;,&amp;lt;embed&amp;gt;,&amp;lt;hr&amp;gt;,&amp;lt;img&amp;gt;,&amp;lt;input&amp;gt;,&amp;lt;link&amp;gt;,&amp;lt;meta&amp;gt;,&amp;lt;param&amp;gt;,&amp;lt;source&amp;gt;,&amp;lt;track&amp;gt;,&amp;lt;wbr&amp;gt;&lt;/code&gt;&lt;/p&gt;
-
-
-
-&lt;h1&gt;
-  &lt;a href="#credits"&gt;
-  &lt;/a&gt;
-  Credits
-&lt;/h1&gt;
-
-&lt;ul&gt;
-&lt;li&gt;GZThermal Web Interface by: SimonW - &lt;a href="https://github.com/simonw/gzthermal-web"&gt;https://github.com/simonw/gzthermal-web&lt;/a&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;Using GZThermal &lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;&lt;a href="https://blog.usejournal.com/of-svg-minification-and-gzip-21cd26a5d007"&gt;https://blog.usejournal.com/of-svg-minification-and-gzip-21cd26a5d007&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://nelsonslog.wordpress.com/2017/11/21/gzthermal-compression-visualization/"&gt;https://nelsonslog.wordpress.com/2017/11/21/gzthermal-compression-visualization/&lt;/a&gt;&lt;/li&gt;
-&lt;/ul&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-
-
-
-&lt;br&gt;
-&lt;br&gt;
-
-&lt;p&gt;&lt;iframe src="https://jsfiddle.net/WebComponents/62f1eLay/embedded/result,html,js//dark" width="100%" height="600"&gt;
-&lt;/iframe&gt;
-&lt;/p&gt;
-
-</description>
-      <category>webcomponents</category>
-      <category>javascript</category>
-      <category>webdev</category>
-      <category>showdev</category>
-    </item>
-    <item>
-      <title>CodePen - CSS Icons (Animation)</title>
-      <author>Roden</author>
-      <pubDate>Fri, 21 May 2021 17:28:49 +0000</pubDate>
-      <link>https://dev.to/kerthin/codepen-css-icons-animation-3c1e</link>
-      <guid>https://dev.to/kerthin/codepen-css-icons-animation-3c1e</guid>
-      <description>&lt;p&gt;I want to introduce you to my 6 animated icons. It took me a little over a week to create them.&lt;/p&gt;
-
-&lt;p&gt;You know, I often use icons in my projects, but it always seemed to me that they lack dynamics, and that they sometimes look very boring. I always wanted those elements that are displayed on the icon to be animated, and that they can be edited as you need. But I could not find anything interesting, which later prompted me to create my own icons created using &lt;strong&gt;html&lt;/strong&gt; and &lt;strong&gt;css&lt;/strong&gt;.&lt;/p&gt;
-
-&lt;p&gt;You can edit these icons as you like: change the size of all the elements, edit the colors, create your own animation for them, and change the location of any element.&lt;/p&gt;
-
-&lt;p&gt;To insert an icon on your site, simply copy the necessary sections of the &lt;strong&gt;pug&lt;/strong&gt; and &lt;strong&gt;scss&lt;/strong&gt; code (&lt;strong&gt;html&lt;/strong&gt; and &lt;strong&gt;css&lt;/strong&gt;), which are marked with the corresponding comments. Also, don't forget about the &lt;strong&gt;@keyframes&lt;/strong&gt; required for the animation, which are located at the very bottom of the code.&lt;/p&gt;
-
-&lt;p&gt;I hope they will benefit you in your future projects.&lt;/p&gt;
-
-&lt;p&gt;&lt;iframe height="600" src="https://codepen.io/Astap/embed/QWddOgw?height=600&amp;amp;default-tab=result&amp;amp;embed-version=2"&gt;
-&lt;/iframe&gt;
-&lt;/p&gt;
-
-&lt;p&gt;I would be very grateful if you appreciate this work.&lt;/p&gt;
-
-&lt;p&gt;P.S.&lt;br&gt;
-To reset the styles, I use &lt;strong&gt;reset.css&lt;/strong&gt; with the addition of the &lt;strong&gt;box-sizing: border-box;&lt;/strong&gt; property, but if you do not want to use it, you can simply insert at the beginning of the styles:&lt;br&gt;
-&lt;strong&gt;&lt;/strong&gt;&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;{
-padding: 0;
-margin: 0;
-box-sizing: border-box;
-}
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;Also keep in mind that the project uses &lt;strong&gt;variables&lt;/strong&gt; and &lt;strong&gt;@extend&lt;/strong&gt;. So, if you don't want to worry about them, just compile them into styles from &lt;strong&gt;scss&lt;/strong&gt; to &lt;strong&gt;css&lt;/strong&gt;. This can be done in CodePen.&lt;br&gt;
-The appearance of the icons I took from the Internet.&lt;/p&gt;
-
-</description>
-      <category>codepen</category>
-      <category>webdev</category>
-      <category>css</category>
-      <category>html</category>
     </item>
   </channel>
 </rss>
