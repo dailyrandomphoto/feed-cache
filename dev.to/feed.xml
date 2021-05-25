@@ -7,6 +7,242 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>Generating unique IDs in a Large scale Distributed environment</title>
+      <author>Apoorv Tyagi</author>
+      <pubDate>Tue, 25 May 2021 14:55:05 +0000</pubDate>
+      <link>https://dev.to/apoorvtyagi/generating-unique-ids-in-a-large-scale-distributed-environment-257d</link>
+      <guid>https://dev.to/apoorvtyagi/generating-unique-ids-in-a-large-scale-distributed-environment-257d</guid>
+      <description>&lt;h1&gt;
+  &lt;a href="#introduction"&gt;
+  &lt;/a&gt;
+  Introduction
+&lt;/h1&gt;
+
+&lt;p&gt;Recently at work, We were looking for a way to generate unique IDs across a distributed system that could also be used as the primary keys in the MySQL tables.&lt;/p&gt;
+
+&lt;p&gt;We knew in a single MySQL database we can simply use an auto-increment ID as the primary key, But this won’t work in a sharded MySQL database.&lt;/p&gt;
+
+&lt;p&gt;So I looked at various existing solutions for this and finally learned about &lt;a href="https://blog.twitter.com/engineering/en_us/a/2010/announcing-snowflake.html"&gt;Twitter Snowflake&lt;/a&gt; - a simple 64-bit unique ID generator.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#why-dont-you-use-uuid"&gt;
+  &lt;/a&gt;
+  Why don't you use UUID? 🤔
+&lt;/h1&gt;
+
+&lt;p&gt;UUIDs are 128-bit hexadecimal numbers that are globally unique. The chances of the same UUID getting generated twice are negligible.&lt;/p&gt;
+
+&lt;p&gt;The problem with UUIDs is that they are very big in size and don’t index well. When your dataset increases, the index size increases as well and the query performance degrades.&lt;/p&gt;
+
+&lt;p&gt;Another problem with UUIDs is related to the user experience. Eventually, our users will be needed that unique identifiers. Imagine that a customer calls Customer Service and is asked to provide the identifier. Having to spell a complete UUID is not a pleasant experience.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#twitter-snowflake-%E2%9D%84"&gt;
+  &lt;/a&gt;
+  Twitter snowflake ❄
+&lt;/h1&gt;
+
+&lt;p&gt;Twitter snowflake is a dedicated service for generating 64-bit unique identifiers used in distributed computing for objects within Twitter such as Tweets, Direct Messages, Lists, etc.&lt;/p&gt;
+
+&lt;p&gt;These IDs are unique 64-bit unsigned integers, which are based on time. The full IDs are made up of the following components:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;  Epoch timestamp in millisecond - 41 bits (gives us 69 years with respect to any custom epoch)&lt;/li&gt;
+&lt;li&gt;  Configured machine/node/shard Id - 10 bits (gives us up to total of 210 i.e 1024 Ids)&lt;/li&gt;
+&lt;li&gt;  Sequence number - 12 bits (A local counter per machine that sets to zero after every 4096 values)&lt;/li&gt;
+&lt;li&gt;  The extra 1 reserved bit at the beginning which is set as 0 to make the overall number as positive.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--CPiFDg-J--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1621607903347/g1bih0ILA.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--CPiFDg-J--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1621607903347/g1bih0ILA.png" alt="image.png"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Since these use the timestamp as the first component, therefore, &lt;strong&gt;they are time sortable as well&lt;/strong&gt;. Another benefit is its &lt;strong&gt;High Availability&lt;/strong&gt;.&lt;/p&gt;
+
+&lt;p&gt;By default, 64-bit unsigned integers (long) will generate an Id whose length is 19, but sometimes it may be too long, our use case needed an Id whose length should not be greater than 10.&lt;/p&gt;
+
+&lt;p&gt;This article will share a simplified version of the unique ID generator that will work for any use-case of generating unique IDs in a distributed environment based on the concepts outlined in the Twitter snowflake service.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#coding-time"&gt;
+  &lt;/a&gt;
+  Coding time ⌚
+&lt;/h1&gt;
+
+&lt;p&gt;In our case, the full ID will be composed of a 20-bit timestamp, 5-bit worker number, and 6-bit sequence number.&lt;/p&gt;
+
+&lt;p&gt;The remaining 1-bit is the signed bit and it is always set to 0 to make the final value positive.&lt;/p&gt;
+
+&lt;p&gt;Our microservices can use this Random number generator to generate IDs independently. This is efficient and fits in the size of a &lt;code&gt;int&lt;/code&gt; (4 Bytes or 32 bits).&lt;/p&gt;
+
+&lt;p&gt;Here is the complete code in Java (&lt;em&gt;&lt;a href="https://github.com/twitter/snowflake/tree/snowflake-2010"&gt;Inspired by Twitter snowflake&lt;/a&gt;, &lt;a href="https://github.com/callicoder/java-snowflake"&gt;code credits&lt;/a&gt;&lt;/em&gt;)  -&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Step 1 - We initialize the number of bits that each component will require&lt;/strong&gt; :&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;public class Snowflake {
+
+    // Sign bit, Unused (always set to 0)
+    private static final int UNUSED_BITS = 1; 
+
+    private static final int EPOCH_BITS = 20;
+    private static final int NODE_ID_BITS = 5;
+    private static final int SEQUENCE_BITS = 6;
+
+    private static final int maxNodeId = (int)(Math.pow(2, NODE_ID_BITS) - 1);
+    private static final int maxSequence = (int)(Math.pow(2, SEQUENCE_BITS) - 1);
+
+    // Custom Epoch (Fri, 21 May 2021 03:00:20 GMT)
+    private static final int DEFAULT_CUSTOM_EPOCH = 1621566020;
+
+    private volatile int lastTimestamp = -1;
+    private volatile int sequence = 0;
+
+    // Class Constructor
+    public Snowflake() {
+        this.nodeId = createNodeId();
+        this.customEpoch = DEFAULT_CUSTOM_EPOCH;
+    }
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;Here, we are taking custom epoch as of Fri, 21 May 2021 03:00:20 GMT.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;&lt;code&gt;EPOCH_BITS&lt;/code&gt; will be 20 bits and is filled with a current timestamp in seconds (You can also use millisecond if there is a possibility of multiple numbers of requests per second).&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;NODE_ID_BITS&lt;/code&gt; will be 5 bits and is filled using the Mac address.&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;SEQUENCE_BITS&lt;/code&gt; will be 6 bits and will act as a local counter which will start from 0, goes till 63, and then resets back to 0.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Step 2 - Creating a &lt;code&gt;synchronized&lt;/code&gt; function to generate the IDs&lt;/strong&gt; :&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;        public synchronized int nextId() {
+            int currentTimestamp = (int) (Instant.now().getEpochSecond() - customEpoch);
+
+            if(currentTimestamp &amp;lt; lastTimestamp) {
+                throw new IllegalStateException("Invalid System Clock!");
+            }
+
+            lastTimestamp = currentTimestamp;
+
+            return currentTimestamp &amp;lt;&amp;lt; (NODE_ID_BITS + SEQUENCE_BITS) | (nodeId &amp;lt;&amp;lt; SEQUENCE_BITS) | sequence;
+        }
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h4&gt;
+  &lt;a href="#wait-why-are-we-doing-these-raw-left-shifts-endraw-amp-raw-logical-or-endraw-operations"&gt;
+  &lt;/a&gt;
+  Wait, why are we doing these &lt;code&gt;Left Shifts&lt;/code&gt; &amp;amp; &lt;code&gt;Logical OR&lt;/code&gt; operations?
+&lt;/h4&gt;
+
+&lt;p&gt;This is because Integer is represented by 32 bits and initially all are set to 0.&lt;br&gt;
+To fill these bits we have to take each component separately, so first we took the epoch timestamp and shift it to 5 + 6 i.e 11 bits to left. Doing this has filled the first 21 bits with the first component (remember the first bit is always set to zero to make the overall number positive). The remaining 11 bits are still 0 and hence again we repeat the same thing with logical OR &amp;amp; the other two components as well thereby filling all the 32 bits and forming the complete number.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Step 3 - Utility function to generate the node id using the system’s MAC address&lt;/strong&gt;:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;private int createNodeId() {
+            int nodeId;
+            try {
+                StringBuilder sb = new StringBuilder();
+                Enumeration&amp;lt;NetworkInterface&amp;gt; networkInterfaces = NetworkInterface.getNetworkInterfaces();
+                while (networkInterfaces.hasMoreElements()) {
+                    NetworkInterface networkInterface = networkInterfaces.nextElement();
+                    byte[] mac = networkInterface.getHardwareAddress();
+                    if (Objects.nonNull(mac))
+                        for(byte macPort: mac)
+                            sb.append(String.format("%02X", macPort));
+                }
+                nodeId = sb.toString().hashCode();
+            } catch (Exception ex) {
+                nodeId = (new SecureRandom().nextInt());
+            }
+            nodeId = nodeId &amp;amp; maxNodeId;
+            return nodeId;
+        }
+    }
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#how-it-works"&gt;
+  &lt;/a&gt;
+  How it works? 💡
+&lt;/h3&gt;
+
+&lt;p&gt;Let’s now understand its working with an example -&lt;/p&gt;
+
+&lt;p&gt;Let’s say it’s Sun, 23 May 2021 00:00:00 GMT right now. The epoch timestamp for this particular time is 1621728000.&lt;/p&gt;
+
+&lt;p&gt;First of all, we adjust our timestamp with respect to the custom epoch-&lt;/p&gt;
+
+&lt;p&gt;currentTimestamp = 1621728000- 1621566020 = 161980(Adjust for custom epoch)&lt;/p&gt;
+
+&lt;p&gt;So to start our ID, the first 20 bits of the ID (after the signed bit) will be filled with the epoch timestamp.  Let's this value with a left-shift :&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;id = currentTimestamp &amp;lt;&amp;lt; (NODE_ID_BITS  + SEQUENCE_BITS )&lt;/code&gt;&lt;/p&gt;
+
+&lt;p&gt;Next, we take the configured node ID/shard ID and fill the next 10 bits with that&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;id = id | nodeId &amp;lt;&amp;lt; SEQUENCE_BITS&lt;/code&gt;&lt;/p&gt;
+
+&lt;p&gt;Finally, we take the next value of our auto-increment sequence and fill out the remaining 6 bits -&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;id = id | sequence  // 6149376&lt;/code&gt;&lt;/p&gt;
+
+&lt;p&gt;That gives us our final ID 🎉&lt;/p&gt;
+
+&lt;p&gt;And that’s it! Primary keys that are unique across our application!&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#summary"&gt;
+  &lt;/a&gt;
+  Summary 📊
+&lt;/h2&gt;
+
+&lt;p&gt;This article showed you a simple solution of how to generate a snowflake id whose length is &amp;gt;=7 and &amp;lt;=10.&lt;/p&gt;
+
+&lt;p&gt;By the way, you can adjust the bit count of the 3 components to adapt to your work.&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;NOTE :&lt;br&gt;
+We should keep the generator as a singleton, it means that we should only create the single instance of SequenceGenerator per node. If not, it may generate some duplicate Ids.&lt;/p&gt;
+
+&lt;p&gt;Not only did twitter used it, &lt;strong&gt;Discord&lt;/strong&gt; also uses snowflakes, with their epoch set to the first second of the year 2015.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Instagram&lt;/strong&gt; uses a modified version of the format, with 41 bits for a timestamp, 13 bits for a shard ID, and 10 bits for a sequence number.&lt;/p&gt;
+
+&lt;p&gt;I hope this will help you! Thanks for reading :))&lt;/p&gt;
+
+
+
+
+&lt;p&gt;&lt;strong&gt;Enjoyed what you read?&lt;/strong&gt; &lt;/p&gt;
+
+&lt;p&gt;You can show some love by buying me a coffee☕&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://www.buymeacoffee.com/apoorvtyagi"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--7PD28--a--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.buymeacoffee.com/buttons/v2/default-violet.png" alt="Buy Me A Coffee"&gt;&lt;/a&gt;&lt;/p&gt;
+
+</description>
+      <category>java</category>
+      <category>computerscience</category>
+      <category>systems</category>
+      <category>architecture</category>
+    </item>
+    <item>
       <title>Want to compress your pdf files ?</title>
       <author>Burak Can Kahraman</author>
       <pubDate>Tue, 25 May 2021 14:41:23 +0000</pubDate>
@@ -1190,6 +1426,163 @@ The second option is &lt;strong&gt;&lt;code&gt;java_multiple_files&lt;/code&gt;&
       <category>programming</category>
     </item>
     <item>
+      <title>The difference between a Cryptocurrency and a Token</title>
+      <author>Owanate Amachree</author>
+      <pubDate>Tue, 25 May 2021 13:50:46 +0000</pubDate>
+      <link>https://dev.to/owans/the-difference-between-a-cryptocurrency-and-a-token-3ee4</link>
+      <guid>https://dev.to/owans/the-difference-between-a-cryptocurrency-and-a-token-3ee4</guid>
+      <description>&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--vYNRgP5o--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/bm29d7wpl6v4ridoyj4i.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--vYNRgP5o--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/bm29d7wpl6v4ridoyj4i.png" alt="Crypto vs Token Banner"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#what-is-a-digital-asset"&gt;
+  &lt;/a&gt;
+  What is a Digital Asset?
+&lt;/h2&gt;
+
+&lt;p&gt;In broad terms, a digital asset is a non-tangible asset that is created, traded, and stored in a digital format. Using this definition In the context of blockchains, digital assets include cryptocurrency and crypto tokens.&lt;/p&gt;
+
+&lt;p&gt;The blockchain terms; token and cryptocurrency are often used interchangeably, as these are both digital assets on blockchains. The biggest difference between a cryptocurrency and a token is that cryptocurrencies are the native asset of a&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--5MywgOKI--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/3nenv3kpdgz12znjdich.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--5MywgOKI--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/3nenv3kpdgz12znjdich.png" alt="Crypto vs Token"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;blockchain like BTC, RBTC, or ETH, whereas tokens are built on an existing blockchain, using smart contracts. Most commonly, these are EIP-20 tokens.&lt;/p&gt;
+
+&lt;p&gt;The following chart summarises the similarities between the two:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--alJEeX2---/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/td9ysdl9w6pvajn1373z.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--alJEeX2---/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/td9ysdl9w6pvajn1373z.png" alt="Crypto vs Tokens2"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;As we can see, these are largely the same from the perspective of the end user. However, there are large technical differences between the two. Let’s dive a little bit deeper into the technical differences:&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#blockchain-blocks-transactions-and-signatures"&gt;
+  &lt;/a&gt;
+  Blockchain, Blocks, Transactions, and Signatures
+&lt;/h2&gt;
+
+&lt;p&gt;Here’s a whirlwind introduction to blockchain:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;End users use public key cryptography to digitally sign information&lt;/li&gt;
+&lt;li&gt;This signed information is a transaction&lt;/li&gt;
+&lt;li&gt;The transaction is broadcast to a peer-to-peer network of computers running the blockchain node software&lt;/li&gt;
+&lt;li&gt;All the nodes have to reach a consensus on whether or not the transaction is valid&lt;/li&gt;
+&lt;li&gt;If the transaction is valid, it gets added to a block, which is a set of transactions&lt;/li&gt;
+&lt;li&gt;Many computers on the network build these blocks of transactions, but only one block gets added at a time&lt;/li&gt;
+&lt;li&gt;These blocks form a single chain, called a blockchain&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;Note that many details have been left out of the above description, for the sake of brevity.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;&lt;strong&gt;Public key cryptography&lt;/strong&gt; is used in blockchain networks, mainly for digitally signing information, and then subsequently verifying those signatures. This was the process of transaction creation and transaction verification. The user possesses both a private key and a public key, and needs to keep the private key a secret, while allowing the public key to be broadcast widely.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#transfer-transactions-vs-smart-contract-interaction-transactions"&gt;
+  &lt;/a&gt;
+  Transfer Transactions vs Smart Contract Interaction Transactions
+&lt;/h2&gt;
+
+&lt;p&gt;In Bitcoin, and in many other blockchains, the information being signed was about one account transferring units from itself to another account. These units are encoded into the software protocols of the blockchain software itself, and are known as cryptocurrency. In this system there is only one type of transaction.&lt;/p&gt;
+
+&lt;p&gt;In Ethereum, RSK, and many other blockchains that support smart contracts, the information being signed was about one account transferring units of cryptocurrency from itself to another account too. However, they added a new concept where you could have “smart contracts” which are autonomously executing code and data stored on the blockchain. These smart contracts may be thought of as a special type of account. Now an account could sign information that does &lt;strong&gt;not&lt;/strong&gt; transfer any units of cryptocurrency, but instead contains instructions for a smart contract to execute some code or store some data. In this system, there are two types of transaction. Read more about Smart contracts in &lt;a href="https://developers.rsk.co/guides/full-stack-dapp-on-rsk/part1-overview/"&gt;How to Build a Full Stack dApp on RSK&lt;/a&gt;.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#tokens"&gt;
+  &lt;/a&gt;
+  Tokens
+&lt;/h2&gt;
+
+&lt;p&gt;Tokens behave very similarly to cryptocurrencies, in the sense that they are a type of currency that exist on a blockchain, and can be transferred from one account to another. However, unlike cryptocurrencies, their behaviour is not built into the blockchain software itself. Instead their behaviour comes about by implementations in smart contracts. These smart contracts tally the units of the token transferred between accounts.&lt;/p&gt;
+
+&lt;p&gt;To transfer units of these tokens, an account signs a transaction telling the smart contract to debit a number of units of the token from its tally, and credit the same number of units of the token to the other account’s tally. Most tokens conform to the EIP-20 token standard, and in fact the majority of all smart contracts on blockchain networks tend to be of this type; making it easy for users, wallets, exchanges, etc to interact with them.&lt;/p&gt;
+
+&lt;p&gt;When interacting with blockchain networks, it is important to be aware of this distinction. On Ethereum, Ether is the cryptocurrency, and other “currencies” are tokens. Likewise, on RSK, RBTC is the cryptocurrency, and other “currencies” are tokens. Some practical reasons to take note of this are that:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Fees (or gas) for transactions are cheaper when transferring the cryptocurrency, and more expensive when transferring tokens.&lt;/li&gt;
+&lt;li&gt;Fees (or gas) is always paid for in the cryptocurrency, and therefore when transferring tokens, you will still need some cryptocurrency in the same account.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;NOTE: When talking about tokens, you will see the terms ERC-20 as well as EIP-20. These are both &lt;strong&gt;the same&lt;/strong&gt;. At the outset, the process for defining standards for Ethereum, and Ethereum-compatible networks, was called “Ethereum Request for Comment”. This process has since been refined and renamed to “Ethereum Improvement Proposal”.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;Visit the &lt;a href="https://developers.rsk.co/"&gt;RSK Developer's Portal&lt;/a&gt; for more info or join the &lt;a href="https://developers.rsk.co/slack/"&gt;Slack Community&lt;/a&gt;!&lt;/p&gt;
+
+&lt;p&gt;Thanks for reading!&lt;/p&gt;
+
+</description>
+      <category>rsk</category>
+      <category>blockchain</category>
+      <category>token</category>
+      <category>cryptocurrency</category>
+    </item>
+    <item>
+      <title>Linux Command Line for Beginners</title>
+      <author>Harvey</author>
+      <pubDate>Tue, 25 May 2021 13:50:25 +0000</pubDate>
+      <link>https://dev.to/harvey/linux-command-line-for-beginners-16n8</link>
+      <guid>https://dev.to/harvey/linux-command-line-for-beginners-16n8</guid>
+      <description>&lt;p&gt;The &lt;a href="https://www.linux.com/what-is-linux/"&gt;Linux&lt;/a&gt; command line is for power users. It is not for the faint of heart or for people who are afraid to take a risk. &lt;/p&gt;
+
+&lt;p&gt;If you are new to Linux and are afraid to take the plunge into using the command line interface, then &lt;a href="//practicelinux.com/"&gt;this tutorial&lt;/a&gt; is a good start. &lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#what-is-linux-and-cli-computer"&gt;
+  &lt;/a&gt;
+  What is Linux and CLI? 💻
+&lt;/h2&gt;
+
+&lt;p&gt;Linux is an open source operating system that is used on everything from smart phones to main frame computers. &lt;/p&gt;
+
+&lt;p&gt;Linux provides a command line interface (CLI) that provides a quick and powerful way to control and manipulate your computer. Once mastered, the Linux CLI can save you time and provide a powerful tool to aid in your daily tasks.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#commands"&gt;
+  &lt;/a&gt;
+  Commands
+&lt;/h2&gt;
+
+&lt;p&gt;The command line can be intimidating but learning the basics will give you access to a world of scripts and automation tools that will make your life a lot easier and more productive.&lt;/p&gt;
+
+&lt;p&gt;The Basics: You will be using the command line to type various commands and tasks. Commands are what Linux runs. In Linux, the Command Line can be used for various things.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--_tBU1EWp--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/xjwh38xzh6neufqr0hev.gif" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--_tBU1EWp--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/xjwh38xzh6neufqr0hev.gif" alt="cat enters pc"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;To start, open up a terminal. Now, let's try using some basic Linux commands! &lt;/p&gt;
+
+&lt;p&gt;Most of these commands are applicable for all Linux distributions. Linux is case sensitive (capitalization matters).&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Navigation&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;ls&lt;/code&gt;    List directory&lt;br&gt;
+&lt;code&gt;cd DIR&lt;/code&gt; Change the current directory to the DIR directory&lt;br&gt;
+&lt;code&gt;cd ~&lt;/code&gt;  Change to home directory&lt;br&gt;
+&lt;code&gt;cd /&lt;/code&gt;      Change the current directory to the root directory&lt;br&gt;
+&lt;code&gt;cd ..&lt;/code&gt;     Go one directory lower&lt;br&gt;
+&lt;code&gt;pwd&lt;/code&gt;   Show name of current working directory &lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;File Commands&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;mkdir -p DIR&lt;/code&gt; Create directory DIR &lt;br&gt;
+&lt;code&gt;rm FILE&lt;/code&gt; Remove FILE&lt;br&gt;
+&lt;code&gt;rm -r DIR&lt;/code&gt; Remove DIR and its contents recursively&lt;br&gt;
+&lt;code&gt;rm -f FILE&lt;/code&gt; Force remove FILE &lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;System Info&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;date&lt;/code&gt;  Print or set the system date and time&lt;br&gt;
+&lt;code&gt;cal&lt;/code&gt;   Displays a calendar&lt;br&gt;
+&lt;code&gt;uptime&lt;/code&gt; Tell how long the system has been running&lt;br&gt;
+&lt;code&gt;w&lt;/code&gt;     Show who is logged on and what they are doing&lt;br&gt;
+&lt;code&gt;whoami&lt;/code&gt;  Print effective userid &lt;/p&gt;
+
+</description>
+      <category>linux</category>
+      <category>beginners</category>
+    </item>
+    <item>
       <title>Node.JS - Foal framework - version 2.4 is here</title>
       <author>Loïc Poullain</author>
       <pubDate>Tue, 25 May 2021 13:48:06 +0000</pubDate>
@@ -1542,411 +1935,345 @@ We covered both the &lt;a href="https://dev.to/appwrite/30daysofappwrite-appwrit
       <category>30daysofappwrite</category>
     </item>
     <item>
-      <title>The outcomes of developers embracing No-code</title>
-      <author>Tony Cletus</author>
-      <pubDate>Tue, 25 May 2021 13:06:06 +0000</pubDate>
-      <link>https://dev.to/tonycletus/the-outcomes-of-developers-embracing-no-code-2bpi</link>
-      <guid>https://dev.to/tonycletus/the-outcomes-of-developers-embracing-no-code-2bpi</guid>
-      <description>&lt;p&gt;&lt;em&gt;Photo credit: &lt;a href="https://iwaria.com/?utm_source=dev_to&amp;amp;utm_medium=banner&amp;amp;utm_campaign=tony_article"&gt;Iwaria&lt;/a&gt;&lt;/em&gt;&lt;/p&gt;
+      <title>Using domain events with legacy software</title>
+      <author>Pascal GARCIA</author>
+      <pubDate>Tue, 25 May 2021 13:11:02 +0000</pubDate>
+      <link>https://dev.to/pgarcia/using-domain-events-with-legacy-software-281h</link>
+      <guid>https://dev.to/pgarcia/using-domain-events-with-legacy-software-281h</guid>
+      <description>&lt;p&gt;by &lt;a class="mentioned-user" href="https://dev.to/pgarcia"&gt;@pgarcia&lt;/a&gt;
+ and &lt;a class="mentioned-user" href="https://dev.to/baptistemesta"&gt;@baptistemesta&lt;/a&gt;
+, BonitaSoft R&amp;amp;D Engineers &lt;/p&gt;
 
-&lt;p&gt;The Software industry is the most exponential field in the world. Especially in the way we craft and think software.&lt;/p&gt;
+&lt;p&gt;If you are using legacy software that is mature and working well, but has a large, complex code base - and you want to add new features without adding more complexity, we have a way of doing that with Domain Driven Design, Clean Architecture, or CQRS techniques that could help you.&lt;/p&gt;
 
-&lt;blockquote&gt;
-&lt;p&gt;"We've never had a better yesterday, it has always been a forward progress."&lt;br&gt;
- — Gideon Shaibu&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;From building software with Low-level languages (Machine language and Assembly language) in 0s and 1s to High-level languages (Python, C++, JavaScript, Java...) and now, there's this new thing echoing all over the internet called &lt;strong&gt;No-Code&lt;/strong&gt;.&lt;/p&gt;
-
-&lt;p&gt;The genealogy of software development has never had a better yesterday. Each chronicle presents a simplified way of building software better than the previous chronicle. Now is the time to talk No-code, though, no longer a new phenomenon.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#the-era-of-nocode"&gt;
-  &lt;/a&gt;
-  The Era of No-Code
-&lt;/h2&gt;
-
-&lt;p&gt;The No-code movement started way back in 1985 when Microsoft released the first version of Excel (interestingly for Mac), followed by the Windows version in 1987. Google took it further by creating Google Sheets and embracing the cloud. Over the years, Excel has helped shape how we handle financial and data analysis. &lt;/p&gt;
-
-&lt;p&gt;In 2003, No-code fully came online, when WordPress kickstarted the ability to build websites without code which is powering about &lt;a href="https://www.whoishostingthis.com/compare/wordpress/stats/"&gt;35% of the world's websites&lt;/a&gt; today. &lt;/p&gt;
-
-&lt;p&gt;In 2004, Shopify empowered people to build their online stores without code. &lt;/p&gt;
-
-&lt;p&gt;WordPress and Shopify were the first set of popular online tools to pave way for entrepreneurs to build all kinds of websites ranging from blog to dev tools to e-commerce websites and SaaS products.&lt;/p&gt;
-
-&lt;p&gt;Later, popular tools like Airtable (2012), Bubble (2012), Webflow (2013), Zapier (2012), TypeForm (2016), Jotform (2006), Notion (2016), Coda (2019) and a list of many others have grossly contributed to the No-code movement. All to democratize software development by creating citizen developers who can quickly build solutions in real-time without writing code.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;p&gt;&lt;code&gt;No-code is simply building and maintaining what is used to be accomplished with code without code.&lt;/code&gt;&lt;br&gt;
-&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#is-nocode-here-to-replace-software-developers"&gt;
-  &lt;/a&gt;
-  Is No-code here to replace Software developers?
-&lt;/h2&gt;
-
-&lt;p&gt;Capital NO. This can never happen as No-code tools need software developers to write code that makes them what they are.&lt;/p&gt;
-
-&lt;p&gt;Think of &lt;a href="https://botamp.com"&gt;Botamp&lt;/a&gt; for example, A software that provides entrepreneurs with simple tools to quickly create their website and professional email campaigns without code. &lt;a href="https://www.wappalyzer.com/apps/"&gt;Wappalyzer&lt;/a&gt; browser extension shows Botamp is powered by Ruby on Rails. A high-level framework only developers can code and maintain. So the idea that No-code is here to replace Software developers is completely useless. &lt;/p&gt;
-
-
-&lt;blockquote class="ltag__twitter-tweet"&gt;
-
-  &lt;div class="ltag__twitter-tweet__main"&gt;
-    &lt;div class="ltag__twitter-tweet__header"&gt;
-      &lt;img class="ltag__twitter-tweet__profile-image" src="https://res.cloudinary.com/practicaldev/image/fetch/s--ZUvPb25p--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://pbs.twimg.com/profile_images/1364158357511286786/sHKiqABw_normal.jpg" alt="Tony Cletus profile image"&gt;
-      &lt;div class="ltag__twitter-tweet__full-name"&gt;
-        Tony Cletus
-      &lt;/div&gt;
-      &lt;div class="ltag__twitter-tweet__username"&gt;
-        @iamtonycletus
-      &lt;/div&gt;
-      &lt;div class="ltag__twitter-tweet__twitter-logo"&gt;
-        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ir1kO05j--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/twitter-f95605061196010f91e64806688390eb1a4dbc9e913682e043eb8b1e06ca484f.svg" alt="twitter logo"&gt;
-      &lt;/div&gt;
-    &lt;/div&gt;
-    &lt;div class="ltag__twitter-tweet__body"&gt;
-      Some people have to learn how to code to build simple tools that will help others create stuff without coding. How sweet that sounds. &lt;br&gt;&lt;a href="https://twitter.com/hashtag/NoCode"&gt;#NoCode&lt;/a&gt; &lt;a href="https://twitter.com/hashtag/BuildInPublic"&gt;#BuildInPublic&lt;/a&gt;
-    &lt;/div&gt;
-    &lt;div class="ltag__twitter-tweet__date"&gt;
-      07:44 AM - 26 Mar 2021
-    &lt;/div&gt;
-
-
-    &lt;div class="ltag__twitter-tweet__actions"&gt;
-      &lt;a href="https://twitter.com/intent/tweet?in_reply_to=1375353052828418048" class="ltag__twitter-tweet__actions__button"&gt;
-        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--fFnoeFxk--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/twitter-reply-action-238fe0a37991706a6880ed13941c3efd6b371e4aefe288fe8e0db85250708bc4.svg" alt="Twitter reply action"&gt;
-      &lt;/a&gt;
-      &lt;a href="https://twitter.com/intent/retweet?tweet_id=1375353052828418048" class="ltag__twitter-tweet__actions__button"&gt;
-        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--k6dcrOn8--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/twitter-retweet-action-632c83532a4e7de573c5c08dbb090ee18b348b13e2793175fea914827bc42046.svg" alt="Twitter retweet action"&gt;
-      &lt;/a&gt;
-      &lt;a href="https://twitter.com/intent/like?tweet_id=1375353052828418048" class="ltag__twitter-tweet__actions__button"&gt;
-        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--SRQc9lOp--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/twitter-like-action-1ea89f4b87c7d37465b0eb78d51fcb7fe6c03a089805d7ea014ba71365be5171.svg" alt="Twitter like action"&gt;
-      &lt;/a&gt;
-    &lt;/div&gt;
-  &lt;/div&gt;
-&lt;/blockquote&gt;
-
-
-&lt;p&gt;I rather say the idea of No-code is to empower non-technical people to build solutions for their business, client, or explore their creative minds. &lt;a href="https://twitter.com/bentossell"&gt;Ben Tossel&lt;/a&gt; puts it this way; &lt;/p&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;"Building is for a large audience (coding or not). Learning to build can often be a gateway into learning to code. But it’s also enabling anyone to make things."&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;So it is important to mention that No-code is not here to replace Software developers but to enable non-coders and even coders build things faster.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#should-developers-embrace-nocode-technology"&gt;
-  &lt;/a&gt;
-  Should Developers embrace No-code technology?
-&lt;/h2&gt;
-
-&lt;p&gt;Absolutely YES, No-code technologies are around to simplify the existing process they are alternating not replace them. Not every development requires coding. &lt;/p&gt;
-
-&lt;p&gt;No-code can do almost anything code can do these days, maybe not as appealing as building certain functionalities with code but it gives enough space for rapid development. No-code saves time and money when you think of creating blogs, landing pages, payment systems, AI tools, SaaS products and community/social apps. &lt;/p&gt;
-
-&lt;p&gt;Recently &lt;a href="https://www.makerpad.co/"&gt;Makerpad&lt;/a&gt;, a community-driven platform built on No-code technologies like Webflow, MemberStack and Stripe was acquired by Zapier. An inspiring News for startups using the same approach.&lt;/p&gt;
-
-&lt;p&gt;Spicing your technical skill-set with No-code makes you an outstanding developer. It helps you build faster, bootstrap your side-project, and be diversified. &lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#what-happens-if-software-developers-crowd-nocode"&gt;
-  &lt;/a&gt;
-  What happens if Software developers crowd No-code?
-&lt;/h2&gt;
-
-&lt;p&gt;All I see is a positive change. Developers are already conversant with the design, implementation and maintenance of Software. All they seek is a simpler approach to what they are already doing. Think of why Laravel framework exists, an alternative to writing raw PHP for web development - To simplify the process. It is easier for developers to adopt No-code. &lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://netlify.com"&gt;Netlify&lt;/a&gt; caught the hearts of developers not because it is a scaled hosting software. &lt;br&gt;
-While similar technologies like Heroku, GitHub and AWS allowed app deployment via Git commands and Terminals, Netlify simplified the process by allowing developers to deploy apps by dragging and dropping your project from your local computer to the cloud. A definition of speed and simplicity.&lt;/p&gt;
-
-&lt;p&gt;Developer tools like Stripe and Algolia can be used to extend the functionality of their App without writing additional code. Visual Development tools like Bubble, Webflow, Botamp, Zapier, Integromat, Airtable, Notion, Coda, and others are used to build stuff that one could only build by writing, hosting, and maintaining a whole lot of code in the absence of these tools.&lt;/p&gt;
-
-&lt;p&gt;In general, No-code adds as a supportive skill to developers to build faster. It comes in handy when you need to ship an MVP. Developers can improve the No-code tools as high-level users. &lt;/p&gt;
-
-&lt;p&gt;Because of No-code, we have titles like non-technical founder, citizen developers, makers and No-coder. Embracing No-code is no longer the case but how knowledgeable are you with No-code tools?&lt;/p&gt;
-
-</description>
-      <category>nocode</category>
-      <category>saas</category>
-      <category>lowcode</category>
-      <category>programming</category>
-    </item>
-    <item>
-      <title>How I started practicing TDD</title>
-      <author>Marcio Frayze</author>
-      <pubDate>Tue, 25 May 2021 13:06:02 +0000</pubDate>
-      <link>https://dev.to/marciofrayze/how-i-started-practicing-tdd-aj5</link>
-      <guid>https://dev.to/marciofrayze/how-i-started-practicing-tdd-aj5</guid>
-      <description>&lt;p&gt;In this article I assume you have already read the basics about test-driven development. Here, I describe some of the problems I faced when trying to internalize this practice in my daily life as a developer and how I managed to get around them.&lt;/p&gt;
+&lt;p&gt;This article offers a step by step guide on how to add this feature on your own legacy software based on a real life example. &lt;/p&gt;
 
 &lt;h1&gt;
-  &lt;a href="#first-steps"&gt;
+  &lt;a href="#context"&gt;
   &lt;/a&gt;
-  First steps
+  Context
 &lt;/h1&gt;
 
-&lt;p&gt;I discovered TDD when I was studying computer science around 2003. I was reading about &lt;a href="http://www.extremeprogramming.org/"&gt;Extreme Programming&lt;/a&gt; and loved the ideas, but had a lot of difficulty practicing some of them, especialy the &lt;strong&gt;test first&lt;/strong&gt; approach (also known as test-driven development). Took many years until I internalized it, but today I can not understand how I was able to develop software without this practice!&lt;br&gt;&lt;br&gt;
-The purpose of this article is to try to help people who have an interest in TDD, but have not yet been able to include this practice in their daily lives.&lt;/p&gt;
+&lt;p&gt;In the case we are using as an example, we are starting with software that executes business processes. The goal is to add analytics to these business processes. &lt;/p&gt;
+
+&lt;p&gt;This software handles its business logic mostly through Create Read Update Delete (CRUD) operations. The goal is to produce domain events from these operations, that is, what happened in the system at a business level.&lt;/p&gt;
+
+&lt;p&gt;We could refactor the software but that comes at a cost. Instead, to quickly start playing with domain events, we chose to develop an extension in the existing software to produce them. &lt;/p&gt;
+
+&lt;p&gt;The software itself is a classic Java application, based on Spring and Hibernate, and all code samples in this article are in Kotlin.&lt;/p&gt;
 
 &lt;h1&gt;
-  &lt;a href="#study-concepts-before-libraries-and-frameworks"&gt;
+  &lt;a href="#methodology"&gt;
   &lt;/a&gt;
-  Study concepts before libraries and frameworks
+  Methodology
 &lt;/h1&gt;
 
-&lt;p&gt;When I decided to apply TDD, my team already used &lt;a href="https://junit.org/"&gt;jUnit&lt;/a&gt; for automated testing, but the tests were done after implementing the production code. As I already knew the tools and had a notion of the basic concepts behind TDD, it was natural to try to go straight to practice without first studying the theory further. And the result couldn't be another: frustration. Changing the way I worked for over 10 years was very hard and I gave up several times. I read articles on the Internet and the theory seemed interesting, but I couldn't understand how to practice.&lt;/p&gt;
-
-&lt;p&gt;At some point I realized that I needed to devote more time to the theory and two books helped me a lot to clarify several doubts. They are:  &lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;
-&lt;a href="https://www.goodreads.com/book/show/387190.Test_Driven_Development"&gt;TDD Guided Development by Tests&lt;/a&gt;. By Kent Beck.&lt;/li&gt;
-&lt;li&gt;
-&lt;a href="http://www.growing-object-oriented-software.com/"&gt;Growing Object Oriented Software, Guided by tests&lt;/a&gt;. By Steve Freeman and Nat Pryce.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;So if you're determined to practice TDD, I suggest you start by reading these books. The first is quite short, objective and explains very well the fundamentals. The second is more extensive, discuses TDD in depth and helped me to finally understand &lt;strong&gt;how to practice TDD&lt;/strong&gt;.  &lt;/p&gt;
-
-&lt;p&gt;Developing test-driven software seems to be very easy, and can be summarized in just three simple steps:  &lt;/p&gt;
+&lt;p&gt;Here are the steps we followed.&lt;/p&gt;
 
 &lt;ol&gt;
-&lt;li&gt;Write an automated test that fails;&lt;/li&gt;
-&lt;li&gt;Write enough production code for this test to pass;&lt;/li&gt;
-&lt;li&gt;Refactor the code and repeat the loop.&lt;/li&gt;
+&lt;li&gt;Design domain events&lt;/li&gt;
+&lt;li&gt;Assess what is possible with current technical events&lt;/li&gt;
+&lt;li&gt;Create domain events&lt;/li&gt;
+&lt;li&gt;Publish the domain events&lt;/li&gt;
 &lt;/ol&gt;
 
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--RDzREtRI--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/1h0rcth4hurt1uy89keq.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--RDzREtRI--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/1h0rcth4hurt1uy89keq.png" alt="tdd cycle"&gt;&lt;/a&gt; &lt;/p&gt;
-
-&lt;p&gt;As this theory seems to be simple, it is tempting to neglect the study of concepts and go straight to practice. Don't make that mistake. Study the principles and fundamentals further and everything will be much easier. Learn from those  who have explored the theme much more and paved the way for us.&lt;/p&gt;
-
-&lt;p&gt;My recommendation is that you read at least the first book I mentioned above. You will spend only a few hours and it will save you many, many days of frustration. And as soon as you have more time, you should also read the second book. It's hard to describe how much I learned from it! It has definitely completely changed the way I develop software.&lt;/p&gt;
-
 &lt;h1&gt;
-  &lt;a href="#always-write-the-tests-first"&gt;
+  &lt;a href="#design-domain-events"&gt;
   &lt;/a&gt;
-  ALWAYS write the tests first
+  Design domain events
 &lt;/h1&gt;
 
-&lt;p&gt;In the beginning I had great difficulty understanding the importance of obeying the order of the TDD cycle. It was common to code business logic and then suffer trying to write the tests. I knew I wasn't practicing TDD, but I thought the end result would be the same, after all, I was writing the automated tests, just not following the order established by TDD. It took me a while to understand that I wasn't letting the tests &lt;strong&gt;guide&lt;/strong&gt; the &lt;em&gt;design&lt;/em&gt; of my code and how much I was missing out.&lt;/p&gt;
+&lt;p&gt;To design domain events, first, it’s necessary to understand the business needs these events are relevant to: who will use them, and how they will be used. &lt;/p&gt;
 
-&lt;p&gt;And when I was to writting the tests, it felt like fighting with the code and I had the feeling that I was inserting bad practices in it. I did things I knew were wrong, but they seemed like the only option! A recurring example: How to test a particular piece of code in isolation if it was a private method? Should I change the method I want to test from private to protect or public? And I ended up doing exactly this (wrongly) a few times. I always felt guilty and realized something was wrong, but ended up putting the blame on the test. I thought committing those architectural deviations was the only way to make that code testable.&lt;/p&gt;
+&lt;p&gt;But, be careful, these domain events should represent what is happening in the business and not address only a single current business need. &lt;/p&gt;
 
-&lt;p&gt;But as I developed the software in this way, the test coverage dropped and the internal quality of the software fell along with it. And as the architecture of the system became less and less testable, it turned into a snowball until it got to the point where it became very difficult to create new tests. In the end it became a very frustrating experience and I saw very little benefit in working this way, since the gains were not offsetting the cost.&lt;/p&gt;
-
-&lt;p&gt;I only understood this better when I read the book &lt;a href="https://www.goodreads.com/book/show/387190.Test_Driven_Development"&gt;TDD Development Guided by Tests&lt;/a&gt; and started obeying the correct flow of TDD. But resisting the urge to write "just one more line of code" before there is a test is harder than it sounds. Practicing TDD requires discipline. Have patience and resist the temptation to advance the production code. Even if you're &lt;strong&gt;sure&lt;/strong&gt; how the code will look in a few minutes, stop implementing the production code as soon as the test becomes green. Go to the refactoring step (duplicate code removal) and then go back to creating a new test. Create a test that fails and only then move on to the next task. You'll be surprised how many times the test will &lt;strong&gt;guide&lt;/strong&gt; your architecture in a different direction than you had originally imagined.&lt;/p&gt;
-
-&lt;p&gt;After a while you will internalize this flow, but the first few times you will need to be very focused. This is usually easier when we are working with paired programming or mob programming, as other people will help remind us to avoid this common mistake.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#dont-shoot-the-messenger"&gt;
-  &lt;/a&gt;
-  Don't shoot the messenger
-&lt;/h1&gt;
-
-&lt;p&gt;If it starts to get too hard to create a new test, you may have underestimated the refactoring step and it's a good time to analyze your architecture. Don't get mad at the test! On the contrary, be glad to have found a point that needs attention and that, if it were not for the test, there might be much bigger problems in the future. The sooner we find and fix the design flaws, the easier and cheaper it will be to repair these problems. And the practice of TDD is a great way to do this.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#dont-use-advanced-testing-tools"&gt;
-  &lt;/a&gt;
-  Don't use advanced testing tools
-&lt;/h1&gt;
-
-&lt;p&gt;It is quite common to find beginners in TDD trying to use advanced tools for creating complex &lt;a href="http://xunitpatterns.com/Test%20Double.html"&gt;double objects&lt;/a&gt; (mock objects), using reflections and even trying to mock static methods or private methods. Don't do this! These tools may be useful in some very rare cases, but in 99.999% cases the problem lies in the system architecture and after fixing these flaws, we no longer need such invasive techniques. The better the architecture, the easier it is to create automated tests.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#learn-software-architecture-and-clean-code"&gt;
-  &lt;/a&gt;
-  Learn software architecture and clean code
-&lt;/h1&gt;
-
-&lt;p&gt;As I said just above, system architecture has a very significant importance in creating testable systems. So you must study about good programming practices. Learn how to implement clean code, understand SOLID principles, and how to create a good software architecture, and apply all of this to your code. Below I list some sources that helped me a lot in this trajectory:&lt;/p&gt;
+&lt;p&gt;In our case, we want to do analytics on business processes. This means that we want to have an event each time a change happens on the business process, for example:&lt;/p&gt;
 
 &lt;ul&gt;
-&lt;li&gt;
-&lt;a href="https://www.goodreads.com/book/show/3735293-clean-code"&gt;Clean Code&lt;/a&gt; — A classic written by Robert Cecil Martin (aka. Uncle Bob). In it you will understand the fundamentals of how to write code that will be easier to maintain and refactor.&lt;/li&gt;
-&lt;li&gt;
-&lt;a href="https://www.goodreads.com/book/show/18043011-clean-architecture"&gt;Clean Archictecture&lt;/a&gt; — From the same author of Clean Code. It will help you better understand what it is and how to create a good software architecture. I recorded &lt;a href="https://segunda.tech/posts/2019-03-23-clean-architecture/"&gt;a podcast&lt;/a&gt; (in Brazilian Portuguese) where I talk about this book.&lt;/li&gt;
-&lt;li&gt;
-&lt;a href="https://martinfowler.com/books/refactoring.html"&gt;Refactoring&lt;/a&gt; — Written by Martin Fowler, another software development classic. One of the main steps of TDD is the refactoring your code, and this book is the natural reference to understand how to do it in the best possible way.&lt;/li&gt;
-&lt;li&gt;
-&lt;a href="https://evolutionaryarchitecture.com/"&gt;Building Evolutionary Architectures&lt;/a&gt; — I also &lt;a href="https://segunda.tech/posts/2019-03-03-building-evolutionary-architectures/"&gt;recorded a podcast&lt;/a&gt; about this book. This work will help you understand how to assemble an &lt;a href="https://www.thoughtworks.com/pt/evolutionary-architecture"&gt;evolutionary architecture&lt;/a&gt;. You can also watch &lt;a href="https://www.youtube.com/watch?v=UV_B-ioocpY"&gt;this talk&lt;/a&gt; by &lt;a href="https://www.thoughtworks.com/pt/profiles/rebecca-parsons"&gt;Rebecca Parsons&lt;/a&gt;, CTO of ThoughtWorks and one of the authors of this book.&lt;/li&gt;
+&lt;li&gt;  when a new case of a process starts&lt;/li&gt;
+&lt;li&gt;  when it ends&lt;/li&gt;
+&lt;li&gt;  when a task of that process is submitted&lt;/li&gt;
 &lt;/ul&gt;
 
-&lt;h1&gt;
-  &lt;a href="#follow-the-principles-of-yagni-and-last-responsible-moment"&gt;
-  &lt;/a&gt;
-  Follow the principles of YAGNI and Last Responsible Moment
-&lt;/h1&gt;
+&lt;p&gt;The best way we found to design these events is to design them as you would for a greenfield development. &lt;/p&gt;
 
-&lt;p&gt;Another tip is to always follow the principle of &lt;strong&gt;y&lt;/strong&gt;ou &lt;strong&gt;a&lt;/strong&gt;in’t &lt;strong&gt;g&lt;/strong&gt;onna &lt;strong&gt;n&lt;/strong&gt;eed &lt;strong&gt;i&lt;/strong&gt;t, known by the abbreviation &lt;a href="https://en.wikipedia.org/wiki/You_aren%27t_gonna_need_it"&gt;YAGNI&lt;/a&gt;. You should also follow The Last Responsible Moment principle.  &lt;/p&gt;
+&lt;p&gt;The goal is to create domain events that are as close as possible to the business logic.&lt;/p&gt;
 
-&lt;p&gt;By following these two principles, along with TDD, we were able to postpone decision-making until the last safe moment. So we can gather as much information as possible so that when we really need to make a decision, it is made as informed as possible.&lt;/p&gt;
+&lt;p&gt;For example, for the domain event for the "new case of a process starts," we named the event "CASE_STARTED" to contain information about the user that started that case, the data the user started the case with, and what the process related to that case is.&lt;/p&gt;
 
-&lt;blockquote&gt;
-&lt;p&gt;“There are things we do not know we don't know.” — Neal Ford.&lt;/p&gt;
-&lt;/blockquote&gt;
+&lt;p&gt;We strongly advise you to read about Domain Driven Design techniques. There are many articles on how to design these events and how to understand the business, and we have listed some references at the end of this article.&lt;/p&gt;
 
-&lt;p&gt;Even if you are sure that a particular database model will be the best solution, that a particular technology is the most appropriate for the problem, and that a certain architecture would be the most appropriate, resist the temptation to make this decision until the &lt;strong&gt;last responsible moment&lt;/strong&gt; arrives.&lt;/p&gt;
-
-&lt;p&gt;There may be several factors that you still don't know that can change all decision-making. Perhaps at the beginning of the project a NoSQL database seems to be the best alternative, until a midway impediment appears that makes this database model no longer a good solution. If your team made the decision to use NoSQL prematurely, the cost and pain of switching to another solution will be much higher than if you had simply waited until the last responsible moment.&lt;/p&gt;
-
-&lt;p&gt;You can find more information about the concepts of last moment responsible and evolutionary architecture in &lt;a href="https://www.thoughtworks.com/insights/blog/microservices-evolutionary-architecture"&gt;this article&lt;/a&gt; by Neal Ford and Rebecca Parsons.&lt;/p&gt;
+&lt;p&gt;In addition, this phase should be done with stakeholders who know and understand the business processes.&lt;/p&gt;
 
 &lt;h1&gt;
-  &lt;a href="#run-tests-automatically-when-saving-any-file"&gt;
+  &lt;a href="#assess-what-is-possible-with-current-technical-events"&gt;
   &lt;/a&gt;
-  Run tests automatically when saving any file
+  Assess what is possible with current technical events
 &lt;/h1&gt;
 
-&lt;p&gt;The technique that helped me the most in the beginning and continues to help is to configure the build tool so that it runs all tests automatically whenever a file is saved. &lt;/p&gt;
+&lt;p&gt;When you have the first version of your domain events defined, see if it might be possible to produce them from what is currently available in your legacy software. &lt;/p&gt;
 
-&lt;p&gt;I leave a window on my secondary monitor that keeps running the tests at all times, while I keep the IDE or editor on the primary monitor. When I'm working with only one monitor, I leave an open terminal at the bottom of the screen running the tests. In this way, I have two great advantages:&lt;/p&gt;
+&lt;p&gt;As a second step, dive into your current codebase and list all data you will be able to extract from current technical events, already produced. This could be data from:&lt;/p&gt;
 
 &lt;ul&gt;
-&lt;li&gt;I don't forget to run the tests often;&lt;/li&gt;
-&lt;li&gt;I get a notification right after a change causes some unwanted side effect that breaks any test.&lt;/li&gt;
+&lt;li&gt;  listeners already implemented in your software&lt;/li&gt;
+&lt;li&gt;  listeners on your framework (as most frameworks provide ways to listen to changes, explore them and verify what information you can gather from them)&lt;/li&gt;
+&lt;li&gt;  probes on your system&lt;/li&gt;
+&lt;li&gt;  combination of a set of all other data. As a trivial example: if you have the start state of something, combined with the current date, you have the duration of that event.&lt;/li&gt;
 &lt;/ul&gt;
 
-&lt;p&gt;If you are programming in Java, &lt;a href="https://blog.gradle.org/introducing-continuous-build"&gt;gradle has a parameter that does this for you&lt;/a&gt;. If you are using any other build tool, look in the documentation and you should find something related to the term &lt;strong&gt;watch&lt;/strong&gt;. When I'm programming on &lt;a href="https://elm-lang.org/"&gt;Elm&lt;/a&gt;, I use the &lt;em&gt;elm-test&lt;/em&gt; in conjunction with the watch parameter, for example. In some cases the &lt;a href="https://eradman.com/entrproject/"&gt;entr&lt;/a&gt; tool may help in this task.&lt;/p&gt;
+&lt;p&gt;The illustration below shows the simplified architecture of our software.&lt;/p&gt;
 
-&lt;p&gt;I strongly recommend that you start this way. Of course, on systems with many tests you will need to adapt this model, since the execution of all tests can be very time consuming and require a lot of resources (memory and CPU).&lt;/p&gt;
+&lt;p&gt;In our case, we can use several extension points:&lt;/p&gt;
 
-&lt;p&gt;To this day I still use this technique and could not count the number of times this helped identify problems in advance and saved a lot of time.&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;  Transaction synchronization&lt;/li&gt;
+&lt;li&gt;  Event handlers&lt;/li&gt;
+&lt;li&gt;  Hibernate event listeners&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;In the next section, we’ll explain more how these can be leveraged for our needs.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--XZWerBY3--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/0dxfpe5wm1cwrovj6dvh.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--XZWerBY3--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/0dxfpe5wm1cwrovj6dvh.png" alt="alt_text" title="data_extraction_legacy_software_architecture_overview"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#adapt-the-design-in-collaboration-with-the-stakeholders"&gt;
+  &lt;/a&gt;
+  Adapt the design in collaboration with the stakeholders
+&lt;/h2&gt;
+
+&lt;p&gt;The original design of events might not be possible with your current architecture. In that case you might need to ask few questions:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;  Can you find a smaller functional scope for your events in that first iteration?&lt;/li&gt;
+&lt;li&gt;  Is it possible to keep  your original design by using post processing?&lt;/li&gt;
+&lt;li&gt;  Can you identify what needs to change in the software to have the full scope of functionality?&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;You might now have a first version for your domain event, along with a backlog of improvements for the software and your events.&lt;/p&gt;
+
+&lt;p&gt;For example, in our case, we were not able to link the update on what we call BusinessData to the Start of a case. What we decided was to simply record both events separately, and in a future iteration add post-processing to combine them..&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#check-that-the-events-follow-some-important-rules"&gt;
+  &lt;/a&gt;
+  Check that the events follow some important rules
+&lt;/h2&gt;
+
+&lt;p&gt;A critical point to keep in mind is that events should follow a set of rules to avoid common pitfalls. Events should be:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;  Immutable&lt;/li&gt;
+&lt;li&gt;  Unique: you’ll need to generate a unique identifier.&lt;/li&gt;
+&lt;li&gt;  Set in the past: all events should be named in the past tense&lt;/li&gt;
+&lt;li&gt;  Have a timestamp&lt;/li&gt;
+&lt;li&gt;  Have a context which will help identify the scope of that event&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;The book &lt;em&gt;Implementing Domain-Driven Design&lt;/em&gt;[1] details in great depth what rules events should follow.&lt;/p&gt;
 
 &lt;h1&gt;
-  &lt;a href="#it-is-not-enough-to-automate-the-execution-of-the-tests"&gt;
+  &lt;a href="#how-to-create-domain-events"&gt;
   &lt;/a&gt;
-  It is not enough to automate the execution of the tests
+  How to create domain events
 &lt;/h1&gt;
 
-&lt;p&gt;Some developers say they are implementing unit tests simply because they are using some library (such as JUnit or NUnit) to make it easier to perform tasks. But in practice, what they're doing is just making it easier to execute a function or method, like it's a main function. This cannot be called automated testing, let alone unit testing.&lt;/p&gt;
+&lt;p&gt;After going through the design process, we ended up with the following event types:&lt;br&gt;
+&lt;/p&gt;
 
-&lt;p&gt;I worked on projects that had a supposedly high coverage of tests where the team even used analysis tools such as &lt;a href="https://www.sonarqube.org/"&gt;SonarQube&lt;/a&gt;, but early on would appear some strange things like tests that had no assert! The only way the test would fail was if an exception occurred during its execution, otherwise it always ended successfully. Another common mistake was tests printing things on the console (usually the result of failure). In short: they were great examples of how to &lt;strong&gt;not&lt;/strong&gt; do automated testing.&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;CASE_STARTED, CASE_COMPLETED, TASK_STARTED, TASK_ASSIGNED, TASK_UNASSIGNED, TASK_SUSPENDED, TASK_EXECUTED, TASK_COMPLETED, CONNECTOR_STARTED, CONNECTOR_COMPLETED, BDM_INSERTED, BDM_UPDATED
+&lt;/code&gt;&lt;/pre&gt;
 
-&lt;p&gt;&lt;strong&gt;Asserts&lt;/strong&gt; are a fundamental part of testing. It is at this point that we validate the outcome of its execution. When it is not done properly, we run the risk of creating false positives, false negatives or even very fragile tests. So don't be in a hurry when writing the asserts. They can't not be too generic, but they can't be too fragile either.&lt;/p&gt;
+&lt;/div&gt;
 
-&lt;p&gt;And &lt;strong&gt;never&lt;/strong&gt; print anything on the console. It is asserts' duty to indicate whether the test ran successfully or not, and in case of failures, the test framework itself will take care of showing where the problem occurred. Therefore, it's very important to give a meaningful names to the tests. I use and recommend the &lt;a href="https://martinfowler.com/bliki/GivenWhenThen.html"&gt;Given-When-Then&lt;/a&gt; standard.&lt;/p&gt;
+
+
+&lt;p&gt;and the following event structure:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight json"&gt;&lt;code&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+ &lt;/span&gt;&lt;span class="nl"&gt;"id"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"6c3b3501-f454-4eb3-be55-63176f47e767"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+ &lt;/span&gt;&lt;span class="nl"&gt;"tenantId"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+ &lt;/span&gt;&lt;span class="nl"&gt;"name"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"CASE_STARTED"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+ &lt;/span&gt;&lt;span class="nl"&gt;"bpmObjectType"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"CASE"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+ &lt;/span&gt;&lt;span class="nl"&gt;"bpmObjectName"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"LoanRequest"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+ &lt;/span&gt;&lt;span class="nl"&gt;"caseExecutorId"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+ &lt;/span&gt;&lt;span class="nl"&gt;"contractData"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+   &lt;/span&gt;&lt;span class="nl"&gt;"amount"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;100000&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+   &lt;/span&gt;&lt;span class="nl"&gt;"type"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"house"&lt;/span&gt;&lt;span class="w"&gt;
+ &lt;/span&gt;&lt;span class="p"&gt;},&lt;/span&gt;&lt;span class="w"&gt;
+ &lt;/span&gt;&lt;span class="nl"&gt;"businessData"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+   &lt;/span&gt;&lt;span class="nl"&gt;"loanData"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+     &lt;/span&gt;&lt;span class="nl"&gt;"ids"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="w"&gt;
+       &lt;/span&gt;&lt;span class="mi"&gt;84&lt;/span&gt;&lt;span class="w"&gt;
+     &lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt;&lt;span class="w"&gt;
+     &lt;/span&gt;&lt;span class="nl"&gt;"dataClassName"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"com.company.loan.Loan"&lt;/span&gt;&lt;span class="w"&gt;
+   &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+ &lt;/span&gt;&lt;span class="p"&gt;},&lt;/span&gt;&lt;span class="w"&gt;
+ &lt;/span&gt;&lt;span class="nl"&gt;"timestamp"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;1582712293203&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+ &lt;/span&gt;&lt;span class="nl"&gt;"context"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+   &lt;/span&gt;&lt;span class="nl"&gt;"processId"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;7564421046497327000&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+   &lt;/span&gt;&lt;span class="nl"&gt;"caseId"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;1052&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+   &lt;/span&gt;&lt;span class="nl"&gt;"rootCaseId"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;1052&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+   &lt;/span&gt;&lt;span class="nl"&gt;"executorId"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="w"&gt;
+ &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Once we have our domain events correctly defined, we can start creating them. We will describe more technical aspects of what we did there. &lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#data-sources-at-our-disposal"&gt;
+  &lt;/a&gt;
+  Data sources at our disposal
+&lt;/h2&gt;
+
+&lt;p&gt;In our case, we had two kinds of data sources we could use. One was home-made listeners on CRUD operations on most of our data. These listeners produced custom technical events. &lt;/p&gt;
+
+&lt;p&gt;The other data source was the Hibernate entity manager on which you can register: &lt;code&gt;org.hibernate.event.spi.PostUpdateEventListener&lt;/code&gt;and&lt;code&gt;org.hibernate.event.spi.PostInsertEventListener&lt;/code&gt;&lt;/p&gt;
+
+&lt;p&gt;These listeners are registered on the Hibernate session factory, and are called when an entity is updated or inserted.&lt;/p&gt;
+
+&lt;p&gt;Below is an example of registration for these handlers:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight kotlin"&gt;&lt;code&gt;&lt;span class="kd"&gt;val&lt;/span&gt; &lt;span class="py"&gt;registry&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="n"&gt;sessionFactory&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;serviceRegistry&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;getService&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nc"&gt;EventListenerRegistry&lt;/span&gt;&lt;span class="o"&gt;::&lt;/span&gt;&lt;span class="k"&gt;class&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;java&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="n"&gt;registry&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;appendListeners&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nc"&gt;EventType&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nc"&gt;POST_INSERT&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;bdmHibernateInsertListener&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="n"&gt;registry&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;appendListeners&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nc"&gt;EventType&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nc"&gt;POST_UPDATE&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;bdmHibernateUpdateListener&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;For more information on Hibernate listeners, see &lt;a href="https://vladmihalcea.com/hibernate-event-listeners/"&gt;https://vladmihalcea.com/hibernate-event-listeners/&lt;/a&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#process-technical-events"&gt;
+  &lt;/a&gt;
+  Process technical events
+&lt;/h2&gt;
+
+&lt;p&gt;We want to combine information from our home-made event (captured by the BonitaEventHandler) and Hibernate events (captured by PostUpdateEventListeners) into the domain events.&lt;/p&gt;
+
+&lt;p&gt;The following schema summarizes that flow:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--_Sz1oOjz--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/yv6rzj4tcpqe17zi4odt.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--_Sz1oOjz--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/yv6rzj4tcpqe17zi4odt.png" alt="alt_text" title="data_extraction_event_generation.png"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;We are working in a transactional environment. This means that all actions will really be applied only at the end of the transaction. The choice we made was to register a &lt;code&gt;javax.transaction.Synchronization&lt;/code&gt; and to gather all technical events during the execution of the transaction, and publish them at the commit of the transaction.&lt;/p&gt;
+
+&lt;p&gt;Here is how we register a transaction synchronization on the transaction manager:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight kotlin"&gt;&lt;code&gt;&lt;span class="k"&gt;private&lt;/span&gt; &lt;span class="kd"&gt;val&lt;/span&gt; &lt;span class="py"&gt;bonitaEventSynchronizations&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nc"&gt;ThreadLocal&lt;/span&gt;&lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nc"&gt;BonitaEventSynchronization&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="nc"&gt;ThreadLocal&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+
+
+   &lt;span class="k"&gt;private&lt;/span&gt; &lt;span class="k"&gt;fun&lt;/span&gt; &lt;span class="nf"&gt;getSynchro&lt;/span&gt;&lt;span class="p"&gt;():&lt;/span&gt; &lt;span class="nc"&gt;BonitaEventSynchronization&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+       &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="n"&gt;bonitaEventSynchronizations&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;getOrSet&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+           &lt;span class="kd"&gt;val&lt;/span&gt; &lt;span class="py"&gt;bonitaEventSynchronization&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="nc"&gt;BonitaEventSynchronization&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;bonitaEventSynchronizations&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;bonitaEventProcessor&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;domainEventPublisher&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+           &lt;span class="n"&gt;txManager&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;getTransaction&lt;/span&gt;&lt;span class="p"&gt;().&lt;/span&gt;&lt;span class="nf"&gt;registerSynchronization&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;bonitaEventSynchronization&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+       &lt;span class="p"&gt;}&lt;/span&gt;
+   &lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;When the transaction is completed, we combine these technical events into one or more domain events.&lt;/p&gt;
+
+&lt;p&gt;The goal here is to gather enough information, from technical events (&lt;code&gt;BonitaEventTypes)&lt;/code&gt;, to avoid having to actively retrieve missing information. This will ensure that producing these new events will have a minimal impact on performance. &lt;/p&gt;
+
+&lt;p&gt;We have a set of &lt;code&gt;DomainEventProcessor,&lt;/code&gt; each one producing a single type of domain event.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight kotlin"&gt;&lt;code&gt;&lt;span class="kd"&gt;interface&lt;/span&gt; &lt;span class="nc"&gt;DomainEventProcessor&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+   &lt;span class="k"&gt;fun&lt;/span&gt; &lt;span class="nf"&gt;createDomainEvent&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;events&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nc"&gt;MutableList&lt;/span&gt;&lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nc"&gt;SEvent&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;):&lt;/span&gt; &lt;span class="nc"&gt;List&lt;/span&gt;&lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nc"&gt;DomainEvent&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;For example, the domain event processor below is in charge of publishing the  &lt;code&gt;TASK_STARTED&lt;/code&gt;domain event:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight kotlin"&gt;&lt;code&gt;&lt;span class="kd"&gt;class&lt;/span&gt; &lt;span class="nc"&gt;TaskStartedProcessor&lt;/span&gt; &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nc"&gt;DomainEventProcessor&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+
+   &lt;span class="k"&gt;companion&lt;/span&gt; &lt;span class="k"&gt;object&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+       &lt;span class="kd"&gt;val&lt;/span&gt; &lt;span class="py"&gt;eventTypes&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="nf"&gt;setOf&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+               &lt;span class="nc"&gt;ACTIVITYINSTANCE_CREATED&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;name&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+               &lt;span class="nc"&gt;EVENT_INSTANCE_CREATED&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;name&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+               &lt;span class="nc"&gt;GATEWAYINSTANCE_CREATED&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;name&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+   &lt;span class="p"&gt;}&lt;/span&gt;
+
+   &lt;span class="k"&gt;override&lt;/span&gt; &lt;span class="k"&gt;fun&lt;/span&gt; &lt;span class="nf"&gt;createDomainEvent&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;events&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nc"&gt;MutableList&lt;/span&gt;&lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nc"&gt;SEvent&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;):&lt;/span&gt; &lt;span class="nc"&gt;List&lt;/span&gt;&lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nc"&gt;DomainEvent&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+       &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="n"&gt;events&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;stream&lt;/span&gt;&lt;span class="p"&gt;().&lt;/span&gt;&lt;span class="nf"&gt;filter&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="n"&gt;eventTypes&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;contains&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;it&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;type&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;}.&lt;/span&gt;&lt;span class="nf"&gt;map&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+           &lt;span class="kd"&gt;val&lt;/span&gt; &lt;span class="py"&gt;activity&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="n"&gt;it&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;`object`&lt;/span&gt; &lt;span class="k"&gt;as&lt;/span&gt; &lt;span class="nc"&gt;SFlowNodeInstance&lt;/span&gt;
+           &lt;span class="kd"&gt;val&lt;/span&gt; &lt;span class="py"&gt;taskStartedEvent&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="nc"&gt;TaskDomainEvent&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nc"&gt;UUID&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;randomUUID&lt;/span&gt;&lt;span class="p"&gt;(),&lt;/span&gt; &lt;span class="n"&gt;activity&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;tenantId&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nc"&gt;TASK_STARTED&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;activity&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;toBPMObjectType&lt;/span&gt;&lt;span class="p"&gt;(),&lt;/span&gt; &lt;span class="n"&gt;activity&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;name&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+           &lt;span class="n"&gt;taskStartedEvent&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;timestamp&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="n"&gt;activity&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;lastUpdateDate&lt;/span&gt;
+           &lt;span class="n"&gt;taskStartedEvent&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;context&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="n"&gt;activity&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;toContext&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+           &lt;span class="k"&gt;return&lt;/span&gt;&lt;span class="nd"&gt;@map&lt;/span&gt; &lt;span class="n"&gt;taskStartedEvent&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+       &lt;span class="p"&gt;}.&lt;/span&gt;&lt;span class="nf"&gt;toList&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+   &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
 
 &lt;h1&gt;
-  &lt;a href="#prioritize-unit-tests"&gt;
+  &lt;a href="#how-to-publish-domain-events"&gt;
   &lt;/a&gt;
-  Prioritize unit tests
+  How to publish domain events
 &lt;/h1&gt;
 
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--VYx2RHU2--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/b5n4d09z20r9etjifzwo.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--VYx2RHU2--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/b5n4d09z20r9etjifzwo.png" alt="tests pyramid"&gt;&lt;/a&gt; &lt;/p&gt;
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--tAXW93AL--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/lpu62juzhnfx4tcpyy3a.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--tAXW93AL--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/lpu62juzhnfx4tcpyy3a.png" alt="alt_text" title="data_extraction_event_generation.png"&gt;&lt;/a&gt;&lt;/p&gt;
 
-&lt;p&gt;We can separate automated tests into three categories: end-to-end, integrated and unit test. Ideally a team that practices TDD should create these 3 types of tests. The most common question is to whether it is not enough to create the end-to-end tests and test everything at once. But each type of test has a different goal and I recommend that you start with the unit ones.&lt;/p&gt;
+&lt;p&gt;Once all domain events are created, we send it to a domain event publisher (&lt;code&gt;DomainEventPublisher)&lt;/code&gt;. The publisher should use its own thread to ensure minimal impact on the rest of the software execution.&lt;br&gt;
+&lt;/p&gt;
 
-&lt;p&gt;I will not get too deep into this topic, but I would like to register here an alert: do not prioritize end-to-end testing. I lost count of how many times I saw teams that focused only on end-to-end testing and after a few months, when the suite was starting to get too big (and with very fragile and slow tests), they abandoned the tests. If you find yourself in this situation, I recommend reading &lt;a href="https://martinfowler.com/articles/practical-test-pyramid.html"&gt;this article&lt;/a&gt; written by Ham Vocke. There he explains this question very well.&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight kotlin"&gt;&lt;code&gt;&lt;span class="k"&gt;private&lt;/span&gt; &lt;span class="kd"&gt;val&lt;/span&gt; &lt;span class="py"&gt;executor&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nc"&gt;ExecutorService&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="nc"&gt;Executors&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;newSingleThreadExecutor&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nc"&gt;CustomizableThreadFactory&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"pulsar-events"&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;
 
-&lt;h1&gt;
-  &lt;a href="#the-test-should-guide-the-development"&gt;
-  &lt;/a&gt;
-  The test should guide the development
-&lt;/h1&gt;
+&lt;/code&gt;&lt;/pre&gt;
 
-&lt;p&gt;When I first met the expression "test-guided software development", I ended up putting a lot of emphasis on the idea that I would be &lt;strong&gt;testing&lt;/strong&gt; my software in an automated way and little attention on the part of &lt;strong&gt;guiding&lt;/strong&gt; the development.&lt;/p&gt;
+&lt;/div&gt;
 
-&lt;p&gt;And test-guided software development (TDD) is, as the name implies, about &lt;strong&gt;software development&lt;/strong&gt;. Don't forget that and let the tests guide you. Even if sometimes it seems like you're going the opposite way to what your gut is telling you, give the tests a chance and realize where they're trying to take you. It's not uncommon to end up on a much shorter, simpler and clearer path than what you were originally thinking.&lt;/p&gt;
 
-&lt;h1&gt;
-  &lt;a href="#dont-give-up-on-the-first-obstacle"&gt;
-  &lt;/a&gt;
-  Don't give up on the first obstacle
-&lt;/h1&gt;
 
-&lt;p&gt;TDD is a practice and every practice requires training, commitment and a dose of perseverance. Like learning a new musical instrument or cycling, it is necessary study and dedication. Sometimes I fall off the bike or miss the drum's beat time in rehearsal with my band. And the first few times I tried to apply TDD I had a hard time finding the best name for the tests, didn't know how to implement the asserts and it took me a while to find out how small the scope of the test should be, among many other difficulties.&lt;/p&gt;
+&lt;p&gt;Each time the transaction completes, these events are pushed as below.&lt;br&gt;
+&lt;/p&gt;
 
-&lt;p&gt;I would like to say that eventually I found the best way to do all this, but the truth is that just like as learning to play an instrument, my Practice of TDD becomes better as I train, and every day I find some better way to apply it. That's why I keep experimenting, making mistakes and trying again. And of course, studying! It's not enough to just practice. Progress is much faster when we learn from people who have been practicing much longer than we have. So my suggestion is, at first, to go for excess. Follow the TDD by the book and only write a new line of code if it is covered by some previously written test (whether unit test, integrated or end-to-end). &lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight kotlin"&gt;&lt;code&gt;&lt;span class="n"&gt;executor&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;submit&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+   &lt;span class="n"&gt;producer&lt;/span&gt;&lt;span class="o"&gt;?.&lt;/span&gt;&lt;span class="nf"&gt;send&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;domainEvent&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
 
-&lt;p&gt;Probably the hardest part of achieving high coverage is infrastructure-related layers (such as methods responsible for accessing the database). It is possible (and recommended) to create tests for these parts of the code, but they may require a little more in-depth knowledge to create these automated tests. To implement them, your  architecture must have a reasonable level of maturity. If your team knows how to apply &lt;a href="https://en.wikipedia.org/wiki/SOLID"&gt;SOLID&lt;/a&gt; principles (in particular, the &lt;a href="https://en.wikipedia.org/wiki/Dependency_inversion_principle"&gt;dependency inversion principle&lt;/a&gt;), these tests are already much easier to implement. If you're having a hard time increasing code coverage of certain layers of your system, try first at least to make sure that the &lt;strong&gt;business logic&lt;/strong&gt; are fully covered.&lt;/p&gt;
+&lt;/div&gt;
 
-&lt;p&gt;There are tools that generate test coverage reports, even integrated with IDEs. These reports display which lines have been tested, percentage coverage of each class and package of your system, among other information that can help you identify places that need more attention. Just be careful not to hold on too much to the reports! Use sparingly and responsibly. &lt;strong&gt;Never&lt;/strong&gt; use as a management metric. Brian Marick wrote &lt;a href="http://www.exampler.com/testing-com/writings/coverage.pdf"&gt;this article&lt;/a&gt; in which he explains in detail the care needed to use metrics in a healthy way.&lt;/p&gt;
 
-&lt;h1&gt;
-  &lt;a href="#the-definition-of-legacy-code"&gt;
-  &lt;/a&gt;
-  The definition of legacy code
-&lt;/h1&gt;
 
-&lt;p&gt;There are several ways to define what &lt;strong&gt;legacy code&lt;/strong&gt; is. Before meeting TDD, I interpreted it as being synonymous with old, outdated code, that had been developed with technologies that were no longer used in new systems. But Feathers has a slightly different definition of this:&lt;/p&gt;
+&lt;p&gt;In our case, we publish these events to the broker Apache Pulsar. When the transaction is committed, the Pulsar client handles the serialization of domain events to a JSON format and sends them to the Pulsar broker.&lt;/p&gt;
 
-&lt;blockquote&gt;
-&lt;p&gt;"To me, legacy code is simply code without tests." - Michael Feathers, Working Effectively with Legacy Code.&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;Knowing this definition has made an immediate impact on me. The code I had written five minutes before reading this definition had no tests. I had just implemented a legacy code! And, at least for me, this definition makes a lot of sense. And it's very easy to sort out whether the code in front of me is legacy or not. I just have to answer the question: do this code have automated tests?&lt;/p&gt;
-
-&lt;p&gt;For your sake, for the mental health of your colleagues and for the sake of the product, let's stop writing legacy code.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#dont-be-afraid-to-revert-the-code-when-youre-having-difficulties"&gt;
-  &lt;/a&gt;
-  Don't be afraid to revert the code when you're having difficulties
-&lt;/h1&gt;
-
-&lt;p&gt;I used to spend a lot of time trying to figure out why my code wasn't working. Used to write several lines of code, executed it, and the result wasn't what I expected. So I used to changed it without much feedback, re-execute it, ... and this vicious cycle repeated. It was common to spend a lot of time (hours or in extreme cases even days) in a situation where the software was in an inconsistent state, not behaving as expected. There were a lot of sledgehammers until I could mold it for something close to what I wanted.&lt;/p&gt;
-
-&lt;p&gt;TDD came to change this routine completely. Applying test-guided development, continuous integration, and other &lt;a href="https://martinfowler.com/bliki/ExtremeProgramming.html"&gt;Extreme Programming&lt;/a&gt; practices, when I feel like I'm having a hard time compiling the project or implementing the code to make a test pass, my reaction is to drop all changes and go back to the previous state (when all the tests passed) and then write a test with a smaller scope and continue the flow.&lt;/p&gt;
-
-&lt;p&gt;Having a lot of difficulty solving the problem you are facing is a sign that the test you wrote is too broad and you are taking a step bigger than your leg. In this situation, it is best to take a step back. Go back to the state where all the tests were passing (discarding all your changes) and write a test with a more limited scope, and then follow the TDD cycle once again. If you still feel you are not managing to evolve, go back again and try to take an even smaller step until you can move forward safely (with the tests passing). Then refactor your code and write the next test to take another step towards your goal.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#the-moment-i-decided-to-follow-tdd"&gt;
-  &lt;/a&gt;
-  The moment I decided to follow TDD
-&lt;/h1&gt;
-
-&lt;p&gt;As I said, I learned about this practice when I was still in college, but it was only after more than a decade after graduation that I began to practice it.&lt;/p&gt;
-
-&lt;p&gt;I was on a project where I had the opportunity to develop a very isolated part. It was almost like a new project, as it depended on almost nothing from the rest of the code base. I decided I'd let the tests guide the development of this part.&lt;/p&gt;
-
-&lt;p&gt;I had very few difficulties and everything was fine, until I had to use a litte more complex double object. At this point I had already read the two books I indicated above (Test-Driven Development, by Example and Growing Object-Oriented Software, Guided by Tests ). I could understand the theory, but it took me a while to come to the conclusion that what I needed in that situation was a &lt;a href="http://xunitpatterns.com/Test%20Spy.html"&gt;spy&lt;/a&gt;.&lt;/p&gt;
-
-&lt;p&gt;The system had some problematic integrations and we decided to create a decorator that would be used around these calls to monitor them. If a certain problem was found, an alert would be issued. It was basically a simple solution to monitor integrations.&lt;/p&gt;
-
-&lt;p&gt;In a first iteration, it would only print some information in the system log. The temptation not to test this one line of code that would issue the alert was great, I confess! But I had committed to letting the tests guide me... and the tests were telling me that simply putting a "System.out.println" in the middle of the code was not a good idea. Against my own will, I decided to follow the tests. I created an interface to specify the entity that would emit the alert and for the tests I created a &lt;em&gt;spy&lt;/em&gt; from this interface. Thus, using the idea of dependency inversion, decreases the coupling of my code. Now the business rule would no longer be coupled with the concrete implementation of alert emitter and it would no longer need to know &lt;strong&gt;how&lt;/strong&gt; the alert would be issued, as it would be coupled only with the interface. But of course before all this, I created a unit test that helped me find this solution.&lt;/p&gt;
-
-&lt;p&gt;A positive side effect of this approach was that in the future, when instead of simply printing on the console we decided to use a more complex mechanism (such as posting in a message queue, for example), I would just need to inject another concrete implementation of this interface and would not need to change any lines of my business code.&lt;/p&gt;
-
-&lt;p&gt;Until this moment everything was fine and there was little left for us to deploy this functionality in production. But a few days later I had to change the logic of when the alert would be issued. I followed the TDD ritual: I changed the test for that functionality (which started to fail), corrected the implementation (making the test green), and then refactored the code.&lt;/p&gt;
-
-&lt;p&gt;But suddenly one of the tests failed. I was &lt;strong&gt;sure&lt;/strong&gt; that my changes had not introduced any errors in the code. And the certainty was such that my first reaction was to think that the test was wrong. I opened the test class and looked at the git history. No recent changes. I reopened the code I was refactoring and rolled back to an earlier version and the test passed. At this moment I admitted to myself that I had made a mistake during the refactoring. Made a diff between the new code and the versioned and bingo! I had unintentionally removed a line. Without that line, the code kept compiling and running normally, but it would never issue any alerts!&lt;/p&gt;
-
-&lt;p&gt;I would never detect this problem in the development or staging environment and maybe not even in production. Since it was something that should be sporadic, we would not realize it's absence. And this would hide a lot of problems that were occurring in production and that we only detected thanks and this alert. At this moment I realized the amount of time and headache that this test I had hesitated to do had spared me. And felt in the skin the advantages of following the development guided by tests.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#its-not-normal-to-be-afraid"&gt;
-  &lt;/a&gt;
-  It's not normal to be afraid
-&lt;/h1&gt;
-
-&lt;p&gt;Are you afraid to publish something in production? Or change parts of the system? In some companies this fear is already part of the routine. But this cannot be considered normal. It's a symptom of a problem and needs to be treated. Never ignore your or any member of your team fears.&lt;/p&gt;
-
-&lt;p&gt;If you are not sure your change will work or you are afraid it might impact another pre-existing functionality, the most effective way to solve this is through test-guided development.&lt;/p&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;"Tests are the philosopher's stone of the programmer, transmuting fear into boredom", Test Driven Development, By Example, Kent Beck.&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;In projects that do not have any kind of automation or testing, it may seem very difficult to get to this stage. And on some larger systems, it can be tricky. But taking it one step at a time, one day your team gets there. If this is your current scenario, Michael Feathers' &lt;a href="https://www.goodreads.com/book/show/44919.Working_Effectively_with_Legacy_Code"&gt;Working Effectively with Legacy Code&lt;/a&gt; may help you find good ways to improve your code.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#less-debug-more-automated-testing"&gt;
-  &lt;/a&gt;
-  Less debug, more automated testing
-&lt;/h1&gt;
-
-&lt;p&gt;As I started developing my test-guided software, I began to notice that the number of times I use debug through the IDE has decreased dramatically. Rather than wasting time trying to assemble a mass of tests to run the application manually, finding the best point to add a break point and closely track the execution of each step of the application, it became much easier and natural to create an automated testing scenario. Whether it's unit tests, integrated testing, or end-to-end testing, the vast majority of the time I can create a test that reproduces the scenario I need to analyze.&lt;/p&gt;
-
-&lt;p&gt;Using a debugger is a task that (at least for me) is quite stressful. To simulate the error only once, I had to generate the data by running scripts in my database or even changing the data of systems that I integrate with, just to be able to create one scenario. Once that's done, if the break point was in the wrong place or pressed the key equivalent to &lt;em&gt;step over&lt;/em&gt; when I should have done a &lt;em&gt;step in&lt;/em&gt;, it would destroy the data and I had to start all over again.&lt;/p&gt;
-
-&lt;p&gt;Besides being a time-consuming task, it is quite delicate, which generates stress. Who has never let out a swear word when, after a lot of work, the IDE goes through the break point line when we expect it to stop?!&lt;/p&gt;
-
-&lt;p&gt;Another advantage of using automated tests rather than debug is that in addition to being much easier to run multiple times, it will ensure that the problem being fixed will not occur again in the future, serving as a &lt;a href="https://en.wikipedia.org/wiki/Regression_testing"&gt;regression test&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;Finally, by configuring a connector in Pulsar, we can publish wherever we want. In our case we publish to an Elastic search server (see &lt;a href="https://pulsar.apache.org/docs/en/io-elasticsearch/"&gt;https://pulsar.apache.org/docs/en/io-elasticsearch/&lt;/a&gt;).&lt;/p&gt;
 
 &lt;h1&gt;
   &lt;a href="#conclusion"&gt;
@@ -1954,252 +2281,34 @@ The purpose of this article is to try to help people who have an interest in TDD
   Conclusion
 &lt;/h1&gt;
 
-&lt;p&gt;Practicing TDD is harder than they say, but also more rewarding than it sounds. Some people don't adapt to this form of work (like the famous &lt;a href="https://dhh.dk/2014/tdd-is-dead-long-live-testing.html"&gt;DHH case&lt;/a&gt;) and maybe you and your team also come to the conclusion that this model isn't right for you. But there's only one way to find out: practicing and giving TDD a real chance. And for this experiment to be appropriate it is necessary study, training and dedication. But I promise that even if in the end you come to the conclusion that TDD is not for you, you will surely learn a lot of useful things in this process, regardless of the model you decide to follow later.&lt;/p&gt;
+&lt;p&gt;Through this article we showed how it is possible to publish domain events from an existing software without modifying it (too much). Our methodology can serve as a basic guide on which you can start experimenting. That's what we did with our business process software. &lt;/p&gt;
 
-</description>
-      <category>tdd</category>
-      <category>extremeprogramming</category>
-      <category>refactoring</category>
-      <category>yagni</category>
-    </item>
-    <item>
-      <title>Interesting people to follow for UI/UX/Webdesign</title>
-      <author>Maxime Guilbert</author>
-      <pubDate>Tue, 25 May 2021 13:02:32 +0000</pubDate>
-      <link>https://dev.to/adaendra/interesting-people-to-follow-for-ui-ux-webdesign-34c3</link>
-      <guid>https://dev.to/adaendra/interesting-people-to-follow-for-ui-ux-webdesign-34c3</guid>
-      <description>&lt;p&gt;&lt;strong&gt;If you are interested in UI/UX or webdesign, here are a few people for you to follow!&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;The approach we took gave us a technical solution to our business need - which was to have domain events published to a data store that is easy to query in order to do data analytics on it. &lt;/p&gt;
 
-&lt;p&gt;These are really interesting people which post regularly about new tools, tips...&lt;/p&gt;
+&lt;p&gt;As this approach is easy and quick to implement, it's also a great opportunity to try out domain events and validate if they are well designed before implementing them directly in the core of the software.&lt;/p&gt;
 
+&lt;p&gt;At a low entry cost, it opens new possibilities of creating values with less coupling from the legacy software. All we have to do now is subscribe to these events.&lt;/p&gt;
 
+&lt;p&gt;In our case we were able to experiment with doing &lt;a href="https://medium.com/@olan.anesini/using-process-discovery-on-business-process-management-bpm-through-bpmn-d6ea0120ad1d"&gt;process analytics&lt;/a&gt; from these events, satisfying the original business requirement.&lt;/p&gt;
 
-
-&lt;h2&gt;
-  &lt;a href="#geoffrey-crofte"&gt;
-  &lt;/a&gt;
-  Geoffrey Crofte
-&lt;/h2&gt;
-
-&lt;p&gt;He is a UX in Luxembourg and posts almost every day on Linkedin in French, English, or both.&lt;/p&gt;
-
-&lt;p&gt;Also, he has a blog &lt;em&gt;(written in French)&lt;/em&gt; named &lt;strong&gt;Creative Juiz&lt;/strong&gt; with a lot of interesting posts.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#links"&gt;
-  &lt;/a&gt;
-  Links
-&lt;/h3&gt;
+&lt;p&gt;&lt;strong&gt;References&lt;/strong&gt;&lt;/p&gt;
 
 &lt;ul&gt;
-&lt;li&gt;&lt;a href="https://www.linkedin.com/in/geoffreycrofte/"&gt;LinkedIn&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://www.creativejuiz.fr/blog/"&gt;Creative Juiz&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;  [1] Implementing Domain-Driven Design:  ISBN-13 : 978-0321834577&lt;/li&gt;
+&lt;li&gt;  [2] Domain-Driven Design: Tackling Complexity in the Heart of Software:  \
+ISBN-13 : 978-0321125217&lt;/li&gt;
+&lt;li&gt;  [3] &lt;a href="https://docs.microsoft.com/en-us/dotnet/architecture/microservices/microservice-ddd-cqrs-patterns/domain-events-design-implementation"&gt;https://docs.microsoft.com/en-us/dotnet/architecture/microservices/microservice-ddd-cqrs-patterns/domain-events-design-implementation&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;  [4] &lt;a href="https://www.martinfowler.com/eaaDev/DomainEvent.html"&gt;https://www.martinfowler.com/eaaDev/DomainEvent.html&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;  [5] &lt;a href="https://vladmihalcea.com/hibernate-event-listeners/"&gt;https://vladmihalcea.com/hibernate-event-listeners/&lt;/a&gt;
+&lt;/li&gt;
 &lt;/ul&gt;
-
-&lt;h3&gt;
-  &lt;a href="#posts-examples"&gt;
-  &lt;/a&gt;
-  Posts examples
-&lt;/h3&gt;
-
-&lt;p&gt;Here is some example of tools which he talked about :&lt;br&gt;
-&lt;a href="https://yeun.github.io/open-color/?ref=shuhari"&gt;Open Color&lt;/a&gt;&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--p_lwcUw---/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ap5qaorzjvcou7yvv6mj.PNG" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--p_lwcUw---/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ap5qaorzjvcou7yvv6mj.PNG" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://luge.cool/"&gt;Luge&lt;/a&gt;&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--nOaAiIlQ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/hycqwqeedxp3tfzhfmmz.PNG" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--nOaAiIlQ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/hycqwqeedxp3tfzhfmmz.PNG" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
-
-
-
-
-&lt;h2&gt;
-  &lt;a href="#colbys-dovi"&gt;
-  &lt;/a&gt;
-  Colbys Dovi
-&lt;/h2&gt;
-
-&lt;p&gt;He is a Product Designer in Paris. As Geoffrey, he posts almost every day on LinkedIn in French and English.&lt;/p&gt;
-&lt;h3&gt;
-  &lt;a href="#links"&gt;
-  &lt;/a&gt;
-  Links
-&lt;/h3&gt;
-
-&lt;ul&gt;
-&lt;li&gt;&lt;a href="https://www.linkedin.com/in/colbysdovi/"&gt;LinkedIn&lt;/a&gt;&lt;/li&gt;
-&lt;/ul&gt;
-&lt;h3&gt;
-  &lt;a href="#posts-examples"&gt;
-  &lt;/a&gt;
-  Posts examples
-&lt;/h3&gt;
-
-&lt;p&gt;Here is some example of what he talked about : &lt;br&gt;
-&lt;a href="https://tablericons.com/?ref=shuhari"&gt;Tabler Icons&lt;/a&gt;&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--SGonJNt---/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/t3jh22ef6jzql53r2kvc.PNG" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--SGonJNt---/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/t3jh22ef6jzql53r2kvc.PNG" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://iainbean.com/posts/2021/5-steps-to-faster-web-fonts/"&gt;5 steps to faster web fonts - Blog post&lt;/a&gt;&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--PTaA3Y_O--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/pntga2z5mwwlxck5xowj.PNG" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--PTaA3Y_O--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/pntga2z5mwwlxck5xowj.PNG" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
-
-
-
-
-&lt;h2&gt;
-  &lt;a href="#laetitia-bouloc"&gt;
-  &lt;/a&gt;
-  Laetitia Bouloc
-&lt;/h2&gt;
-
-&lt;p&gt;Also known by the name of &lt;strong&gt;Néographe Factory&lt;/strong&gt; &lt;em&gt;(The name of her enterprise)&lt;/em&gt;, she is a freelancer in Bordeaux, France.&lt;/p&gt;
-
-&lt;p&gt;She posts in French, generally in a video format, and it's really interesting and fun!&lt;/p&gt;
-
-&lt;p&gt;&lt;iframe width="710" height="399" src="https://www.youtube.com/embed/N8cEEuoRzVI"&gt;
-&lt;/iframe&gt;
-&lt;/p&gt;
-
-&lt;p&gt;Also, on her website, she has a page that can be your next bookmark! A huge &lt;a href="https://www.neographefactory.com/toolbox.html"&gt;toolbox&lt;/a&gt;!&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--w9BZrgGj--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/mya569zbp7ire1wahpd4.PNG" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--w9BZrgGj--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/mya569zbp7ire1wahpd4.PNG" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;&lt;strong&gt;Note:&lt;/strong&gt;&lt;br&gt;
-She is currently writing a book to be able to create your visual identity. It will be in French, but if you understand french and like her job, I think it will be a great buy.&lt;br&gt;
-&lt;a href="https://www.neographefactory.com/book-.html"&gt;Néographe Factory - Book&lt;/a&gt;&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;h3&gt;
-  &lt;a href="#links"&gt;
-  &lt;/a&gt;
-  Links
-&lt;/h3&gt;
-
-&lt;ul&gt;
-&lt;li&gt;&lt;a href="https://www.linkedin.com/in/laetitiabouloc/"&gt;LinkedIn&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://www.youtube.com/c/N%C3%A9ographeFactory/videos"&gt;YouTube&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://www.neographefactory.com/"&gt;Néographe Factory - WebSite&lt;/a&gt;&lt;/li&gt;
-&lt;/ul&gt;
-
-
-
-
-&lt;p&gt;So go follow them and go give them some love about their great job about sharing knowledge!&lt;/p&gt;
-
-&lt;p&gt;I hope it will help you!&lt;/p&gt;
 
 </description>
-      <category>ux</category>
-      <category>css</category>
-    </item>
-    <item>
-      <title>Role-Based Security using Entity Framework (Part 1) | Dear Coder</title>
-      <author>Kasey Wahl</author>
-      <pubDate>Tue, 25 May 2021 12:45:09 +0000</pubDate>
-      <link>https://dev.to/piaomu/role-based-security-using-entity-framework-part-1-dear-coder-4d6h</link>
-      <guid>https://dev.to/piaomu/role-based-security-using-entity-framework-part-1-dear-coder-4d6h</guid>
-      <description>&lt;p&gt;Dear Coder,&lt;/p&gt;
-
-&lt;p&gt;If you're working on an application that allows users to register an account, you've likely encountered the issue of role-based security.&lt;/p&gt;
-
-&lt;p&gt;What is role-based security and why do we need it?&lt;/p&gt;
-
-&lt;p&gt;Say you're working on an application that allows users to share webcomics with each other. You've already built in the features that allow the user to securely upload photos to your database, and you've implemented features that allow users to register an account and log in.&lt;/p&gt;
-
-&lt;p&gt;But now you need to ask what features should be accessible to any user regardless of if they've registered an account, what features should be accessible to registered users, and what features should be available to privileged users.&lt;/p&gt;
-
-&lt;p&gt;This is where role-based security comes in.&lt;/p&gt;
-
-&lt;p&gt;For the sake of my illustration, let's categorize users into four tiers of access:&lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;anonymous (unregistered) users&lt;/li&gt;
-&lt;li&gt;registered users&lt;/li&gt;
-&lt;li&gt;Moderators&lt;/li&gt;
-&lt;li&gt;Administrators&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;h2&gt;
-  &lt;a href="#anonymous-user-authorizations"&gt;
-  &lt;/a&gt;
-  Anonymous User Authorizations
-&lt;/h2&gt;
-
-&lt;p&gt;By default, my application allows any user to see, interact with, and use any of the pages on my application.&lt;/p&gt;
-
-&lt;p&gt;But what pages should anonymous users be able to see?&lt;/p&gt;
-
-&lt;p&gt;As a general rule, landing pages and displays of publicly-available data are fine for anonymous end-users to see.&lt;/p&gt;
-
-&lt;p&gt;Some developers may maintain applications that contain a large amount of sensitive data, however, which means it might be appropriate to refactor the application's default authorization.&lt;/p&gt;
-
-&lt;p&gt;We can do this with some interplay between the &lt;code&gt;[Authorize]&lt;/code&gt; and &lt;code&gt;[AllowAnonymous]&lt;/code&gt; attributes.&lt;/p&gt;
-
-&lt;p&gt;But more on anonymous users later.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#registered-users"&gt;
-  &lt;/a&gt;
-  Registered Users
-&lt;/h2&gt;
-
-&lt;p&gt;Let's back up and talk about the &lt;code&gt;[Authorize]&lt;/code&gt; attribute.&lt;/p&gt;
-
-&lt;p&gt;If I want my application to handle uploads, it's in my best interest to deny anonymous users access to some of my views. I can do this with a simple keyword called "Authorize"&lt;/p&gt;
-
-&lt;p&gt;To prompt a user to register and log in to see a View, I need to access the controller that handles the get and post http requests for the Views I want to authorize.&lt;/p&gt;
-
-&lt;p&gt;To illustrate, let's look in my ToonSpace webtoons application, and access the Uploads controller.&lt;/p&gt;
-
-&lt;p&gt;I don't want anonymous users to be able to upload to my website, so I need to make a small change under the "get" action by adding &lt;code&gt;[Authorize]&lt;/code&gt; above the action.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--wMYXDKHh--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/se5z34c683u8yrfr1kub.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--wMYXDKHh--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/se5z34c683u8yrfr1kub.png" alt="Get Create Action"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;This simply ensures that only users who have registered an account and are logged in can access the "Create" view to upload something new to the database.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#moderators-and-administrators"&gt;
-  &lt;/a&gt;
-  Moderators and Administrators
-&lt;/h2&gt;
-
-&lt;p&gt;﻿I've grouped moderators and administrators together because the code for my Moderator and Administrator permissions is essentially the same. The only differences are discretionary. I grant some permissions to both roles and others to just the Administrator.&lt;/p&gt;
-
-&lt;p&gt;So how do I grant special permissions to these roles?&lt;/p&gt;
-
-&lt;p&gt;Just a few simple lines of text:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--mtXdiUXe--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/vvoqe97de6md8qys6qo2.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--mtXdiUXe--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/vvoqe97de6md8qys6qo2.png" alt="Administrator Auth"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;To authorize a moderator as well, I simply add a comma:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;[Authorize(Roles = "Administrator, Moderator"]
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;I've created the structure for role-based security. Any user may create an account and log in, and anonymous users are not allowed to post anything. But what if I want to set the default to allow anonymous users to post something (like a comment)? I can simply use the &lt;code&gt;[AllowAnonymous]&lt;/code&gt; attribute.&lt;/p&gt;
-
-&lt;p&gt;And what about these Administrator and Moderator roles? How do I differentiate between which users are in these roles?  Should anyone be allowed to sign up as an Administrator or Moderator?&lt;/p&gt;
-
-&lt;p&gt;I'm sure you already know, dear Coder, that allowing the user to sign up as an Admin is probably not a great idea. What I can do instead, however, is "seed" a designated user as an Administrator or Moderator.&lt;/p&gt;
-
-&lt;p&gt;But that will be the topic of my next letter.&lt;br&gt;
-If you'd like to read more letters, you can find them at &lt;a href="http://www.dear-coder.com/"&gt;dear-coder.com&lt;/a&gt;.&lt;/p&gt;
-
-&lt;p&gt;Until next time, godspeed in your keystrokes.&lt;/p&gt;
-
-&lt;p&gt;Clickity Clacks,&lt;/p&gt;
-
-&lt;p&gt;Kasey&lt;/p&gt;
-
-</description>
-      <category>security</category>
-      <category>csharp</category>
-      <category>dotnet</category>
-      <category>tutorial</category>
+      <category>legacy</category>
+      <category>domaindrivendesign</category>
+      <category>processanalytics</category>
     </item>
   </channel>
 </rss>
