@@ -479,6 +479,316 @@
       <category>algorithms</category>
     </item>
     <item>
+      <title>How I Created an Event-Driven Backend with RxJS, Server-Sent Events and ExpressJS</title>
+      <author>Shayan</author>
+      <pubDate>Sat, 29 May 2021 20:36:28 +0000</pubDate>
+      <link>https://dev.to/sh4yy/how-i-created-an-event-driven-backend-with-rxjs-server-sent-events-and-expressjs-4d6k</link>
+      <guid>https://dev.to/sh4yy/how-i-created-an-event-driven-backend-with-rxjs-server-sent-events-and-expressjs-4d6k</guid>
+      <description>&lt;p&gt;About a month ago, a friend and I came up with an idea for a small website and decided to create an MVP in a couple of days to give it a shot. The idea was pretty simple; a meme-driven chat room and a live price chart for each cryptocurrency. I was assigned to create the backend for the project, and my friend would make the web client.&lt;/p&gt;
+
+&lt;p&gt;I set three requirements for myself before starting to work on the server. First and foremost, I wanted to get the MVP out as soon as possible. Secondly, I wanted to make the server as lightweight as possible to just leave it running on a cheap VM. Lastly, I wanted to design the architecture to allow for easy scaling if the shit coin investors decide to make another stupid decision and use our application.&lt;/p&gt;
+
+&lt;p&gt;The first step was to think of the entire server as a pipeline. Basically, the whole thing is a pipeline that consumes a set of events, processes them, and then streams them to many clients.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--bEd1cIHI--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/t07myzizo5mjmnayc2ca.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--bEd1cIHI--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/t07myzizo5mjmnayc2ca.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Any incoming data can be considered as some sort of event. For example, we have things like users joining or leaving a room, publishing or deleting comments, and ticker price updates. On the other side, anything that consumes these events can be considered as a client; our database, cache, and every connected browser.&lt;/p&gt;
+
+&lt;p&gt;After giving this a bit more thought, the first thing that came to my mind was a combination of &lt;a href="https://rxjs-dev.firebaseapp.com/"&gt;RxJS&lt;/a&gt; and Server-Sent Events. I have never written a server-side javascript project as I mainly use Golang and Python, but I really wanted to experiment with &lt;a href="https://rxjs-dev.firebaseapp.com/"&gt;RxJS&lt;/a&gt; on the server-side, and this seemed to be the perfect time to give it a shot.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--PMI-YYcF--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/6a5nnjz1dxvwhm4mdd7z.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--PMI-YYcF--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/6a5nnjz1dxvwhm4mdd7z.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;To explain the implementation in more detail, I will walk through implementing a very simple stock/cryptocurrency live price streaming endpoint. First, we need a RxJS Subject which is a multicast observable. Our subject will take care of streaming the ticker price events to all of our clients (subscribers).&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;Subject&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;rxjs&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;filter&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;map&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;rxjs/operators&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="c1"&gt;// our RxJS subject&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;TickerSubject&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;Subject&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Next, we need an entry point for our events to be pushed to our stream. We can either emit directly to our subject or create a wrapper function as an abstraction layer and sanitize and check our data before emitting new events.&lt;/p&gt;
+
+&lt;p&gt;To do so, let's define a function called &lt;code&gt;EmitTickerPrice&lt;/code&gt;. Every time we get a new ticker price data, we will call this method with the proper parameters, and it will emit a new event to our ticker subject.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="cm"&gt;/**
+ * Emit a new ticker price
+ * @param {string} symbol: ticker symbol
+ * @param {string} price: ticker price
+ * @param {string} currency: ticker currency
+ */&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;EmitTickerPrice&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;symbol&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;price&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;currency&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;ticker&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="nx"&gt;symbol&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;price&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;currency&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+        &lt;span class="na"&gt;createdAt&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;Math&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;floor&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nb"&gt;Date&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;/&lt;/span&gt; &lt;span class="mi"&gt;1000&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+    &lt;span class="p"&gt;};&lt;/span&gt;
+    &lt;span class="nx"&gt;TickerSubject&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;next&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;ticker&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;ticker&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;};&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;For our project, I am using PostgreSQL to persist historical ticker price information. I am also using Redis as a cache store to reduce the database load when clients request the data to render the price chart. As I mentioned previously, each of these is considered a client and independently subscribed to our &lt;a href="https://rxjs-dev.firebaseapp.com/"&gt;RxJS&lt;/a&gt; subjects. We can call subscribe on our ticker subject and pass a callback method to observe and handle each incoming event.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="nx"&gt;TickerSubject&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;subscribe&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;ticker&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{})&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Pretty easy, right? Well, not really. See, for our website, we are pushing a new ticker price event every five seconds for each supported stock and cryptocurrency ticker. These events are also not synchronized and come in at different intervals, which means that we get dozens of ticker events every second. The problem is that we don't want to call our Redis and PostgreSQL subscriber callback every time a new event is emitted. Instead, we want to implement some additional logic in our pipeline to reduce the load on these services.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#postgresql-observer"&gt;
+  &lt;/a&gt;
+  PostgreSQL Observer
+&lt;/h3&gt;
+
+&lt;p&gt;Let's start with PostgreSQL; inserting a new row individually each time a new ticker price is emitted is not ideal. This may differ for the different projects as, in some cases, we may need atomic inserts. However, for this project, the 30 seconds insertion delay was negligible. Luckily, &lt;a href="https://rxjs-dev.firebaseapp.com/"&gt;RxJS&lt;/a&gt; makes it very easy to implement this feature by providing pipelines and dozens of operators. For our case, we can create a pipe and use the &lt;code&gt;bufferTime&lt;/code&gt; operator to buffer our events for 30,000 milliseconds. Then, we can subscribe to the newly defined pipeline.&lt;/p&gt;
+
+&lt;p&gt;Let's start with PostgreSQL; inserting a new row individually each time a new ticker price is emitted is not ideal. This may differ for the different projects as, in some cases, we may need atomic inserts. However, for this project, the 30 seconds insertion delay was negligible. Luckily, &lt;a href="https://rxjs-dev.firebaseapp.com/"&gt;RxJS&lt;/a&gt; makes it very easy to implement this feature by providing pipelines and dozens of operators. For our case, we can create a pipe and use the bufferTime operator to buffer our events for 30,000 milliseconds. Then, we can subscribe to the newly defined pipeline.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;bufferTime&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;rxjs/operators&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="nx"&gt;TickerSubject&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;TickerSubject&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;pipe&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="nx"&gt;bufferTime&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;30000&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;subscribe&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;tickers&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{})&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Our subscriber is called every 30 seconds, and it gets a list of buffered events in the past buffer period instead.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#redis-observer"&gt;
+  &lt;/a&gt;
+  Redis Observer
+&lt;/h3&gt;
+
+&lt;p&gt;Our problem gets a bit more interesting with Redis. As I mentioned previously, Redis is mainly used to cache the price points needed to generate the price chart displayed on the website.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--JMi0m47W--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/7ijmi41hpowscg6m3nhp.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--JMi0m47W--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/7ijmi41hpowscg6m3nhp.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;This chart is created for the different intervals such as the past 5 minutes, one hour, or a day. As you can tell by now, we don't need a data point every 5 seconds for our 24-hour chart; instead, a data point every 30 minutes or even an hour would do the job.&lt;/p&gt;
+
+&lt;p&gt;Our Redis observer should throttle each unique ticker symbol for 30 minutes before calling the subscriber. To achieve this, we need to create a bit more complicated pipeline than what we previously had for the PostgreSQL observer.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--iyxynO0F--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/p5wuwkzw95hb8zqyeii8.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--iyxynO0F--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/p5wuwkzw95hb8zqyeii8.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;First, we have to group our events based on their ticker symbol. To do so, we can use the &lt;code&gt;groupBy&lt;/code&gt; operator provided by &lt;a href="https://rxjs-dev.firebaseapp.com/"&gt;RxJS&lt;/a&gt; and provide an arrow function to specify how we are grouping these events. We want the group our events based on their ticker symbols; hence, we return the ticker symbol value from our arrow function.&lt;/p&gt;
+
+&lt;p&gt;Next, we will throttle each group to emit once every 30 minutes and finally merge all the groups into a single pipeline. We can use the &lt;code&gt;mergeMap&lt;/code&gt; operator and map through each group to add the &lt;code&gt;throttleTime&lt;/code&gt; operator with a 30-minute interval. Finally, we can subscribe to the pipeline and insert the data into our Redis server.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;groupBy&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;mergeMap&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;throttleTime&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;rxjs/operators&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="nx"&gt;TickerSubject&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;pipe&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="nx"&gt;groupBy&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;ticker&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;ticker&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;symbol&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+    &lt;span class="nx"&gt;mergeMap&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;group&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;group&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;pipe&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+        &lt;span class="nx"&gt;throttleTime&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;30&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt; &lt;span class="mi"&gt;60&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt; &lt;span class="mi"&gt;1000&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+    &lt;span class="p"&gt;)),&lt;/span&gt;
+&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;subscribe&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;ticker&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{})&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We can even go further and buffer these events to take advantage of Redis pipelines, but I will skip that part as it will look almost identical to what we did with our PostgreSQL pipeline.&lt;/p&gt;
+
+&lt;p&gt;If you made it thus far, pat yourself on the back, take a deep breath and go get some coffee before we get our hands dirty with server-sent events.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#serversent-events%C2%A0endpoint"&gt;
+  &lt;/a&gt;
+  Server-Sent Events Endpoint
+&lt;/h3&gt;
+
+&lt;p&gt;For our website, I am using ExpressJS and the @awaitjs/express library to use async/await in my routers. Register the path &lt;code&gt;/ticker/:symbol/event&lt;/code&gt; via &lt;code&gt;GET&lt;/code&gt; method on our express server to create our server-sent events route.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="nx"&gt;Router&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;getAsync&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;/ticker/:symbol/event&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;req&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;res&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{})&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;To enable &lt;a href="https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events"&gt;SSE&lt;/a&gt;, we need to flush a couple of headers back to our client. We want the &lt;code&gt;Connection&lt;/code&gt; set to &lt;code&gt;keep-alive&lt;/code&gt;, &lt;code&gt;Content-Type&lt;/code&gt; set to &lt;code&gt;no-cache&lt;/code&gt; and &lt;code&gt;Content-Type&lt;/code&gt; set to &lt;code&gt;text/event-stream&lt;/code&gt; so our client would understand that this is an &lt;a href="https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events"&gt;SSE&lt;/a&gt; route.&lt;/p&gt;
+
+&lt;p&gt;In addition, I have added &lt;code&gt;Access-Control-Allow-Origin&lt;/code&gt; to for CORS and &lt;code&gt;X-Accel-Buffering&lt;/code&gt; set to &lt;code&gt;no&lt;/code&gt; to avoid Nginx from messing with this route. Finally, we can flush the headers back to our client to kickstart the event stream.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="nx"&gt;Router&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;getAsync&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;/ticker/:symbol/event&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;req&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;res&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="nx"&gt;res&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;setHeader&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Cache-Control&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;no-cache&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+        &lt;span class="nx"&gt;res&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;setHeader&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Content-Type&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;text/event-stream&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+        &lt;span class="nx"&gt;res&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;setHeader&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Connection&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;keep-alive&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+        &lt;span class="nx"&gt;res&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;setHeader&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Access-Control-Allow-Origin&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;*&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+        &lt;span class="nx"&gt;res&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;setHeader&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;X-Accel-Buffering&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;no&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+        &lt;span class="nx"&gt;res&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;flushHeaders&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+&lt;span class="p"&gt;});&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We can now start streaming data by writing something into our response. &lt;a href="https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events"&gt;SSE&lt;/a&gt; provides a text-based protocol that we can use to help our clients differentiate between the event types. Each one of our events should look like the following:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="nx"&gt;event&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;$&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;event&lt;/span&gt; &lt;span class="nx"&gt;name&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="err"&gt;\&lt;/span&gt;&lt;span class="nx"&gt;n&lt;/span&gt;
+&lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;$&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;event&lt;/span&gt; &lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="err"&gt;\&lt;/span&gt;&lt;span class="nx"&gt;n&lt;/span&gt;&lt;span class="err"&gt;\&lt;/span&gt;&lt;span class="nx"&gt;n&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;To make our lives a bit easier, I have created a helper function to take care of serialization for us.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;/**javascript
+ * SSE message serializer
+ * @param {string} event: Event name
+ * @param {Object} data: Event data
+ * @returns {string}
+ */
+const EventSerializer = (event, data) =&amp;gt; {
+    const jsonString = JSON.stringify(data);
+    return `event: ${event}\ndata: ${jsonString}\n\n`;
+};
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;On our website, we have half a dozen subjects similar to what we have created so far. To be able to differentiate between these events, we have to assign an event name to each. Let's use &lt;code&gt;price_update&lt;/code&gt; for the ticker subject. In addition, we need to filter these events based on the dynamic path that our client has subscribed. For example, on &lt;code&gt;/ticker/DOGE/event&lt;/code&gt;, we only want events related to Dogecoin. To implement these two features, let's create a new wrapper around our ticker subject to filter the pipeline and add our event name to the events.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;filter&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;map&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;rxjs/operators&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="cm"&gt;/**
+ * Event stream for ticker price update
+ * @param {string} symbol: ticker symbol
+ * @returns {Observable&amp;lt;{data: *, name: string}&amp;gt;}
+ */&lt;/span&gt;
+&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;EventTickerStream&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;symbol&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+   &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;TickerSubject&lt;/span&gt;
+      &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;pipe&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+         &lt;span class="nx"&gt;filter&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;ticker&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;ticker&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;symbol&lt;/span&gt; &lt;span class="o"&gt;===&lt;/span&gt; &lt;span class="nx"&gt;symbol&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+         &lt;span class="nx"&gt;map&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;ticker&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;data&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;ticker&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;price_update&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt; &lt;span class="p"&gt;};&lt;/span&gt;
+         &lt;span class="p"&gt;}&lt;/span&gt;
+      &lt;span class="p"&gt;),&lt;/span&gt;
+   &lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;All left to do is merge these events into a single pipeline and create a new subscriber to write them into the &lt;a href="https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events"&gt;SSE&lt;/a&gt; connection. We can take use the &lt;code&gt;of&lt;/code&gt; operator to create a pipeline from all of our subjects. Then, we use the &lt;code&gt;mergeAll&lt;/code&gt; operator to collect and merge all of our observables into a single observable. Then, we can subscribe to the observable, serialize our data and write it to our response. Finally, we have to make sure to unsubscribe from our observer when the &lt;a href="https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events"&gt;SSE&lt;/a&gt; connection is closed. Putting all of these together, we should have something like the following&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="k"&gt;of&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;rxjs&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;mergeAll&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;rxjs/operators&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="nx"&gt;Router&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;getAsync&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;/ticker/:symbol/event&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;req&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;res&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="nx"&gt;res&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;setHeader&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Cache-Control&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;no-cache&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+        &lt;span class="nx"&gt;res&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;setHeader&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Content-Type&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;text/event-stream&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+        &lt;span class="nx"&gt;res&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;setHeader&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Connection&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;keep-alive&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+        &lt;span class="nx"&gt;res&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;setHeader&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Access-Control-Allow-Origin&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;*&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+        &lt;span class="nx"&gt;res&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;setHeader&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;X-Accel-Buffering&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;no&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+        &lt;span class="nx"&gt;res&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;flushHeaders&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+        &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;symbol&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;req&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;params&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;symbol&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;toUpperCase&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+        &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;stream$&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;of&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+            &lt;span class="nx"&gt;EventTickerStream&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;symbol&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+            &lt;span class="c1"&gt;// other events ...&lt;/span&gt;
+        &lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;pipe&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+            &lt;span class="nx"&gt;mergeAll&lt;/span&gt;&lt;span class="p"&gt;(),&lt;/span&gt;
+        &lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;subscribe&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;event&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="nx"&gt;res&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;write&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;EventSerializer&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;event&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;name&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;event&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;));&lt;/span&gt;
+        &lt;span class="p"&gt;});&lt;/span&gt;
+        &lt;span class="nx"&gt;req&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;on&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;close&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="nx"&gt;stream$&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;unsubscribe&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+        &lt;span class="p"&gt;});&lt;/span&gt;
+&lt;span class="p"&gt;});&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Aaannddd… that's it! We are done with our backend server. &lt;br&gt;
+Here's an overall view of what we have created so far.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--umL1MoaR--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/2or1hd6yaxk8088v42ok.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--umL1MoaR--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/2or1hd6yaxk8088v42ok.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;h3&gt;
+  &lt;a href="#serversent-events%C2%A0client"&gt;
+  &lt;/a&gt;
+  Server-Sent Events Client
+&lt;/h3&gt;
+
+&lt;p&gt;To subscribe to our &lt;a href="https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events"&gt;SSE&lt;/a&gt; route, we can create a new instance of the EventSource interface and pass our endpoint to the constructor. Once we have an instance, we can add event handlers for specific event names to process the incoming data. In our case, we can subscribe to the &lt;code&gt;price_update&lt;/code&gt; event for Dogecoin and use the data to update our UI.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;eventSource&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;EventSource&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;/ticker/DOGE/event&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="nx"&gt;eventSource&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;addEventListener&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+   &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;price_update&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;event&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+       &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;data&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;JSON&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;parse&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;event&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+       &lt;span class="c1"&gt;// use the data to update the UI&lt;/span&gt;
+    &lt;span class="p"&gt;},&lt;/span&gt; &lt;span class="kc"&gt;false&lt;/span&gt;
+&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="c1"&gt;// close the connection when needed&lt;/span&gt;
+&lt;span class="nx"&gt;eventSource&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;close&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;At the end of the day, I am pleased about this architecture as it satisfies most of my requirements for this project. Going with a reactive design allowed me to implement many complex features more efficiently and less error-prone than an imperative model. Higher-level functions provided by &lt;a href="https://rxjs-dev.firebaseapp.com/"&gt;RxJS&lt;/a&gt;, such as throttleTime and bufferTime solved many of my problems very quickly and saved me a lot of development time. Completing the first iteration of the MVP took us about 4 days.&lt;/p&gt;
+
+&lt;p&gt;I also wanted to deploy our services on the smallest virtual machine to reduce costs and benchmark server-side performance. Thus, I went with the $5/month digital ocean droplet. Over the last week, our server has served over 3.7M requests and over 120M events, and at one point, we had over 500 concurrent clients, which I think is a pretty damn good benchmark.&lt;/p&gt;
+
+&lt;p&gt;In terms of scalability, we still have a lot of room to grow vertically and increase the resources available on the VM. But if we want to grow horizontally, the current architecture allows us to deploy proxies that subscribe to our pipelines, either through our &lt;a href="https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events"&gt;SSE&lt;/a&gt; endpoint or to the subjects over the network, and then multiplex the events to more clients.&lt;/p&gt;
+
+&lt;p&gt;That concludes the discussion on how I implemented an event-driven server for our project. You can check out the final result at &lt;a href="https://monke.cafe"&gt;Monke Cafe&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;Thank you for reading; if you would like to chat, you can find me on Twitter &lt;a href="https://twitter.com/ImSh4yy"&gt;@imsh4yy&lt;/a&gt; or via responses here.&lt;/p&gt;
+
+</description>
+      <category>node</category>
+      <category>javascript</category>
+      <category>redis</category>
+      <category>tutorial</category>
+    </item>
+    <item>
       <title>Data Structures in JavaScript [Arrays]</title>
       <author>YoussefZidan</author>
       <pubDate>Sat, 29 May 2021 20:31:56 +0000</pubDate>
@@ -2038,6 +2348,63 @@ npm -v
       <category>showdev</category>
     </item>
     <item>
+      <title>How to close a port in use on Windows</title>
+      <author>Danilo Assis</author>
+      <pubDate>Sat, 29 May 2021 19:19:41 +0000</pubDate>
+      <link>https://dev.to/daniloab_/how-to-close-a-port-in-use-on-windows-1lp7</link>
+      <guid>https://dev.to/daniloab_/how-to-close-a-port-in-use-on-windows-1lp7</guid>
+      <description>&lt;p&gt;Several times there was a task in my simple day-to-day life that often took me five minutes to remember the commands to execute it at the prompt, or a few more minutes to do a quick google search and remember the process as a whole.&lt;/p&gt;
+
+&lt;p&gt;Thinking that maybe some more people can go through the same simple stress, combining with the idea that knowledge does not occupy space and with the old desire that I have to write for you, I decided to write this short post that can help several people, just like me and use him as a pilot here in the medium.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Problem&lt;/strong&gt;&lt;br&gt;
+Daily running the famous &lt;strong&gt;yarn start&lt;/strong&gt;, between one project and another a door was in use and I wasn't even using it anymore. Because of that, I was going to remember the process that consisted of opening the cmd, setting some commands, taking the PID of the process in question and then ending it. Of course, there must be simpler ways to do the same, but at the moment I follow this and never remember it in my head. So below I will list how to do this role in a practical and quick way:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Let's start by opening the command prompt by running it as a system administrator.&lt;/li&gt;
+&lt;li&gt;After that go ahead and type in it &lt;strong&gt;netstat -a -n -o&lt;/strong&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--E0rTL-7N--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://miro.medium.com/max/700/1%2A8t7-WGavFjFV3bpIG_z_NA.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--E0rTL-7N--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://miro.medium.com/max/700/1%2A8t7-WGavFjFV3bpIG_z_NA.png" alt="Image showing how the processes are listed."&gt;&lt;/a&gt;&lt;/p&gt;
+Image showing how the processes are listed.
+
+
+
+&lt;p&gt;Used with the &lt;strong&gt;a&lt;/strong&gt; argument, the netstat command shows the set of connections and ports being listened to on the computer.&lt;/p&gt;
+
+&lt;p&gt;Used with the &lt;strong&gt;n&lt;/strong&gt;. Argument, the netstat command shows addresses and port numbers in digital format, without &lt;a href="https://br.ccm.net/contents/264-dns-sistema-de-nomes-de-dominio"&gt;name resolution&lt;/a&gt;(pt_BR).&lt;/p&gt;
+
+&lt;p&gt;Used with the &lt;strong&gt;o&lt;/strong&gt; argument, the netstat command details the process number associated with the connection.&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;p&gt;After this we just need to identify the PID related to the connection we want to terminate, in my case it is port 9001, so we have 11348.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Still at the prompt we trigger the following taskkill / PID  command&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;In place of  we replaced it with 11348 and then the taskkill / PID 11348&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;We then receive the following information at the prompt&lt;/p&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--tE30Mojv--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://miro.medium.com/max/506/1%2Aw7_gid_HVbuWCQSsGcMUnQ.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--tE30Mojv--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://miro.medium.com/max/506/1%2Aw7_gid_HVbuWCQSsGcMUnQ.png" alt="Prompt image stating that the process has ended."&gt;&lt;/a&gt;&lt;/p&gt;
+Prompt image stating that the process has ended.
+
+
+
+&lt;p&gt;&lt;strong&gt;But the list of processes is very long&lt;/strong&gt;&lt;br&gt;
+You may notice that when requesting the list of open cases, an extensive result of it will be displayed. There is a way to improve this command by filtering the search results by the &lt;strong&gt;STATE&lt;/strong&gt; of the process. So it ends up looking like this:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;netstat -aon | find / i “listening”&lt;/strong&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;However, it is important to remember that if your windows is running in a different language, it will be necessary to change “listening” to the term referring to it.&lt;/p&gt;
+
+&lt;p&gt;End =]&lt;/p&gt;
+
+</description>
+      <category>programming</category>
+      <category>tutorial</category>
+    </item>
+    <item>
       <title>What's in my RC 2021</title>
       <author>Henry Unite</author>
       <pubDate>Sat, 29 May 2021 19:13:30 +0000</pubDate>
@@ -2424,339 +2791,6 @@ Follow:&lt;br&gt;
       <category>webdev</category>
       <category>react</category>
       <category>javascript</category>
-    </item>
-    <item>
-      <title>Migrating a notebook app from react to Next.js</title>
-      <author>Muhammad  Ahmad</author>
-      <pubDate>Sat, 29 May 2021 17:27:24 +0000</pubDate>
-      <link>https://dev.to/m_ahmad/migrating-a-notebook-app-from-react-to-next-js-3ljn</link>
-      <guid>https://dev.to/m_ahmad/migrating-a-notebook-app-from-react-to-next-js-3ljn</guid>
-      <description>&lt;p&gt;I created a notebook app in react a few months ago. I wrote article about it.&lt;/p&gt;
-
-
-&lt;div class="ltag__link"&gt;
-  &lt;a href="/m_ahmad" class="ltag__link__link"&gt;
-    &lt;div class="ltag__link__pic"&gt;
-      &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--vrvEKvHu--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://res.cloudinary.com/practicaldev/image/fetch/s--iCCO7GRa--/c_fill%2Cf_auto%2Cfl_progressive%2Ch_150%2Cq_auto%2Cw_150/https://dev-to-uploads.s3.amazonaws.com/uploads/user/profile_image/370400/bda2fd3e-cb65-4abb-81e6-1f50edf567dd.png" alt="m_ahmad image"&gt;
-    &lt;/div&gt;
-  &lt;/a&gt;
-  &lt;a href="/m_ahmad/create-a-notebook-app-with-react-charaui-and-framermotion-dej" class="ltag__link__link"&gt;
-    &lt;div class="ltag__link__content"&gt;
-      &lt;h2&gt;Create a Notebook app with React, ChakraUi, and framerMotion&lt;/h2&gt;
-      &lt;h3&gt;Muhammad  Ahmad ・ Apr 2 ・ 1 min read&lt;/h3&gt;
-      &lt;div class="ltag__link__taglist"&gt;
-        &lt;span class="ltag__link__tag"&gt;#typescript&lt;/span&gt;
-        &lt;span class="ltag__link__tag"&gt;#react&lt;/span&gt;
-        &lt;span class="ltag__link__tag"&gt;#webdev&lt;/span&gt;
-        &lt;span class="ltag__link__tag"&gt;#javascript&lt;/span&gt;
-      &lt;/div&gt;
-    &lt;/div&gt;
-  &lt;/a&gt;
-&lt;/div&gt;
-
-
-&lt;p&gt;Now I migrated this app to Next.js smoothly. &lt;br&gt;
-Here are the few steps that will guide you how i did this.  &lt;/p&gt;
-&lt;h1&gt;
-  &lt;a href="#step-1"&gt;
-  &lt;/a&gt;
-  Step 1
-&lt;/h1&gt;
-
-&lt;p&gt;Installed &lt;code&gt;next&lt;/code&gt; in my project:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;yarn add next
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h1&gt;
-  &lt;a href="#step-2"&gt;
-  &lt;/a&gt;
-  Step 2
-&lt;/h1&gt;
-
-&lt;p&gt;Updated &lt;code&gt;package.json&lt;/code&gt; with the following scripts:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;"scripts": {
-  "dev": "next dev",
-  "build": "next build",
-  "start": "next start"
-}
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h1&gt;
-  &lt;a href="#step-3"&gt;
-  &lt;/a&gt;
-  Step 3
-&lt;/h1&gt;
-
-&lt;p&gt;Created pages folder:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;src/pages/_app.tsx
-src/pages/index.tsx
-src/pages/projects/index.tsx
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h1&gt;
-  &lt;a href="#step-4"&gt;
-  &lt;/a&gt;
-  Step 4
-&lt;/h1&gt;
-
-&lt;p&gt;Migrated code:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;from src/index.tsx and src/app.tsx
-to src/pages/index.tsx and src/pages/_app.tsx
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;blockquote&gt;
-&lt;p&gt;Note: I didn't copy paste code here.&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;h1&gt;
-  &lt;a href="#step-5"&gt;
-  &lt;/a&gt;
-  Step 5
-&lt;/h1&gt;
-
-&lt;p&gt;Deleted these files:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;src/index.tsx
-src/app.tsx
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h1&gt;
-  &lt;a href="#final-step"&gt;
-  &lt;/a&gt;
-  Final step
-&lt;/h1&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Used &lt;code&gt;next/router&lt;/code&gt;. &lt;/li&gt;
-&lt;li&gt;Replaced &lt;code&gt;chakra links&lt;/code&gt; and &lt;code&gt;react-router-dom links&lt;/code&gt; with &lt;code&gt;next/link&lt;/code&gt; in different files.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h1&gt;
-  &lt;a href="#app"&gt;
-  &lt;/a&gt;
-  App
-&lt;/h1&gt;
-
-&lt;p&gt;&lt;strong&gt;Demo Link:&lt;/strong&gt; &lt;a href="https://next-notebook.vercel.app/"&gt;Notebook&lt;/a&gt;&lt;br&gt;
-&lt;strong&gt;GitHub Repo:&lt;/strong&gt; &lt;a href="https://github.com/MA-Ahmad/next-notebook"&gt;Repo&lt;/a&gt;&lt;/p&gt;
-
-</description>
-      <category>react</category>
-      <category>webdev</category>
-      <category>showdev</category>
-      <category>nextjs</category>
-    </item>
-    <item>
-      <title>How functions work in java Script?</title>
-      <author>Utkarsh Yadav</author>
-      <pubDate>Sat, 29 May 2021 17:23:42 +0000</pubDate>
-      <link>https://dev.to/uyadavdev/how-functions-work-in-java-script-18a6</link>
-      <guid>https://dev.to/uyadavdev/how-functions-work-in-java-script-18a6</guid>
-      <description>&lt;p&gt;Table of Content&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;What are functions?&lt;/li&gt;
-&lt;li&gt;Types of function declaration in JavaScript?&lt;/li&gt;
-&lt;li&gt;BTS Functions working?&lt;/li&gt;
-&lt;li&gt;Call stack with functions.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h1&gt;
-  &lt;a href="#what-are-functions"&gt;
-  &lt;/a&gt;
-  What are functions?
-&lt;/h1&gt;
-
-&lt;p&gt;Functions in JavaScript are same as in any other language. These contains some set of statements inside its scope and executes the statement when invoked or called when required,they also takes input as parameter and return the output.&lt;/p&gt;
-
-&lt;p&gt;Syntax:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;Name&lt;/span&gt;&lt;span class="p"&gt;(){&lt;/span&gt;
-  &lt;span class="c1"&gt;// ... statements..&lt;/span&gt;
-&lt;span class="c1"&gt;// ...statements..&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;There are many jargon for functions that should be understood by every developer like : Function declaration | function invocation | function statement | function call | Function expression.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#type-of-function-expressions-in-javascript"&gt;
-  &lt;/a&gt;
-  Type of Function expressions in JavaScript
-&lt;/h1&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;Functions as anonymous&lt;br&gt;
-&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;square&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="kd"&gt;function&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;num&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="nx"&gt;num&lt;/span&gt;&lt;span class="o"&gt;*=&lt;/span&gt;&lt;span class="nx"&gt;num&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;num&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;square&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;5&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt; &lt;span class="c1"&gt;// 25&lt;/span&gt;
-&lt;span class="kd"&gt;var&lt;/span&gt; &lt;span class="nx"&gt;ans&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;square&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;5&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;ans&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt; &lt;span class="c1"&gt;// 25 will be stored in `ans` variable.&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;ul&gt;
-&lt;li&gt; In above example, an anonymous function is declared using variable in JavaScript.&lt;/li&gt;
-&lt;li&gt;Here function acts as a variable, and now it can be hoisted by JavaScript. &lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;Functions using function name&lt;br&gt;
-&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;square&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;num&lt;/span&gt;&lt;span class="p"&gt;){&lt;/span&gt;
-   &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;num&lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="nx"&gt;num&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;square&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;5&lt;/span&gt;&lt;span class="p"&gt;));&lt;/span&gt; &lt;span class="c1"&gt;// 25 will be returned as output.&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;ul&gt;
-&lt;li&gt;In above example, function is expressed using function name, here function is not acting as a variable, hence hoisting is not possible.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h1&gt;
-  &lt;a href="#bts-functions-working"&gt;
-  &lt;/a&gt;
-  BTS Functions working?
-&lt;/h1&gt;
-
-&lt;p&gt;Let's understand the functioning of the functions in JavaScript with the help of example.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;var&lt;/span&gt; &lt;span class="nx"&gt;x&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
-&lt;span class="nx"&gt;b&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
-&lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;x&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-
-&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="p"&gt;(){&lt;/span&gt;
-   &lt;span class="kd"&gt;var&lt;/span&gt; &lt;span class="nx"&gt;x&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="mi"&gt;10&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-   &lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;x&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;b&lt;/span&gt;&lt;span class="p"&gt;(){&lt;/span&gt;
-   &lt;span class="kd"&gt;var&lt;/span&gt; &lt;span class="nx"&gt;x&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="mi"&gt;100&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-   &lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;x&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;ul&gt;
-&lt;li&gt;Now it's time to analyse how everything works behind the scenes in the browsers engine.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h3&gt;
-  &lt;a href="#first-global-execution-context"&gt;
-  &lt;/a&gt;
-  First: Global Execution context
-&lt;/h3&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Remember, Inside java Script everything runs inside Global Execution Context.&lt;/li&gt;
-&lt;li&gt;To learn more about GEC visit: &lt;a href="https://dev.to/uyadavdev/behind-the-scenes-javascript-3ebh"&gt;Behind The scenes in JavaScript&lt;/a&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--xNBS-ZuF--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/s7z2z4kzk6wqio7aisjs.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--xNBS-ZuF--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/s7z2z4kzk6wqio7aisjs.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;The variable x is assigned undefined at the first skims.&lt;/li&gt;
-&lt;li&gt;And all the other function will be referenced with the actual code inside it.&lt;/li&gt;
-&lt;li&gt;When the code execution of first statement begins the variable x is assigned with the value of 1&lt;/li&gt;
-&lt;li&gt;After that &lt;code&gt;a();&lt;/code&gt; function is called and this function calls make another &lt;strong&gt;Local Execution context inside the global execution context&lt;/strong&gt; and executes as it is executes in GEC.&lt;/li&gt;
-&lt;li&gt;Same with the fucntion &lt;code&gt;b();&lt;/code&gt;.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h1&gt;
-  &lt;a href="#call-stack-with-functions"&gt;
-  &lt;/a&gt;
-  Call stack with functions.
-&lt;/h1&gt;
-
-&lt;p&gt;Now let's look to the call stack, observe how the call stack will look behind the scenes in JavaScript Engine.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--5IijRZqZ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ffzlal1wvtd0xq5pdptt.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--5IijRZqZ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ffzlal1wvtd0xq5pdptt.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;This is how the call stack looks, I have put a debugger to have a look to my call stack. but it executes in fraction of milliseconds.&lt;/p&gt;
-
-&lt;p&gt;I hope this content provided you with some deep knowledge on JavaScript functions.&lt;/p&gt;
-
-&lt;p&gt;Please Like and Comment What you think?&lt;/p&gt;
-
-&lt;p&gt;Happy Coding.&lt;/p&gt;
-
-&lt;p&gt;Follow me on:&lt;/p&gt;
-
-&lt;p&gt;LinkedIn: &lt;a href="https://linkedin.com/in/yadavutkarsh"&gt;https://linkedin.com/in/yadavutkarsh&lt;/a&gt;&lt;br&gt;
-Website: &lt;a href="https://utkarshwhocodes.netlify.app"&gt;https://utkarshwhocodes.netlify.app&lt;/a&gt;&lt;br&gt;
-Blogs-Dev: &lt;a href="https://dev.to/uyadav207"&gt;https://dev.to/uyadav207&lt;/a&gt;&lt;br&gt;
-Blogs-Personal: &lt;a href="https://utkarshwhocodesblogs.netlify.app"&gt;https://utkarshwhocodesblogs.netlify.app&lt;/a&gt;&lt;/p&gt;
-
-</description>
-      <category>javascript</category>
-      <category>tutorial</category>
-      <category>codenewbie</category>
-      <category>webdev</category>
     </item>
   </channel>
 </rss>
