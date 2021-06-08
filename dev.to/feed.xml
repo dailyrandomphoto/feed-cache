@@ -7,6 +7,803 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>Load-Balancing Minecraft Servers with Kong Gateway</title>
+      <author>Michael Bogan</author>
+      <pubDate>Tue, 08 Jun 2021 14:41:16 +0000</pubDate>
+      <link>https://dev.to/mbogan/load-balancing-minecraft-servers-with-kong-gateway-59ml</link>
+      <guid>https://dev.to/mbogan/load-balancing-minecraft-servers-with-kong-gateway-59ml</guid>
+      <description>&lt;p&gt;&lt;iframe width="710" height="399" src="https://www.youtube.com/embed/_T3OwzPVECQ"&gt;
+&lt;/iframe&gt;
+&lt;/p&gt;
+
+&lt;p&gt;It's time to have some fun. Sure, tell your colleagues or your family that you're doing research, experimenting with some new tech—because that is what we'll be doing—but just don't let them see you playing Minecraft!&lt;/p&gt;
+
+&lt;p&gt;Here's the scenario: You're organizing a full-day Minecraft class for local STEM students. You need to run your own Minecraft servers to ensure a kid-friendly multiplayer environment, restricted only to your students. One server won't be enough, so you'll run two servers simultaneously, expecting your load balancer to handle sending students to Server A or Server B, depending on the load.&lt;/p&gt;
+
+&lt;p&gt;In this article, we're going to explore port forwarding and load balancing with &lt;a href="https://konghq.com/kong/?utm_source=guest&amp;amp;utm_medium=devspotlight&amp;amp;utm_campaign=community"&gt;Kong Gateway&lt;/a&gt;. We're going to do this by spinning up multiple Minecraft servers, and then placing Kong Gateway in front of these upstream services to handle port forwarding and load balancing.&lt;/p&gt;
+
+&lt;p&gt;Before we dive in, let's briefly cover a few important technology concepts.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#key-concepts"&gt;
+  &lt;/a&gt;
+  &lt;strong&gt;Key Concepts&lt;/strong&gt;
+&lt;/h2&gt;
+
+&lt;h4&gt;
+  &lt;a href="#port-forwarding"&gt;
+  &lt;/a&gt;
+  &lt;strong&gt;Port Forwarding&lt;/strong&gt;
+&lt;/h4&gt;
+
+&lt;p&gt;Port forwarding is receiving network requests on a certain port of a machine and forwarding those requests to a different port. A router, firewall or &lt;a href="https://konghq.com/learning-center/api-gateway/?utm_source=guest&amp;amp;utm_medium=devspotlight&amp;amp;utm_campaign=community"&gt;API gateway&lt;/a&gt; usually handles this task. For example, you might have a web server listening on port 3000 and a database server listening on port 5000. Your API gateway would listen for requests from outside your network. Requests addressed to port 80 would be forwarded by the gateway to your web server at port 3000. Meanwhile, requests addressed to port 5432 would be forwarded to your database server at port 5000.&lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#load-balancing"&gt;
+  &lt;/a&gt;
+  &lt;strong&gt;Load Balancing&lt;/strong&gt;
+&lt;/h4&gt;
+
+&lt;p&gt;Load balancing is the task of distributing multiple requests to a server in a balanced manner across numerous replicas of that server. A specific piece of hardware or software called a load balancer usually handles this. The outside world is unaware that there are multiple replicas of a server running. They believe they’re making requests to a single server. The load balancer, however, distributes the request load to prevent any one server from being overwhelmed. In the case of a replica failing completely, the load balancer ensures that requests only go to healthy nodes.&lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#kong-gateway"&gt;
+  &lt;/a&gt;
+  &lt;strong&gt;Kong Gateway&lt;/strong&gt;
+&lt;/h4&gt;
+
+&lt;p&gt;Kong Gateway is a thin API gateway layer that sits in front of upstream services, capable of performing these port forwarding and load balancing tasks. Whether those upstream services are web servers or databases or even Minecraft game servers, Kong is the front-door greeter to all requests. In addition to traffic control, Kong Gateway can manage &lt;a href="https://konghq.com/learning-center/api-gateway/api-gateway-authentication/?utm_source=guest&amp;amp;utm_medium=devspotlight&amp;amp;utm_campaign=community"&gt;authentication&lt;/a&gt;, request transformations, analytics, and logging.&lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#tcp-stream-support"&gt;
+  &lt;/a&gt;
+  &lt;strong&gt;TCP Stream Support&lt;/strong&gt;
+&lt;/h4&gt;
+
+&lt;p&gt;One aspect of our Minecraft project that sets it apart from deploying a typical web server or database is that Minecraft requires an established connection between the Minecraft client (the gamer) and server. Rather than expecting stateless HTTP requests, we'll need to handle TCP connections with streaming data. Fortunately, &lt;a href="https://konghq.com/blog/tcp-stream-support-kong/?utm_source=guest&amp;amp;utm_medium=devspotlight&amp;amp;utm_campaign=community"&gt;Kong Gateway fully supports TCP streaming&lt;/a&gt;.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#our-project-approach"&gt;
+  &lt;/a&gt;
+  &lt;strong&gt;Our project approach&lt;/strong&gt;
+&lt;/h3&gt;
+
+&lt;p&gt;We're going to walk through this project step-by-step:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;Spin up a single, local Minecraft server without any port forwarding.&lt;/li&gt;
+&lt;li&gt;Spin up a Minecraft server on a non-default port, configuring Kong Gateway to port forward requests to that server.&lt;/li&gt;
+&lt;li&gt;Spin up two Minecraft servers on different ports, configuring Kong Gateway to load balance and port forward connection requests.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;As you can see, we'll start simple, and we'll slowly build on complexity.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#what-youll-need-to-get-started"&gt;
+  &lt;/a&gt;
+  &lt;strong&gt;What you'll need to get started&lt;/strong&gt;
+&lt;/h3&gt;
+
+&lt;p&gt;You don't &lt;em&gt;actually&lt;/em&gt; need a lot of familiarity with Minecraft to progress through this mini-project. Since it’s easiest to spin up Minecraft servers within Docker containers, basic familiarity with Docker may be helpful. &lt;/p&gt;
+
+&lt;p&gt;You will need to &lt;a href="https://docs.docker.com/engine/install/"&gt;install Docker Engine&lt;/a&gt; on your local machine. Lastly, if you want to test that our project results are successful, you'll need to &lt;a href="https://www.minecraft.net/en-us/about-minecraft"&gt;install the Minecraft game client&lt;/a&gt; and log in as a paid owner of the game. The free trial of Minecraft doesn't allow connecting to multiplayer servers, which is what we'll be running for our project.&lt;/p&gt;
+
+&lt;p&gt;Are you ready to do this? Here we go!&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#step-1-single-minecraft-server-with-default-port"&gt;
+  &lt;/a&gt;
+  &lt;strong&gt;Step 1: Single Minecraft Server with Default Port&lt;/strong&gt;
+&lt;/h1&gt;
+
+&lt;p&gt;In this first step, we want to spin up a single Minecraft server on our local machine. We'll use the default port for the server, and then we'll connect our game client to the server. It’s simple to deploy the Minecraft server as a Docker container, with the Docker image found &lt;a href="https://hub.docker.com/r/itzg/minecraft-server"&gt;here&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;In a terminal window, we'll run this command to pull down the server image and spin it up in a container:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;~$ docker run -p 25000:25565 -e EULA=true itzg/minecraft-server
+
+Unable to find image 'itzg/minecraft-server:latest' locally
+latest: Pulling from itzg/minecraft-server
+...
+
+Status: Downloaded newer image for itzg/minecraft-server:latest
+...
+
+[init] Checking for JSON files.
+[init] Setting initial memory to 1G and max to 1G
+[init] Starting the Minecraft server...
+...
+
+[Server thread/INFO]: Preparing start region for dimension minecraft:overworld
+[Worker-Main-5/INFO]: Preparing spawn area: 1%
+...
+
+
+...
+
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;As our container starts up, it downloads the Docker image for the Minecraft server. Once the image downloads, it starts up the server, and we see the log messages of the server startup. Here's an explanation of flags and options we provided to docker run in our command:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;  &lt;code&gt;-p&lt;/code&gt; specifies a port on the host (your local machine) that Docker should bind to a port on the container. In this case, our local machine's port 25000 will point to the container's port 25565. By default, Minecraft servers run on port 25565. Typically, you will always bind to the container's port 25565, regardless of the port on the host that you choose to use.&lt;/li&gt;
+&lt;li&gt;  &lt;code&gt;-e EULA=true&lt;/code&gt; provides an environment variable that the Docker container needs to use when starting up the server within the container. The Minecraft server application requires that you accept the EULA upon startup. Providing this environment variable is the Docker way to do that.&lt;/li&gt;
+&lt;li&gt;  Lastly, we specify the name of the Docker image (on &lt;a href="https://hub.docker.com/"&gt;DockerHub&lt;/a&gt;), which contains the Minecraft server.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;With our server running, let's see if we can connect to the server at localhost:25000. Open up the Minecraft Launcher client and click on "Play".&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--rYtunAIy--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/v0zgst3gf0x6sd56kjut.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--rYtunAIy--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/v0zgst3gf0x6sd56kjut.png" alt=""&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;The actual Minecraft game should launch. For game options, click on "Multiplayer".&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--werSsEdD--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/osyinj35j1yl8sxdvsad.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--werSsEdD--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/osyinj35j1yl8sxdvsad.png" alt=""&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Next, click on "Direct Connection".&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--P9svBApb--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/m7lta1uuzrzwbbgqq8rm.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--P9svBApb--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/m7lta1uuzrzwbbgqq8rm.png" alt=""&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;For server address, enter localhost:25000. Our local port 25000, of course, is bound to the container running our Minecraft server. Finally, we click on "Join Server".&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--LywZURrF--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/z7ztj6340mtftnsgpj26.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--LywZURrF--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/z7ztj6340mtftnsgpj26.png" alt=""&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;And… we're in!&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--v4BVsSp2--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/0r7uixaj0a9m4g1pog67.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--v4BVsSp2--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/0r7uixaj0a9m4g1pog67.png" alt=""&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;If you look back at the terminal with the &lt;code&gt;docker run&lt;/code&gt; command, you'll recall that it continues to output the log messages from the Minecraft server. It might look something like this:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;...
+ 
+[User Authenticator #1/INFO]: UUID of player familycodingfun is 8b4fb92b-24c6-423a-bf32-fea282fc8a25
+[Server thread/INFO]: familycodingfun[/172.17.0.1:53248] logged in with entity id 282 at (243.5, 65.0, -138.5)
+[Server thread/INFO]: familycodingfun joined the game
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The server notes that a new player (my username is &lt;code&gt;familycodingfun&lt;/code&gt;) has joined the game. Our single game server setup is complete. Now, let's add Kong Gateway and port forwarding to the mix. For now, we'll exit the game and then kill our Docker container with the server.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#step-2-minecraft-server-with-kong-gateway-and-port-forwarding"&gt;
+  &lt;/a&gt;
+  &lt;strong&gt;Step 2: Minecraft Server with Kong Gateway and Port Forwarding&lt;/strong&gt;
+&lt;/h1&gt;
+
+&lt;p&gt;Next, we'll put Kong Gateway in front of our Minecraft server and take advantage of port forwarding. If you were running a private network, you might forbid requests from outside the network to reach your Minecraft server port. At the same time, you might expose a single port on which Kong listens. Kong, as the API gateway, would listen to requests on that port and then forward those requests to your Minecraft server. Doing so ensures that any requests that want to go to a Minecraft server must go through Kong first.&lt;/p&gt;
+
+&lt;p&gt;Although we'll be working within localhost, we'll set up this kind of port forwarding through Kong. Just like in our previous step, we want our Minecraft server to run on port 25000. Meanwhile, Kong will listen on port 20000. Kong will take TCP connection requests on port 20000 and forward them to the Minecraft server at port 25000.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#install-and-setup-kong"&gt;
+  &lt;/a&gt;
+  &lt;strong&gt;Install and Setup Kong&lt;/strong&gt;
+&lt;/h2&gt;
+
+&lt;p&gt;The first step is to &lt;a href="https://konghq.com/install/?utm_source=guest&amp;amp;utm_medium=devspotlight&amp;amp;utm_campaign=community"&gt;install Kong Gateway&lt;/a&gt;. The &lt;a href="https://konghq.com/blog/kong-gateway-tutorial/?utm_source=guest&amp;amp;utm_medium=devspotlight&amp;amp;utm_campaign=community"&gt;installation steps&lt;/a&gt; vary depending on your unique setup. After installing Kong, we'll need to set up the initial configuration file. In your &lt;code&gt;/etc/kong&lt;/code&gt; folder, you'll see a template file called &lt;code&gt;kong.conf.default&lt;/code&gt;. We will copy this file and rename it as &lt;code&gt;kong.conf&lt;/code&gt;, which is the file that Kong will look to for its startup configuration:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;~$ cd /etc/kong
+/etc/kong$ sudo cp kong.conf.default kong.conf
+/etc/kong$ tree
+.
+├── kong.conf
+├── kong.conf.default
+└── kong.logrotate
+
+0 directories, 3 files
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;In &lt;code&gt;kong.conf&lt;/code&gt;, we'll need to make the following three edits:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;# PATH: /etc/kong/kong.conf
+
+#
+# Around line 368. Uncomment and set for TCP listening on port 20000
+#
+
+stream_listen = 127.0.0.1:20000
+ 
+#
+# Around line 922. Uncomment and set database to off
+#
+ 
+database = off
+
+#
+# Around line 1106. Uncomment and set to a file we're about to create.
+#                   Use the absolute path to a project folder
+#
+
+declarative_config = /PATH/TO/MY/project/minecraft-kong.yml
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The stream_listen configuration tells Kong to listen for streaming TCP traffic. We're telling Kong to listen on port 20000 for this. For the needs of this mini project, we can configure Kong using its &lt;a href="https://docs.konghq.com/gateway-oss/2.4.x/db-less-and-declarative-config/"&gt;DB-less and Declarative configuration&lt;/a&gt; style. Kong will not need to use a database (database = off), and all of our configurations for port forwarding and load balancing will be stored in a single YAML file. That is the &lt;code&gt;declarative_config&lt;/code&gt; file path that we've set above.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#write-declarative-configuration-file"&gt;
+  &lt;/a&gt;
+  &lt;strong&gt;Write Declarative Configuration File&lt;/strong&gt;
+&lt;/h2&gt;
+
+&lt;p&gt;Before we start up Kong, we need to write that &lt;code&gt;minecraft-kong.yml&lt;/code&gt; file with our port forwarding configuration. In a project folder (that matches the path you specified above), open up a new file called &lt;code&gt;minecraft-kong.yml&lt;/code&gt;:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;# PATH: ~/project/minecraft-kong.yml
+
+_format_version: "2.1"
+
+services:
+  - name: Minecraft-Server-A
+    url: tcp://localhost:25000
+    routes:
+      - name: Server-A-TCP-Routes
+        protocols: ["tcp", "tls"]
+        destinations:
+          - ip: 127.0.0.1
+            port: 20000
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;In this file, we declare a new &lt;a href="https://docs.konghq.com/gateway-oss/2.4.x/admin-api/#service-object"&gt;Service entity&lt;/a&gt; named Minecraft-Server-A. The server uses the TCP protocol, listening on localhost port 25000, so we set these values together as the service's url. Next, we define a &lt;a href="https://docs.konghq.com/gateway-oss/2.4.x/admin-api/#route-object"&gt;Route&lt;/a&gt; for the service, which associates our service with a URL path or an incoming connection destination that Kong will listen for. We provide a name for our route, telling Kong to listen for requests using TCP/TLS on the destination that we specified in our kong.conf file: ip 127.0.0.1 and port 20000.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#start-up-minecraft-server-and-kong"&gt;
+  &lt;/a&gt;
+  &lt;strong&gt;Start Up Minecraft Server and Kong&lt;/strong&gt;
+&lt;/h2&gt;
+
+&lt;p&gt;We’ve written all of our configuration for this step. Let's start up our Minecraft server in Docker. Remember, we want our host (our local machine) to be ready on port 25000, binding that port to the standard Minecraft server port of 25565 on the container:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;~/project$ docker run -p 25000:25565 -e EULA=true itzg/minecraft-server
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;That command might take a little time to run as the server starts up. Now, in a separate terminal window, we'll start up Kong:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;~/project$ sudo kong start
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;With our server up and running, we go back to our game client and, just like above, choose "Multiplayer" and try to establish a "Direct Connection" with a game server. We know that we could connect directly to localhost:25000, since that's the actual host port bound to the container's port; rather, we want to test Kong's port forwarding. We want to connect to the supposed game server on localhost:20000, pretending that we're the casual user who is unaware that port 20000 points to a port forwarding gateway.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--6lS1qeUz--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/eq0p4z71tysqukrhoitu.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--6lS1qeUz--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/eq0p4z71tysqukrhoitu.png" alt=""&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Click on "Join Server." Like Step 1, your connection should be successful, and you'll have entered the Minecraft world. Our TCP connection request to localhost:20000 went to Kong Gateway, which then forwarded that request to port 25000, our actual Minecraft server. We have port forwarding up and running!&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#step-3-loadbalancing-two-minecraft-servers"&gt;
+  &lt;/a&gt;
+  &lt;strong&gt;Step 3: Load-Balancing Two Minecraft Servers&lt;/strong&gt;
+&lt;/h1&gt;
+
+&lt;p&gt;We will spin up two Minecraft servers for the final step in our mini-project, listening on ports 25000 and 26000. Previously, when we only had one Minecraft server, Kong would naturally forward TCP requests at port 20000 to that sole Minecraft server's port. Now, with two Minecraft server ports to choose from, we'll need to use port forwarding and load balancing. Kong Gateway will take TCP connection requests that come to port 20000 and distribute connections evenly between Minecraft Server A and Minecraft Server B.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#start-up-minecraft-servers"&gt;
+  &lt;/a&gt;
+  &lt;strong&gt;Start Up Minecraft Servers&lt;/strong&gt;
+&lt;/h2&gt;
+
+&lt;p&gt;If you haven't done so already, terminate the single Minecraft server that was running in the previous step. We'll start everything up again from a clean state, spinning up each server in its own terminal window. In your first terminal window, run the Docker container for Server A, binding the host's port 25000 to the container's port 25565:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;~/project$ docker run -p 25000:25565 -e EULA=true itzg/minecraft-server
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Then, in a separate terminal window, we will start up Server B, this time binding the host's port 26000 to the container's port 25565:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;~/project$ docker run -p 26000:25565 -e EULA=true itzg/minecraft-server
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Now, we have Servers A and B running, accessible at ports 25000 and 26000, respectively.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#edit-declarative-configuration-file"&gt;
+  &lt;/a&gt;
+  &lt;strong&gt;Edit Declarative Configuration File&lt;/strong&gt;
+&lt;/h2&gt;
+
+&lt;p&gt;Next, we want to edit our declarative configuration file (minecraft-kong.yml), configuring Kong for load balancing. Edit your file to reflect the following:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;# PATH: ~/project/minecraft-kong.yml
+_format_version: "2.1"
+
+upstreams:
+  - name: Minecraft-Servers
+    targets:
+      - target: localhost:25000
+        weight: 100
+      - target: localhost:26000
+        weight: 100
+services:
+  - name: Load-Balancing-Service
+    host: Minecraft-Servers
+    protocol: tcp
+    routes:
+      - name: Load-Balancing-Route
+        protocols: ["tcp", "tls"]
+        destinations:
+          - ip: 127.0.0.1
+            port: 20000
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Let's walk through what we've done here. First, we added an &lt;a href="https://docs.konghq.com/gateway-oss/2.4.x/admin-api/#upstream-object"&gt;Upstream Object&lt;/a&gt; (arbitrarily named Minecraft-Servers), which functions as a virtual host for load balancing to multiple services. That's exactly the functionality that we need. We added two &lt;a href="https://docs.konghq.com/gateway-oss/2.4.x/admin-api/#target-object"&gt;Target Objects&lt;/a&gt; to our upstream service. Each target has an address with host and port; in our case, our two targets point to localhost:25000 (Minecraft Server A) and localhost:26000 (Minecraft Server B). Then, we set a weight for each target, which the load balancer uses to distribute load. Even though we've explicitly set the weights evenly to 100, the default for this optional configuration is 100.&lt;/p&gt;
+
+&lt;p&gt;Next, we declared our Service Object, which in this case is our load balancer service. Requests that satisfy the routes we establish will be forwarded to the Minecraft-Servers host, our load balancing upstream object. Similar to our previous step, we configured a route, telling Kong Gateway to listen for TCP/TLS requests destined for 127.0.0.1:20000.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#restart-kong"&gt;
+  &lt;/a&gt;
+  &lt;strong&gt;Restart Kong&lt;/strong&gt;
+&lt;/h2&gt;
+
+&lt;p&gt;Since our Kong configuration has changed, we need to restart Kong for the changes to take effect:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;~/project$ sudo kong restart
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;At this point, everything is up and running. We have our two Minecraft servers (Server A and Server B) running in Docker containers in two separate terminal windows. We have Kong configured to listen for TCP on port 20000, forwarding those requests to our load balancer, distributing connections across our two servers.&lt;/p&gt;
+
+&lt;p&gt;Open the Minecraft game client again. Similar to previous steps, we will attempt to connect to the multiplayer server at localhost:20000 directly. As you connect, keep an eye on your two server terminal windows. As you repeatedly connect to the game, disconnect, and then reconnect, you will at times see a connection log message for Server A, and then at other times a message for Server B.&lt;/p&gt;
+
+&lt;p&gt;And just like that, we have set up our load balancer to distribute connection requests across our two Minecraft servers!&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#ready-to-play-work"&gt;
+  &lt;/a&gt;
+  &lt;strong&gt;Ready to &lt;del&gt;Play&lt;/del&gt; Work&lt;/strong&gt;
+&lt;/h1&gt;
+
+&lt;p&gt;To recap, we slowly progressed in complexity for our mini-project:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;We started by simply spinning up a single Minecraft server in a Docker container, using port 25000 for accepting game client connections.&lt;/li&gt;
+&lt;li&gt;Next, we configured Kong Gateway to sit in front of our single server to perform port forwarding. Kong listened on port 20000 for game client connections, forwarding those requests to the port on our host where the Minecraft server was accessible.&lt;/li&gt;
+&lt;li&gt;Lastly, we set up two Minecraft servers to run concurrently. Then, we configured Kong Gateway to act as a load balancer. Kong listened on port 20000 for game client connections, this time funneling them through its load balancing service to distribute connections across our two servers.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;From here, you have many opportunities for adding complexity. You can add more game servers. For example, if some servers run on machines that can handle a heavier load of connections than others, then you can configure the load balancer to distribute the load unevenly. You can configure health check rules for Kong's load balancer to ensure requests are only forwarded to those servers which are presently healthy. You can even select from a handful of load balancing algorithms besides the default "round-robin" strategy.&lt;/p&gt;
+
+&lt;p&gt;So, we've had a little fun and learned to use some important tools and concepts along the way. We have discovered that load balancing and port forwarding with Kong Gateway is simple and easy to set up. Yet, even with such ease, these features are extremely powerful. Now that you've got a handle on it, it's time to get to work and face the &lt;a href="https://minecraft.fandom.com/wiki/Ender_Dragon"&gt;Ender Dragon&lt;/a&gt;.&lt;/p&gt;
+
+</description>
+      <category>devops</category>
+      <category>architecture</category>
+    </item>
+    <item>
+      <title>Finding A Web Design Company - Factors To Consider</title>
+      <author>Alex</author>
+      <pubDate>Tue, 08 Jun 2021 14:36:48 +0000</pubDate>
+      <link>https://dev.to/alexanderkdev/finding-a-web-design-company-factors-to-consider-11n0</link>
+      <guid>https://dev.to/alexanderkdev/finding-a-web-design-company-factors-to-consider-11n0</guid>
+      <description>&lt;p&gt;In this rapidly changing world where change is the new constant, a website's life is only limited to a few years if not correctly designed or updated frequently. Thus, partnering with an experienced web design company ensures these aspects are taken care of to see a constant rise in the charts. (&lt;a href="https://www.mediafire.com/view/66bjmol7x8a2wks/Finding_A_Web_Design_Company_-_Factors_To_Consider.png/file#"&gt;https://www.mediafire.com/view/66bjmol7x8a2wks/Finding_A_Web_Design_Company_-_Factors_To_Consider.png/file#&lt;/a&gt;)&lt;/p&gt;
+
+</description>
+      <category>design</category>
+      <category>webdev</category>
+      <category>company</category>
+      <category>webdesign</category>
+    </item>
+    <item>
+      <title>What is An Application Programming Interface?</title>
+      <author>Rezaul karim</author>
+      <pubDate>Tue, 08 Jun 2021 14:33:28 +0000</pubDate>
+      <link>https://dev.to/rezaulkarim014/what-is-an-application-programming-interface-5ea6</link>
+      <guid>https://dev.to/rezaulkarim014/what-is-an-application-programming-interface-5ea6</guid>
+      <description>&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--fuV3pPDI--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1623162278151/whHt5e6Ao.jpeg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--fuV3pPDI--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1623162278151/whHt5e6Ao.jpeg" alt="api-application-programming-interface-isometric_107791-2716.jpg"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#application-programming-interface"&gt;
+  &lt;/a&gt;
+  Application Programming Interface
+&lt;/h2&gt;
+
+&lt;p&gt;In this article. I’m going to be talking about what an application programming interface. Both in general and related specifically to web development. Let’s start now.&lt;/p&gt;
+
+&lt;p&gt;To get started API stands for application programming interface. Which is just a fancy way of saying what one application exposes to another. That is the API. Let’s take an&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#example-of-a-restaurant-to-describe-how-an-api-works-in-nontechnical-terms"&gt;
+  &lt;/a&gt;
+  Example of a restaurant to describe how an API Works in non-technical terms.
+&lt;/h2&gt;
+
+&lt;p&gt;So when you go to a restaurant you don’t go directly up to this chef and tell him what you want to order. You need to look at the In order something off of the menu. Because the menu tells you what the restaurant offers that is their API. This menu the API essentially tells you what that certain application is giving to you and the things that you can use from the application. So you go to the restaurant and you order something off of that menu. Then after you order something from that menu you tell them what you want. And restaurant is Going to give you whatever you ordered off of that menu. They’re going to give you back data.&lt;/p&gt;
+
+&lt;p&gt;So when you access an API that API you’re going to send it what you want, then it will send you back information based on what you wanted It.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--80-1SdMU--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1623162478930/GZbwAf4W8.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--80-1SdMU--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1623162478930/GZbwAf4W8.png" alt="api-5582541_960_720.png"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;But if you go to this restaurant, for example a steak restaurant and you try to order a peanut butter jelly sandwich, they’re going to throw an error at you. They’re going to tell you we don’t serve peanut butter jelly sandwiches. You have to choose something on the menu and this makes API’s secure because the only exposed what you want to expose to the rest of the world.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#web-applications-role"&gt;
+  &lt;/a&gt;
+  Web Application’s Role:
+&lt;/h2&gt;
+
+&lt;p&gt;For example, a web application is not going to expose to the database with all the Information passwords. They’re only going to expose to you the login and sign up pages and not the actual database itself. This makes that website secure because they’re only exposing the parts that they want to some of the most common forms of API’s that you’ll run into as a developer are going to be rest API’s on the web and library API’s from code that you pull into your project.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#web-apis"&gt;
+  &lt;/a&gt;
+  Web API’s
+&lt;/h3&gt;
+
+&lt;p&gt;Let’s first talk about these web API’s, which are going to be most likely rest API access. These API’s exposed different endpoints also known as URLs, which you can access to get certain data from that API. You can also access these endpoint in order to modify data on these servers, but it only is what the application actually exposes to you and wants to let you modify.&lt;/p&gt;
+
+&lt;p&gt;For example, you may be able to update it user through a rest API, but they’re not going to let you update the password. They’re only going to let you update the name in the email. For example. You also will to get users from this API, but they’re not going to return to you the password of the user the does give you the name and the email. This is a way that these servers can be secured by only exposing the information. They want through this API which is the contract that the server and the client are having between each other.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--ysD_onK0--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1623162195330/DrdvIyNQy.jpeg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ysD_onK0--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1623162195330/DrdvIyNQy.jpeg" alt="software-developers-programming-computer-with-script_74855-6661.jpg"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#common-application-programming-interface"&gt;
+  &lt;/a&gt;
+  Common Application Programming Interface
+&lt;/h2&gt;
+
+&lt;p&gt;The other most common Application Programming Interface, which is not really referred to commonly as an API. But is still technically API is an actual library that you pull into your code. These libraries have a bunch of different methods to find on them that do specific things. When you call them and return to you specific data when you call them, this is exactly what an API is it’s a contract between this Library code that you’ve installed and your actual project that using that libraries code you have different ways that you can access it only. Of the methods that they And you aren’t able to access the internals of that Library unless it’s through the methods that the API of the library exposes to you.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#in-conclusion"&gt;
+  &lt;/a&gt;
+  In Conclusion
+&lt;/h2&gt;
+
+&lt;p&gt;The common theme with API’s is that the only exposed to exactly what they want you to be able to access. And hide away absolutely everything else that they can in order to make their API as secure as possible. Also commonly with web API. You’re going to need some form of token to authenticate yourself with this API. Which will allow the application to know whose axis in the API.&lt;/p&gt;
+
+&lt;p&gt;In order to limit what that person can access based on their specific permissions in conclusion. API’s are absolutely everywhere from technology to non technology related fields, and it’s really just a contract between two things. Look how they can interact with one another.&lt;/p&gt;
+
+&lt;p&gt;It’s mostly used to make things more secure and easier to use. Because you know how you can use something. And it hides away all the stuff that you cannot access which makes it secure.&lt;/p&gt;
+
+&lt;p&gt;That’s all an API is.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://mrezaulkarim.com/why-should-we-use-dark-mode/"&gt;Read this article on my blog&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;For more exciting tips and tricks please read our  &lt;a href="https://mrezaulkarim.com/blog/"&gt;others articles&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Find My page on Instagram:  &lt;a href="//instagram.com/stack.content"&gt;@stack.content&lt;/a&gt;&lt;/p&gt;
+
+</description>
+      <category>uiweekly</category>
+      <category>ux</category>
+      <category>programming</category>
+      <category>webdev</category>
+    </item>
+    <item>
+      <title>How to start a task being a junior developer</title>
+      <author>Fabrícia Diniz</author>
+      <pubDate>Tue, 08 Jun 2021 14:14:04 +0000</pubDate>
+      <link>https://dev.to/fabriciadiniz/how-to-start-a-task-being-a-junior-developer-4d16</link>
+      <guid>https://dev.to/fabriciadiniz/how-to-start-a-task-being-a-junior-developer-4d16</guid>
+      <description>&lt;h3&gt;
+  &lt;a href="#tldr"&gt;
+  &lt;/a&gt;
+  TL-DR:
+&lt;/h3&gt;
+
+&lt;p&gt;In this article I talk about strategies I use to efficiently navigate my tasks at work as a junior developer (who has ADHD).&lt;br&gt;
+These are the topics covered (I went a little further than just starting):&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="#before-starting-a-task"&gt;Before starting a task&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="#while-developing"&gt;While developing&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="#at-task-end"&gt;At task completion&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+
+
+
+&lt;p&gt;Basically, there are 3 types of strategies I use when doing a task: ** those applied to reduce the difficulty of starting, those applied during development to smooth the process, and those applied at the end of the task to reduce the errors that will pass into code review*&lt;em&gt;. To help understanding, I'm going to use a task I did a few months ago, a modal in React.&lt;br&gt;
+*I have to warn you that these tips will improve your performance in the medium term, but in the short term it may seem like you're taking things slower than you'd like. I suggest talking to your leadership to align the expectations.&lt;/em&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#before-starting-a-task"&gt;
+  &lt;/a&gt;
+  Before starting a task
+&lt;/h2&gt;
+
+&lt;p&gt;Before starting any task I like to understand the code I'm going to work with, so I look for the components involved in the task and read them, taking notes in a notebook about what each one does, where the data comes from and what its internal functions do. &lt;strong&gt;That way I can have a deeper understanding of what I'm going to be dealing with&lt;/strong&gt; and I prevent that information from staying only in my head (which is not at all reliable), as well create a place to turn to if ever I need to work again on the same components.&lt;/p&gt;
+
+&lt;p&gt;You could argue that doing it this way "consumes" a lot of task time, but I guarantee it makes development easier and reduces time spent looking for bugs later. From a junior's perspective, &lt;strong&gt;you gain code mastery much faster and deeper&lt;/strong&gt; this way. People don't usually do this and I've found that reading and understanding the code beforehand helps me identify points of attention that go unnoticed even by the more experienced.&lt;/p&gt;
+
+&lt;p&gt;However, sometimes the task is to start something from scratch. In these cases I look for similar components and do the same procedure to understand what all its code does because &lt;strong&gt;this prevents me from just copying code snippets without understanding what they actually do&lt;/strong&gt;. My task of creating a modal fell in this case, I had to create the component from scratch based on a more general one that already existed in the project.&lt;/p&gt;
+
+&lt;p&gt;The last thing I do is &lt;strong&gt;taking note of the subtasks&lt;/strong&gt; within the main task. Here I try to make them as simple and short as possible, because this reduces the time between one subtask and another and greatly improves the development flow. Regarding my modal, it was something like this:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;create modal component&lt;/li&gt;
+&lt;li&gt;condition API call to click&lt;/li&gt;
+&lt;li&gt;mock API return&lt;/li&gt;
+&lt;li&gt;test the action of clicking the button&lt;/li&gt;
+&lt;li&gt;find out how to pass information between different components&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h2&gt;
+  &lt;a href="#while-developing"&gt;
+  &lt;/a&gt;
+  While developing
+&lt;/h2&gt;
+
+&lt;p&gt;Having very small and relatively simple subtasks helps reduce the anxiety and procrastination to get started and gives you a better view of progress. Sometimes it is necessary to define &lt;strong&gt;microsteps&lt;/strong&gt; to help break the inertia of starting the task and one that helps me a lot when I need to research a difficult topic is to leave the website or documentation open and then get up from the chair for a while. For some reason I feel less overwhelmed when I've just taken a walk and the website I need is already open just waiting for me. This also works with the code itself, I find the right file to work with and then I'll take a walk around to unwind before starting.&lt;/p&gt;
+
+&lt;p&gt;During the task, unforeseen bugs/fixes always arise, so I &lt;strong&gt;write down all the things I didn't anticipate I would have to do and also all the questions that come up&lt;/strong&gt; to search the internet or ask someone on the team, that way nothing gets lost and I guarantee that I will remember to clarify everything.&lt;br&gt;
+Another strategy I have to adopt when it's particularly difficult to focus on the task is to write down the problem I'm trying to solve and write down the little conclusions that will lead me to the solution. An example of how I do this part:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;at what moment should the click open the modal?
+
+&lt;ul&gt;
+&lt;li&gt;↪ when an element is registered, determined by &lt;code&gt;element.isEnabled&lt;/code&gt;
+&lt;/li&gt;
+&lt;li&gt;what defines isEnabled? At what point is it changed?&lt;/li&gt;
+&lt;/ul&gt;
+
+
+&lt;/li&gt;
+&lt;li&gt;the modal must have: isOpen, onClose, type, name, date, activities
+
+&lt;ul&gt;
+&lt;li&gt;date comes from the URL ✅&lt;/li&gt;
+&lt;li&gt;where does the other information come from? Does the parent component have them all? Do I need to get any of them from somewhere else?&lt;/li&gt;
+&lt;/ul&gt;
+
+
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;In some situations it's necessary to do a pair programming and I realized that without my notes I could end up getting pretty lost, so I like to take these steps before having someone help me with answers.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#at-task-completion"&gt;
+  &lt;/a&gt;
+  At task completion
+&lt;/h2&gt;
+
+&lt;p&gt;This is the time to check if any silly mistakes have gone unnoticed. Before submitting an assignment for code review I usually recheck a few things:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;run all the automated/integration tests to make sure I didn't accidentally break anything&lt;/li&gt;
+&lt;li&gt;run lint (if not running automatically)&lt;/li&gt;
+&lt;li&gt;update my branch with main/master
+
+&lt;ul&gt;
+&lt;li&gt;if necessary, update libraries and database&lt;/li&gt;
+&lt;li&gt;if necessary, resolve merge conflicts&lt;/li&gt;
+&lt;/ul&gt;
+
+
+&lt;/li&gt;
+&lt;li&gt;run the code and make sure the behavior is as expected, including error cases&lt;/li&gt;
+&lt;li&gt;check if I've followed the code standards defined by the company&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;&lt;strong&gt;And here's a tip my tech lead gave me&lt;/strong&gt;: if you think the code is bad after finishing the whole task, call someone on your team to take a look, you can explain what you tried to do and the person can give you feedback on how to improve before submitting to the code review itself.&lt;/p&gt;
+
+
+
+
+&lt;p&gt;Starting a career in development can be quite difficult, especially if you've gone through a career transition or don't have a good theoretical background. With this article I would like to share some strategies I use to make tasks less daunting and less anxiety-provoking.&lt;br&gt;
+Do you have any more tips to give not only to me but to other people just starting out? Leave it in the comments and help some more people.&lt;/p&gt;
+
+</description>
+      <category>beginners</category>
+      <category>productivity</category>
+    </item>
+    <item>
+      <title>Moving Perl Mojolicious routes to their own module</title>
+      <author>Mark Gardner</author>
+      <pubDate>Tue, 08 Jun 2021 14:00:00 +0000</pubDate>
+      <link>https://dev.to/mjgardner/moving-perl-mojolicious-routes-to-their-own-module-53c2</link>
+      <guid>https://dev.to/mjgardner/moving-perl-mojolicious-routes-to-their-own-module-53c2</guid>
+      <description>&lt;p&gt;A mentee asked me over the weekend if there was a way within a &lt;a href="https://mojolicious.org/"&gt;Mojolicious&lt;/a&gt; web application to store the &lt;a href="https://docs.mojolicious.org/Mojolicious/Guides/Routing"&gt;routes&lt;/a&gt; separately from the main application class. Here’s one way. &lt;strong&gt;These instructions assume you’re using &lt;a href="https://www.perl.org/get.html"&gt;Perl 5.34&lt;/a&gt; and &lt;a href="https://metacpan.org/release/SRI/Mojolicious-9.19"&gt;Mojolicious 9.19&lt;/a&gt;&lt;/strong&gt; (the latest as of this writing) via the terminal command line on a Linux, Unix, or macOS system; make the appropriate changes if this doesn’t apply to you.&lt;/p&gt;
+
+&lt;p&gt;First, if you haven’t already, &lt;a href="https://docs.mojolicious.org/Mojolicious/Command/Author/generate/app"&gt;create your Mojolicious app&lt;/a&gt; at your shell prompt:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;$ mojo generate app Local::RouteDemo
+  [mkdir] /Users/mgardner/Projects/blog/local_route_demo/script
+  [write] /Users/mgardner/Projects/blog/local_route_demo/script/local_route_demo
+  [chmod] /Users/mgardner/Projects/blog/local_route_demo/script/local_route_demo 744
+  [mkdir] /Users/mgardner/Projects/blog/local_route_demo/lib/Local
+  [write] /Users/mgardner/Projects/blog/local_route_demo/lib/Local/RouteDemo.pm
+  [exist] /Users/mgardner/Projects/blog/local_route_demo
+  [write] /Users/mgardner/Projects/blog/local_route_demo/local-route_demo.yml
+  [mkdir] /Users/mgardner/Projects/blog/local_route_demo/lib/Local/RouteDemo/Controller
+  [write] /Users/mgardner/Projects/blog/local_route_demo/lib/Local/RouteDemo/Controller/Example.pm
+  [mkdir] /Users/mgardner/Projects/blog/local_route_demo/t
+  [write] /Users/mgardner/Projects/blog/local_route_demo/t/basic.t
+  [mkdir] /Users/mgardner/Projects/blog/local_route_demo/public
+  [write] /Users/mgardner/Projects/blog/local_route_demo/public/index.html
+  [mkdir] /Users/mgardner/Projects/blog/local_route_demo/templates/layouts
+  [write] /Users/mgardner/Projects/blog/local_route_demo/templates/layouts/default.html.ep
+  [mkdir] /Users/mgardner/Projects/blog/local_route_demo/templates/example
+  [write] /Users/mgardner/Projects/blog/local_route_demo/templates/example/welcome.html.ep
+$ cd local_route_demo
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Create a new Perl module in your editor for storing your routes. Here we’re using &lt;code&gt;Local::RouteDemo::Routes&lt;/code&gt;:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;$ touch lib/Local/RouteDemo/Routes.pm
+$ $EDITOR lib/Local/RouteDemo/Routes.pm
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Make the module with a function that will create the routes you want, given a &lt;a href="https://docs.mojolicious.org/Mojolicious/Routes"&gt;Mojolicious::Routes&lt;/a&gt; object. Here we’re just bringing over the default route created when we created our app:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight perl"&gt;&lt;code&gt;&lt;span class="nb"&gt;package&lt;/span&gt; &lt;span class="nn"&gt;Local::RouteDemo::&lt;/span&gt;&lt;span class="nv"&gt;Routes&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="k"&gt;use&lt;/span&gt; &lt;span class="nv"&gt;strict&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="k"&gt;use&lt;/span&gt; &lt;span class="nv"&gt;warnings&lt;/span&gt; &lt;span class="sx"&gt;qw(all -experimental::signatures)&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="k"&gt;use&lt;/span&gt; &lt;span class="nv"&gt;feature&lt;/span&gt; &lt;span class="p"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;signatures&lt;/span&gt;&lt;span class="p"&gt;';&lt;/span&gt;
+&lt;span class="k"&gt;use&lt;/span&gt; &lt;span class="nv"&gt;Exporter&lt;/span&gt; &lt;span class="p"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;import&lt;/span&gt;&lt;span class="p"&gt;';&lt;/span&gt;
+&lt;span class="k"&gt;our&lt;/span&gt; &lt;span class="nv"&gt;@EXPORT_OK&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="sx"&gt;qw(make_routes)&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="k"&gt;sub &lt;/span&gt;&lt;span class="nf"&gt;make_routes&lt;/span&gt; &lt;span class="p"&gt;($router) {&lt;/span&gt;
+    &lt;span class="nv"&gt;$router&lt;/span&gt;&lt;span class="o"&gt;-&amp;gt;&lt;/span&gt;&lt;span class="nv"&gt;get&lt;/span&gt;&lt;span class="p"&gt;('&lt;/span&gt;&lt;span class="s1"&gt;/&lt;/span&gt;&lt;span class="p"&gt;')&lt;/span&gt;&lt;span class="o"&gt;-&amp;gt;&lt;/span&gt;&lt;span class="nv"&gt;to&lt;/span&gt;&lt;span class="p"&gt;('&lt;/span&gt;&lt;span class="s1"&gt;Example#welcome&lt;/span&gt;&lt;span class="p"&gt;');&lt;/span&gt;
+    &lt;span class="c1"&gt;# add more routes here&lt;/span&gt;
+
+    &lt;span class="k"&gt;return&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Adjust the application class to load your new Routes module and call its &lt;a href="https://perldoc.pl/Exporter"&gt;exported&lt;/a&gt; function:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight perl"&gt;&lt;code&gt;&lt;span class="nb"&gt;package&lt;/span&gt; &lt;span class="nn"&gt;Local::&lt;/span&gt;&lt;span class="nv"&gt;RouteDemo&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="k"&gt;use&lt;/span&gt; &lt;span class="nn"&gt;Mojo::&lt;/span&gt;&lt;span class="nv"&gt;Base&lt;/span&gt; &lt;span class="p"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Mojolicious&lt;/span&gt;&lt;span class="p"&gt;',&lt;/span&gt; &lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="nv"&gt;signatures&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="k"&gt;use&lt;/span&gt; &lt;span class="nn"&gt;Local::RouteDemo::&lt;/span&gt;&lt;span class="nv"&gt;Routes&lt;/span&gt; &lt;span class="p"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;make_routes&lt;/span&gt;&lt;span class="p"&gt;';&lt;/span&gt;
+
+&lt;span class="c1"&gt;# This method will run once at server start&lt;/span&gt;
+&lt;span class="k"&gt;sub &lt;/span&gt;&lt;span class="nf"&gt;startup&lt;/span&gt; &lt;span class="p"&gt;($self) {&lt;/span&gt;
+
+    &lt;span class="c1"&gt;# Load configuration from config file&lt;/span&gt;
+    &lt;span class="k"&gt;my&lt;/span&gt; &lt;span class="nv"&gt;$config&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nv"&gt;$self&lt;/span&gt;&lt;span class="o"&gt;-&amp;gt;&lt;/span&gt;&lt;span class="nv"&gt;plugin&lt;/span&gt;&lt;span class="p"&gt;('&lt;/span&gt;&lt;span class="s1"&gt;NotYAMLConfig&lt;/span&gt;&lt;span class="p"&gt;');&lt;/span&gt;
+
+    &lt;span class="c1"&gt;# Configure the application&lt;/span&gt;
+    &lt;span class="nv"&gt;$self&lt;/span&gt;&lt;span class="o"&gt;-&amp;gt;&lt;/span&gt;&lt;span class="nv"&gt;secrets&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nv"&gt;$config&lt;/span&gt;&lt;span class="o"&gt;-&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nv"&gt;secrets&lt;/span&gt;&lt;span class="p"&gt;});&lt;/span&gt;
+
+    &lt;span class="c1"&gt;# Make routes&lt;/span&gt;
+    &lt;span class="nv"&gt;make_routes&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nv"&gt;$self&lt;/span&gt;&lt;span class="o"&gt;-&amp;gt;&lt;/span&gt;&lt;span class="nv"&gt;routes&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+
+    &lt;span class="k"&gt;return&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Finally, run your tests and/or manually test your routes to be sure everything works OK:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;$ prove -vlr t
+t/basic.t .. [2021-06-07 12:21:55.36917] [58779] [debug] [elVGykGVWlOt] GET "/"
+[2021-06-07 12:21:55.36972] [58779] [debug] [elVGykGVWlOt] Routing to controller "Local::RouteDemo::Controller::Example" and action "welcome"
+[2021-06-07 12:21:55.37137] [58779] [debug] [elVGykGVWlOt] Rendering template "example/welcome.html.ep"
+[2021-06-07 12:21:55.37343] [58779] [debug] [elVGykGVWlOt] Rendering template "layouts/default.html.ep"
+[2021-06-07 12:21:55.37495] [58779] [debug] [elVGykGVWlOt] 200 OK (0.005772s, 173.250/s)
+
+ok 1 - GET /
+ok 2 - 200 OK
+ok 3 - content is similar
+1..3
+ok
+All tests successful.
+Files=1, Tests=3, 1 wallclock secs ( 0.02 usr 0.01 sys + 0.38 cusr 0.11 csys = 0.52 CPU)
+Result: PASS
+$ script/local_route_demo get /
+[2021-06-07 12:22:29.55930] [58889] [debug] [f3YoaFhkwJ42] GET "/"
+[2021-06-07 12:22:29.55990] [58889] [debug] [f3YoaFhkwJ42] Routing to controller "Local::RouteDemo::Controller::Example" and action "welcome"
+[2021-06-07 12:22:29.56059] [58889] [debug] [f3YoaFhkwJ42] Rendering template "example/welcome.html.ep"
+[2021-06-07 12:22:29.56269] [58889] [debug] [f3YoaFhkwJ42] Rendering template "layouts/default.html.ep"
+[2021-06-07 12:22:29.56432] [58889] [debug] [f3YoaFhkwJ42] 200 OK (0.005004s, 199.840/s)
+&amp;lt;!DOCTYPE html&amp;gt;
+&amp;lt;html&amp;gt;
+  &amp;lt;head&amp;gt;&amp;lt;title&amp;gt;Welcome&amp;lt;/title&amp;gt;&amp;lt;/head&amp;gt;
+  &amp;lt;body&amp;gt;&amp;lt;h2&amp;gt;Welcome to the Mojolicious real-time web framework!&amp;lt;/h2&amp;gt;
+&amp;lt;p&amp;gt;
+  This page was generated from the template "templates/example/welcome.html.ep"
+  and the layout "templates/layouts/default.html.ep",
+  &amp;lt;a href="/"&amp;gt;click here&amp;lt;/a&amp;gt; to reload the page or
+  &amp;lt;a href="/index.html"&amp;gt;here&amp;lt;/a&amp;gt; to move forward to a static page.
+&amp;lt;/p&amp;gt;
+&amp;lt;/body&amp;gt;
+&amp;lt;/html&amp;gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;You can find &lt;a href="https://github.com/mjgardner/local_route_demo"&gt;a git repository of this work on GitHub&lt;/a&gt;, and here’s a &lt;a href="https://github.com/mjgardner/local_route_demo/commit/ea1226793ae689ce7e049b36caaebccabb581c57"&gt;commit of all the changes made to the default Mojolicious application&lt;/a&gt; so you can see the differences.&lt;/p&gt;
+
+</description>
+      <category>mojolicious</category>
+      <category>perl</category>
+      <category>webdev</category>
+    </item>
+    <item>
       <title>Build an Exercise Tracker App using React.js (Hooks) and React Router | Learn React.js</title>
       <author>The Nerdy Dev</author>
       <pubDate>Tue, 08 Jun 2021 13:51:48 +0000</pubDate>
@@ -2011,6 +2808,93 @@ Let's get to the journey!&lt;/p&gt;
       <category>geolocation</category>
     </item>
     <item>
+      <title>How to Learn Anything: 5 Simple Tips That Works</title>
+      <author>John Wakahiu</author>
+      <pubDate>Tue, 08 Jun 2021 13:13:55 +0000</pubDate>
+      <link>https://dev.to/jonniwaka/how-to-learn-anything-5-simple-tips-that-works-1mbl</link>
+      <guid>https://dev.to/jonniwaka/how-to-learn-anything-5-simple-tips-that-works-1mbl</guid>
+      <description>&lt;p&gt;In our quest to achieve success, we end up wasting much time doing things that do not contribute to our success.&lt;/p&gt;
+
+&lt;p&gt;When we want to learn something new, oftentimes, we rush to books and videos.&lt;/p&gt;
+
+&lt;p&gt;Books and videos that are never related to the field we are aiming to learn. Other times you are watching videos that motivate you to get started.&lt;/p&gt;
+
+&lt;p&gt;We always do this not knowing we are on the wrong path. Watching these videos is not bad as a beginner but there is so much to gain when you dive into the exact intent.&lt;/p&gt;
+
+&lt;p&gt;Here are five simple tips for starting any project.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;1. Identify Your Goal&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;The only sure way that I have found to work is actually to go straight to the goal you need to achieve.&lt;/p&gt;
+
+&lt;p&gt;What is your goal and what do you aim to achieve in the future. Have a picture of the kind of work you will be doing 5 years from today.&lt;/p&gt;
+
+&lt;p&gt;Say you want to start a software company. Research on things that go into building a successful software company.&lt;/p&gt;
+
+&lt;p&gt;Now that you have an idea of what you aim to achieve, let us now get those skills that make us stand.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;2. Identify Your Skills&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;Do you have the skills to work as a software engineer? What languages do you need to create products for your clients?&lt;/p&gt;
+
+&lt;p&gt;Identify what languages you need to learn. To start selling your services as a professional, you have to learn those languages well.&lt;/p&gt;
+
+&lt;p&gt;Say you settle for a front-end developer, you will need to learn HTML, CSS, and JavaScript.&lt;/p&gt;
+
+&lt;p&gt;Here is where a surprising number of people make mistakes.&lt;/p&gt;
+
+&lt;p&gt;Searching for motivation.&lt;/p&gt;
+
+&lt;p&gt;People want proof that things have worked for other people. And what do they do? They dive into endless tutorials on the subject matter.&lt;/p&gt;
+
+&lt;p&gt;A little start to get you started might not hurt but it will if you end up moving from one HTML course to another.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;3. Start by Doing&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;Watching YouTube tutorials might seem like your best way to get started. But it might lead you into an endless tutorial hell.&lt;/p&gt;
+
+&lt;p&gt;The best bet would be to make sure you have all the tools you need to get started. Computer or a laptop, IDE, and language documentation.&lt;/p&gt;
+
+&lt;p&gt;That’s all you need actually.&lt;/p&gt;
+
+&lt;p&gt;Start writing your code on day one. You will have moved from a “one day I will…” person to a “today was my day one to…” person.&lt;/p&gt;
+
+&lt;p&gt;Start and see how much you achieve on your first day. If you are stuck, search for solutions on the internet and fix them. There is a high chance that another person faced a similar issue before you.&lt;/p&gt;
+
+&lt;p&gt;This would save you time by checking the available solutions.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;4. Blog Your Problems&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;If you encounter an issue that you cannot find online, find a way to get a solution on your own.&lt;/p&gt;
+
+&lt;p&gt;This may take you time but it is the best way to remember things you learn.&lt;/p&gt;
+
+&lt;p&gt;Document your solution on a blog since it helps you to remember and luckily help another person too.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;5. Build a Project&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;Use your skills to build a project. The first project may not look great but it will give you satisfaction.&lt;/p&gt;
+
+&lt;p&gt;This way you will be confident of your skills and you will be more marketable. From this, you can keep improving and getting better.&lt;/p&gt;
+
+&lt;p&gt;Then you can create more projects and contribute to open-source projects.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Wrapping Up&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;Remember, people are looking for solutions. Offer solutions instead.&lt;/p&gt;
+
+&lt;p&gt;No one will ever ask you how motivated you feel after reading the famous fancy guys’ books you see on media.&lt;/p&gt;
+
+&lt;p&gt;Stop wasting time reading their books and attending every other webinar. Get better by doing. Done is always better at the end of the day.&lt;/p&gt;
+
+&lt;p&gt;And while at it, make sure you enjoy the process.&lt;/p&gt;
+
+</description>
+      <category>webdev</category>
+      <category>productivity</category>
+      <category>beginners</category>
+    </item>
+    <item>
       <title>Setting up Google Authentication With Firebase🚀</title>
       <author>Karan Choudhary</author>
       <pubDate>Tue, 08 Jun 2021 13:03:00 +0000</pubDate>
@@ -2288,1573 +3172,6 @@ Find the NPM Package here: &lt;a href="https://www.npmjs.com/package/firebase-au
       <category>authentication</category>
       <category>webdev</category>
       <category>beginners</category>
-    </item>
-    <item>
-      <title>How to connect a chatbot to a TalkJS chat</title>
-      <author>Andrew</author>
-      <pubDate>Tue, 08 Jun 2021 12:55:23 +0000</pubDate>
-      <link>https://dev.to/talkjs/how-to-connect-a-chatbot-to-a-talkjs-chat-1h7e</link>
-      <guid>https://dev.to/talkjs/how-to-connect-a-chatbot-to-a-talkjs-chat-1h7e</guid>
-      <description>&lt;p&gt;In this post, I will demonstrate how you can connect the TalkJS &lt;a href="https://talkjs.com/"&gt;Chat API&lt;/a&gt; with a chatbot service like &lt;a href="https://cloud.google.com/dialogflow"&gt;Dialogflow&lt;/a&gt;. A chatbot is a software application used to conduct an online chat conversation via text or text-to-speech instead of providing direct contact with a live human agent.&lt;/p&gt;
-
-&lt;p&gt;Chatbots can be a fantastic way to add rich functionality to your chat integration by enabling automatic and application-aware responses to user inquiries.&lt;/p&gt;
-
-&lt;p&gt;While TalkJS doesn't provide an out-of-the-box AI chatbot that can interact with your users without any further operations, we provide a way for chatbots to interface with the chat by combining our webhooks feature which allows you to create a URL to monitor events from users.&lt;/p&gt;
-
-&lt;p&gt;For example, when a user sends a message, our REST API can be used by your chatbot to directly interact with your users by sending messages. It is up to your application to appropriately process incoming events and generate relevant responses.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#prerequisite"&gt;
-  &lt;/a&gt;
-  Prerequisite
-&lt;/h2&gt;
-
-&lt;p&gt;Before going any further, complete our &lt;a href="https://talkjs.com/docs/Reference/REST_API/Getting_Started/Introduction.html"&gt;Getting Started guide&lt;/a&gt; to set up a simple conversation between two users.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#dialogflow-setup"&gt;
-  &lt;/a&gt;
-  Dialogflow Setup
-&lt;/h2&gt;
-
-&lt;p&gt;Let’s set up a simple Dialogflow project that will allow us to integrate with TalkJS.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Step 1&lt;/strong&gt; - Go to &lt;a href="https://dialogflow.com/"&gt;https://dialogflow.com/&lt;/a&gt; and select Dialogflow ES, the standard agent type suitable for small and simple agents. &lt;/p&gt;
-
-&lt;p&gt;Thankfully the documentation for this application is excellent. Finish the &lt;a href="https://cloud.google.com/dialogflow/es/docs/quick/setup"&gt;setup&lt;/a&gt; as instructed, which involves:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;  &lt;a href="https://cloud.google.com/dialogflow/es/docs/quick/setup#project"&gt;Creating a new project&lt;/a&gt;
-&lt;/li&gt;
-&lt;li&gt;  &lt;a href="https://cloud.google.com/dialogflow/es/docs/quick/setup#api"&gt;Enabling the API for the project&lt;/a&gt;
-&lt;/li&gt;
-&lt;li&gt;  &lt;a href="https://cloud.google.com/dialogflow/es/docs/quick/setup#sa-create"&gt;Creating a service account&lt;/a&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;&lt;strong&gt;Step 2&lt;/strong&gt; - &lt;a href="https://cloud.google.com/dialogflow/es/docs/quick/build-agent"&gt;Build your agent using this guide&lt;/a&gt;. Finish the required steps to &lt;a href="https://cloud.google.com/dialogflow/es/docs/quick/build-agent#create_a_new_intent"&gt;create your intent&lt;/a&gt;. I added a training phrase of “What is the best Chat API and SDK?” with the response being “TalkJS is the best Chat API and SDK!”. &lt;/p&gt;
-
-&lt;p&gt;This concludes our Dialogflow setup. Let’s set up our webhook in TalkJS, which will allow us to receive messages.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#using-webhooks-to-receive-messages-in-talkjs"&gt;
-  &lt;/a&gt;
-  Using webhooks to receive messages in TalkJS
-&lt;/h2&gt;
-
-&lt;p&gt;So, what exactly is a webhook? A webhook (also called a web callback or HTTP push API) is a way for an app to provide other applications with real-time information. A webhook delivers data to other applications as it happens, meaning you get data immediately.&lt;/p&gt;
-
-&lt;p&gt;Before we can use webhooks we need to set up a server for our application. If you have a server URL already set up, you can move on to &lt;a href="#enable"&gt;Enabling the TalkJS Webhook&lt;/a&gt;.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#setting-up-our-server"&gt;
-  &lt;/a&gt;
-  Setting up our server
-&lt;/h3&gt;
-
-&lt;p&gt;We will be using &lt;a href="https://nodejs.org/en/download/"&gt;Node.js&lt;/a&gt;, and &lt;a href="https://ngrok.com/download"&gt;ngrok&lt;/a&gt; to set up our server. &lt;/p&gt;
-
-&lt;p&gt;You may be wondering, what is ngrok?&lt;/p&gt;
-
-&lt;p&gt;Your development machine may be connected to a secure network behind a firewall. To work around access restrictions, ngrok runs a small client process on your machine which creates a private connection tunnel to the ngrok cloud service. Your localhost development server is mapped to an ngrok.io sub-domain, which a remote user can then access. There’s no need to expose ports, set up forwarding, or make other network changes. The connection tunnel established by ngrok is secure and can only transmit data to the localhost port you have open.&lt;/p&gt;
-
-&lt;p&gt;Make sure you have both of these installed before proceeding. Extract the ngrok executable to your project folder, or add it to your &lt;code&gt;PATH&lt;/code&gt;.&lt;/p&gt;
-
-&lt;p&gt;In the terminal for your project, type &lt;code&gt;npx express-generator&lt;/code&gt; to quickly create a skeleton for our local server.&lt;/p&gt;
-
-&lt;p&gt;Once this operation is complete you should now see a *&lt;em&gt;routes *&lt;/em&gt; directory.&lt;/p&gt;
-
-&lt;p&gt;In the &lt;strong&gt;routes&lt;/strong&gt; directory, open the file &lt;em&gt;users.js&lt;/em&gt;&lt;/p&gt;
-
-&lt;p&gt;Replace the existing code:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;router.get('/', function(req, res, next) {
-  res.send('respond with a resource');
-});
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;With the new code:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;router.post('/', function(req, res) {
-  var body = req.body;
-  var message = body.data.message.text;
-  console.log("Message Text: " + message);
-  res.status(200).send();
-});
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;In the bin directory open the file &lt;em&gt;www&lt;/em&gt;. Change the line:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;var port = normalizePort(process.env.PORT || '3000');
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Time to launch our ngrok server. Open the Command Prompt or shell, and change (&lt;code&gt;cd&lt;/code&gt;) into the directory of your project. &lt;/p&gt;
-
-&lt;p&gt;Run the command: &lt;code&gt;ngrok http 3000&lt;/code&gt;&lt;/p&gt;
-
-&lt;p&gt;Copy the https protocol version of the URL. This URL is used to forward all of the messages from your ngrok server to your local server:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--_QlY0_SV--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/4gotzrlcl5w460kddloz.PNG" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--_QlY0_SV--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/4gotzrlcl5w460kddloz.PNG" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;For my server, I have a value of &lt;a href="https://5286ee752ef7.ngrok.io"&gt;https://5286ee752ef7.ngrok.io&lt;/a&gt; &lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Note:&lt;/strong&gt; this URL will be different for you.&lt;/p&gt;
-
-&lt;p&gt;Now append the “/users” section to this URL. &lt;/p&gt;
-
-&lt;p&gt;My final result looks like the following: &lt;a href="https://5286ee752ef7.ngrok.io/users"&gt;https://5286ee752ef7.ngrok.io/users&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;This is the URL we will use for our webhook.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#enabling-the-talkjs-webhook"&gt;
-  &lt;/a&gt;
-  &lt;a&gt;&lt;/a&gt;Enabling the TalkJS Webhook
-&lt;/h3&gt;
-
-&lt;p&gt;You can enable the TalkJS webhook in the &lt;a href="https://talkjs.com/dashboard/"&gt;dashboard&lt;/a&gt;. Enter the https URL from ngrok and enable the messages sent checkbox&lt;/p&gt;
-
-&lt;p&gt;When webhooks are enabled in the TalkJS dashboard, your server will receive HTTP POST requests from the TalkJS server notifying you about events that happen in your application between your users. If you’re interested in learning more about how TalkJS webhooks work, read the &lt;a href="https://talkjs.com/docs/Reference/Webhooks.html"&gt;Webhook Reference Guide&lt;/a&gt;.&lt;/p&gt;
-
-&lt;p&gt;From your &lt;a href="https://talkjs.com/dashboard/"&gt;dashboard&lt;/a&gt;, perform the following steps to enable webhooks:&lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;Enable the use of webhooks by setting the Webhook toggle to enabled. You should now have the option to enter a URL. &lt;/li&gt;
-&lt;li&gt;Enter the URL of your server, or the ngrok server you created from the previous section (in my case, it’s: &lt;a href="https://5286ee752ef7.ngrok.io/users"&gt;https://5286ee752ef7.ngrok.io/users&lt;/a&gt;).&lt;/li&gt;
-&lt;li&gt;Enable the message.sent checkbox&lt;/li&gt;
-&lt;li&gt;Click the Save URL button &lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;p&gt;Your final result should look something like this:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--K_tFVIub--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ovok7ofr0r2etsdlr04k.PNG" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--K_tFVIub--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ovok7ofr0r2etsdlr04k.PNG" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Time to test out what we have done so far.&lt;/p&gt;
-
-&lt;p&gt;In the terminal of your project, type the command &lt;code&gt;npm install&lt;/code&gt; to ensure all dependencies are installed.&lt;/p&gt;
-
-&lt;p&gt;Finally, run &lt;code&gt;npm start&lt;/code&gt; and launch your application so that you can see the inbox you previously created in the &lt;a href="https://talkjs.com/docs/Reference/REST_API/Getting_Started/Introduction.html"&gt;Getting Started guide&lt;/a&gt;.&lt;/p&gt;
-
-&lt;p&gt;Type a message into the conversation, and go back to your terminal to check the logs. Look for the output of  &lt;code&gt;console.log("Message Text: " + message);&lt;/code&gt; It should match the text you have typed in.&lt;/p&gt;
-
-&lt;p&gt;In my case, the logs look like the following snippet:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--dLk3QBZP--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/190mb1drdva96r793r04.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--dLk3QBZP--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/190mb1drdva96r793r04.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;There you have it, we have successfully used webhooks to receive messages in TalkJS. But how do we send this message to Dialogflow? Let’s find out!&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#sending-a-message-to-dialogflow"&gt;
-  &lt;/a&gt;
-  Sending a message to Dialogflow
-&lt;/h2&gt;
-
-&lt;p&gt;At this stage, we have the message our user has typed in. This could be a question about a product or service we offer. &lt;/p&gt;
-
-&lt;p&gt;In order to see our Dialogflow response, ensure the text you enter into the TalkJS conversation the same as the training phrase you set up for your intent. In this example, the training phrase of “What is the best Chat API and SDK?” with the response being “TalkJS is the best Chat API and SDK!”. &lt;/p&gt;
-
-&lt;p&gt;To accomplish sending our message to Dialogflow, we must first ensure we are authenticated to do so. &lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#authentication-for-sending-messages-to-dialogflow"&gt;
-  &lt;/a&gt;
-  Authentication for Sending messages to Dialogflow
-&lt;/h3&gt;
-
-&lt;p&gt;Follow the steps to get authenticated here:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://cloud.google.com/docs/authentication/getting-started#cloud-console"&gt;https://cloud.google.com/docs/authentication/getting-started#cloud-console&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;For me my final command looked like:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;set GOOGLE_APPLICATION_CREDENTIALS=C:\Users\Admin\Downloads\chatbot-talkjs-5ee64d42fcbb
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Your value will be different.&lt;/p&gt;
-
-&lt;p&gt;If you run into issues with this method, specifically this error:&lt;code&gt;Error: Could not load the default credentials&lt;/code&gt;. You can try this alternate method of authenticating.&lt;/p&gt;
-
-&lt;p&gt;Visit: &lt;a href="https://cloud.google.com/sdk/install"&gt;https://cloud.google.com/sdk/install&lt;/a&gt; and perform the following steps:&lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;Install the Google SDK.&lt;/li&gt;
-&lt;li&gt;Open the gcloud shell.&lt;/li&gt;
-&lt;li&gt;Run the command: &lt;code&gt;gcloud auth application-default login&lt;/code&gt;
-&lt;/li&gt;
-&lt;li&gt;Log in to your associated Gmail account.&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;p&gt;You should now be authenticated. Time to add the code that sends our text to  Dialogflow.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#sending-messages-to-dialogflow-using-the-nodejs-client-library"&gt;
-  &lt;/a&gt;
-  Sending messages to Dialogflow using the Node.js client library
-&lt;/h3&gt;
-
-&lt;p&gt;We can send messages to Dialogflow using the &lt;a href="https://github.com/googleapis/nodejs-dialogflow"&gt;Node.js client library&lt;/a&gt;. &lt;/p&gt;
-
-&lt;p&gt;The following code sends the message we type in the TalkJS inbox to Dialogflow.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;const dialogflow = require('@google-cloud/dialogflow');
-const uuid = require('uuid');
-
-async function sendMessageToDialogflow(talkjsText) {
-  // A unique identifier for the given session
-  const sessionId = uuid.v4();
-
-  // Create a new session
-  const sessionClient = new dialogflow.SessionsClient();
-
-
-// Pass the cloud project ID here
-const sessionPath = sessionClient.projectAgentSessionPath('chatbot-talkjs', sessionId);
-
-  // The text query request.
-  const request = {
-    session: sessionPath,
-    queryInput: {
-      text: {
-        // The query to send to the dialogflow agent
-        text: talkjsText,
-        // The language used by the client (en-US)
-        languageCode: 'en-US',
-      },
-    },
-  };
-
-  // Send request and log result
-  const responses = await sessionClient.detectIntent(request);
-  console.log('Detected intent');
-  const result = responses[0].queryResult;
-  console.log(`  Query: ${result.queryText}`);
-  console.log(`  Response: ${result.fulfillmentText}`);
-
-  if(result.queryText != "TalkJS is the best Chat API and SDK!")
-    return result.fulfillmentText;
-
-  if (result.intent) {
-    console.log(`  Intent: ${result.intent.displayName}`);
-  } else {
-    console.log(`  No intent matched.`);
-  }
-}
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;We add the line: &lt;code&gt;if(result.queryText != "TalkJS is the best Chat API and SDK!")&lt;/code&gt; to make sure our application does not interpret this reply as a new message to reply to. &lt;/p&gt;
-
-&lt;p&gt;In reality, you would have more than a single reply set up, so this would not be necessary.&lt;/p&gt;
-
-&lt;p&gt;Re-open the file &lt;em&gt;user.js&lt;/em&gt; and add a call to &lt;code&gt;sendMessageToDialogflow&lt;/code&gt; here:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;router.post('/', function(req, res) {
-  var body = req.body;
-  var message = body.data.message.text;
-  console.log("Message Text: " + message);
-  res.status(200).send();
-  var replyFromDialogFlow = sendMessageToDialogflow(message);
-});
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Before we run this code and test out our new feature, run the following commands the install the required packages:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;  &lt;code&gt;npm install @google-cloud/dialogflow&lt;/code&gt;
-&lt;/li&gt;
-&lt;li&gt;  &lt;code&gt;npm install uuid&lt;/code&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;Let’s launch our application, this time writing a message that matches our training phrase exactly.&lt;/p&gt;
-
-&lt;p&gt;To see our new feature in action we need to check the logs!&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--rAmQx1Ds--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/d87l3590wbw7dwsnnpre.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--rAmQx1Ds--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/d87l3590wbw7dwsnnpre.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;This is exactly the result we want. It is recognizing our intent and sending the appropriate response to our query. &lt;/p&gt;
-
-&lt;p&gt;We now have the message from our TalkJS conversation being sent to Dialogflow and correctly generating a response. Let’s look at how we get this response to appear as a reply in our TalkJS conversation. &lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#sending-dialogflow-responses-to-talkjs"&gt;
-  &lt;/a&gt;
-  Sending Dialogflow responses to TalkJS
-&lt;/h2&gt;
-
-&lt;p&gt;We have the response generating correctly, but we need to show this response in the TalkJS conversation. This can be accomplished through the TalkJS &lt;a href="https://talkjs.com/docs/Reference/REST_API/Getting_Started/Introduction.html"&gt;REST API&lt;/a&gt;, specifically a POST request to the &lt;a href="https://talkjs.com/docs/Reference/REST_API/Messages.html"&gt;Messages endpoint&lt;/a&gt;. &lt;/p&gt;
-
-&lt;p&gt;To send our POST request in Node.js we will use axios. Axios is a promise-based HTTP client for the browser and Node. js. Axios makes it easy to send asynchronous HTTP requests to REST endpoints and perform CRUD operations.&lt;/p&gt;
-
-&lt;p&gt;To install axios, simply run &lt;code&gt;npm install axios&lt;/code&gt; in your terminal console.  &lt;/p&gt;
-
-&lt;p&gt;Time to add the code that will allow us to send the Dialogflow response to our conversation. &lt;/p&gt;
-
-&lt;p&gt;You will need to change several things with the code below: &lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;  &lt;code&gt;APP_ID&lt;/code&gt; - you can find your app id on the &lt;a href="https://talkjs.com/dashboard/"&gt;dashboard&lt;/a&gt;.&lt;/li&gt;
-&lt;li&gt;  &lt;code&gt;CONVERSATION_ID&lt;/code&gt; - you can find the ID of a conversation using &lt;code&gt;conversation.id&lt;/code&gt;
-&lt;/li&gt;
-&lt;li&gt;  &lt;code&gt;USER_ID&lt;/code&gt; - This can be found wherever you created your user, like this &lt;a href="https://talkjs.com/docs/Getting_Started/The_Current_User.html"&gt;example&lt;/a&gt;. &lt;/li&gt;
-&lt;li&gt;  &lt;code&gt;SECRET_KEY&lt;/code&gt; - you can find your secret key on the &lt;a href="https://talkjs.com/dashboard/"&gt;dashboard&lt;/a&gt;.
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;function sendReplyToTalkJS(responseFromDialog) {
-  axios
-.post('https://api.talkjs.com/v1/&amp;lt;APP_ID&amp;gt;/conversations/&amp;lt;CONVERSATION_ID&amp;gt;/messages', 
-  '[{"text": "' + responseFromDialog + '", "sender": "&amp;lt;USER_ID&amp;gt;", "type": "UserMessage"}]',
-  {
-    headers: {
-      'Authorization': 'Bearer &amp;lt;SECRET_KEY&amp;gt;,
-      'Content-Type': 'application/json'
-    }
-  })
-  .then(res =&amp;gt; {
-    console.log(`statusCode: ${res.statusCode}`);
-
-  })
-  .catch(error =&amp;gt; {
-    console.error(error)
-  })
-  .catch((error) =&amp;gt; console.log( error.response.request._response ) );
-}
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Let’s call this method.&lt;/p&gt;
-
-&lt;p&gt;Re-open the file &lt;em&gt;user.js&lt;/em&gt; and add a call to &lt;code&gt;sendReplyToTalkJS&lt;/code&gt; here:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;router.post('/', function(req, res) {
-  var body = req.body;
-  var message = body.data.message.text;
-  console.log("Message Text: " + message);
-  res.status(200).send();
-  var replyFromDialogFlow = sendMessageToDialogflowrunSample('chatbot-talkjs', message);
-sendReplyToTalkJS(replyFromDialogFlow);
-});
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Launch your application and enter your training phrase again.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--ySjIuNed--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/yzb99rttssn5m1vx50qo.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ySjIuNed--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/yzb99rttssn5m1vx50qo.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;This time you should see the response from Dialogflow appearing as a reply in your conversation!&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#how-to-use-talkjs-with-websockets-and-chatbots"&gt;
-  &lt;/a&gt;
-  How to use TalkJS with websockets and chatbots!
-&lt;/h2&gt;
-
-&lt;p&gt;Using a combination of websockets and our REST API has allowed us to integrate Dialogflow into the TalkJS workflow. However, you are not limited to Dialogflow. The principles we have learned today apply to many different offerings in the market. So what are you waiting for? Go and build the best chatbot you can, with a little help from TalkJS!&lt;/p&gt;
-
-</description>
-      <category>api</category>
-      <category>webdev</category>
-      <category>chat</category>
-      <category>chatbot</category>
-    </item>
-    <item>
-      <title>Sorting Algorithms Visualizer</title>
-      <author>Akshay Pai</author>
-      <pubDate>Tue, 08 Jun 2021 12:54:49 +0000</pubDate>
-      <link>https://dev.to/sadanandpai/sorting-algorithms-visualizer-4631</link>
-      <guid>https://dev.to/sadanandpai/sorting-algorithms-visualizer-4631</guid>
-      <description>&lt;p&gt;Hello folks,&lt;/p&gt;
-
-&lt;p&gt;Designed and developed "Sorting Algorithms Visualizer" (using React and Zustand) to help everyone, learning popular sorting algorithms easier and fun.&lt;/p&gt;
-
-&lt;p&gt;Link to the webapp: &lt;a href="https://sadanandpai.github.io/sorting-visualizer/dist/"&gt;https://sadanandpai.github.io/sorting-visualizer/dist/&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Repo: &lt;a href="https://github.com/sadanandpai/sorting-visualizer"&gt;https://github.com/sadanandpai/sorting-visualizer&lt;/a&gt;&lt;/p&gt;
-
-</description>
-      <category>javascript</category>
-      <category>react</category>
-      <category>algorithms</category>
-      <category>webdev</category>
-    </item>
-    <item>
-      <title>How To Write Your First Node.js Script</title>
-      <author>Boyan Iliev</author>
-      <pubDate>Tue, 08 Jun 2021 12:31:50 +0000</pubDate>
-      <link>https://dev.to/boiliev/how-to-write-your-first-node-js-script-h05</link>
-      <guid>https://dev.to/boiliev/how-to-write-your-first-node-js-script-h05</guid>
-      <description>&lt;h1&gt;
-  &lt;a href="#introduction"&gt;
-  &lt;/a&gt;
-  Introduction
-&lt;/h1&gt;
-
-&lt;p&gt;Until recently(if you think that 2009 is recently), we could only run JS code in a web browser. Node is a JavaScript runtime that executes code outside of the browser. We can use the same JS syntax we know and love to write server-side code, instead of relying on other languages like Python or Ruby. You can build Web Servers, Command Line Tools, Native Apps(VSCode is a Node app!), Video Games, Drone Software, and a whole lot more.&lt;/p&gt;
-
-&lt;p&gt;In this post, I am going to show you how to write your first little Node script which will make you a directory with an HTML, CSS, and JavaScript file in it.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#getting-started"&gt;
-  &lt;/a&gt;
-  Getting Started
-&lt;/h1&gt;
-
-&lt;p&gt;First, you need to check if you have Node installed on your machine. If you don't know if you have it, just go to the terminal and write:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;node -v
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;This will print out the Node.js version which is currently installed. If you see an error and nothing prints, then you don't have Node installed.&lt;/p&gt;
-
-&lt;p&gt;In order to install Node, go to the node website and just press the download button.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://nodejs.org/en/"&gt;https://nodejs.org/en/&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;After installing Node, we need to create a JavaScript file. Let's call this file &lt;code&gt;script.js&lt;/code&gt;. In this file, we are going to write our script.&lt;/p&gt;
-
-&lt;p&gt;Now that we have Node installed and our file created, it's time to write our script. For this script, we are going to need to know what the &lt;code&gt;process&lt;/code&gt; object is and how the &lt;code&gt;fs&lt;/code&gt; module works. &lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#how-to-run-node-files"&gt;
-  &lt;/a&gt;
-  How To Run Node Files
-&lt;/h1&gt;
-
-&lt;p&gt;In order to run Node files, you just need to write &lt;code&gt;node&lt;/code&gt; and then the file name next to it in the terminal. Th file must be in the same folder that you're in, or you need to reference that full path relative to where you are at the moment.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;node script.js
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h1&gt;
-  &lt;a href="#-raw-process-endraw-amp-raw-argv-endraw-"&gt;
-  &lt;/a&gt;
-  &lt;code&gt;process&lt;/code&gt; &amp;amp; &lt;code&gt;argv&lt;/code&gt;
-&lt;/h1&gt;
-
-&lt;p&gt;&lt;code&gt;process&lt;/code&gt; is an object that's available which is in the global scope. It provides information about, and control over, the current Node.js process. It has a bunch of methods and properties. For example, we can see our current working directory.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;process.cwd()
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;There is a method called &lt;code&gt;process.argv&lt;/code&gt;. It returns an array containing the command line arguments passed when the Node.js process was launched. The first element will be the path where the node executable is, and the second will be the path to the JS file being executed. To call this method you need to go to your JS file and &lt;code&gt;console.log()&lt;/code&gt; it.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;console.log(process.argv);
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Then after running your file, you should see this:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;node script.js
-[ '/usr/local/bin/node', '/Users/ghostman/scripts/script.js' ]
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Any remaining element will be additional command-line arguments. We can pass them as arguments into a script. Not a function, but it's a similar idea. I can pass in arguments to a script. &lt;/p&gt;
-
-&lt;p&gt;Here is an example of a little script that prints out the additional command-line arguments:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;const args = process.argv.slice(2)  -&amp;gt; slice to remove first two items.
-
-for(let arg of args){
-    console.log(`Hello ${arg}`)
-}
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Then when we run the file like this:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;node script.js Batman Superman
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Ou output should look like this:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;Hello Batman
-Hello Superman
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;This is a fun little script to help you understand how the file and node work together and how they can be used. &lt;/p&gt;
-
-&lt;p&gt;Now let's get to the fun part.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#-raw-fs-endraw-module"&gt;
-  &lt;/a&gt;
-  &lt;code&gt;fs&lt;/code&gt; Module
-&lt;/h1&gt;
-
-&lt;p&gt;The fs module enables interacting with the file system. It has hundreds of methods that you can use. Here is a list so you can see how much they are.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://nodejs.org/dist/latest-v14.x/docs/api/fs.html"&gt;https://nodejs.org/dist/latest-v14.x/docs/api/fs.html&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;In order for us to use the &lt;code&gt;fs&lt;/code&gt; module, we have to &lt;code&gt;require&lt;/code&gt; it. We have to save it in a variable.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;const fs = require('fs')
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Now that we have our &lt;code&gt;fs&lt;/code&gt; module, here are the methods that we will be needing for our script.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#-raw-fsmkdirsync-endraw-"&gt;
-  &lt;/a&gt;
-  &lt;code&gt;fs.mkdirSync&lt;/code&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;This method creates a directory in our current working directory. There is also an &lt;code&gt;fs.mkdir&lt;/code&gt; method, but we will be using the synchronous method because it will not execute anything else until this method is completed. Here is an example of our method:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;fs.mkdirSync('dirName')
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h3&gt;
-  &lt;a href="#-raw-fswritefilesync-endraw-"&gt;
-  &lt;/a&gt;
-  &lt;code&gt;fs.writeFileSync&lt;/code&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;This method creates files for us. Just like &lt;code&gt;fs.mkdirSync&lt;/code&gt;, this method will not let anything else run until it has finished its process.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;fs.writeFileSync('fileName')
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;You can check for errors with the &lt;code&gt;try..catch&lt;/code&gt; statements if your code doesn't seem to work.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;try {
-    fs.writeFileSync('fileName')
-} catch (e){
-    console.log(e)
-}
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h1&gt;
-  &lt;a href="#writting-our-node-script"&gt;
-  &lt;/a&gt;
-  Writting Our Node Script
-&lt;/h1&gt;
-
-&lt;p&gt;Now that you have a basic knowledge of Node, try writing a script that creates a directory with three files inside it on your own. If you can't, that OK. Here is how to write your script:&lt;/p&gt;
-
-&lt;p&gt;First, you need to require the &lt;code&gt;fs&lt;/code&gt; module. Then you must use &lt;code&gt;process.argv&lt;/code&gt; to set the name of your directory. After that, you need to use the &lt;code&gt;fs.mkdirSync&lt;/code&gt; method and the &lt;code&gt;fs.writeFileSync&lt;/code&gt; method to create the directory and the files:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;const fs = require('fs')
-const folderName = process.argv[2] || 'Project'
-
-try {
-    fs.mkdirSync(folderName);
-    fs.writeFileSync(`${folderName}/index.html`);
-    fs.writeFileSync(`${folderName}/style.css`);
-    fs.writeFileSync(`${folderName}/app.js`);
-} catch (err) {
-    console.log(`Error!`);
-console.log(err)
-} 
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;After writing the code for the script, we can run it like this:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;node script.js SecretProject
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;If we don't give an additional command-line argument, it will automatically set the directory name to &lt;code&gt;Project&lt;/code&gt;.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#consclusion"&gt;
-  &lt;/a&gt;
-  Consclusion
-&lt;/h1&gt;
-
-&lt;p&gt;I hope that this post has helped you understand Node.js a little bit more and made you more comfortable with it. Don't be scared to try some new stuff and experiment with all those &lt;code&gt;fs&lt;/code&gt; module methods.&lt;/p&gt;
-
-&lt;p&gt;Let me know if this has been of help to you through Twitter. You can follow me &lt;a href="https://twitter.com/bo_iliev21"&gt;here&lt;/a&gt;.&lt;/p&gt;
-
-</description>
-      <category>node</category>
-      <category>javascript</category>
-      <category>developer</category>
-    </item>
-    <item>
-      <title>TypeORM - Prevent SQL Injection with Node.js/React/TypeScript in 2021</title>
-      <author>Yoshiaki Matsutomo</author>
-      <pubDate>Tue, 08 Jun 2021 12:11:50 +0000</pubDate>
-      <link>https://dev.to/yoshi_yoshi/typeorm-prevent-sql-injection-with-node-js-react-typescript-in-2021-1go4</link>
-      <guid>https://dev.to/yoshi_yoshi/typeorm-prevent-sql-injection-with-node-js-react-typescript-in-2021-1go4</guid>
-      <description>&lt;h1&gt;
-  &lt;a href="#introduction"&gt;
-  &lt;/a&gt;
-  Introduction
-&lt;/h1&gt;
-
-&lt;p&gt;I have demonstrated some data manipulations with &lt;a href="https://en.wikipedia.org/wiki/Object%E2%80%93relational_mapping"&gt;ORM(Object-Relational Mapping)&lt;/a&gt; frameworks such as &lt;a href="https://typeorm.io/#/"&gt;TypeORM&lt;/a&gt; so far. Today's topic is still cases with &lt;a href="https://typeorm.io/#/"&gt;TypeORM&lt;/a&gt;. However, it focuses on the security, which is my main field at the moment. I think you understand why I select topics regarding complex queries, performance, and the difference from the Microsoft ecosystem.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#demo-application"&gt;
-  &lt;/a&gt;
-  Demo Application
-&lt;/h1&gt;
-
-&lt;p&gt;I developed a demo application in &lt;a href="https://github.co.jp/"&gt;GitHub&lt;/a&gt; .&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://github.com/y-matsutomo/blogs_demo_app_about_sql_injection"&gt;Demo Application for SQL injection tutorials&lt;/a&gt;&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#utilization-of-orm-is-safe"&gt;
-  &lt;/a&gt;
-  Utilization of ORM is Safe?
-&lt;/h1&gt;
-
-&lt;p&gt;Some experienced developers mention that &lt;a href="https://en.wikipedia.org/wiki/Object%E2%80%93relational_mapping"&gt;ORM(Object-Relational Mapping)&lt;/a&gt; frameworks such as &lt;a href="https://typeorm.io/#/"&gt;TypeORM&lt;/a&gt; support prevent &lt;a href="https://en.wikipedia.org/wiki/SQL_injection"&gt;SQL injection&lt;/a&gt;, which is a traditional security matter. However, I still find high-risk cases with &lt;a href="https://en.wikipedia.org/wiki/Object%E2%80%93relational_mapping"&gt;ORM&lt;/a&gt; frameworks in &lt;a href="https://github.co.jp/"&gt;GitHub&lt;/a&gt; repositories, public project spaces, or in my work experience.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#example-highrisk-code-with-typeorm"&gt;
-  &lt;/a&gt;
-  Example High-Risk Code with TypeORM
-&lt;/h3&gt;
-
-&lt;p&gt;This is a typical high-risk case with &lt;a href="https://typeorm.io/#/"&gt;TypeORM&lt;/a&gt; even though they use the &lt;a href="https://en.wikipedia.org/wiki/Object%E2%80%93relational_mapping"&gt;ORM&lt;/a&gt; framework that prevents the &lt;a href="https://en.wikipedia.org/wiki/SQL_injection"&gt;SQL injection&lt;/a&gt;.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight typescript"&gt;&lt;code&gt;    &lt;span class="c1"&gt;// TO-DO temporary solution&lt;/span&gt;
-    &lt;span class="c1"&gt;// I need to update it when I have a spare time&lt;/span&gt;
-    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;users&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;userRepository&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;query&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
-      &lt;span class="s2"&gt;`SELECT user.id as id,
-        user.firstName as firstName,
-        user.lastName as lastName,
-        user.age as age,
-        user.clientId as clientId,
-        user.createdDateTime as createdDateTime,
-        user.updatedDateTime as updatedDateTime,
-        Client.companyName as 'clientCompanyName',
-        Client.createdDateTime as 'clientCreatedDateTime',
-        Client.updatedDateTime as 'clientUpdatedDateTime'
-      FROM User INNER JOIN Client ON user.clientId = Client.id 
-      WHERE clientId = &lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;clientId&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt; 
-        AND (firstName LIKE '%&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;name&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;%' 
-        OR lastName LIKE '%&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;name&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;%')`&lt;/span&gt;
-    &lt;span class="p"&gt;);&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h1&gt;
-  &lt;a href="#why-orm-is-safe"&gt;
-  &lt;/a&gt;
-  Why ORM is Safe?
-&lt;/h1&gt;
-
-&lt;p&gt;Let's step back once. We should review the traditional way of executing SQL.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight typescript"&gt;&lt;code&gt;
-&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;users&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;connection&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;query&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
-  &lt;span class="s2"&gt;`SELECT * 
-   FROM users 
-   WHERE clientId = &lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;clientId&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt; 
-    AND name LIKE %&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;name&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;%;`&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-
-&lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;connection&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;end&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;How do you think if we enter &lt;code&gt;%' OR 1=1 --&lt;/code&gt; in the form to search users?&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--D3ihvo89--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/qssz4jepv26719y9n3gq.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--D3ihvo89--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/qssz4jepv26719y9n3gq.png" alt="screenshot_1"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;The method accepts the value, and the generated SQL is:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight sql"&gt;&lt;code&gt;&lt;span class="k"&gt;SELECT&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt; 
-&lt;span class="k"&gt;FROM&lt;/span&gt; &lt;span class="n"&gt;users&lt;/span&gt; 
-&lt;span class="k"&gt;WHERE&lt;/span&gt; &lt;span class="n"&gt;clientId&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt; 
-  &lt;span class="k"&gt;AND&lt;/span&gt; &lt;span class="n"&gt;name&lt;/span&gt; &lt;span class="k"&gt;LIKE&lt;/span&gt; &lt;span class="s1"&gt;'%%'&lt;/span&gt; &lt;span class="k"&gt;OR&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt; &lt;span class="c1"&gt;-- %; &lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;The application should return only users of a client ID, 1, but this actually returns all users including the other clients'. &lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--eJLsa2su--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/gtobzre7vllt4cmb7jsm.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--eJLsa2su--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/gtobzre7vllt4cmb7jsm.png" alt="screenshot_2"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;On the other hand, most developers basically utilize &lt;a href="https://en.wikipedia.org/wiki/Object%E2%80%93relational_mapping"&gt;ORM&lt;/a&gt; frameworks in the modern age. Below is the case with &lt;a href="https://typeorm.io/#/"&gt;TypeORM&lt;/a&gt;.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;userRepository&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;find&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt;
-  &lt;span class="na"&gt;where&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;
-    &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;clientId&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;clientId&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; 
-      &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;Like&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`%&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;name&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;%`&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;},&lt;/span&gt;
-  &lt;span class="p"&gt;],&lt;/span&gt;
-&lt;span class="p"&gt;});&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;The code generates the same SQL code as&lt;br&gt;
-&lt;code&gt;SELECT * FROM users WHERE clientId = 1 AND name LIKE '%{{name}}%';&lt;/code&gt;. However, &lt;a href="https://en.wikipedia.org/wiki/Object%E2%80%93relational_mapping"&gt;ORM&lt;/a&gt; frameworks treat the value, &lt;code&gt;name&lt;/code&gt; as &lt;a href="https://en.wikipedia.org/wiki/Prepared_statement"&gt;prepared statements&lt;/a&gt;, not partial SQL syntaxes. Of course, the return value is empty.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--_i6pAj-U--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/pimskl7t69sk4zqdh0s6.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--_i6pAj-U--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/pimskl7t69sk4zqdh0s6.png" alt="screenshot_3"&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;h1&gt;
-  &lt;a href="#this-is-serious-vulnerability"&gt;
-  &lt;/a&gt;
-  This is Serious Vulnerability?
-&lt;/h1&gt;
-
-&lt;p&gt;Some people do not think this is a critical issue. They might say:&lt;/p&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;Hey Yoshi! Do not worry too much. The application just displays user's information which does not include their privacy, such as their password. Take it easy!&lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;h3&gt;
-  &lt;a href="#unionbased-sql-injection"&gt;
-  &lt;/a&gt;
-  UNION-based SQL Injection
-&lt;/h3&gt;
-
-&lt;p&gt;If an attacker notices that the system has a security hole here, they will enter &lt;code&gt;%' OR 1=1 UNION SELECT 'fakeName' as companyName, email as firstName, password as lastName FROM Login; --&lt;/code&gt; to get login details. "First Name" column has user's login email addresses and "Last Name" column has their password.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--WWIIRnAA--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/pikonc5s6hzmbfgnkand.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--WWIIRnAA--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/pikonc5s6hzmbfgnkand.png" alt="screenshot_4"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;&lt;strong&gt;POINT&lt;/strong&gt;: External Authentication&lt;br&gt;
-Some enterprise applications utilize external authentication provided by &lt;a href="https://firebase.google.com/products/auth"&gt;Firebase Auth&lt;/a&gt; and &lt;a href="https://auth0.com/jp"&gt;Auth0&lt;/a&gt;. However, I also know that some companies still manage legacy applications with old-fashioned frameworks, which are not supported by them. &lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;POINT&lt;/strong&gt;: Password Encryption&lt;br&gt;
-The sample app stores the password as plain text, which is not encrypted, and you might think that you are okay because your app encrypts critical data, but do you adopt the latest encryption methodology? &lt;/p&gt;
-&lt;/blockquote&gt;
-&lt;h1&gt;
-  &lt;a href="#this-is-still-serious-vulnerability"&gt;
-  &lt;/a&gt;
-  This is Still Serious Vulnerability?
-&lt;/h1&gt;
-
-&lt;p&gt;Some people still do not think that this is a critical issue, and they might say:&lt;/p&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;Hey Yoshi! Do not worry! Crackers have no idea about all table schemas including a login table. If not, they are not able to execute it. Take it easy, man!&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;For &lt;a href="https://www.sqlite.org/index.html"&gt;SQLite&lt;/a&gt;, they will enter &lt;code&gt;%' OR 1=1 UNION SELECT 'fakeName' as companyName, sql as firstName, 'fakelastname' as lastName FROM sqlite_master; --&lt;/code&gt; to show table schemas. "First Name" column has tables' information.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--JhsF_x80--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/fr72qavsg8ucj0aoi5c8.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--JhsF_x80--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/fr72qavsg8ucj0aoi5c8.png" alt="screenshot_4"&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;h1&gt;
-  &lt;a href="#solution"&gt;
-  &lt;/a&gt;
-  Solution
-&lt;/h1&gt;
-
-&lt;p&gt;The first code should be replaced by the below code. Yes, this is simple.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight typescript"&gt;&lt;code&gt;     &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;users&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;userRepository&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;find&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt;
-      &lt;span class="na"&gt;where&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;
-        &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;clientId&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;clientId&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="na"&gt;firstName&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;Like&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`%&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;name&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;%`&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;},&lt;/span&gt;
-        &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;clientId&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;clientId&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="na"&gt;lastName&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;Like&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`%&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;name&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;%`&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;},&lt;/span&gt;
-      &lt;span class="p"&gt;],&lt;/span&gt;
-      &lt;span class="na"&gt;relations&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;client&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
-    &lt;span class="p"&gt;});&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h1&gt;
-  &lt;a href="#causes-of-vulnerability"&gt;
-  &lt;/a&gt;
-  Causes of Vulnerability
-&lt;/h1&gt;
-
-&lt;p&gt;Some C-level or managers assume that the cause is the lack of education for junior developers, and they attempt having the security training or pair-work with senior engineers.&lt;/p&gt;
-
-&lt;p&gt;Is this true?&lt;/p&gt;
-
-&lt;p&gt;The fundamental knowledge of secure coding is mandatory. However, to be honest with you, this might be one of the reasons and I have to conclude this is not correct. I deeply investigated and found some potential causes.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#lack-of-thirdpartys-module-information"&gt;
-  &lt;/a&gt;
-  Lack of Third-party's Module Information
-&lt;/h3&gt;
-
-&lt;p&gt;I moved from the Microsoft development world to &lt;a href="https://en.wikipedia.org/wiki/Open-source_software"&gt;OSS&lt;/a&gt;, which is the development in Node.js/TypeScript with third-party modules. I think that their official documents provide too general and basic information only in comparison with Microsoft.&lt;/p&gt;
-
-&lt;p&gt;They basically provide the cases with detailed examples and combination of libraries. It is easy because most libraries are provided by Microsoft themselves! &lt;/p&gt;
-
-&lt;p&gt;For instance, with &lt;a href="https://typeorm.io/#/"&gt;TypeORM&lt;/a&gt;, I found the below code that developers use the official ways for simple code. However, if they have to write complex data operations such as creating join tables or executing with subqueries, they copy and paste the raw SQL and leave it once.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;Service&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;Token&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;typedi&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;Repository&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;UpdateResult&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;typeorm&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;InjectRepository&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;typeorm-typedi-extensions&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;Client&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;../entity/Client&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;User&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;../entity/User&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-
-&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kr"&gt;interface&lt;/span&gt; &lt;span class="nx"&gt;IRiskyUserUsecase&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="nx"&gt;getAll&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;clientId&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;number&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt; &lt;span class="nb"&gt;Promise&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;User&lt;/span&gt;&lt;span class="p"&gt;[]&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nx"&gt;save&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;user&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;User&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt; &lt;span class="nb"&gt;Promise&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;User&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nx"&gt;update&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;id&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;number&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;user&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;User&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt; &lt;span class="nb"&gt;Promise&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;UpdateResult&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nx"&gt;remove&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;user&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;User&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt; &lt;span class="nb"&gt;Promise&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;User&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nx"&gt;search&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;clientId&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="k"&gt;typeof&lt;/span&gt; &lt;span class="nx"&gt;Client&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;prototype&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;id&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;name&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;string&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt; &lt;span class="nb"&gt;Promise&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;User&lt;/span&gt;&lt;span class="p"&gt;[]&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;RiskyUserUsecaseToken&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;Token&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;IRiskyUserUsecase&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
-
-&lt;span class="p"&gt;@&lt;/span&gt;&lt;span class="nd"&gt;Service&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;RiskyUserUsecaseToken&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;class&lt;/span&gt; &lt;span class="nx"&gt;RiskyUserUsecase&lt;/span&gt; &lt;span class="k"&gt;implements&lt;/span&gt; &lt;span class="nx"&gt;IRiskyUserUsecase&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="p"&gt;@&lt;/span&gt;&lt;span class="nd"&gt;InjectRepository&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;User&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-  &lt;span class="k"&gt;private&lt;/span&gt; &lt;span class="nx"&gt;userRepository&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;Repository&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;User&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-
-  &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="nx"&gt;getAll&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;clientId&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;number&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;userRepository&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;find&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="na"&gt;clientId&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;clientId&lt;/span&gt; &lt;span class="p"&gt;});&lt;/span&gt;
-  &lt;span class="p"&gt;}&lt;/span&gt;
-
-  &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="nx"&gt;save&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;user&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;User&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;userRepository&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;save&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;user&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-  &lt;span class="p"&gt;}&lt;/span&gt;
-
-  &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="nx"&gt;update&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;id&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;number&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;user&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;User&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;userRepository&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;update&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;id&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;user&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-  &lt;span class="p"&gt;}&lt;/span&gt;
-
-  &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="nx"&gt;remove&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;user&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;User&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;userRepository&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;remove&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;user&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-  &lt;span class="p"&gt;}&lt;/span&gt;
-
-  &lt;span class="c1"&gt;// TO-DO temporary solution&lt;/span&gt;
-  &lt;span class="c1"&gt;// I need to update it when I have a spare time&lt;/span&gt;
-  &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="nx"&gt;search&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;clientId&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="k"&gt;typeof&lt;/span&gt; &lt;span class="nx"&gt;Client&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;prototype&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;id&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;name&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;string&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;users&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;userRepository&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;query&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
-      &lt;span class="s2"&gt;`SELECT user.id as id,
-      user.firstName as firstName,
-      user.lastName as lastName,
-      user.age as age,
-      user.clientId as clientId,
-      user.createdDateTime as createdDateTime,
-      user.updatedDateTime as updatedDateTime,
-      Client.companyName as 'clientCompanyName',
-      Client.createdDateTime as 'clientCreatedDateTime',
-      Client.updatedDateTime as 'clientUpdatedDateTime'
-      FROM User INNER JOIN Client ON user.clientId = Client.id 
-      WHERE clientId = &lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;clientId&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt; AND (firstName like '%&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;name&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;%' OR lastName like '%&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;name&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;%')`&lt;/span&gt;
-    &lt;span class="p"&gt;);&lt;/span&gt;
-    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;users&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;map&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
-      &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;u&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt; &lt;span class="nx"&gt;User&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-          &lt;span class="na"&gt;id&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;u&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;id&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-          &lt;span class="na"&gt;firstName&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;u&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;firstName&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-          &lt;span class="na"&gt;lastName&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;u&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;lastName&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-          &lt;span class="na"&gt;age&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;u&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;age&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-          &lt;span class="na"&gt;clientId&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;u&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;clientId&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-          &lt;span class="na"&gt;client&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-            &lt;span class="na"&gt;id&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;u&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;clientId&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-            &lt;span class="na"&gt;companyName&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;u&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;clientCompanyName&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-            &lt;span class="na"&gt;createdDateTime&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;u&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;clientCreatedDateTime&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-            &lt;span class="na"&gt;updatedDateTime&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;u&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;clientUpdatedDateTime&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-          &lt;span class="p"&gt;},&lt;/span&gt;
-          &lt;span class="na"&gt;createdDateTime&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;u&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;createdDateTime&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-          &lt;span class="na"&gt;updatedDateTime&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;u&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;updatedDateTime&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-        &lt;span class="p"&gt;};&lt;/span&gt;
-      &lt;span class="p"&gt;}&lt;/span&gt;
-    &lt;span class="p"&gt;);&lt;/span&gt;
-  &lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;It would be best if you maximize the full benefits of &lt;a href="https://typeorm.io/#/"&gt;TypeORM&lt;/a&gt; and do not execute the raw SQL. However, at least, you should use the &lt;a href="https://en.wikipedia.org/wiki/Prepared_statement"&gt;prepared statements&lt;/a&gt; for security reasons like below if you need.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight typescript"&gt;&lt;code&gt;
-&lt;span class="o"&gt;---&lt;/span&gt;
-
-&lt;span class="p"&gt;@&lt;/span&gt;&lt;span class="nd"&gt;Service&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;RiskyUserUsecaseToken&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;class&lt;/span&gt; &lt;span class="nx"&gt;RiskyUserUsecase&lt;/span&gt; &lt;span class="k"&gt;implements&lt;/span&gt; &lt;span class="nx"&gt;IRiskyUserUsecase&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="p"&gt;@&lt;/span&gt;&lt;span class="nd"&gt;InjectRepository&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;User&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-  &lt;span class="k"&gt;private&lt;/span&gt; &lt;span class="nx"&gt;userRepository&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;Repository&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;User&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-
-  &lt;span class="c1"&gt;// TO-DO temporary solution&lt;/span&gt;
-  &lt;span class="c1"&gt;// I need to update it when I have a spare time&lt;/span&gt;
-  &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="nx"&gt;search&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;clientId&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="k"&gt;typeof&lt;/span&gt; &lt;span class="nx"&gt;Client&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;prototype&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;id&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;name&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;string&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;users&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;userRepository&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;query&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
-      &lt;span class="s2"&gt;`SELECT user.id as id,
-      user.firstName as firstName,
-      user.lastName as lastName,
-      user.age as age,
-      user.clientId as clientId,
-      user.createdDateTime as createdDateTime,
-      user.updatedDateTime as updatedDateTime,
-      Client.companyName as 'clientCompanyName',
-      Client.createdDateTime as 'clientCreatedDateTime',
-      Client.updatedDateTime as 'clientUpdatedDateTime'
-      FROM User INNER JOIN Client ON user.clientId = Client.id 
-      WHERE clientId = :clientId AND (firstName like '%:name%' OR lastName like '%:name%')`&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-      &lt;span class="p"&gt;[{&lt;/span&gt; &lt;span class="na"&gt;clientId&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;clientId&lt;/span&gt; &lt;span class="p"&gt;},&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;name&lt;/span&gt; &lt;span class="p"&gt;}]&lt;/span&gt;
-    &lt;span class="p"&gt;);&lt;/span&gt;
-    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;users&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;map&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
-      &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;u&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt; &lt;span class="nx"&gt;User&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-          &lt;span class="na"&gt;id&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;u&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;id&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-          &lt;span class="na"&gt;firstName&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;u&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;firstName&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-          &lt;span class="na"&gt;lastName&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;u&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;lastName&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-          &lt;span class="na"&gt;age&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;u&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;age&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-          &lt;span class="na"&gt;clientId&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;u&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;clientId&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-          &lt;span class="na"&gt;client&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-            &lt;span class="na"&gt;id&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;u&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;clientId&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-            &lt;span class="na"&gt;companyName&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;u&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;clientCompanyName&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-            &lt;span class="na"&gt;createdDateTime&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;u&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;clientCreatedDateTime&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-            &lt;span class="na"&gt;updatedDateTime&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;u&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;clientUpdatedDateTime&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-          &lt;span class="p"&gt;},&lt;/span&gt;
-          &lt;span class="na"&gt;createdDateTime&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;u&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;createdDateTime&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-          &lt;span class="na"&gt;updatedDateTime&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;u&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;updatedDateTime&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-        &lt;span class="p"&gt;};&lt;/span&gt;
-      &lt;span class="p"&gt;}&lt;/span&gt;
-    &lt;span class="p"&gt;);&lt;/span&gt;
-  &lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;But again, you should not do that for code-reviewers. Can you recognize the difference between the raw SQL with and without &lt;a href="https://en.wikipedia.org/wiki/Prepared_statement"&gt;prepared statements&lt;/a&gt;? &lt;/p&gt;
-
-&lt;p&gt;It must be tough!&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#upgrade-of-oldfashioned-applications"&gt;
-  &lt;/a&gt;
-  Upgrade of Old-Fashioned Applications
-&lt;/h3&gt;
-
-&lt;p&gt;We sometimes develop pure new applications = we can select the appropriate frameworks and environments, which are the modern architecture. &lt;/p&gt;
-
-&lt;p&gt;On the other hand, we have to convert from the old applications to ones with the modern frameworks. For example:&lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;Conversion from Web Form applications in .Net to MVC App/SPA in .Net Core&lt;/li&gt;
-&lt;li&gt;Conversion from MVC applications in PHP to React applications in Node.js/TypeScript &lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;p&gt;In this case, it might occur the above case because developers try completing the task within limited time allocation = they  use existing code.    &lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#error-of-human-resourcetime-allocation"&gt;
-  &lt;/a&gt;
-  Error of Human Resource/Time Allocation
-&lt;/h3&gt;
-
-&lt;p&gt;I assume that this is the main reason. Developers handle their tasks with limited human/time resources every day, even though it is sometimes unreasonable and puts pressure on them. It is fantastic if they can always choose the best solution, but it is difficult.&lt;/p&gt;
-
-&lt;p&gt;Managers and leads, do you think that you understand the current situation and manage it properly?&lt;/p&gt;
-
-&lt;p&gt;It is unacceptable for us to fire developers making security mistakes even though nobody wants to write insecure code, and it often happens due to external factors. Without thinking about why they made such a choice, it would not be the ultimate solution. &lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#potential-solutions-for-developers"&gt;
-  &lt;/a&gt;
-  Potential Solutions for Developers
-&lt;/h1&gt;
-
-&lt;ol&gt;
-&lt;li&gt;Review the parts of comment out with TO-DO and temporary solutions once - Developers and code-reviewers might not imagine how simple mistakes pose critical incidents. It is good timing to review them.
-&lt;/li&gt;
-&lt;li&gt;Security issues would come from human errors - Please do not focus on improving their security skills/knowledge. This is significant but you would also need to review your team management and development environment.&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;h1&gt;
-  &lt;a href="#potential-solutions-by-publishers"&gt;
-  &lt;/a&gt;
-  Potential Solutions by Publishers
-&lt;/h1&gt;
-
-&lt;ol&gt;
-&lt;li&gt;Provide intermediate/senior-level information and a variety of examples as well - If the information is too general, developers might select lazy ways even though they do not want to.&lt;/li&gt;
-&lt;li&gt;Provide information regarding the utilization of the modern  modules/library's combination - I faced multiple times that when I used the third-party module independently, it worked well. But when I used it with the other modules, it did not work.  If developers have trouble implementing complex tasks with multiple third-party modules, they might select temporary solutions. &lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;h1&gt;
-  &lt;a href="#conclusion"&gt;
-  &lt;/a&gt;
-  Conclusion
-&lt;/h1&gt;
-
-&lt;p&gt;I will continuously publish security articles. However, I also understand the importance of providing the technical skills/knowledge in a non-security field. I believe that if we can provide helpful information about the development itself or project management, it would indirectly prevent security matters.&lt;/p&gt;
-
-&lt;p&gt;We are with you, friends.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#bio"&gt;
-  &lt;/a&gt;
-  Bio
-&lt;/h1&gt;
-
-&lt;p&gt;When I was 30 years old, I went to Australia for changing my career on a Working Holiday visa. I graduated from University of Sydney with a Bachelor of Computer Science and Technology. During the period, I also worked as a Fraud Prevention Analyst at Amex in Sydney, Australia (yes, it was super busy. I went to my uni during the day and worked at night...) &lt;/p&gt;
-
-&lt;p&gt;After graduation, I worked as a C#/.Net developer for an Australian small business for 5 years. Now, I came back to Japan and work as a TypeScript/Go/React developer for a Japanese security start-up company. &lt;/p&gt;
-
-&lt;p&gt;I love learning new fields which is a big challenge. I am happy if you support me to accelerate the improvement of my skill/knowledge. Please feel free to contact me if you are interested in my unique career.&lt;/p&gt;
-
-&lt;p&gt;Thanks, &lt;/p&gt;
-
-</description>
-      <category>node</category>
-      <category>security</category>
-      <category>sql</category>
-      <category>typescript</category>
-    </item>
-    <item>
-      <title>Best Online Code Editors For Web Developers</title>
-      <author>themeselection</author>
-      <pubDate>Tue, 08 Jun 2021 11:58:52 +0000</pubDate>
-      <link>https://dev.to/theme_selection/best-online-code-editors-for-web-developers-5bpn</link>
-      <guid>https://dev.to/theme_selection/best-online-code-editors-for-web-developers-5bpn</guid>
-      <description>&lt;p&gt;Are you looking for Best Online Code editors? Then here is the collection of Best Online Code Editors For Web Developers.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#what-is-an-online-code-editor"&gt;
-  &lt;/a&gt;
-  What is an Online code editor?
-&lt;/h2&gt;
-
-&lt;p&gt;An online code editor is a tool that resides on a remote server and is accessible via browsers. Some online code editors have basic features more similar to text editors while others are like complete IDEs. In this article, we will review both types.&lt;/p&gt;
-
-&lt;p&gt;Some online code editors focus on one language or even a framework. For example, there are products that call themselves – JavaScript online code editors or  react  online editor.&lt;/p&gt;
-
-&lt;p&gt;As a developer, your main tool is obviously the one that allows you to turn your ideas into code: A text editor. As time goes by, more online text editors are created that can help you code from any computer with Internet access. In this article, let’s take a look at 10+ useful online code editors.&lt;/p&gt;
-
-&lt;p&gt;Following are the major advantages of using online code editors&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;  Zero setups. You won’t have to download, install and configure an IDE;&lt;/li&gt;
-&lt;li&gt;  Sharing and Collaboration. Start coding and then forward the URL to your colleague to continue your work or help you debug it;&lt;/li&gt;
-&lt;li&gt;  Zero or little cost. The vast majority of online code editors have free versions that will be enough for you for most of the daily tasks;&lt;/li&gt;
-&lt;li&gt;  Subscription-based pricing. It might be very useful to pay monthly for online editors instead of yearly licenses.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h2&gt;
-  &lt;a href="#how-to-choose-an-online-code-editor"&gt;
-  &lt;/a&gt;
-  How to choose an online code editor?
-&lt;/h2&gt;
-
-&lt;p&gt;Most famous online code editors share many great features. These include autocompletion, git integration, plugin support, CI/CD pipelines, and others. But it’s the little things that can make a specific editor a better fit for you than others.&lt;/p&gt;
-
-&lt;p&gt;Let’s run through some aspects you need to keep in mind choosing an online IDE/code editor:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;  How fast an application works&lt;/li&gt;
-&lt;li&gt;  Languages support&lt;/li&gt;
-&lt;li&gt;  For free editors: how much ads it shows&lt;/li&gt;
-&lt;li&gt;  Ease of setup&lt;/li&gt;
-&lt;li&gt;  Integrations with repository managers&lt;/li&gt;
-&lt;li&gt;  NPM support&lt;/li&gt;
-&lt;li&gt;  A number of text and layout settings&lt;/li&gt;
-&lt;li&gt;  Terminal support&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;Now, let's begin the collection..!!&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--LVBoKsXM--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/vlj2cwy8kj90fe05kr4c.gif" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--LVBoKsXM--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/vlj2cwy8kj90fe05kr4c.gif" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#stackblitz"&gt;
-  &lt;/a&gt;
-  &lt;a href="https://stackblitz.com/"&gt;StackBlitz&lt;/a&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--MPJ4E-Aq--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/luol7ziogvk6dt5x3pqq.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--MPJ4E-Aq--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/luol7ziogvk6dt5x3pqq.png" alt="StackBlitz"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://stackblitz.com/"&gt;StackBlitz&lt;/a&gt; claims to allow you to code the future in your browser. And after trying it, I’m confident you’ll agree that this web application is extremely useful for coders.&lt;/p&gt;
-
-&lt;p&gt;StackBlitz features 5 workspaces: React, AngularJS, JavaScript, Ignite UI and KendoReact. Once launched, you will notice a similarity between StackBlitz and the VSCode editor, which is a good thing if you’re used to Microsoft’s editor.&lt;/p&gt;
-
-&lt;p&gt;Another extremely cool StackBlitz feature is that all applications get deployed automatically on their servers, and hosted for free.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Features:&lt;/strong&gt;&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;  Native support for Firebase (which is something I don’t personally use, but hey, it’s a boon for those not wanting to dive into the murky depths of the backend)&lt;/li&gt;
-&lt;li&gt;  Intellisense, Project Search&lt;/li&gt;
-&lt;li&gt;  Hot reloading as you type&lt;/li&gt;
-&lt;li&gt;  Import npm packages&lt;/li&gt;
-&lt;li&gt;  Edit offline when not connected!&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h3&gt;
-  &lt;a href="#codepen"&gt;
-  &lt;/a&gt;
-  &lt;a href="https://codepen.io/"&gt;Codepen&lt;/a&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Jc_E6hvP--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/u9o8qinxgb3zsbencem5.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Jc_E6hvP--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/u9o8qinxgb3zsbencem5.png" alt="Codepen"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Probably the most popular online code editor. &lt;a href="https://codepen.io/"&gt;CodePen&lt;/a&gt; is fast, easy to use, and allows a web developer to write and share HTML/CSS/JS code online. CodePen is free and creating an account isn’t mandatory, so you can start writing code and create a new web application straight from your web browser quickly and efficiently.&lt;/p&gt;
-
-&lt;p&gt;CodePen editor allows you to use Vim Key Bindings which are command-line keyboard shortcuts. Both of these tools together can help to create a faster workflow.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Features:&lt;/strong&gt;&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;  File system&lt;/li&gt;
-&lt;li&gt;  Autocomplete&lt;/li&gt;
-&lt;li&gt;  Private sandboxes&lt;/li&gt;
-&lt;li&gt;  Website deployment&lt;/li&gt;
-&lt;li&gt;  Collaboration mode&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h3&gt;
-  &lt;a href="#codesandbox"&gt;
-  &lt;/a&gt;
-  &lt;a href="https://codesandbox.io/"&gt;CodeSandbox&lt;/a&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--LWj22hUh--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/43ynieckvc54g6a8gdlh.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--LWj22hUh--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/43ynieckvc54g6a8gdlh.png" alt="Codesandbox"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://codesandbox.io/"&gt;CodeSandbox&lt;/a&gt; can be thought of as a much more powerful and complete take on JSFiddle. True to its name, CodeSandbox provides a complete code editor experience and a sandboxed environment for front-end development.&lt;/p&gt;
-
-&lt;p&gt;This complete development environment is loaded with many features and code templates that will definitely make your coding faster and easier.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Features:&lt;/strong&gt;&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;  &lt;strong&gt;Npm support:&lt;/strong&gt;  Yes, you can add pretty much any package that is available on npm.&lt;/li&gt;
-&lt;li&gt;  &lt;strong&gt;Files, folders, modules:&lt;/strong&gt;  You can split your code into multiple files, add/remove images from the public folder, and build/import modules as you see fit. The workflow mirrors that of a modern module bundler, so you don’t need to set up (almost) anything.&lt;/li&gt;
-&lt;li&gt;  Support for TypeScript, hot reloading, GitHub export, static file hosting, etc.&lt;/li&gt;
-&lt;li&gt;  It is built on  &lt;strong&gt;Monaco editor&lt;/strong&gt;, the same beast that powers the favorite  &lt;a href="https://code.visualstudio.com/"&gt;VSCode&lt;/a&gt;  editor. This brings powerful features like “Go To,” “Find References,” and necessary refactoring to your fingertips!&lt;/li&gt;
-&lt;li&gt;  Snippet support for  &lt;a href="https://emmet.io/"&gt;Emmet&lt;/a&gt;
-&lt;/li&gt;
-&lt;li&gt;  Integrated DevTools, linting, error overlays, testing frameworks (Jest), keybindings, and more.&lt;/li&gt;
-&lt;li&gt;  Powerful CLI to directly import local projects into CodeSandbox.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h3&gt;
-  &lt;a href="#jsfiddle"&gt;
-  &lt;/a&gt;
-  &lt;a href="https://jsfiddle.net/"&gt;JSFiddle&lt;/a&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--hZT6B95V--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/zl4udkn7xu9q845jyhbf.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--hZT6B95V--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/zl4udkn7xu9q845jyhbf.png" alt="JSFiddle"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;While  &lt;a href="https://jsfiddle.net/"&gt;JSFiddle&lt;/a&gt;  can’t replace a full-fledged text editor, it does a damn good job of handling one-off frontend scripts. It’s so popular that Q&amp;amp;A sites like StackOverflow already support the embedding of JSFiddle links directly in their platform.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Advantages:&lt;/strong&gt;&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;  Free to use (no hidden fee or freemium features). JSFiddle supports itself through ads (at least as of writing), and you can see an Adobe ad in the lower left of the screenshot above.&lt;/li&gt;
-&lt;li&gt;  Code collaboration features — ideal for building concepts together, interviews, etc.&lt;/li&gt;
-&lt;li&gt;  Multiple layouts, font sizes, light/dark themes, etc.&lt;/li&gt;
-&lt;li&gt;  Code formatting (tidying), upcoming support for linters (CSS and JS), and more&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h3&gt;
-  &lt;a href="#jsbin"&gt;
-  &lt;/a&gt;
-  &lt;a href="https://jsbin.com/"&gt;JSbin&lt;/a&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--g8SfXisI--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/3m3l4p51fore0c4rxbrr.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--g8SfXisI--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/3m3l4p51fore0c4rxbrr.png" alt="JSBin"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://jsbin.com/"&gt;JSBin&lt;/a&gt; is an online text editor primarily focused on Javascript, with a fast and simple interface. Each of your code snippets can be tested through your web browser, and then exported into a text file.&lt;/p&gt;
-
-&lt;p&gt;Another good thing to note is that JSBin can import popular HTML/CSS/JS frameworks such as jQuery and Bootstrap, allowing you to easily create modern pages and web applications.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Features:&lt;/strong&gt;&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;  Live reload both in editor and in full preview&lt;/li&gt;
-&lt;li&gt;  Codecasting - blog post&lt;/li&gt;
-&lt;li&gt;  Console&lt;/li&gt;
-&lt;li&gt;  Full unmodified rendered view&lt;/li&gt;
-&lt;li&gt;  Gist support: import and export&lt;/li&gt;
-&lt;li&gt;  Processors. HTML. CSS. Sass &amp;amp; SCSS (with Compass &amp;amp; Bourbon) &lt;/li&gt;
-&lt;li&gt;  Debug/source mode&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h3&gt;
-  &lt;a href="#gitpod"&gt;
-  &lt;/a&gt;
-  &lt;a href="https://www.gitpod.io/"&gt;Gitpod&lt;/a&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--8VEJeJAJ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/6bhwvmgqtxxrm4s7k6ro.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--8VEJeJAJ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/6bhwvmgqtxxrm4s7k6ro.png" alt="Gitpod"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://www.gitpod.io/"&gt;Gitpod&lt;/a&gt;  is a refreshing take on cloud code editors (or IDEs, if you will) that aims to keep your code always tested and up to date. In other words, it’s deeply integrated with GitHub, and every time you add code, it runs your testing and CI/CD pipelines to make sure code is always at 100% health.&lt;/p&gt;
-
-&lt;p&gt;Worth checking out if you love the VSCode experience and want something that supports all major back-end/front-end languages and frameworks&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://www.gitpod.io/docs/#-dev-environments-as-code"&gt;Dev environments as code&lt;/a&gt;  - Gitpod applies lessons learned from infrastructure-as-code. Spinning up dev environments is easily repeatable and reproducible empowering you to automate, version-control and share dev environments across your team.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Features:&lt;/strong&gt;&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Prebuilt dev environments&lt;/li&gt;
-&lt;li&gt;Integrated Docker build &lt;/li&gt;
-&lt;li&gt;GitLab, GitHub, and Bitbucket integration &lt;/li&gt;
-&lt;li&gt;Integrated code reviews&lt;/li&gt;
-&lt;li&gt;Collaboration&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h3&gt;
-  &lt;a href="#codespace"&gt;
-  &lt;/a&gt;
-  &lt;a href="https://github.com/features/codespaces"&gt;Codespace&lt;/a&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--OsqFT6Td--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/o7hazzxln97vxwjnz8fh.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--OsqFT6Td--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/o7hazzxln97vxwjnz8fh.png" alt="Codespaces"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://github.com/features/codespaces"&gt;Codespaces&lt;/a&gt; is a configurable cloud development environment available in your browser on GitHub or through Visual Studio Code. A codespace includes everything developers need to develop for a specific repository, including the Visual Studio Code editing experience and common languages, tools, and utilities&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#theia"&gt;
-  &lt;/a&gt;
-  &lt;a href="https://www.theia-ide.org/"&gt;Theia&lt;/a&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--nz-wgLco--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/j509u86arxamjlw0hbtf.jpg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--nz-wgLco--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/j509u86arxamjlw0hbtf.jpg" alt="Theia"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;If you’re a die-hard SOLID fan and a nit-picking software architect, the  &lt;a href="https://www.theia-ide.org/"&gt;Theia IDE&lt;/a&gt;  will tickle your separation-of-concerns bone. It’s a TypeScript-coded (five points for style straightaway!) code IDE that has a perfectly separate front-end and backend. The front-end runs in a browser, while the backend can be anywhere — local machine or the cloud!&lt;/p&gt;
-
-&lt;p&gt;But that’s not all — the front-end can be run as an Electron app with a fully functional, isolated browser environment, giving you the look-and-feel of a native desktop app should you crave it.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Features:&lt;/strong&gt;&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;  Establish a platform to build IDE-like products.&lt;/li&gt;
-&lt;li&gt;  Provide the end-user with a full-fledged multi-language IDE (not just a smart editor)&lt;/li&gt;
-&lt;li&gt;  Support equally the paradigm of Cloud IDE and Desktop IDE.&lt;/li&gt;
-&lt;li&gt;  Provide support for multiple languages via the language and debug server protocols.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h3&gt;
-  &lt;a href="#coder"&gt;
-  &lt;/a&gt;
-  &lt;a href="https://coder.com/"&gt;Coder&lt;/a&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--rgz6DF5e--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/zw1zn7qx99hqgog34dcy.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--rgz6DF5e--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/zw1zn7qx99hqgog34dcy.png" alt="coder"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://coder.com/"&gt;Coder&lt;/a&gt; is a VSCode environment bundled in a server that can be run locally or in the cloud. The recommended configuration is to run the IDE as a server in the cloud and access it locally via the browser. There are prebuilt Docker images for zero-hassle setups, and an enterprise plan should you need support or have different needs.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#aws-cloud9"&gt;
-  &lt;/a&gt;
-  &lt;a href="https://aws.amazon.com/cloud9/"&gt;AWS Cloud9&lt;/a&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--89FtDqTo--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/5ifb9a2ce3vydhmgg7ur.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--89FtDqTo--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/5ifb9a2ce3vydhmgg7ur.png" alt="AWS Cloud9"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://aws.amazon.com/cloud9/"&gt;Cloud9&lt;/a&gt; was arguably the first browser-based IDE that offered serious features and took the idea of browser-as-an-editor mainstream. No wonder that Amazon later acquired it, and today, Cloud9 is part of the AWS offerings.&lt;/p&gt;
-
-&lt;p&gt;There are no additional charges for using Cloud9. You can connect Cloud9 to an existing/new AWS compute instance, and you pay only for that instance. It’s also possible to connect to a third-party server over SSH — for exactly no fee&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Features:&lt;/strong&gt;&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt; First-class support for AWS Server less applications (debugging, etc.)&lt;/li&gt;
-&lt;li&gt; Direct terminal access to AWS from within the editor &lt;/li&gt;
-&lt;li&gt; Over 40 programming languages supported (Go, C++, Ruby, Node, Python, PHP, Java . . . take your pick)&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h3&gt;
-  &lt;a href="#conclusion"&gt;
-  &lt;/a&gt;
-  Conclusion:
-&lt;/h3&gt;
-
-&lt;p&gt;So, this was the collection of the best online code editors for web developers in 2021.  You can pick any of them as per your need and requirements.&lt;/p&gt;
-
-&lt;p&gt;This is of course not a complete list, as there are many other online code editors available on internet that you can use. We have collected these online editor tools by their popularity.&lt;/p&gt;
-
-&lt;p&gt;Tell us which one is you are currently using and which we can add in the list in the comment section below. Also, do not forget to bookmark and share this collection.&lt;/p&gt;
-
-&lt;p&gt;We hope you find this collection helpful.&lt;/p&gt;
-
-</description>
-      <category>webdev</category>
-      <category>javascript</category>
-      <category>beginners</category>
-      <category>programming</category>
-    </item>
-    <item>
-      <title>Why Elasticsearch is an indispensable component of the Adyen stack</title>
-      <author>Deepu K Sasidharan</author>
-      <pubDate>Tue, 08 Jun 2021 11:48:36 +0000</pubDate>
-      <link>https://dev.to/adyen/why-elasticsearch-is-an-indispensable-component-of-the-adyen-stack-2f5o</link>
-      <guid>https://dev.to/adyen/why-elasticsearch-is-an-indispensable-component-of-the-adyen-stack-2f5o</guid>
-      <description>&lt;p&gt;&lt;em&gt;By Willem Pino, Bengisu Sahin, Diego Costa and Deepu K Sasidharan&lt;/em&gt;&lt;/p&gt;
-
-&lt;p&gt;At Adyen, we use Elasticsearch to power various parts of our payments platform. This includes payment search, monitoring, and log search. Let’s take a look at how we use Elastic for these different use cases and see how we capitalize on the power of Elasticsearch.&lt;/p&gt;
-
-&lt;p&gt;We recently did a talk about some of our Elasticsearch adventures at an Elastic meetup. &lt;a href="https://www.youtube.com/watch?v=OCO7lgWVBQw"&gt;You can find a recording here&lt;/a&gt;.&lt;/p&gt;
-
-&lt;p&gt;Before we look into our different use cases, it helps to get a high-level understanding of Adyen’s architecture.&lt;/p&gt;
-
-&lt;p&gt;At Adyen, we do many things, but the core of what we do is payment processing. Our payment platform is built for any business and every customer journey. We process payments across all sales channels.&lt;/p&gt;
-
-&lt;p&gt;Let’s say you want to buy a beer at the local pub (a merchant) and you want to pay with your credit card, which you received from a bank, called the issuing bank. Now when you pay for the beer, the pub wants to know if your account is valid and if you can make the payment. For this, the pub needs to contact the issuing bank.&lt;/p&gt;
-
-&lt;p&gt;This is where Adyen comes in.&lt;/p&gt;
-
-&lt;p&gt;When you provide your payment details — a credit card in this example — to the pub, the pub contacts Adyen with the payment details, and Adyen figures out the rest. This usually means sending the payment details to a third-party, or scheme, such as Mastercard or Visa, which forwards it to the issuer.&lt;/p&gt;
-
-&lt;p&gt;The Adyen flow looks like this:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--d2cszX06--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn-images-1.medium.com/max/2406/0%2AR4KekhX77MFhDciJ.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--d2cszX06--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn-images-1.medium.com/max/2406/0%2AR4KekhX77MFhDciJ.png" alt="high-level architecture"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;But why doesn’t the merchant contact the scheme directly?&lt;/p&gt;
-
-&lt;p&gt;Because the next shopper might not use a credit card but wants to pay by scanning a WeChat Pay QR code. The merchant does not want to build a separate integration for every way of paying, because it should also work for payment methods like credit/debit cards, SEPA, iDeal, Klarna, PayPal, and so on. This is especially true for international merchants, and this is where part of the power of Adyen lies.&lt;/p&gt;
-
-&lt;p&gt;Now imagine we do such a transaction not just once but hundreds of times per second. These are the principles that we follow that allow us to keep doing this efficiently and still be flexible:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;One platform worldwide&lt;/li&gt;
-&lt;li&gt;A single application that receives payments&lt;/li&gt;
-&lt;li&gt;Abstract away differences between payments to make it easier to handle the data later&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;This is, of course, a very simplified view and explanation. In reality, there are hundreds of components and moving parts that work seamlessly together to make everything work.&lt;/p&gt;
-
-&lt;p&gt;Now that we have a basic understanding of the scale of the architecture, let’s look at how we use Elastic.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#payment-search"&gt;
-  &lt;/a&gt;
-  Payment search
-&lt;/h2&gt;
-
-&lt;p&gt;Customer Area is our merchant-facing web application where merchants can gain insights into their transactions and perform operational actions. In the Customer Area, there is a feature called payment search. It is the most used functionality in the Customer Area, and it allows merchants to search their payments by using an order reference, email address, payment method, and so on.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--bwzladND--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn-images-1.medium.com/max/3600/0%2AgTBfinrzMWq_Bpaq.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--bwzladND--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn-images-1.medium.com/max/3600/0%2AgTBfinrzMWq_Bpaq.png" alt="payment search page"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;We use Elasticsearch as a search engine in our application because it is built to provide simple REST APIs and has a distributed nature, speed, and scalability.&lt;/p&gt;
-
-&lt;p&gt;Adyen processes millions of payments every day. We want to provide a near real-time payment search functionality for merchants.&lt;/p&gt;
-
-&lt;p&gt;So, imagine that a shopper is purchasing a pair of shoes in a store. The credit-card payment for the shoes needs to be immediately visible to the merchant so they know the buyer’s purchase was successfully processed — usually within seconds.&lt;/p&gt;
-
-&lt;p&gt;In order to make this possible, we have to index all this data into the Elasticsearch cluster when the payment is successfully processed. For these purposes, we have an in-house streaming/consumer framework that helps us to make this happen in a scalable way. It is implemented to take the burden from accounting clusters and create a summary of the data in the streaming clusters. This data is fed to the consumer framework, which indexes the data into the payment Elasticsearch cluster.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--w0zcB2-v--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn-images-1.medium.com/max/2732/0%2Aje3xiniPnDdrZ3Dr.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--w0zcB2-v--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn-images-1.medium.com/max/2732/0%2Aje3xiniPnDdrZ3Dr.png" alt="payment search flow"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;The consumer framework implements three parts of the indexing journey:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;The first part is &lt;strong&gt;filtering&lt;/strong&gt;, which decides if the current stream item is of any interest to this consumer. This is used to filter out the payments which have a creation date before a certain date.&lt;/li&gt;
-&lt;li&gt;The filtered payment goes to the &lt;strong&gt;consuming&lt;/strong&gt; part, where we apply the business logic. In our use case, it converts a payment to a payment document and creates index/update requests depending on the status of the payment.&lt;/li&gt;
-&lt;li&gt;After the consumer framework reaches a certain amount of consumed payment or a certain time, it goes to a &lt;strong&gt;persisting&lt;/strong&gt; level where it performs the bulk operation with the bulk request. The bulk request consists of index/update requests that we consumed so far. After it gets a successful response from the Elasticsearch cluster, it saves the in-memory state of the consumer to db. In case some requests fail, the consumer framework includes them into the next persist and then saves the state. This helps us make sure we index all the data.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;This cycle in the consumer framework runs continuously, as long as we have new payments processed. It allows us to give our customers a near real-time, reliable, and fast payment search experience.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#platform-monitoring"&gt;
-  &lt;/a&gt;
-  Platform monitoring
-&lt;/h2&gt;
-
-&lt;p&gt;The goal of the monitoring team at Adyen is to provide solutions that can monitor the whole platform for merchant-facing issues. This is already quite a challenging task, and on top of that, the solution must be flexible enough to be used by other teams, each with a very unique use case.&lt;/p&gt;
-
-&lt;p&gt;Plus, the alerts must occur on a (near) real-time basis. To summarize, monitoring aims to provide:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Real-time alerts&lt;/li&gt;
-&lt;li&gt;End-to-end monitoring&lt;/li&gt;
-&lt;li&gt;Integrated, scalable solutions to all teams at Adyen&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;To accomplish this, we leverage the Elastic Stack as the underlying basis to build the necessary tools. The monitoring solution looks upon custom-based analytical events. The analytic events are freely created by the programmers and are the main data source for all the configurable monitors.&lt;/p&gt;
-
-&lt;p&gt;These events exist in parallel and complement the logging infrastructure — and the data in databases. Next, the monitors accommodate the analytic events into multiple use cases, such as spikes, drops, underperforming transactions, anomaly detection, forecasting, and more. These monitors are responsible for creating alerts that are, finally, delivered to the right individuals (or teams).&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--9TEa0G-m--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn-images-1.medium.com/max/3600/0%2AqbRgza_CrTqXKwIb.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--9TEa0G-m--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn-images-1.medium.com/max/3600/0%2AqbRgza_CrTqXKwIb.png" alt="monitoring flow"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;From a business perspective, the objectives were:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;
-&lt;strong&gt;Customizable monitors for predefined use cases:&lt;/strong&gt; Provide monitors for standard use cases (such as a drop in volume, or a spike in errors) that are easy to set up for anyone in the organization&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;Out-of-the-box measurements:&lt;/strong&gt; Every new merchant, or host, is already capable of generating events from Day 1&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;End-to-end alert lifecycle integration:&lt;/strong&gt; Use a single interface to create any monitor, tweak its settings, and receive the alerts&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--i0zcY8zo--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn-images-1.medium.com/max/2972/0%2AXrwMrHYVsFdcvnMY.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--i0zcY8zo--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn-images-1.medium.com/max/2972/0%2AXrwMrHYVsFdcvnMY.png" alt="monitoring goals"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;From a development perspective, the objectives of monitoring were:&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Real-time user-based analytical events&lt;/strong&gt;&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Parallel and complementary with the logging structure&lt;/li&gt;
-&lt;li&gt;Seamless ES template mapping to/from java objects&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;&lt;strong&gt;Enabled/disable event materialization routes on top-level events.&lt;/strong&gt;&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Long-term storage&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h2&gt;
-  &lt;a href="#keeping-the-lights-on"&gt;
-  &lt;/a&gt;
-  Keeping the lights on
-&lt;/h2&gt;
-
-&lt;p&gt;Apart from payment search and monitoring, we also use Elasticsearch for storing and retrieving logs, and we use Kibana for log search, which is integral for troubleshooting issues internally.&lt;/p&gt;
-
-&lt;p&gt;Our logging cluster was at 1 petabyte at one point. For payment search, we did a migration from Elasticsearch v1.7 to v7.6 with 12TB of data last year, and the flexibility of Elasticsearch made the migration smooth. So at Adyen, Elasticsearch will continue to be an integral part of keeping our lights on.&lt;/p&gt;
-
-&lt;p&gt;&lt;em&gt;Originally published at &lt;a href="https://www.elastic.co/blog/why-elasticsearch-is-an-indispensable-component-of-the-adyen-stack"&gt;https://www.elastic.co&lt;/a&gt; on May 27, 2021.&lt;/em&gt;&lt;/p&gt;
-
-</description>
-      <category>fintech</category>
-      <category>elasticsearch</category>
-      <category>adyen</category>
-      <category>architecture</category>
     </item>
   </channel>
 </rss>
