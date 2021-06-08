@@ -183,6 +183,229 @@
       <category>p5js</category>
     </item>
     <item>
+      <title>Forever Functional: Memoizing Promises</title>
+      <author>OpenReplay Tech Blog</author>
+      <pubDate>Tue, 08 Jun 2021 20:09:49 +0000</pubDate>
+      <link>https://dev.to/asayerio_techblog/forever-functional-memoizing-promises-4p36</link>
+      <guid>https://dev.to/asayerio_techblog/forever-functional-memoizing-promises-4p36</guid>
+      <description>&lt;p&gt;&lt;em&gt;by author &lt;a href="https://blog.openreplay.com/authors/federico-kereki"&gt;Federico Kereki&lt;/a&gt;&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;In a complex web application, with several components needing data, odds are that redundant API calls will be made. You may imagine even a simple e-commerce page: the user could want to see an article, then a second one, and then go back to the first. In such a case it's a sure bet that the app would redo its previous API calls, to essentially get the very same information it already had. Caching by the browser may help, for sure, but that also depends on the remote server providing the appropriate headers, and that may not always happen. So, we want to do something in our code that will complement whatever caching is done by the browser, if any, but ensure the best performance for the user in any case.&lt;/p&gt;
+
+&lt;p&gt;In &lt;a href="https://blog.openreplay.com/forever-functional-memoizing-functions-for-performance"&gt;the previous article in this series&lt;/a&gt;, we showed how we could enhance the performance of your code by &lt;em&gt;memoizing&lt;/em&gt;: generating a new version of your functions that use an internal cache to avoid repeating calculations that had been already done. This leads to wondering: can't we do something similar with Promises, and avoid redoing API calls? The answer is a qualified "yes". In this article we'll cover how to do it, a few problems to avoid (including a serious "gotcha!") plus some further enhancements that you can apply to your web app for a better, slicker user experience.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#discarded-solutions"&gt;
+  &lt;/a&gt;
+  Discarded solutions
+&lt;/h1&gt;
+
+&lt;p&gt;Let's begin by thinking of some ways to solve the problem of having repeated API calls... and then discard those solutions! &lt;br&gt;
+Note that we'll only consider front-end solutions: modifying the server to allow caching is an obvious idea but it may not be available to you, and may even not be possible at all for some other reasons. &lt;br&gt;
+The very first (and most obvious) way to fix this is checking, before doing any kind of call, if the required data is somehow already available - in other words, writing a cache algorithm! This would require adding the cache (possibly using &lt;a href="https://developer.mozilla.org/en-US/docs/Web/API/CacheStorage"&gt;CacheStorage&lt;/a&gt;) and modifying your code everywhere to check the cache before actually doing a call... but this isn't a good idea: too many changes to do, too many possibilities for bugs!&lt;/p&gt;
+
+&lt;p&gt;You could note that if you are working with React, Vue, or similar frameworks, instead of adding a new cache you might do with the global store instead, with a service layer that checks the store before calling an endpoint to avoid unneeded calls. Of course, you would enlarge the store to also keep previously received values. This solution would also do, and not entail so many code changes, because most would be at the service layer, instead of everywhere throughout your code. But, you'll still need to change your code in non-trivial ways, so the possibility of added errors wouldn't disappear.&lt;/p&gt;
+
+&lt;p&gt;What we really want is a solution that requires changing as little code as possible, and not require adding any hand-written special code to test for available data. Also, we'd desire that the solution could be applied selectively, and not an "all-or-nothing" kind of recipe. We want the flexibility to decide where to use this enhancement and where we shouldn't do so. Finally, and thinking in REST terms, we want to apply the fix to &lt;code&gt;GET&lt;/code&gt; calls, but not to &lt;code&gt;POST&lt;/code&gt;, &lt;code&gt;PUT&lt;/code&gt; or &lt;code&gt;DELETE&lt;/code&gt; calls; those should always go out (even if made earlier). Our fix has to be very specific!&lt;/p&gt;
+&lt;h1&gt;
+  &lt;a href="#a-subtly-failed-first-attempt"&gt;
+  &lt;/a&gt;
+  A (subtly failed) first attempt
+&lt;/h1&gt;
+
+&lt;p&gt;Remembering the work we did in &lt;a href="https://blog.openreplay.com/forever-functional-memoizing-functions-for-performance"&gt;our previous article on memoizing&lt;/a&gt;, we could think about applying that technique here, too. The code we developed to memoize a function was the following.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;memoize&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;fn&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;cache&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nb"&gt;Map&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;(...&lt;/span&gt;&lt;span class="nx"&gt;args&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;strX&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;JSON&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;stringify&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;args&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+      &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="nx"&gt;cache&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;has&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;strX&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="nx"&gt;cache&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="kd"&gt;set&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;strX&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;fn&lt;/span&gt;&lt;span class="p"&gt;(...&lt;/span&gt;&lt;span class="nx"&gt;args&lt;/span&gt;&lt;span class="p"&gt;));&lt;/span&gt;
+      &lt;span class="p"&gt;}&lt;/span&gt;
+      &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;cache&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="kd"&gt;get&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;strX&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="p"&gt;};&lt;/span&gt;
+  &lt;span class="p"&gt;};&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Our higher-order &lt;code&gt;memoize(...)&lt;/code&gt; function takes any function as input, and returns a new function that uses a cache. Whenever you call this new function, it first checks whether if the arguments you are calling the function with, are already in the cache. If so, instead of doing any calculation, it returns the cached value. Otherwise, if the arguments aren't in the cache, the original function is called, its value is stored in the cache, and then it's returned to the caller. The very first time you call a function with any specific set of arguments, it will do its job, but if you repeat the call later, the cached result from the first call will be returned.&lt;/p&gt;
+
+&lt;p&gt;Let's go back to our API problem. A common pattern in applications is routing API calls through a single function, &lt;code&gt;getData()&lt;/code&gt;, that sets up common parameters (for instance, a token in the headers for authentication) and then uses some library (&lt;a href="https://axios-http.com/"&gt;Axios&lt;/a&gt;, &lt;a href="https://visionmedia.github.io/superagent/"&gt;SuperAgent&lt;/a&gt;, or even plain &lt;a href="https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API"&gt;fetch&lt;/a&gt;) to do the call, returning a promise. So, that function would be like the following.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;getData&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;urlToCall&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;someOtherParameters&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="c1"&gt;// set up headers&lt;/span&gt;
+    &lt;span class="c1"&gt;// set up options&lt;/span&gt;
+    &lt;span class="c1"&gt;// set up other things&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;doTheCall&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;urlToCall&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;headers&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;options&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;etc&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;How can you avoid duplicate calls to an API? Why not apply &lt;code&gt;memoize(...)&lt;/code&gt; to the &lt;code&gt;getData(...)&lt;/code&gt; function? If we do so, whenever we want to repeat an API call we will get the original promise, without (repeatedly) calling the API endpoint. We can produce a cache-using &lt;code&gt;getCachedData(...)&lt;/code&gt; function like this, with a single line of code:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;getCachedData&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;memoize&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;getData&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;To optimize calls, just substitute &lt;code&gt;getCachedData(...)&lt;/code&gt; for &lt;code&gt;getData(...)&lt;/code&gt; wherever you want. Of course, there may be some API &lt;code&gt;GET&lt;/code&gt;s that you don't want to optimize this way (maybe to some endpoint that always returns freshly updated data) so in that case let the original call to &lt;code&gt;getData(...)&lt;/code&gt; be. We won't use memoizing either for other REST calls, as POST, PUT, or DELETE; these have to be done everytime.&lt;/p&gt;
+
+&lt;p&gt;This is a very good solution... but with a subtle bug! What are we missing?&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#a-complete-solution"&gt;
+  &lt;/a&gt;
+  A complete solution
+&lt;/h1&gt;
+
+&lt;p&gt;The solution we saw above seemingly works well; what's the catch? The problem is what would happen if an API call failed ‑and then we call it a second time? The answer is simple: nothing at all! We already memoized the (rejected) promise, so further calls will return it without trying a second time. In fact, with our memoized promise there will be no way at all to retry the call... so what are we to do?&lt;/p&gt;
+
+&lt;p&gt;What we really need is to make our memoizing function aware of possible errors. Should a call fail the promise should be removed from the cache, to allow future new calls to start from zero, and actually call the API. We can make this change fairly easily.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;memoize&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;fn&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;cache&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nb"&gt;Map&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;(...&lt;/span&gt;&lt;span class="nx"&gt;args&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;strX&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;JSON&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;stringify&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;args&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="nx"&gt;cache&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;has&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;strX&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="nx"&gt;cache&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="kd"&gt;set&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+        &lt;span class="nx"&gt;strX&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+        &lt;span class="nx"&gt;fn&lt;/span&gt;&lt;span class="p"&gt;(...&lt;/span&gt;&lt;span class="nx"&gt;args&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="k"&gt;catch&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+          &lt;span class="nx"&gt;cache&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="k"&gt;delete&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;strX&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+          &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+        &lt;span class="p"&gt;})&lt;/span&gt;
+      &lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;cache&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="kd"&gt;get&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;strX&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+  &lt;span class="p"&gt;};&lt;/span&gt;
+&lt;span class="p"&gt;};&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;How is the problem solved? We added a &lt;code&gt;.catch(...)&lt;/code&gt; to the promise before adding it to the &lt;code&gt;cache&lt;/code&gt; map. With this change, if an API call fails, the rejected promise will be removed from the cache. If you repeat the original call later, the API will be queried again because the results of the first call won't be cached.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#the-prefetching-pattern"&gt;
+  &lt;/a&gt;
+  The prefetching pattern
+&lt;/h1&gt;
+
+&lt;p&gt;Can you do better for the end-user? Maybe your web page cannot be faster, but it can look as if it were! Memoizing promises makes it easy to implement the prefetching pattern: get data into memory before it's actually needed, so when the app actually requires it, it will already be on hand. You can often predict what actions a user will take at a certain moment, so with prefetched data, your page will feel quite snappier.&lt;/p&gt;
+
+&lt;p&gt;Implementing data prefetching can be hard, but with memoized promises it's really simple. You just have to do the call for whatever data you think that will be needed, and ignore the results! The key here is that if a future second call is made to get the results you already asked for, the memoized promise will already have them and return instantaneously, with no delay.&lt;/p&gt;
+
+&lt;p&gt;To implement prefetching, there's no need to change anything in the code; just to add appropriate calls whenever possible, anticipating future needs. Some obvious examples are calling for the next records if paging through a table, asking for more details on whatever is shown onscreen (assuming the user has some way to see that extra information), and so on. A single caveat: try not to go overboard with prefetching, because browsers have a limit on outgoing connections. If you require too much data, you may find yourself blocked for a while until all prefetching calls come back with their results.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#the-swr-pattern"&gt;
+  &lt;/a&gt;
+  The SWR pattern
+&lt;/h1&gt;
+
+&lt;p&gt;A second pattern that will also make your page seem faster and more responsive is the SWR (&lt;a href="https://web.dev/stale-while-revalidate/"&gt;Stale While Revalidate&lt;/a&gt;) pattern. The key idea is that if you ask for some data, and the promise is already cached, you return the current data but at the same time you launch a new API request to refresh the (possibly stale) in-memory data for future use. You could get more fancy by inspecting the staleness of the cached data and using it to decide whether to return data immediately or not, but as a first attempt the described logic will do. Note that this isn't simple caching: with our memoizing solution, an API call would go out only one time, and with SWR API calls will always go out, even if the caller receives results immediately.&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;You can read more on stale content in &lt;a href="https://datatracker.ietf.org/doc/html/rfc5861"&gt;RFC-5861&lt;/a&gt;.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;You may ask: why not make do with browser caching? Browser caches work very well for static contents, but unless the back end provides good values for HTTP headers such as &lt;code&gt;max-age&lt;/code&gt; and &lt;code&gt;stale-while-revalidate&lt;/code&gt; you really are on your own (also, the browser uses the cache to return data quickly, but doesn't refresh its cache). Of course, ignoring the cache and making requests that will skip it is always possible (so, no caching at all). However, then the user won't see any speed advantage. SWR is an intermediate solution that works well in most cases, and memoizing promises allows for it.&lt;/p&gt;
+
+&lt;p&gt;What do we have to change for this new approach?&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;memoize&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;fn&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;cache&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nb"&gt;Map&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;(...&lt;/span&gt;&lt;span class="nx"&gt;args&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;strX&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;JSON&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;stringify&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;args&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;result&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;cache&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="kd"&gt;get&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;strX&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;     &lt;span class="cm"&gt;/* (1) */&lt;/span&gt;
+    &lt;span class="nx"&gt;cache&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="kd"&gt;set&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;                          &lt;span class="cm"&gt;/* (2) */&lt;/span&gt;
+      &lt;span class="nx"&gt;strX&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+      &lt;span class="nx"&gt;fn&lt;/span&gt;&lt;span class="p"&gt;(...&lt;/span&gt;&lt;span class="nx"&gt;args&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="k"&gt;catch&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="nx"&gt;cache&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="k"&gt;delete&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;strX&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+      &lt;span class="p"&gt;})&lt;/span&gt;
+    &lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;result&lt;/span&gt; &lt;span class="o"&gt;!==&lt;/span&gt; &lt;span class="kc"&gt;undefined&lt;/span&gt;         &lt;span class="cm"&gt;/* (3) */&lt;/span&gt;
+      &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="nx"&gt;result&lt;/span&gt;
+      &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;cache&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="kd"&gt;get&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;strX&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+  &lt;span class="p"&gt;};&lt;/span&gt;
+&lt;span class="p"&gt;};&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;First (1) we try to get an existing promise from the cache; this may succeed, returning the promise, or fail, returning &lt;code&gt;undefined&lt;/code&gt;. Then (2) we always set the cache anew, with a new promise, as in the previous section. Finally (3) if we had a promise, we return it, and we return the one just added to the cache otherwise. An important point: to make sure that the call to the server will actually go out, you'll have to force the browser by adding a random parameter (like &lt;code&gt;xyzzy=${Date.now()}&lt;/code&gt;)at the end of the query string, or equivalently add headers to your request:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;code&gt;pragma: no-cache&lt;/code&gt;&lt;/li&gt;
+&lt;li&gt;&lt;code&gt;cache-control: no-cache&lt;/code&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Either of those methods would get your browser to actually repeat the call, and skip its cache. The "double-whammy" of prefetching plus SWR can help make your code feel much more responsive, and by applying memoization you get all those advantages; good!&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#memoizing-api-calls-in-frameworks"&gt;
+  &lt;/a&gt;
+  Memoizing API calls in frameworks
+&lt;/h1&gt;
+
+&lt;p&gt;In our previous article on memoization for functions we saw that popular frameworks like &lt;a href="https://reactjs.org/"&gt;React&lt;/a&gt; and &lt;a href="https://v3.vuejs.org/"&gt;Vue&lt;/a&gt; implement a simplified,  version of it, just caching a single value. Let's consider now what happens concerning the topics we've discussed: memoization for API calls, prefetching, and SWR.&lt;/p&gt;
+
+&lt;p&gt;For React, &lt;a href="https://swr.vercel.app/"&gt;SWR&lt;/a&gt; is a library that provides these features, and it's also been ported to Vue as &lt;a href="https://docs-swrv.netlify.app/"&gt;SWRV&lt;/a&gt;. &lt;a href="https://react-query.tanstack.com/"&gt;React Query&lt;/a&gt; is another library that enables React (and &lt;a href="https://reactnative.dev/"&gt;React Native&lt;/a&gt;) apps to take advantage of all the features we've mentioned.&lt;/p&gt;
+
+&lt;p&gt;Installing and using these libraries is straightforward, and they add more features than those we've developed here, so you should give them a try.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#frontend-monitoring"&gt;
+  &lt;/a&gt;
+  Frontend Monitoring
+&lt;/h2&gt;
+
+&lt;p&gt;Debugging a web application in production may be challenging and time-consuming. &lt;a href="https://github.com/openreplay/openreplay"&gt;OpenReplay&lt;/a&gt; is an Open-source alternative to FullStory, LogRocket and Hotjar. It allows you to monitor and replay everything your users do and shows how your app behaves for every issue. &lt;br&gt;
+It’s like having your browser’s inspector open while looking over your user’s shoulder.&lt;br&gt;
+OpenReplay is the only open-source alternative currently available.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--MvoFt7Qf--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/openreplay/openreplay/main/static/replayer.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--MvoFt7Qf--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/openreplay/openreplay/main/static/replayer.png" alt="OpenReplay"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Happy debugging, for modern frontend teams - &lt;a href="https://github.com/openreplay/openreplay"&gt;Start monitoring your web app for free&lt;/a&gt;.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#summary"&gt;
+  &lt;/a&gt;
+  Summary
+&lt;/h1&gt;
+
+&lt;p&gt;In this article, the second in the series about functional programming techniques applied to JavaScript programming, we've seen how to apply memoizing to promises to speed up future retrieval of API data. We also considered a couple of extra techniques for an even sprightlier feel: prefetching, to get data in advance of its being needed, and stale-while-revalidate, to allow providing for cached data, though refreshing it for future usage. &lt;/p&gt;
+
+&lt;p&gt;Finally, we discussed some available libraries for React and Vue that simplify taking advantage of the suggestions in the article. Given that you can get a better, more responsive application with little extra work, it would seem that there's no excuse to avoid the optimizations we discussed here!&lt;/p&gt;
+
+</description>
+      <category>javascript</category>
+      <category>performance</category>
+      <category>react</category>
+    </item>
+    <item>
       <title>Googley eyes, Clippy's story after retirement and 60 floppy's - videos with a tenuous link to tech! [I was bored]</title>
       <author>InHuOfficial</author>
       <pubDate>Tue, 08 Jun 2021 20:00:49 +0000</pubDate>
@@ -1077,6 +1300,134 @@ Done in 4.86s.
       <category>netlify</category>
     </item>
     <item>
+      <title>Details &amp; Summary tags: HTML's best kept secret</title>
+      <author>Ayush Newatia</author>
+      <pubDate>Tue, 08 Jun 2021 19:16:40 +0000</pubDate>
+      <link>https://dev.to/ayushn21/details-summary-tags-html-s-best-kept-secret-4ak4</link>
+      <guid>https://dev.to/ayushn21/details-summary-tags-html-s-best-kept-secret-4ak4</guid>
+      <description>&lt;p&gt;&lt;code&gt;&amp;lt;details&amp;gt;&lt;/code&gt; and &lt;code&gt;&amp;lt;summary&amp;gt;&lt;/code&gt; tags are among of the most useful tags that HTML gives us. I'm constantly surprised by how esoteric they are in practice.  &lt;/p&gt;
+
+&lt;p&gt;In its simplest use case, the &lt;code&gt;&amp;lt;details&amp;gt;&lt;/code&gt; tag gives us an "open/close" toggle control that shows the contents of the &lt;code&gt;&amp;lt;summary&amp;gt;&lt;/code&gt; tag when closed; and all its contents when &lt;code&gt;open&lt;/code&gt;end by clicking on it.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;details&amp;gt;&lt;/span&gt;
+  &lt;span class="nt"&gt;&amp;lt;summary&amp;gt;&lt;/span&gt;Steven Wilson&lt;span class="nt"&gt;&amp;lt;/summary&amp;gt;&lt;/span&gt;
+  Steven John Wilson is an English musician, singer, songwriter and record producer. Currently a solo artist, he was the founder, guitarist, lead vocalist and songwriter of the band Porcupine Tree, as well as being a member of several other bands, including Blackfield, Storm Corrosion and No-Man.
+&lt;span class="nt"&gt;&amp;lt;/details&amp;gt;&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--YW9kTbUe--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.chapter24.blog/1620941714ts750aTyl4RWYpM7M8I2wA" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--YW9kTbUe--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.chapter24.blog/1620941714ts750aTyl4RWYpM7M8I2wA"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;When the details are open, the &lt;code&gt;&amp;lt;details&amp;gt;&lt;/code&gt; tag has an &lt;code&gt;open&lt;/code&gt; attribute so we can target some CSS styles on the &lt;code&gt;open&lt;/code&gt; attribute to visually change the control's state:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="nt"&gt;details&lt;/span&gt;&lt;span class="o"&gt;[&lt;/span&gt;&lt;span class="nt"&gt;open&lt;/span&gt;&lt;span class="o"&gt;]&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="nl"&gt;background&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="no"&gt;gray&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;a href="https://codepen.io/ayushn21/pen/GRWZqzw"&gt;Here's a codepen&lt;/a&gt; for the above example.  &lt;/p&gt;
+
+&lt;p&gt;There are a plethora of applications for &lt;code&gt;&amp;lt;details&amp;gt;&lt;/code&gt; / &lt;code&gt;&amp;lt;summary&amp;gt;&lt;/code&gt; tags such as &lt;a href="https://en.wikipedia.org/wiki/Accordion_(GUI)"&gt;accordions&lt;/a&gt; or dropdowns. You can build these components with these tags without any JavaScript at all!  &lt;/p&gt;
+
+&lt;p&gt;Let's take a look at how easy it is to build a dropdown using &lt;code&gt;&amp;lt;details&amp;gt;&lt;/code&gt; / &lt;code&gt;&amp;lt;summary&amp;gt;&lt;/code&gt;.  &lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#dropdown-menu-using-details-summary-tags"&gt;
+  &lt;/a&gt;
+  Dropdown menu using details / summary tags
+&lt;/h1&gt;
+
+&lt;p&gt;The HTML markup for our dropdown is incredibly straightforward. The CSS is where the interesting stuff happens.  &lt;/p&gt;
+
+&lt;p&gt;This is what the HTML for a simple menu with 3 items would look like:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;details&amp;gt;&lt;/span&gt;
+  &lt;span class="nt"&gt;&amp;lt;summary&amp;gt;&lt;/span&gt;
+    Menu
+  &lt;span class="nt"&gt;&amp;lt;/summary&amp;gt;&lt;/span&gt;
+  &lt;span class="nt"&gt;&amp;lt;ul&amp;gt;&lt;/span&gt;
+    &lt;span class="nt"&gt;&amp;lt;li&amp;gt;&lt;/span&gt;Settings&lt;span class="nt"&gt;&amp;lt;/li&amp;gt;&lt;/span&gt;
+    &lt;span class="nt"&gt;&amp;lt;li&amp;gt;&lt;/span&gt;Profile&lt;span class="nt"&gt;&amp;lt;li&amp;gt;&lt;/span&gt;
+    &lt;span class="nt"&gt;&amp;lt;li&amp;gt;&lt;/span&gt;Logout&lt;span class="nt"&gt;&amp;lt;/li&amp;gt;&lt;/span&gt;
+  &lt;span class="nt"&gt;&amp;lt;/ul&amp;gt;&lt;/span&gt;  
+&lt;span class="nt"&gt;&amp;lt;/details&amp;gt;&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;To make this into a proper "dropdown" menu we need to alter its behaviour using CSS:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="c"&gt;/* Hide arrow glyph */&lt;/span&gt;
+&lt;span class="nt"&gt;details&lt;/span&gt; &lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="nt"&gt;summary&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="nl"&gt;list-style&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;none&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+  &lt;span class="nl"&gt;cursor&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;pointer&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="c"&gt;/* Hide arrow glyph in Safari */&lt;/span&gt;
+&lt;span class="nt"&gt;details&lt;/span&gt; &lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="nt"&gt;summary&lt;/span&gt;&lt;span class="nd"&gt;::-webkit-details-marker&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="nl"&gt;display&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;none&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="c"&gt;/* Set position to relative so we can position */&lt;/span&gt;
+&lt;span class="c"&gt;/* the list of menu items with `absolute` in relation */&lt;/span&gt;
+&lt;span class="c"&gt;/* the `details` tag */&lt;/span&gt;
+&lt;span class="nt"&gt;details&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="nl"&gt;position&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;relative&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="c"&gt;/* Add some styles to make the dropdown menu stand out from */&lt;/span&gt;
+&lt;span class="c"&gt;/* the rest of the page. A high `z-index` ensures it stays */&lt;/span&gt;
+&lt;span class="c"&gt;/* on top of all the other content. */&lt;/span&gt;
+&lt;span class="nt"&gt;details&lt;/span&gt; &lt;span class="nt"&gt;ul&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="nl"&gt;display&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;block&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+  &lt;span class="nl"&gt;list-style&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;none&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+  &lt;span class="nl"&gt;padding&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+  &lt;span class="nl"&gt;border&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;2px&lt;/span&gt; &lt;span class="nb"&gt;solid&lt;/span&gt; &lt;span class="no"&gt;black&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+  &lt;span class="nl"&gt;width&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;100px&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+  &lt;span class="nl"&gt;z-index&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;100&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+  &lt;span class="nl"&gt;position&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;absolute&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+  &lt;span class="nl"&gt;background&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="no"&gt;black&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+  &lt;span class="nl"&gt;color&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="no"&gt;white&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Here's what the end result looks like:  &lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--bHFnbRdv--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.chapter24.blog/16209441111biTfMPUjkp-uX2i1ys_YQ" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--bHFnbRdv--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.chapter24.blog/16209441111biTfMPUjkp-uX2i1ys_YQ"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;We have a dropdown with just a few lines of CSS and no JavaScript at all! &lt;a href="https://codepen.io/ayushn21/pen/ZEeWpvX"&gt;Here's a CodePen&lt;/a&gt; you can play around with.  &lt;/p&gt;
+
+&lt;p&gt;The next time you need to build a control with an "open" and "closed" state, reach for &lt;code&gt;&amp;lt;details&amp;gt;&lt;/code&gt; / &lt;code&gt;&amp;lt;summary&amp;gt;&lt;/code&gt; instead of rolling some custom JavaScript!&lt;/p&gt;
+
+&lt;p&gt;&lt;em&gt;This article was originally published on &lt;a href="https://binarysolo.chapter24.blog/details-summary-tags-html-s-best-kept-secret"&gt;my blog&lt;/a&gt;&lt;/em&gt;&lt;/p&gt;
+
+</description>
+      <category>html</category>
+      <category>webdev</category>
+      <category>css</category>
+    </item>
+    <item>
       <title>Learning Web Dev on the Web | A Roadmap with Resources</title>
       <author>Nukala Suraj</author>
       <pubDate>Tue, 08 Jun 2021 18:16:04 +0000</pubDate>
@@ -1875,123 +2226,6 @@ Customer-first&lt;/p&gt;
       <category>react</category>
       <category>javascript</category>
       <category>microservices</category>
-    </item>
-    <item>
-      <title>Reverse An Array - 3 Methods</title>
-      <author>Amritanshu Dev Rawat</author>
-      <pubDate>Tue, 08 Jun 2021 17:54:47 +0000</pubDate>
-      <link>https://dev.to/amritanshu/reverse-an-array-3-methods-2ekn</link>
-      <guid>https://dev.to/amritanshu/reverse-an-array-3-methods-2ekn</guid>
-      <description>&lt;ul&gt;
-&lt;li&gt;Method 1 - Revere with For Loop and print
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight java"&gt;&lt;code&gt;&lt;span class="kd"&gt;public&lt;/span&gt; &lt;span class="kd"&gt;class&lt;/span&gt; &lt;span class="nc"&gt;ReverseArray&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
-&lt;span class="kd"&gt;public&lt;/span&gt; &lt;span class="kd"&gt;static&lt;/span&gt; &lt;span class="kt"&gt;void&lt;/span&gt; &lt;span class="nf"&gt;main&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="nc"&gt;String&lt;/span&gt;&lt;span class="o"&gt;[]&lt;/span&gt; &lt;span class="n"&gt;args&lt;/span&gt;&lt;span class="o"&gt;)&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
-&lt;span class="c1"&gt;// Array with some element&lt;/span&gt;
-&lt;span class="kt"&gt;int&lt;/span&gt;&lt;span class="o"&gt;[]&lt;/span&gt; &lt;span class="n"&gt;myArray&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;&lt;span class="mi"&gt;10&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;22&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;33&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;11&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;88&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;9&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="o"&gt;};&lt;/span&gt;
-    &lt;span class="c1"&gt;// reverse loop and printing&lt;/span&gt;
-    &lt;span class="k"&gt;for&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="n"&gt;i&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;myArray&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;length&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="o"&gt;;&lt;/span&gt;&lt;span class="n"&gt;i&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;=&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="o"&gt;;&lt;/span&gt;&lt;span class="n"&gt;i&lt;/span&gt;&lt;span class="o"&gt;--)&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
-        &lt;span class="nc"&gt;System&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;out&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;print&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="n"&gt;myArray&lt;/span&gt;&lt;span class="o"&gt;[&lt;/span&gt;&lt;span class="n"&gt;i&lt;/span&gt;&lt;span class="o"&gt;]+&lt;/span&gt; &lt;span class="s"&gt;" "&lt;/span&gt;&lt;span class="o"&gt;);&lt;/span&gt;
-        &lt;span class="o"&gt;}&lt;/span&gt;
-    &lt;span class="o"&gt;}&lt;/span&gt;
-&lt;span class="o"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;ul&gt;
-&lt;li&gt;Method 2 - Using Array List
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight java"&gt;&lt;code&gt;&lt;span class="c1"&gt;// Method 2 Reverse an array using array list&lt;/span&gt;
-    &lt;span class="kd"&gt;public&lt;/span&gt; &lt;span class="kd"&gt;class&lt;/span&gt; &lt;span class="nc"&gt;ReverseArray&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
-    &lt;span class="kd"&gt;public&lt;/span&gt; &lt;span class="kd"&gt;static&lt;/span&gt; &lt;span class="kt"&gt;void&lt;/span&gt; &lt;span class="nf"&gt;main&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="nc"&gt;String&lt;/span&gt;&lt;span class="o"&gt;[]&lt;/span&gt; &lt;span class="n"&gt;args&lt;/span&gt;&lt;span class="o"&gt;)&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
-        &lt;span class="c1"&gt;// Array List&lt;/span&gt;
-        &lt;span class="nc"&gt;ArrayList&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nc"&gt;Integer&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="n"&gt;myArray&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nc"&gt;ArrayList&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nc"&gt;Integer&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;();&lt;/span&gt;
-        &lt;span class="n"&gt;myArray&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;add&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;10&lt;/span&gt;&lt;span class="o"&gt;);&lt;/span&gt;
-        &lt;span class="n"&gt;myArray&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;add&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;21&lt;/span&gt;&lt;span class="o"&gt;);&lt;/span&gt;
-        &lt;span class="n"&gt;myArray&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;add&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;13&lt;/span&gt;&lt;span class="o"&gt;);&lt;/span&gt;
-        &lt;span class="n"&gt;myArray&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;add&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;14&lt;/span&gt;&lt;span class="o"&gt;);&lt;/span&gt;
-        &lt;span class="n"&gt;myArray&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;add&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;51&lt;/span&gt;&lt;span class="o"&gt;);&lt;/span&gt;
-
-        &lt;span class="c1"&gt;// reverse array and method&lt;/span&gt;
-        &lt;span class="nc"&gt;Collections&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;reverse&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="n"&gt;myArray&lt;/span&gt;&lt;span class="o"&gt;);&lt;/span&gt;
-        &lt;span class="nc"&gt;System&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;out&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;println&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="n"&gt;myArray&lt;/span&gt;&lt;span class="o"&gt;);&lt;/span&gt;
-    &lt;span class="o"&gt;}&lt;/span&gt;
-&lt;span class="o"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;ul&gt;
-&lt;li&gt;Method 3 - Two Pointers and Swap
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight java"&gt;&lt;code&gt;&lt;span class="c1"&gt;// Method 3 Reverse with swap&lt;/span&gt;
-&lt;span class="kd"&gt;public&lt;/span&gt; &lt;span class="kd"&gt;class&lt;/span&gt; &lt;span class="nc"&gt;ReverseArray&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
-&lt;span class="kd"&gt;public&lt;/span&gt; &lt;span class="kd"&gt;static&lt;/span&gt; &lt;span class="kt"&gt;void&lt;/span&gt; &lt;span class="nf"&gt;main&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="nc"&gt;String&lt;/span&gt;&lt;span class="o"&gt;[]&lt;/span&gt; &lt;span class="n"&gt;args&lt;/span&gt;&lt;span class="o"&gt;)&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
-
-    &lt;span class="c1"&gt;// Array with some element&lt;/span&gt;
-    &lt;span class="kt"&gt;int&lt;/span&gt;&lt;span class="o"&gt;[]&lt;/span&gt; &lt;span class="n"&gt;myArray&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;&lt;span class="mi"&gt;10&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;22&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;33&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;11&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;88&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;9&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="o"&gt;};&lt;/span&gt;
-
-    &lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="n"&gt;start&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="o"&gt;;&lt;/span&gt;
-    &lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="n"&gt;end&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;myArray&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;length&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="o"&gt;;&lt;/span&gt;
-    &lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="n"&gt;temp&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="o"&gt;;&lt;/span&gt;
-
-    &lt;span class="c1"&gt;// looping and swapping&lt;/span&gt;
-    &lt;span class="k"&gt;while&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="n"&gt;end&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="n"&gt;start&lt;/span&gt;&lt;span class="o"&gt;)&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
-        &lt;span class="n"&gt;temp&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;myArray&lt;/span&gt;&lt;span class="o"&gt;[&lt;/span&gt;&lt;span class="n"&gt;start&lt;/span&gt;&lt;span class="o"&gt;];&lt;/span&gt;
-        &lt;span class="n"&gt;myArray&lt;/span&gt;&lt;span class="o"&gt;[&lt;/span&gt;&lt;span class="n"&gt;start&lt;/span&gt;&lt;span class="o"&gt;]&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;myArray&lt;/span&gt;&lt;span class="o"&gt;[&lt;/span&gt;&lt;span class="n"&gt;end&lt;/span&gt;&lt;span class="o"&gt;];&lt;/span&gt;
-        &lt;span class="n"&gt;myArray&lt;/span&gt;&lt;span class="o"&gt;[&lt;/span&gt;&lt;span class="n"&gt;end&lt;/span&gt;&lt;span class="o"&gt;]&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;temp&lt;/span&gt;&lt;span class="o"&gt;;&lt;/span&gt;
-        &lt;span class="n"&gt;end&lt;/span&gt;&lt;span class="o"&gt;--;&lt;/span&gt;
-        &lt;span class="n"&gt;start&lt;/span&gt;&lt;span class="o"&gt;++;&lt;/span&gt;
-    &lt;span class="o"&gt;}&lt;/span&gt;
-
-    &lt;span class="k"&gt;for&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="nl"&gt;i:&lt;/span&gt;&lt;span class="n"&gt;myArray&lt;/span&gt;&lt;span class="o"&gt;)&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
-        &lt;span class="nc"&gt;System&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;out&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;print&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="n"&gt;i&lt;/span&gt;&lt;span class="o"&gt;+&lt;/span&gt;&lt;span class="s"&gt;" "&lt;/span&gt;&lt;span class="o"&gt;);&lt;/span&gt;
-    &lt;span class="o"&gt;}&lt;/span&gt;
-&lt;span class="o"&gt;}&lt;/span&gt;
-&lt;span class="o"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-</description>
-      <category>java</category>
-      <category>javascript</category>
-      <category>oop</category>
-      <category>webdev</category>
-    </item>
-    <item>
-      <title>Pure CSS Tabs</title>
-      <author>mrwolferinc</author>
-      <pubDate>Tue, 08 Jun 2021 17:49:04 +0000</pubDate>
-      <link>https://dev.to/mrwolferinc/pure-css-tabs-54ak</link>
-      <guid>https://dev.to/mrwolferinc/pure-css-tabs-54ak</guid>
-      <description>&lt;p&gt;An example of some tabs created using HTML and CSS. I tried to make it as modern and mobile-friendly as possible. I hope you enjoy it!&lt;/p&gt;
-
-&lt;p&gt;&lt;iframe height="600" src="https://codepen.io/mrwolferinc/embed/vYxayJe?height=600&amp;amp;default-tab=result&amp;amp;embed-version=2"&gt;
-&lt;/iframe&gt;
-&lt;/p&gt;
-
-</description>
-      <category>html</category>
-      <category>css</category>
-      <category>webdev</category>
-      <category>codepen</category>
     </item>
   </channel>
 </rss>
