@@ -7,6 +7,171 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>Async Redis key mutation notifications in Rails</title>
+      <author>leastbad</author>
+      <pubDate>Sun, 27 Jun 2021 14:55:42 +0000</pubDate>
+      <link>https://dev.to/leastbad/async-redis-key-mutation-notifications-in-rails-4hng</link>
+      <guid>https://dev.to/leastbad/async-redis-key-mutation-notifications-in-rails-4hng</guid>
+      <description>&lt;p&gt;I am a huge fan of &lt;a href="https://github.com/rails/kredis"&gt;Kredis&lt;/a&gt;. It allows Rails developers to see Redis as far more than just a fragment cache and "where jobs are".&lt;/p&gt;
+
+&lt;p&gt;Working with Kredis made me want to be able to run &lt;a href="https://cableready.stimulusreflex.com/reference/operations"&gt;arbitrary operations&lt;/a&gt; in my Rails app when specific keys are modified via specific Redis commands. &lt;a href="https://redis.io/topics/pubsub"&gt;Redis has an excellent pub/sub infrastructure&lt;/a&gt;, and all &lt;a href="https://redis.io/topics/notifications"&gt;Redis commands publish messages&lt;/a&gt;.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#why-would-someone-want-this"&gt;
+  &lt;/a&gt;
+  Why would someone want this?
+&lt;/h1&gt;
+
+&lt;p&gt;While it's true that changes to data that occur within a typical Rails app are already well covered by model callbacks, state machines and other standard tooling, an entire world of real-time stream processing, ETL and multi-application use cases open up when you can run &lt;code&gt;redis-cli set leastbad rules&lt;/code&gt; on your terminal and pick it up in your app.&lt;/p&gt;
+
+&lt;p&gt;Problem #1: Listening for messages blocks execution.&lt;br&gt;
+Solution #1: Spin up a thread!&lt;/p&gt;
+
+&lt;p&gt;Problem #2: Every dyno/server is going to receive the same messages, causing mayhem as developers respond to those messages with database updates. Side-effect chaos!&lt;br&gt;
+Solution #2: A standalone process that can be registered as a &lt;code&gt;worker&lt;/code&gt; in &lt;code&gt;Procfile&lt;/code&gt;... &lt;em&gt;sort of like Sidekiq.&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;At first, I was just planning on borrowing 95% of Mike Perham's battle-hardened code. Then I realized that the Venn diagram of "people who want a Redis changeset firehose" and "Sidekiq users" is close to 100%... &lt;strong&gt;so I just bolted what I needed onto Sidekiq&lt;/strong&gt;.&lt;/p&gt;
+&lt;h1&gt;
+  &lt;a href="#try-it-out"&gt;
+  &lt;/a&gt;
+  Try it out!
+&lt;/h1&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;What follows is the MVP of my new gem. In fact, it's not a gem, yet: it's an initializer! It has no tests and is hours old. My janky code would make poor Mike &lt;a href="https://youtu.be/W7JyjZI3LUM?t=333"&gt;bleed out&lt;/a&gt;. The goal is to see if folks actually need/want this to exist. &lt;strong&gt;I'm looking for feedback on what the ideal Rails-side API would actually look like&lt;/strong&gt;.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;Your Rails app needs to be up and running with Sidekiq. Just stick this in &lt;code&gt;config/initializers/sidekiq.rb&lt;/code&gt;:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight ruby"&gt;&lt;code&gt;&lt;span class="k"&gt;module&lt;/span&gt; &lt;span class="nn"&gt;Sidekiq&lt;/span&gt;
+  &lt;span class="k"&gt;class&lt;/span&gt; &lt;span class="nc"&gt;Subscriber&lt;/span&gt;
+    &lt;span class="kp"&gt;include&lt;/span&gt; &lt;span class="o"&gt;::&lt;/span&gt;&lt;span class="no"&gt;Sidekiq&lt;/span&gt;&lt;span class="o"&gt;::&lt;/span&gt;&lt;span class="no"&gt;Util&lt;/span&gt;
+
+    &lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;initialize&lt;/span&gt;
+      &lt;span class="vi"&gt;@done&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="kp"&gt;false&lt;/span&gt;
+      &lt;span class="vi"&gt;@thread&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="kp"&gt;nil&lt;/span&gt;
+    &lt;span class="k"&gt;end&lt;/span&gt;
+
+    &lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;start&lt;/span&gt;
+      &lt;span class="vi"&gt;@thread&lt;/span&gt; &lt;span class="o"&gt;||=&lt;/span&gt; &lt;span class="n"&gt;safe_thread&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;"subscriber"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="k"&gt;until&lt;/span&gt; &lt;span class="vi"&gt;@done&lt;/span&gt;
+          &lt;span class="no"&gt;Sidekiq&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;redis&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt; &lt;span class="o"&gt;|&lt;/span&gt;&lt;span class="n"&gt;conn&lt;/span&gt;&lt;span class="o"&gt;|&lt;/span&gt;
+            &lt;span class="c1"&gt;# https://redis.io/topics/notifications#configuration&lt;/span&gt;
+            &lt;span class="n"&gt;conn&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;config&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="ss"&gt;:set&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s2"&gt;"notify-keyspace-events"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s2"&gt;"E$lshz"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+            &lt;span class="c1"&gt;# https://redis.io/topics/notifications#events-generated-by-different-commands&lt;/span&gt;
+            &lt;span class="n"&gt;conn&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;psubscribe&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;"__key*__:*"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt; &lt;span class="o"&gt;|&lt;/span&gt;&lt;span class="n"&gt;on&lt;/span&gt;&lt;span class="o"&gt;|&lt;/span&gt;
+              &lt;span class="n"&gt;on&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;psubscribe&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
+                &lt;span class="vi"&gt;@firehose&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="no"&gt;Firehose&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;new&lt;/span&gt;
+              &lt;span class="k"&gt;end&lt;/span&gt;
+              &lt;span class="n"&gt;on&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;pmessage&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt; &lt;span class="o"&gt;|&lt;/span&gt;&lt;span class="n"&gt;pattern&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;command&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;key&lt;/span&gt;&lt;span class="o"&gt;|&lt;/span&gt;
+                &lt;span class="vi"&gt;@firehose&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;process&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;command&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;split&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;":"&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nf"&gt;last&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;to_sym&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;key&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+              &lt;span class="k"&gt;end&lt;/span&gt;
+              &lt;span class="n"&gt;on&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;punsubscribe&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
+                &lt;span class="vi"&gt;@firehose&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="kp"&gt;nil&lt;/span&gt;
+              &lt;span class="k"&gt;end&lt;/span&gt;
+            &lt;span class="k"&gt;end&lt;/span&gt;
+          &lt;span class="k"&gt;end&lt;/span&gt;
+        &lt;span class="k"&gt;end&lt;/span&gt;
+        &lt;span class="no"&gt;Sidekiq&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;logger&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;info&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;"Subscriber exiting..."&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+      &lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="k"&gt;end&lt;/span&gt;
+
+    &lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;terminate&lt;/span&gt;
+      &lt;span class="vi"&gt;@done&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="kp"&gt;true&lt;/span&gt;
+      &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="vi"&gt;@thread&lt;/span&gt;
+        &lt;span class="n"&gt;t&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="vi"&gt;@thread&lt;/span&gt;
+        &lt;span class="no"&gt;Thread&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;kill&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="vi"&gt;@thread&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+        &lt;span class="vi"&gt;@thread&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="kp"&gt;nil&lt;/span&gt;
+        &lt;span class="n"&gt;t&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;value&lt;/span&gt;
+      &lt;span class="k"&gt;end&lt;/span&gt;
+    &lt;span class="k"&gt;end&lt;/span&gt;
+  &lt;span class="k"&gt;end&lt;/span&gt;
+&lt;span class="k"&gt;end&lt;/span&gt;
+
+&lt;span class="k"&gt;module&lt;/span&gt; &lt;span class="nn"&gt;CoreExtensions&lt;/span&gt;
+  &lt;span class="k"&gt;module&lt;/span&gt; &lt;span class="nn"&gt;Sidekiq&lt;/span&gt;
+    &lt;span class="k"&gt;module&lt;/span&gt; &lt;span class="nn"&gt;Launcher&lt;/span&gt;
+      &lt;span class="nb"&gt;attr_accessor&lt;/span&gt; &lt;span class="ss"&gt;:subscriber&lt;/span&gt;
+
+      &lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;initialize&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;options&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+        &lt;span class="vi"&gt;@subscriber&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="o"&gt;::&lt;/span&gt;&lt;span class="no"&gt;Sidekiq&lt;/span&gt;&lt;span class="o"&gt;::&lt;/span&gt;&lt;span class="no"&gt;Subscriber&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;new&lt;/span&gt;
+        &lt;span class="k"&gt;super&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;options&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+      &lt;span class="k"&gt;end&lt;/span&gt;
+
+      &lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;run&lt;/span&gt;
+        &lt;span class="k"&gt;super&lt;/span&gt;
+        &lt;span class="n"&gt;subscriber&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;start&lt;/span&gt;
+      &lt;span class="k"&gt;end&lt;/span&gt;
+
+      &lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;quiet&lt;/span&gt;
+        &lt;span class="n"&gt;subscriber&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;terminate&lt;/span&gt;
+        &lt;span class="k"&gt;super&lt;/span&gt;
+      &lt;span class="k"&gt;end&lt;/span&gt;
+
+      &lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;stop&lt;/span&gt;
+        &lt;span class="n"&gt;subscriber&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;terminate&lt;/span&gt;
+        &lt;span class="k"&gt;super&lt;/span&gt;
+      &lt;span class="k"&gt;end&lt;/span&gt;
+    &lt;span class="k"&gt;end&lt;/span&gt;
+  &lt;span class="k"&gt;end&lt;/span&gt;
+&lt;span class="k"&gt;end&lt;/span&gt;
+
+&lt;span class="no"&gt;Sidekiq&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;configure_server&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
+  &lt;span class="nb"&gt;require&lt;/span&gt; &lt;span class="s2"&gt;"sidekiq/launcher"&lt;/span&gt;
+  &lt;span class="o"&gt;::&lt;/span&gt;&lt;span class="no"&gt;Sidekiq&lt;/span&gt;&lt;span class="o"&gt;::&lt;/span&gt;&lt;span class="no"&gt;Launcher&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;prepend&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="no"&gt;CoreExtensions&lt;/span&gt;&lt;span class="o"&gt;::&lt;/span&gt;&lt;span class="no"&gt;Sidekiq&lt;/span&gt;&lt;span class="o"&gt;::&lt;/span&gt;&lt;span class="no"&gt;Launcher&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="k"&gt;end&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;I'm using &lt;a href="https://cableready.stimulusreflex.com"&gt;CableReady&lt;/a&gt; to send console log notifications to the Console Inspector whenever a key is updated with the Redis &lt;code&gt;SET&lt;/code&gt; command. I have a simple &lt;code&gt;AllUsers&lt;/code&gt; ActionCable Channel in play for testing. This lives in &lt;code&gt;app/lib/firehose.rb&lt;/code&gt;:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight ruby"&gt;&lt;code&gt;&lt;span class="k"&gt;class&lt;/span&gt; &lt;span class="nc"&gt;Firehose&lt;/span&gt;
+  &lt;span class="kp"&gt;include&lt;/span&gt; &lt;span class="no"&gt;CableReady&lt;/span&gt;&lt;span class="o"&gt;::&lt;/span&gt;&lt;span class="no"&gt;Broadcaster&lt;/span&gt;
+
+  &lt;span class="nb"&gt;attr_reader&lt;/span&gt; &lt;span class="ss"&gt;:redis&lt;/span&gt;
+
+  &lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;initialize&lt;/span&gt;
+    &lt;span class="vi"&gt;@redis&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="no"&gt;Redis&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;new&lt;/span&gt;
+  &lt;span class="k"&gt;end&lt;/span&gt;
+
+  &lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;process&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;command&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;key&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="k"&gt;case&lt;/span&gt; &lt;span class="n"&gt;command&lt;/span&gt; &lt;span class="c1"&gt;# https://github.com/rails/kredis#examples&lt;/span&gt;
+    &lt;span class="k"&gt;when&lt;/span&gt; &lt;span class="ss"&gt;:set&lt;/span&gt;    &lt;span class="c1"&gt;# string, integer, json&lt;/span&gt;
+      &lt;span class="n"&gt;cable_ready&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s2"&gt;"all_users"&lt;/span&gt;&lt;span class="p"&gt;].&lt;/span&gt;&lt;span class="nf"&gt;console_log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="ss"&gt;message: &lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="si"&gt;#{&lt;/span&gt;&lt;span class="n"&gt;key&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="s2"&gt; was just updated to &lt;/span&gt;&lt;span class="si"&gt;#{&lt;/span&gt;&lt;span class="n"&gt;redis&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;get&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;key&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nf"&gt;broadcast&lt;/span&gt;
+    &lt;span class="k"&gt;when&lt;/span&gt; &lt;span class="ss"&gt;:rpush&lt;/span&gt;  &lt;span class="c1"&gt;# list&lt;/span&gt;
+    &lt;span class="k"&gt;when&lt;/span&gt; &lt;span class="ss"&gt;:lrem&lt;/span&gt;   &lt;span class="c1"&gt;# unique_list&lt;/span&gt;
+    &lt;span class="k"&gt;when&lt;/span&gt; &lt;span class="ss"&gt;:sadd&lt;/span&gt;   &lt;span class="c1"&gt;# set&lt;/span&gt;
+    &lt;span class="k"&gt;when&lt;/span&gt; &lt;span class="ss"&gt;:incr&lt;/span&gt;
+    &lt;span class="k"&gt;when&lt;/span&gt; &lt;span class="ss"&gt;:decr&lt;/span&gt;
+    &lt;span class="k"&gt;when&lt;/span&gt; &lt;span class="ss"&gt;:incrby&lt;/span&gt;
+    &lt;span class="k"&gt;when&lt;/span&gt; &lt;span class="ss"&gt;:decrby&lt;/span&gt;
+    &lt;span class="k"&gt;when&lt;/span&gt; &lt;span class="ss"&gt;:exists&lt;/span&gt;
+    &lt;span class="k"&gt;when&lt;/span&gt; &lt;span class="ss"&gt;:del&lt;/span&gt;
+      &lt;span class="n"&gt;cable_ready&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s2"&gt;"all_users"&lt;/span&gt;&lt;span class="p"&gt;].&lt;/span&gt;&lt;span class="nf"&gt;console_log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="ss"&gt;message: &lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="si"&gt;#{&lt;/span&gt;&lt;span class="n"&gt;key&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="s2"&gt; was deleted"&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nf"&gt;broadcast&lt;/span&gt;
+    &lt;span class="k"&gt;else&lt;/span&gt;
+    &lt;span class="k"&gt;end&lt;/span&gt;
+  &lt;span class="k"&gt;end&lt;/span&gt;
+&lt;span class="k"&gt;end&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;As Seinfeld would say, &lt;strong&gt;is this anything?&lt;/strong&gt;&lt;/p&gt;
+
+</description>
+      <category>rails</category>
+      <category>redis</category>
+    </item>
+    <item>
       <title>You are coding the wrong way in Python if you aren't using these two libraries</title>
       <author>Rohith Gilla</author>
       <pubDate>Sun, 27 Jun 2021 14:48:49 +0000</pubDate>
@@ -598,12 +763,379 @@ After that, I set a new property value for the root element that takes the value
       <category>100daysofcode</category>
     </item>
     <item>
+      <title>Abstract Syntax Tree (AST)</title>
+      <author>Rahul Khinchi</author>
+      <pubDate>Sun, 27 Jun 2021 14:03:10 +0000</pubDate>
+      <link>https://dev.to/rk7/abstract-syntax-tree-ast-43p0</link>
+      <guid>https://dev.to/rk7/abstract-syntax-tree-ast-43p0</guid>
+      <description>&lt;h3&gt;
+  &lt;a href="#what-is-ast"&gt;
+  &lt;/a&gt;
+  What is AST?
+&lt;/h3&gt;
+
+&lt;p&gt;It is a tree representation of the abstract syntactic structure of source code written in a programming language. Each node of the tree denotes a construct occurring in the source code.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#application-in-compilers"&gt;
+  &lt;/a&gt;
+  Application in compilers
+&lt;/h3&gt;
+
+&lt;p&gt;Abstract syntax trees are data structures widely used in compilers to represent the structure of program code. An AST is usually the result of the syntax analysis phase of a compiler. It often serves as an intermediate representation of the program through several stages that the compiler requires, and has a strong impact on the final output of the compiler.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#for-example-this-is-a-source-code"&gt;
+  &lt;/a&gt;
+  For Example, This is a Source Code.
+&lt;/h3&gt;
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;class GFG {
+    public static void main (String[] args) {
+        System.out.println("Hello World!");
+    }
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#ast-of-above-source-code"&gt;
+  &lt;/a&gt;
+  AST of above source code:
+&lt;/h3&gt;
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;CLASS_DEF -&amp;gt; CLASS_DEF [1:0]
+|--MODIFIERS -&amp;gt; MODIFIERS [1:0]
+|   `--LITERAL_PUBLIC -&amp;gt; public [1:0]
+|--LITERAL_CLASS -&amp;gt; class [1:7]
+|--IDENT -&amp;gt; GFG [1:13]
+`--OBJBLOCK -&amp;gt; OBJBLOCK [1:17]
+    |--LCURLY -&amp;gt; { [1:17]
+    |--METHOD_DEF -&amp;gt; METHOD_DEF [2:4]
+    |   |--MODIFIERS -&amp;gt; MODIFIERS [2:4]
+    |   |   |--LITERAL_PUBLIC -&amp;gt; public [2:4]
+    |   |   `--LITERAL_STATIC -&amp;gt; static [2:11]
+    |   |--TYPE -&amp;gt; TYPE [2:18]
+    |   |   `--LITERAL_VOID -&amp;gt; void [2:18]
+    |   |--IDENT -&amp;gt; main [2:23]
+    |   |--LPAREN -&amp;gt; ( [2:27]
+    |   |--PARAMETERS -&amp;gt; PARAMETERS [2:34]
+    |   |   `--PARAMETER_DEF -&amp;gt; PARAMETER_DEF [2:34]
+    |   |       |--MODIFIERS -&amp;gt; MODIFIERS [2:34]
+    |   |       |--TYPE -&amp;gt; TYPE [2:34]
+    |   |       |   `--ARRAY_DECLARATOR -&amp;gt; [ [2:34]
+    |   |       |       |--IDENT -&amp;gt; String [2:28]
+    |   |       |       `--RBRACK -&amp;gt; ] [2:35]
+    |   |       `--IDENT -&amp;gt; args [2:37]
+    |   |--RPAREN -&amp;gt; ) [2:41]
+    |   `--SLIST -&amp;gt; { [2:43]
+    |       |--EXPR -&amp;gt; EXPR [3:26]
+    |       |   `--METHOD_CALL -&amp;gt; ( [3:26]
+    |       |       |--DOT -&amp;gt; . [3:18]
+    |       |       |   |--DOT -&amp;gt; . [3:14]
+    |       |       |   |   |--IDENT -&amp;gt; System [3:8]
+    |       |       |   |   `--IDENT -&amp;gt; out [3:15]
+    |       |       |   `--IDENT -&amp;gt; println [3:19]
+    |       |       |--ELIST -&amp;gt; ELIST [3:27]
+    |       |       |   `--EXPR -&amp;gt; EXPR [3:27]
+    |       |       |       `--STRING_LITERAL -&amp;gt; "Hello World!" [3:27]
+    |       |       `--RPAREN -&amp;gt; ) [3:41]
+    |       |--SEMI -&amp;gt; ; [3:42]
+    |       `--RCURLY -&amp;gt; } [4:4]
+    `--RCURLY -&amp;gt; } [5:0]
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+
+
+
+&lt;h2&gt;
+  &lt;a href="#how-to-make-an-ast"&gt;
+  &lt;/a&gt;
+  How to Make an AST:
+&lt;/h2&gt;
+
+&lt;ol&gt;
+&lt;li&gt;&lt;p&gt;Run the Source Code in your local Environment.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Download the Checkstyle Command line: checkstyle-8.43-all.jar from &lt;a href="https://checkstyle.org/cmdline.html"&gt;Here&lt;/a&gt;.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Audit the Program with the help of Checkstyle in your Terminal: java -jar checkstyle-8.43-all.jar -c /google_checks.xml YourFile.java&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;After Audit, Run this command in your terminal to get the AST of your preferred  Code: java -jar checkstyle-8.43-all.jar -t YourFile.java&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;Your AST is Ready.&lt;/p&gt;
+
+
+&lt;/li&gt;
+&lt;/ol&gt;
+
+
+
+
+&lt;h2&gt;
+  &lt;a href="#to-learn-more-about-ast-and-checkstyle-click-here"&gt;
+  &lt;/a&gt;
+  To learn More about AST and Checkstyle: &lt;a href="https://checkstyle.org/cmdline.html"&gt;Click Here&lt;/a&gt;
+&lt;/h2&gt;
+
+</description>
+      <category>opensource</category>
+      <category>java</category>
+      <category>contributorswanted</category>
+      <category>testing</category>
+    </item>
+    <item>
+      <title>Branching Out (With Git)</title>
+      <author>Jenna Toff</author>
+      <pubDate>Sun, 27 Jun 2021 14:02:36 +0000</pubDate>
+      <link>https://dev.to/larkceresin/branching-out-with-git-m28</link>
+      <guid>https://dev.to/larkceresin/branching-out-with-git-m28</guid>
+      <description>&lt;p&gt;When thinking of a branch: the first thing to come to mind is the part of a tree that is growing out from another part of the same tree. As a tree grows, branches are sent out from the trunk or from other branches. They grow leaves and help with supplying nourishment to the tree to become a better tree. When a specific branch dies, it might fall off or be pruned so another branch can grow in its place.&lt;/p&gt;
+
+&lt;p&gt;When it comes to git: branches work similarly. You have your trunk: but it's called Main (or Master if your repository was created before Oct 2020) that is the primary living portion of your code. You can create branches that copy the current Main code to allow you to build on it, make changes, and test things without effecting your live environment. Once you're done and successfully made changes, you can merge them into your Main. Branches can also be used to create other branches, and can be areas to merge other code into as well. After you're done with the branch, it can be deleted.&lt;/p&gt;
+
+&lt;p&gt;To get started with branches: there's a few common commands to learn:&lt;br&gt;
+&lt;code&gt;git branch&lt;/code&gt; Will list all branches, with an indicator on which one you're on. (Depending on your system this can be a symbol or different coloring)&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;git branch &amp;lt;nameOfBranch&amp;gt;&lt;/code&gt; Will create a branch by the name of &lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;git checkout &amp;lt;nameOfBranch&amp;gt;&lt;/code&gt; Will change your &lt;em&gt;pointer&lt;/em&gt; to the branch specified at &lt;/p&gt;
+
+&lt;p&gt;Using &lt;code&gt;git checkout -b &amp;lt;nameOfBranch&amp;gt;&lt;/code&gt; will create and switch you over to the new branch in one line!&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;git merge &amp;lt;nameOfBranch&amp;gt;&lt;/code&gt; will combine content of branch specified in  with the branch you're currently on. In the case of changes in the same areas from when both points were at similar states, you'll be notified of a merge conflict where you'll either be directed to select which changes to keep or have to manually correct the conflicting area.&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;git branch -d &amp;lt;nameOfBranch&amp;gt;&lt;/code&gt; removes/deletes the specified branch. You do need to be on a different branch than the one you're trying to delete.&lt;/p&gt;
+
+&lt;p&gt;If you want to learn more about git branches be sure to check out additional documentation on branches. This includes different flags you can use, which can give more visibility to how you're displaying information about your branches, as well as extra things you can do!&lt;/p&gt;
+
+</description>
+    </item>
+    <item>
+      <title>Running a Java Application as a Service</title>
+      <author>Davey</author>
+      <pubDate>Sun, 27 Jun 2021 13:50:26 +0000</pubDate>
+      <link>https://dev.to/davey/running-a-java-application-as-a-service-1c0o</link>
+      <guid>https://dev.to/davey/running-a-java-application-as-a-service-1c0o</guid>
+      <description>&lt;p&gt;With the advent of cloud computing, we now have many ways that we can deploy Java applications. For example, we can deploy them to an Iaas (Infrastructure as a service) such as Amazon &lt;a href="https://aws.amazon.com/ec2"&gt;EC2&lt;/a&gt;, or to a Paas (Platform as a service) such as &lt;a href="https://aws.amazon.com/elasticbeanstalk"&gt;Amazon Elastic Beanstalk&lt;/a&gt; or also to a variety of other solutions.&lt;/p&gt;
+
+&lt;p&gt;In this article, I'm going to show how to deploy an application to a service such as EC2 where we have full control over the platform. I'll be deploying onto a Linux EC2 instance that already has Java installed and concentrating on configuring a stable environment for a Java application.&lt;/p&gt;
+
+&lt;p&gt;There are many ways that a Java application can be controlled within Linux. It can be started manually via the &lt;code&gt;java&lt;/code&gt; command, or it can be deployed and ran as an executable (for example, via SpringBoot), or it can be ran as a service.&lt;/p&gt;
+
+&lt;p&gt;In this post, I'm going to show how to run a Java application (or any other application for that matter) as a system service. When running as a system service, we get the following benefits:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;We can specify the user the application runs as&lt;/li&gt;
+&lt;li&gt;We can easily start and stop the application&lt;/li&gt;
+&lt;li&gt;We can configure the application to automatically start up when the system boot&lt;/li&gt;
+&lt;li&gt;We can configure the application to start again in the case of failure.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h2&gt;
+  &lt;a href="#creating-a%C2%A0service"&gt;
+  &lt;/a&gt;
+  Creating a Service
+&lt;/h2&gt;
+
+&lt;p&gt;To create a service, I'm going to assume that we have a Jar packaged version of the application. This can be created by Maven with the package command:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;mvn package
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;To control our application, we're going to run it as a systemd service. Wikipedia defines systemd as:&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;a software suite that provides an array of system components for Linux operating systems. Its main aim is to unify service configuration and behavior across Linux distributions; systemd's primary component is a "system and service manager" - an init system used to bootstrap user space and manage user processes.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;To create a service, we need to have the relevant access to the server, so we need to ensure we have &lt;code&gt;sudo&lt;/code&gt; access.&lt;/p&gt;
+
+&lt;p&gt;The first stage in defining the application as a service, is to create a file within the &lt;code&gt;/etc/systemd/system&lt;/code&gt; directory with a name of &lt;code&gt;myapp.service&lt;/code&gt;&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;/etc/systemd/system/myapp.service
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Within this file, we need to add 3 sections. &lt;code&gt;[Unit]&lt;/code&gt; defines the description of the service, &lt;code&gt;[Service]&lt;/code&gt; defines how the service is executed and &lt;code&gt;[Install]&lt;/code&gt; tells the operating system when to run the application. For example&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;[Unit]
+Description=My Application As A Service
+
+[Service]
+User=myapp_user 
+Group=myapp_group 
+Type=simple 
+ExecStart= java -jar /home/ubuntu/myapp/myapp.jar -Xmx512m –Xms512m -XX:MaxNewSize=384m -XX:MaxPermSize=128m  
+SuccessExitStatus=143
+
+[Install]
+WantedBy=multi-user.target
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Let's take a look at each of these sections in turn.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#unit"&gt;
+  &lt;/a&gt;
+  [Unit]
+&lt;/h2&gt;
+
+&lt;p&gt;This section simply contains one entry which is the description of the service. Note, the name of the service is defined by the name of the file within the &lt;code&gt;/etc/systemd/system&lt;/code&gt; directory.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#service"&gt;
+  &lt;/a&gt;
+  [Service]
+&lt;/h2&gt;
+
+&lt;p&gt;This section defines details that the operating system requires to be able to start the service. Firstly, the User and Group specify the security details for the application to run. The application is run as this specified user and group and has their permissions.&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;Type&lt;/code&gt; can be set to &lt;code&gt;simple&lt;/code&gt; for most cases. This defines that the application will run immediately without forking any other processes. For a definition of the other options available here, check out the &lt;a href="http://manpages.ubuntu.com/manpages/cosmic/man5/systemd.service.5.html"&gt;man pages&lt;/a&gt; for systemd.&lt;/p&gt;
+
+&lt;p&gt;Next, &lt;code&gt;ExecStart&lt;/code&gt; specifies the command that is used to run the application. Here, we specify the entire command line (including &lt;code&gt;java&lt;/code&gt; and any parameters) to run the application. This can be very useful as we can specify which version of Java to use here, so an application can be configured to run with any required JVM, and not only with the system's default JVM. Any JVM properties or application variables can be configured here.&lt;/p&gt;
+
+&lt;p&gt;Finally, as we're running a Java application, we need to tell it how to play properly with systemd. When a Java application is killed via a SIGTERM event, the JVM will close down cleanly but will return an exit code of 143. Adding this as a &lt;code&gt;SuccessExitStatus&lt;/code&gt; tells systemd that the application has closed cleanly in this situation.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#install"&gt;
+  &lt;/a&gt;
+  [Install]
+&lt;/h2&gt;
+
+&lt;p&gt;The last section basically tells systemd that if the application is configured to start at server boot time, then do so as part of the normal boot process. This tells systemd that the application can start at boot time, but not that it necessarily will. Read on for how we do that.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#controlling-the%C2%A0service"&gt;
+  &lt;/a&gt;
+  Controlling the Service
+&lt;/h2&gt;
+
+&lt;p&gt;Once the &lt;code&gt;.service&lt;/code&gt; file has been created, we need to tell systemd that we have a new service. This is achieved by executing:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;sudo systemctl daemon-reload
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Once executed, we can start and stop the service via:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;sudo systemctl start myapp
+sudo systemctl stop myapp
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We can get the status of the application by executing:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;sudo systemctl status myapp
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Finally, if we want to tell the systemd to start the application at boot time, we can execute the following command:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;sudo systemctl enable myapp
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#restarting-upon%C2%A0failure"&gt;
+  &lt;/a&gt;
+  Restarting upon Failure
+&lt;/h2&gt;
+
+&lt;p&gt;Now that we've seen how to create and manage a service, the only thing remaining is to tell systemd to restart the service in case of a failure.&lt;/p&gt;
+
+&lt;p&gt;That can be achieved by adding the following entries into the &lt;code&gt;[Service]&lt;/code&gt; section of the file.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;Restart=on-failure
+RestartSec=10s
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This configuration tells systemd to restart the service 10s after a failure (you can obviously customise this to your required time interval).&lt;/p&gt;
+
+&lt;p&gt;There are other options available here, for example, when the service is to restart and how many attempts to be made. For more information, check out the &lt;a href="http://manpages.ubuntu.com/manpages/cosmic/man5/systemd.service.5.html"&gt;man pages&lt;/a&gt; for systemd.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#conclusion"&gt;
+  &lt;/a&gt;
+  Conclusion
+&lt;/h2&gt;
+
+&lt;p&gt;In this post we've seen how to run a Java application as a service using systemd, and how to control it. We've seen how to start the service at boot time and how to restart the service upon failure.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#credits"&gt;
+  &lt;/a&gt;
+  Credits
+&lt;/h2&gt;
+
+&lt;p&gt;Photo by &lt;a href="https://unsplash.com/@introspectivedsgn?utm_source=medium&amp;amp;utm_medium=referral"&gt;Erik Mclean&lt;/a&gt; on &lt;a href="https://unsplash.com?utm_source=medium&amp;amp;utm_medium=referral"&gt;Unsplash&lt;/a&gt;&lt;/p&gt;
+
+</description>
+      <category>java</category>
+      <category>ec2</category>
+      <category>systemd</category>
+      <category>services</category>
+    </item>
+    <item>
       <title>Add a 'Slider' to your Website using CSS and Javascript</title>
       <author>Devang Saklani</author>
       <pubDate>Sun, 27 Jun 2021 13:38:11 +0000</pubDate>
       <link>https://dev.to/devang/add-a-slider-to-your-website-using-css-and-javascript-238e</link>
       <guid>https://dev.to/devang/add-a-slider-to-your-website-using-css-and-javascript-238e</guid>
-      <description>&lt;p&gt;In this article I will tell you several ways to &lt;strong&gt;add a Slider to your website&lt;/strong&gt; and how you can use these sliders to make your website look more &lt;strong&gt;Attractive&lt;/strong&gt; and more &lt;strong&gt;Functional&lt;/strong&gt;.&lt;/p&gt;
+      <description>&lt;p&gt;In this article I will tell you several ways to &lt;strong&gt;add a Slider to your website&lt;/strong&gt; and how you can use these sliders to make your website look more Attractive and more Functional.&lt;/p&gt;
 
 &lt;h2&gt;
   &lt;a href="#first-of-all-what-is-meant-by-slider"&gt;
@@ -611,7 +1143,7 @@ After that, I set a new property value for the root element that takes the value
   First of all, What is meant by slider?
 &lt;/h2&gt;
 
-&lt;p&gt;A &lt;strong&gt;slider&lt;/strong&gt; is a term that refers to a slideshow on a website. An example of a &lt;strong&gt;slider&lt;/strong&gt; can be a revolving carousel that displays products or photos.&lt;/p&gt;
+&lt;p&gt;A slider is a term that refers to a slideshow on a website. An example of a slider can be a revolving carousel that displays products or photos.&lt;/p&gt;
 
 &lt;p&gt;Types of Sliders we are going to build:&lt;/p&gt;
 
@@ -632,10 +1164,10 @@ After that, I set a new property value for the root element that takes the value
 &lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--MvUTcywa--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/64rqh5qsc01hqumylg56.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--MvUTcywa--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/64rqh5qsc01hqumylg56.png" alt="W3Scchools slider example"&gt;&lt;/a&gt;&lt;br&gt;
 Codepen example: &lt;a href="https://codepen.io/devang47/pen/OJmLELR"&gt;click here&lt;/a&gt;&lt;/p&gt;
 
-&lt;p&gt;You can &lt;strong&gt;customize&lt;/strong&gt; it as much as you want (if you know how to).&lt;br&gt;
+&lt;p&gt;You can also customize it as much as you want (if you know how to).&lt;br&gt;
 I won't do deeper into its working as it is already full explained by W3Schools in &lt;a href="https://www.w3schools.com/howto/howto_js_slideshow.asp"&gt;this article.&lt;/a&gt;  &lt;/p&gt;
 
-&lt;p&gt;And a person Named &lt;a href="https://www.toptal.com/css/full-page-slider-css-and-javascript"&gt;Stefan Vitasovic&lt;/a&gt; has &lt;strong&gt;made  a cool slider&lt;/strong&gt; using plain CSS and JS. I would recommened you to check-out his method, If you are making it with plain JS. Check out what he made &lt;strong&gt;&lt;a href="http://stefan.lynxdev.io/projects/fullscreen-slider/"&gt;here&lt;/a&gt;&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;And a person Named &lt;a href="https://www.toptal.com/css/full-page-slider-css-and-javascript"&gt;Stefan Vitasovic&lt;/a&gt; has made  a cool slider using plain CSS and JS. I would recommened you to check-out his method, If you are making it with plain JS. Check out what he made &lt;a href="http://stefan.lynxdev.io/projects/fullscreen-slider/"&gt;here&lt;/a&gt;&lt;/p&gt;
 
 &lt;p&gt;I would suggest not to use this method if you are a beginner as this method is most complicated. But it can be really helpful to you in some way! i.e. you will get deeper knowledge of It's working and I am sure you will learn many things from it.&lt;/p&gt;
 &lt;h1&gt;
@@ -644,7 +1176,7 @@ I won't do deeper into its working as it is already full explained by W3Schools 
   Using CSS libraries (Bootstrap)
 &lt;/h1&gt;
 
-&lt;p&gt;In this method we will use &lt;strong&gt;&lt;em&gt;Bootstrap&lt;/em&gt;&lt;/strong&gt; to make a Image slider.&lt;br&gt;
+&lt;p&gt;In this method we will use &lt;strong&gt;Bootstrap&lt;/strong&gt; to make a Image slider.&lt;br&gt;
 &lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--pR3_-hJt--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/s48fjyhnt26vb5dc8gh0.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--pR3_-hJt--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/s48fjyhnt26vb5dc8gh0.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
 
 &lt;p&gt;First of all, import bootstrap CSS and JS files from any CDN network (for a quick setup).&lt;br&gt;
@@ -685,7 +1217,7 @@ Then go to &lt;a href="https://getbootstrap.com/docs/5.0/components/carousel/"&g
 
 &lt;p&gt;Codepen example: &lt;a href="https://codepen.io/devang47/pen/vYmBrXN"&gt;click here&lt;/a&gt;&lt;/p&gt;
 
-&lt;p&gt;You can do many customizations like: add &lt;strong&gt;Controls&lt;/strong&gt;, &lt;strong&gt;Indicators&lt;/strong&gt;, &lt;strong&gt;Captions&lt;/strong&gt;, &lt;strong&gt;Custom Transition effects&lt;/strong&gt; etc. by reading their documentation &lt;a href="https://getbootstrap.com/docs/5.0/components/carousel/"&gt;here&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;You can do many customizations like: add Controls, Indicators, Captions, Custom Transition effects etc. by reading their documentation &lt;a href="https://getbootstrap.com/docs/5.0/components/carousel/"&gt;here&lt;/a&gt;.&lt;/p&gt;
 
 &lt;p&gt;All I have to say about this is that this is a really easy and fast way to add/make a slider in your Website without compromising anything. &lt;/p&gt;
 
@@ -697,7 +1229,7 @@ Then go to &lt;a href="https://getbootstrap.com/docs/5.0/components/carousel/"&g
 
 &lt;p&gt;This is (according to me) the best way to add a Image/Normal Slider with good Animations in your website.&lt;br&gt;
 &lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Cbd31G7B--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/3g4i3ntecjr5k8uubjur.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Cbd31G7B--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/3g4i3ntecjr5k8uubjur.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;br&gt;
- In this we will use a JS library called &lt;strong&gt;&lt;a href="https://swiperjs.com/"&gt;SwiperJS&lt;/a&gt;&lt;/strong&gt;. You can use others too, but this one is &lt;strong&gt;maintained&lt;/strong&gt; and really &lt;strong&gt;popular&lt;/strong&gt; among developers. Also the things and &lt;strong&gt;customizations&lt;/strong&gt; you can do with it are just Amazing.&lt;/p&gt;
+ In this we will use a JS library called &lt;strong&gt;&lt;a href="https://swiperjs.com/"&gt;SwiperJS&lt;/a&gt;&lt;/strong&gt;. You can use others too, but this one is &lt;strong&gt;maintained&lt;/strong&gt; and really popular among developers. Also the things and customizations you can do with it are just Amazing.&lt;/p&gt;
 
 &lt;p&gt;Also, This library has support for Swipe gestures (which is a really difficult thing to make with plain JS). Check example &lt;a href="https://swiperjs.com/demos"&gt;&lt;strong&gt;here&lt;/strong&gt;&lt;/a&gt;&lt;/p&gt;
 &lt;h2&gt;
@@ -817,13 +1349,12 @@ Then go to &lt;a href="https://getbootstrap.com/docs/5.0/components/carousel/"&g
 
 
 
-&lt;p&gt;This is really &lt;strong&gt;Easy to setup&lt;/strong&gt; and it is &lt;strong&gt;highly maintained&lt;/strong&gt; library. You can do many customizations in this library such as: &lt;/p&gt;
+&lt;p&gt;This is really Easy to setup and it is highly maintained library. You can do many customizations in this library such as: &lt;/p&gt;
 
 &lt;ul&gt;
-&lt;li&gt;turn off &lt;strong&gt;Preloading Images&lt;/strong&gt; to get &lt;strong&gt;Lazyload&lt;/strong&gt; &lt;/li&gt;
+&lt;li&gt;turn off Preloading Images to get Lazyload&lt;/li&gt;
 &lt;li&gt;use &lt;code&gt;swiper.activeIndex&lt;/code&gt; in JS to get current index of frame&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;Add a slider inside a Slider&lt;/strong&gt; and many more&lt;/li&gt;
+&lt;li&gt;Add a slider inside a Slider and many more&lt;/li&gt;
 &lt;/ul&gt;
 
 &lt;p&gt;I would recommened you to read their &lt;strong&gt;Official Documentation&lt;/strong&gt; &lt;a href="https://github.com/nolimits4web/swiper"&gt;here&lt;/a&gt; or Check out some &lt;strong&gt;Examples&lt;/strong&gt; &lt;a href="https://swiperjs.com/demos"&gt;here&lt;/a&gt; to get more information about this Library.&lt;/p&gt;
@@ -848,6 +1379,457 @@ Then go to &lt;a href="https://getbootstrap.com/docs/5.0/components/carousel/"&g
       <category>webdev</category>
       <category>beginners</category>
       <category>html</category>
+    </item>
+    <item>
+      <title>Building a SaaS App: Beyond the Basics (Part III)</title>
+      <author>zchtodd</author>
+      <pubDate>Sun, 27 Jun 2021 13:31:25 +0000</pubDate>
+      <link>https://dev.to/zchtodd_79/building-a-saas-app-beyond-the-basics-part-iii-4am6</link>
+      <guid>https://dev.to/zchtodd_79/building-a-saas-app-beyond-the-basics-part-iii-4am6</guid>
+      <description>&lt;p&gt;Once you've finished this post, you'll have a foundation on which to build the data model of your applications, using SQLAlchemy and Postgres.&lt;/p&gt;
+
+&lt;p&gt;If you haven't read the &lt;a href="https://dev.to/zchtodd_79/building-a-saas-app-beyond-the-basics-1jh"&gt;first post in the series&lt;/a&gt;, this is a step by step guide on building a SaaS app that goes beyond the basics, showing you how to do everything from accept payments to manage users.  The example project is a Google rank tracker that we'll build together piece by piece, but you can apply these lessons to any kind of SaaS app.&lt;/p&gt;
+
+&lt;p&gt;In the last post, &lt;a href="https://dev.to/zchtodd_79/building-a-saas-app-beyond-the-basics-part-ii-1h90"&gt;we set up NGINX and Flask&lt;/a&gt; using Docker, with both a local development version, as well as a version suitable for production deployment.  In this post, we'll set up SQLAlchemy and explore a few of the performance pitfalls that lurk behind the scenes. Then we'll move to setting up our first real route handler, so that the scraper we built in part one can report its results.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://github.com/zchtodd/open-rank-tracker"&gt;You can find the complete code on GitHub.&lt;/a&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#table-of-contents"&gt;
+  &lt;/a&gt;
+  Table of Contents
+&lt;/h2&gt;
+
+&lt;ul&gt;
+&lt;li&gt;
+&lt;a href="https://dev.to/zchtodd_79/building-a-saas-app-beyond-the-basics-1jh#building-the-google-search-scraper"&gt;Part I: Building the Google Search Scraper&lt;/a&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="https://dev.to/zchtodd_79/building-a-saas-app-beyond-the-basics-1jh#setting-up-puppeteer-on-an-aws-instance"&gt;Setting up Puppeteer on an AWS instance&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://dev.to/zchtodd_79/building-a-saas-app-beyond-the-basics-1jh#making-a-simple-google-search-request"&gt;Making a simple Google search request&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://dev.to/zchtodd_79/building-a-saas-app-beyond-the-basics-1jh#using-a-proxy-network-for-scraper-requests"&gt;Using a proxy network for scraper requests&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://dev.to/zchtodd_79/building-a-saas-app-beyond-the-basics-1jh#gathering-the-search-results"&gt;Gathering the search results&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://dev.to/zchtodd_79/building-a-saas-app-beyond-the-basics-1jh#scraper-error-handling"&gt;Scraper error handling&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+
+&lt;/li&gt;
+&lt;li&gt;
+&lt;a href="https://dev.to/zchtodd_79/building-a-saas-app-beyond-the-basics-part-ii-1h90"&gt;Part II: Production Ready Deployment with NGINX, Flask, and Postgres&lt;/a&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="https://dev.to/zchtodd_79/building-a-saas-app-beyond-the-basics-part-ii-1h90#setting-up-docker-and-docker-compose"&gt;Setting up Docker and Docker Compose&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://dev.to/zchtodd_79/building-a-saas-app-beyond-the-basics-part-ii-1h90#deploying-the-development-version"&gt;Deploying the development version&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://dev.to/zchtodd_79/building-a-saas-app-beyond-the-basics-part-ii-1h90#understanding-how-nginx-and-flask-work-together"&gt;Understanding how NGINX and Flask work together&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://dev.to/zchtodd_79/building-a-saas-app-beyond-the-basics-part-ii-1h90#testing-the-nginx-and-flask-configuration"&gt;Testing the NGINX and Flask configuration&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://dev.to/zchtodd_79/building-a-saas-app-beyond-the-basics-part-ii-1h90#postgres-configuration"&gt;Postgres configuration&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://dev.to/zchtodd_79/building-a-saas-app-beyond-the-basics-part-ii-1h90#setting-up-ssl-with-lets-encrypt"&gt;Setting up SSL with Let's Encrypt&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://dev.to/zchtodd_79/building-a-saas-app-beyond-the-basics-part-ii-1h90#deploying-the-production-version"&gt;Deploying the production version&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+
+&lt;/li&gt;
+&lt;li&gt;
+&lt;a href="https://dev.to/zchtodd_79/building-a-saas-app-beyond-the-basics-part-iii-4am6"&gt;Part III: Flask, SQLAlchemy, and Postgres&lt;/a&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="https://dev.to/zchtodd_79/building-a-saas-app-beyond-the-basics-part-iii-4am6/#setting-up-sqlalchemy-and-postgres"&gt;Setting up SQLAlchemy and Postgres&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://dev.to/zchtodd_79/building-a-saas-app-beyond-the-basics-part-iii-4am6/#sqlalchemy-performance-pitfalls-to-avoid"&gt;SQLAlchemy performance pitfalls&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://dev.to/zchtodd_79/building-a-saas-app-beyond-the-basics-part-iii-4am6/#setting-up-our-first-api-route-handler"&gt;Setting up our first API route handler&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3&gt;
+  &lt;a href="#setting-up-sqlalchemy-and-postgres"&gt;
+  &lt;/a&gt;
+  Setting up SQLAlchemy and Postgres
+&lt;/h3&gt;
+
+&lt;p&gt;Back in the first post, we built a working Google search scraper, but we didn't have anywhere to put the results.  We're going to fix that problem now with the help of SQLAlchemy – by far the most popular ORM library for Python.  &lt;/p&gt;
+
+&lt;p&gt;If you haven't used one before, using an ORM will allow us to work in terms of objects, instead of working with messy raw SQL strings in the Python code.  Luckily, setting up SQLAlchemy to work with a Flask application is very straightforward, thanks to the Flask-SQLAlchemy package.&lt;/p&gt;
+
+&lt;p&gt;The &lt;code&gt;app/__init__.py&lt;/code&gt; file contains all of the configuration necessary to get started.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="kn"&gt;from&lt;/span&gt; &lt;span class="nn"&gt;flask&lt;/span&gt; &lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="n"&gt;Flask&lt;/span&gt;
+&lt;span class="kn"&gt;from&lt;/span&gt; &lt;span class="nn"&gt;flask_sqlalchemy&lt;/span&gt; &lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="n"&gt;SQLAlchemy&lt;/span&gt;
+
+&lt;span class="kn"&gt;from&lt;/span&gt; &lt;span class="nn"&gt;app.util&lt;/span&gt; &lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="n"&gt;create_db_uri&lt;/span&gt;
+
+&lt;span class="n"&gt;db&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;SQLAlchemy&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+
+&lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;init_app&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;app&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;
+    &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;init_app&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;app&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="n"&gt;app&lt;/span&gt;
+
+&lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;create_app&lt;/span&gt;&lt;span class="p"&gt;():&lt;/span&gt;
+    &lt;span class="n"&gt;app&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;Flask&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;__name__&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="n"&gt;app&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;config&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s"&gt;"SQLALCHEMY_DATABASE_URI"&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;create_db_uri&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+    &lt;span class="n"&gt;app&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;config&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s"&gt;"SQLALCHEMY_ECHO"&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="bp"&gt;False&lt;/span&gt;
+
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="n"&gt;app&lt;/span&gt;
+
+&lt;span class="kn"&gt;from&lt;/span&gt; &lt;span class="nn"&gt;app.models&lt;/span&gt; &lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt;  &lt;span class="c1"&gt;# noqa
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This is a reduced version of the init file containing just the minimum needed to set up Flask-SQLAlchemy. The config value &lt;code&gt;SQLALCHEMY_DATABASE_URI&lt;/code&gt; tells Flask-SQLAlchemy how to connect to the database.  This ultimately depends on the environment variables we saw in Part 2, such as &lt;code&gt;POSTGRES_USER&lt;/code&gt; and &lt;code&gt;POSTGRES_HOST&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;The &lt;code&gt;SQLALCHEMY_ECHO&lt;/code&gt; value is useful when debugging – when set to true, every SQL statement is logged, so you can see what's happening at every step.  We'll see a lot of the global db variable throughout the application, because we'll import it wherever we need to interact with the database.  &lt;/p&gt;
+
+&lt;p&gt;You might also notice the seemingly odd import at the bottom of the file, but it serves an important purpose.  As you'll see soon, each of our models resides in its own file.  Until a model is imported, SQLAlchemy won't know that it exists, even though we created the definition.  Thus, the wildcard import at the bottom ensures that all of our models are imported at runtime.&lt;/p&gt;
+
+&lt;p&gt;Defining a model is easy.  Model classes inherit from &lt;code&gt;db.Model&lt;/code&gt; and define the columns, indexes, and constraints that belong to that model.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="kn"&gt;from&lt;/span&gt; &lt;span class="nn"&gt;app&lt;/span&gt; &lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;
+
+&lt;span class="k"&gt;class&lt;/span&gt; &lt;span class="nc"&gt;ProxyConnection&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Model&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;
+    &lt;span class="n"&gt;__tablename__&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s"&gt;"proxyconn"&lt;/span&gt;
+
+    &lt;span class="nb"&gt;id&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Column&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Integer&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;primary_key&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="bp"&gt;True&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+    &lt;span class="n"&gt;proxy_url&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Column&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;String&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;nullable&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="bp"&gt;False&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="n"&gt;username&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Column&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;String&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;nullable&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="bp"&gt;False&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="n"&gt;password&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Column&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;String&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;nullable&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="bp"&gt;False&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+    &lt;span class="n"&gt;allow_parallel&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Column&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+        &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Boolean&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;default&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="bp"&gt;False&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;server_default&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s"&gt;"f"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;nullable&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="bp"&gt;False&lt;/span&gt;
+    &lt;span class="p"&gt;)&lt;/span&gt;
+
+    &lt;span class="n"&gt;usage_count&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Column&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Integer&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;default&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;server_default&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s"&gt;"0"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="n"&gt;block_count&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Column&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Integer&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;default&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;server_default&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s"&gt;"0"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="n"&gt;consecutive_fails&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Column&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Integer&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;default&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;server_default&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s"&gt;"0"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+    &lt;span class="n"&gt;engaged&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Column&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Boolean&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;default&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="bp"&gt;False&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;server_default&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s"&gt;"f"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+    &lt;span class="n"&gt;min_wait_time&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Column&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Integer&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;default&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;server_default&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s"&gt;"0"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;nullable&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="bp"&gt;False&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="n"&gt;random_delay&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Column&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Integer&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;default&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;server_default&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s"&gt;"0"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;nullable&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="bp"&gt;False&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="n"&gt;last_used&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Column&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;DateTime&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;index&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="bp"&gt;True&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;nullable&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="bp"&gt;True&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;As we discussed in the first part of the series, we'll need to use proxy connections for the scraper – we'll keep track of those proxies in the database, as well as how they are performing.  We can set a threshold, for instance, so that if a proxy has a certain number of &lt;code&gt;consecutive_fails&lt;/code&gt; we take it out of rotation. The project will eventually have many tables, with a model for everything from users to ranking results.&lt;/p&gt;
+
+&lt;p&gt;At the moment, however, the database is empty.  We need to create the tables defined in our models.  To do that, we can use &lt;code&gt;manage.py&lt;/code&gt; to create an interactive shell.  This shell session is almost the same as an interactive Python session, but within the context of the Flask application.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;docker exec -it openranktracker_app_1 python manage.py shell
+&amp;gt;&amp;gt;&amp;gt; db.create_all()
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The shell makes the &lt;code&gt;db&lt;/code&gt; global available, and the create_all function will initialize the entire schema within Postgres.  Once that step is complete, you can verify that the tables were created using a &lt;code&gt;psql&lt;/code&gt; session.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;docker exec -it openranktracker_database_1 psql -U pguser -d openranktracker
+
+psql (11.4 (Debian 11.4-1.pgdg90+1))
+Type "help" for help.
+
+openranktracker=# \d
+               List of relations
+ Schema |       Name       |   Type   | Owner  
+-------------+------------------+----------+--------
+ public | domain           | table    | pguser
+ public | domain_id_seq    | sequence | pguser
+ public | keyword          | table    | pguser
+ public | keyword_id_seq   | sequence | pguser
+ public | proxyconn        | table    | pguser
+ public | proxyconn_id_seq | sequence | pguser
+(6 rows)
+
+openranktracker=#
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The tables have been created!  Now we just need to put some data in there.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#sqlalchemy-performance-pitfalls-to-avoid"&gt;
+  &lt;/a&gt;
+  SQLAlchemy performance pitfalls to avoid
+&lt;/h2&gt;
+
+&lt;p&gt;We want our users to have a fast and responsive experience with the application.  In my experience, the most common source of slowness is mistakes made with the ORM. SQLAlchemy allows for great convenience and speed of development, but it's easy to lose track of what's happening behind the scenes.&lt;/p&gt;
+
+&lt;p&gt;So before moving on, let's cover some of the biggest performance killers, and how to avoid them in our application.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#the-n1-problem"&gt;
+  &lt;/a&gt;
+  The N+1 Problem
+&lt;/h3&gt;
+
+&lt;p&gt;Relationship loading is one of the killer features of any ORM.  Instead of manually writing SQL, we can treat data more like objects and object properties.  To take an example, think of artists, their albums, and the songs that make up those albums.&lt;/p&gt;
+
+&lt;p&gt;This would be a fairly typical way to represent such a problem.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="k"&gt;class&lt;/span&gt; &lt;span class="nc"&gt;Artist&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Model&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;
+    &lt;span class="nb"&gt;id&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Column&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Integer&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;primary_key&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="bp"&gt;True&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="n"&gt;name&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Column&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;String&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+&lt;span class="k"&gt;class&lt;/span&gt; &lt;span class="nc"&gt;Album&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Model&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;
+    &lt;span class="nb"&gt;id&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Column&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Integer&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;primary_key&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="bp"&gt;True&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="n"&gt;name&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Column&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;String&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+    &lt;span class="n"&gt;artist_id&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Column&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+        &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Integer&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+        &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;ForeignKey&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"artist.id"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;ondelete&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s"&gt;"CASCADE"&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+        &lt;span class="n"&gt;index&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="bp"&gt;True&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+        &lt;span class="n"&gt;nullable&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="bp"&gt;False&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="p"&gt;)&lt;/span&gt;
+
+    &lt;span class="n"&gt;artist&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;relationship&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+        &lt;span class="n"&gt;Artist&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+        &lt;span class="n"&gt;backref&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;backref&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+            &lt;span class="s"&gt;"albums"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;order_by&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s"&gt;"Album.name"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;cascade&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s"&gt;"delete-orphan,all"&lt;/span&gt;
+        &lt;span class="p"&gt;),&lt;/span&gt;
+    &lt;span class="p"&gt;)&lt;/span&gt;
+
+&lt;span class="k"&gt;class&lt;/span&gt; &lt;span class="nc"&gt;Song&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Model&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;
+    &lt;span class="nb"&gt;id&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Column&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Integer&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;primary_key&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="bp"&gt;True&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="n"&gt;name&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Column&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;String&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+    &lt;span class="n"&gt;album_id&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Column&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+        &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Integer&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+        &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;ForeignKey&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"album.id"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;ondelete&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s"&gt;"CASCADE"&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+        &lt;span class="n"&gt;index&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="bp"&gt;True&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+        &lt;span class="n"&gt;nullable&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="bp"&gt;False&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="p"&gt;)&lt;/span&gt;    
+
+    &lt;span class="n"&gt;album&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;relationship&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+        &lt;span class="n"&gt;Album&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+        &lt;span class="n"&gt;backref&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;backref&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+            &lt;span class="s"&gt;"songs"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;order_by&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s"&gt;"Song.name"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;cascade&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s"&gt;"delete-orphan,all"&lt;/span&gt;
+        &lt;span class="p"&gt;),&lt;/span&gt;
+    &lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Now say we wanted to show a big list of all artists, their albums, and songs in one place. Because of the relationships that we have defined, this would be one possible way of doing that.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="n"&gt;result&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[]&lt;/span&gt;
+&lt;span class="k"&gt;for&lt;/span&gt; &lt;span class="n"&gt;artist&lt;/span&gt; &lt;span class="ow"&gt;in&lt;/span&gt; &lt;span class="n"&gt;Artist&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;query&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nb"&gt;all&lt;/span&gt;&lt;span class="p"&gt;():&lt;/span&gt;
+    &lt;span class="k"&gt;for&lt;/span&gt; &lt;span class="n"&gt;album&lt;/span&gt; &lt;span class="ow"&gt;in&lt;/span&gt; &lt;span class="n"&gt;artist&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;albums&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+        &lt;span class="k"&gt;for&lt;/span&gt; &lt;span class="n"&gt;song&lt;/span&gt; &lt;span class="ow"&gt;in&lt;/span&gt; &lt;span class="n"&gt;album&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;songs&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+            &lt;span class="n"&gt;result&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;append&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="n"&gt;artist&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;name&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;album&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;name&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;song&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;name&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This may seem innocent enough, and in fact might work perfectly well with a small amount of data, but there is a lot happening behind the scenes.  After setting &lt;code&gt;SQLALCHEMY_ECHO&lt;/code&gt; to true, we see a surprising number of queries sent to the database for such a simple program.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;[2021-06-26 17:03:27,602] INFO in log: SELECT artist.id AS artist_id, artist.name AS artist_name 
+FROM artist
+[2021-06-26 17:03:27,607] INFO in log: SELECT album.id AS album_id, album.name AS album_name, album.artist_id AS album_artist_id 
+FROM album 
+WHERE %(param_1)s = album.artist_id ORDER BY album.name
+[2021-06-26 17:03:27,610] INFO in log: SELECT song.id AS song_id, song.name AS song_name, song.album_id AS song_album_id 
+FROM song 
+WHERE %(param_1)s = song.album_id ORDER BY song.name
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;And this is just with one artist and a single album!  For each new artist or album, you can expect to see another query.  The N+1 problem refers to the idea that an ORM is constantly issuing yet another query for each related object that you want to load.&lt;/p&gt;
+
+&lt;p&gt;This is a real problem, because each database round-trip quickly adds up, and that means our user is growing impatient as they stare at a loading spinner.&lt;/p&gt;
+
+&lt;p&gt;There are many variations on this problem, but the general idea is that we should aim to accomplish the task with fewer queries to the database.  This isn't always worth obsessing over, especially if we're certain that the amount of data is always going to remain limited. When we know that a serious amount of data is expected, however, it's worth thinking in terms of how many queries are involved.&lt;/p&gt;
+
+&lt;p&gt;&lt;em&gt;How can we speed up the code we saw above?&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;There is no one absolute best answer, but instead solutions that fit different scenarios.  If we know, for instance, that we're almost always going to fetch artists, albums, and songs together, then we can change how the relationships are loaded.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;    &lt;span class="n"&gt;artist&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;relationship&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+        &lt;span class="n"&gt;Artist&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+        &lt;span class="n"&gt;backref&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;backref&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+            &lt;span class="s"&gt;"albums"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;order_by&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s"&gt;"Album.name"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;lazy&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s"&gt;"joined"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;cascade&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s"&gt;"delete-orphan,all"&lt;/span&gt;
+        &lt;span class="p"&gt;),&lt;/span&gt;
+    &lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Adding &lt;code&gt;lazy="joined"&lt;/code&gt; instructs SQLAlchemy to always load the related data upfront by issuing a query with a JOIN.  This means fewer queries to the database, because the data is already available when accessing the relationship attributes.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;[2021-06-26 17:21:44,224] INFO in log: SELECT artist.id AS artist_id, artist.name AS artist_name, album_1.id AS album_1_id, album_1.name AS album_1_name, album_1.artist_id AS album_1_artist_id, song_1.id AS song_1_id, song_1.name AS song_1_name, song_1.album_id AS song_1_album_id 
+FROM artist LEFT OUTER JOIN album AS album_1 ON artist.id = album_1.artist_id LEFT OUTER JOIN song AS song_1 ON album_1.id = song_1.album_id ORDER BY album_1.name, song_1.name
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Now all of the albums and songs are loaded alongside the artist data, and in a single query, instead of separate queries that waste round-trip time.  Of course, if the relationships are rarely loaded, this becomes wasteful, because we're asking the database to do this extra work regardless.&lt;/p&gt;
+
+&lt;p&gt;You can also do the join yourself, which makes sense when always joining up-front is overkill.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="n"&gt;result&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;Artist&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;query&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;join&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Album&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;Song&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nb"&gt;all&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#calling-commit-too-many-times"&gt;
+  &lt;/a&gt;
+  Calling commit too many times
+&lt;/h3&gt;
+
+&lt;p&gt;Understanding when to call commit is also important.  Performance and data integrity are two key reasons to call commit at the proper point in the code.  Commit marks all of your changes as permanent (i.e. visible outside of your current transaction), and does so by forcing all of your updates to disk.&lt;/p&gt;
+
+&lt;p&gt;You want your changes persisted to disk, but calling commit multiple times repeats this process unnecessarily.  Call commit only once, typically once you're done making all changes.  This is usually simple in a web application, where you should expect to see &lt;code&gt;commit()&lt;/code&gt; called near the end of a route handler.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#great-convenience-but-with-caution-required"&gt;
+  &lt;/a&gt;
+  Great convenience, but with caution required
+&lt;/h3&gt;
+
+&lt;p&gt;SQLAlchemy brings great convenience, but also the ability to shoot yourself in the foot. Be mindful of what's happening in the background, and just because some code works fine now, doesn't ensure it won't grind to a halt later when flooded with real data.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#setting-up-our-first-api-route-handler"&gt;
+  &lt;/a&gt;
+  Setting up our first API route handler
+&lt;/h3&gt;
+
+&lt;p&gt;Now that SQLAlchemy is set up, we're almost ready to start storing some real data.  The scraper agent from part one is already collecting ranking data, so let's build an API endpoint that can store those results.&lt;/p&gt;
+
+&lt;p&gt;First we'll make a slight modification of &lt;code&gt;app/__init__.py&lt;/code&gt; to register the Flask blueprint that represents the API.  A blueprint is a Flask concept that allows for endpoints sharing a common prefix (i.e. &lt;code&gt;/api&lt;/code&gt; in our case) to be grouped together.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;init_app&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;app&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;
+    &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;init_app&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;app&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+    &lt;span class="kn"&gt;from&lt;/span&gt; &lt;span class="nn"&gt;app.api&lt;/span&gt; &lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="n"&gt;api_blueprint&lt;/span&gt;
+
+    &lt;span class="n"&gt;app&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;register_blueprint&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;api_blueprint&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="n"&gt;app&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Importing the api_blueprint object within the init_app function prevents circular import issues, since the code within those endpoints will need to import the global &lt;code&gt;db&lt;/code&gt; object.&lt;/p&gt;
+
+&lt;p&gt;We'll need a place to wire up routes to their respective handlers, and &lt;code&gt;app/api/__init__.py&lt;/code&gt; is where that happens.  We'll start off with just one route, for handling data coming back from the Puppeteer search scraper.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="kn"&gt;from&lt;/span&gt; &lt;span class="nn"&gt;flask&lt;/span&gt; &lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="n"&gt;Blueprint&lt;/span&gt;
+&lt;span class="kn"&gt;from&lt;/span&gt; &lt;span class="nn"&gt;flask_restful&lt;/span&gt; &lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="n"&gt;Api&lt;/span&gt;
+
+&lt;span class="kn"&gt;from&lt;/span&gt; &lt;span class="nn"&gt;app.api.keywords.scan_callback&lt;/span&gt; &lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="n"&gt;ScanCallbackView&lt;/span&gt;
+
+&lt;span class="n"&gt;api_blueprint&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;Blueprint&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"main"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;__name__&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;url_prefix&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s"&gt;"/api"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="n"&gt;api&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;Api&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;api_blueprint&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+&lt;span class="n"&gt;api&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;add_resource&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;ScanCallbackView&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;"/keywords/&amp;lt;int:keyword_id&amp;gt;/callback/"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The &lt;code&gt;&amp;lt;int:keyword_id&amp;gt;&lt;/code&gt; in the URL path is a placeholder for a variable that we expect to receive.  The value will be passed along to the handler method, as we'll see in the next snippet of code.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="kn"&gt;from&lt;/span&gt; &lt;span class="nn"&gt;flask&lt;/span&gt; &lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="n"&gt;request&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;abort&lt;/span&gt;
+&lt;span class="kn"&gt;from&lt;/span&gt; &lt;span class="nn"&gt;flask&lt;/span&gt; &lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="n"&gt;current_app&lt;/span&gt; &lt;span class="k"&gt;as&lt;/span&gt; &lt;span class="n"&gt;app&lt;/span&gt;
+
+&lt;span class="kn"&gt;from&lt;/span&gt; &lt;span class="nn"&gt;flask_restful&lt;/span&gt; &lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="n"&gt;Resource&lt;/span&gt;
+&lt;span class="kn"&gt;from&lt;/span&gt; &lt;span class="nn"&gt;app.services.keyword&lt;/span&gt; &lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="n"&gt;handle_scraper_response&lt;/span&gt;
+
+
+&lt;span class="k"&gt;class&lt;/span&gt; &lt;span class="nc"&gt;ScanCallbackView&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Resource&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;
+    &lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;post&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;keyword_id&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;
+        &lt;span class="n"&gt;data&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;request&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;get_json&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+
+        &lt;span class="n"&gt;app&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;logger&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;debug&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Keyword scan callback initiated"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+        &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="n"&gt;data&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;get&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"secret_key"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;!=&lt;/span&gt; &lt;span class="n"&gt;app&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;config&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s"&gt;"SECRET_KEY"&lt;/span&gt;&lt;span class="p"&gt;]:&lt;/span&gt;
+            &lt;span class="n"&gt;app&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;logger&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;warning&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+                &lt;span class="s"&gt;"Scan callback did not provide correct secret key: {}"&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nb"&gt;format&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+                    &lt;span class="n"&gt;data&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;get&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"secret_key"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+                &lt;span class="p"&gt;)&lt;/span&gt;
+            &lt;span class="p"&gt;)&lt;/span&gt;
+            &lt;span class="n"&gt;abort&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;403&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+        &lt;span class="n"&gt;handle_scraper_response&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;keyword_id&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;data&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="s"&gt;""&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;201&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This project uses Flask-RESTful, so the handlers are class based instead of functions – this allows us to handle GET, PUT, POST, and DELETE a little more elegantly.  The scraper sends a POST request, and the handler extracts the data via &lt;code&gt;request.get_json()&lt;/code&gt; before processing the results within the &lt;code&gt;handle_scraper_response&lt;/code&gt; function.&lt;/p&gt;
+
+&lt;p&gt;We haven't covered users or authentication yet, so how do we prevent abuse of this endpoint?  The app has a &lt;code&gt;SECRET_KEY&lt;/code&gt; config value, which it will pass to scraper sessions. When a scraper sends its POST request, it will include that same secret key for verification.&lt;/p&gt;
+
+&lt;p&gt;That's all it takes to add a route handler!  At this point we have some real functionality: the scraper runs, collects results, and now has a place to report those results.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#whats-next"&gt;
+  &lt;/a&gt;
+  What's next?
+&lt;/h3&gt;
+
+&lt;p&gt;In part four, we'll break ground on the user interface for OpenRankTracker using React. We'll start off with the user sign-up and login flow and build from there!  I hope you'll join me for part four.&lt;/p&gt;
+
+</description>
+      <category>python</category>
+      <category>javascript</category>
+      <category>docker</category>
     </item>
     <item>
       <title>Understanding Kubernetes in a visual way (in 🎥 video): part 18 – Pod &amp; Node (Anti) Affinities</title>
@@ -1019,669 +2001,6 @@ Follow me on Github at &lt;a href="https://github.com/pranjaljain0"&gt;github/pr
       <category>webdev</category>
       <category>webpack</category>
       <category>security</category>
-    </item>
-    <item>
-      <title>LAUNCHING MATLAB MONDAYS💥, a Crash Course✨🌟</title>
-      <author>Aatmaj</author>
-      <pubDate>Sun, 27 Jun 2021 12:58:37 +0000</pubDate>
-      <link>https://dev.to/aatmaj/launching-matlab-mondays-a-crash-course-nb1</link>
-      <guid>https://dev.to/aatmaj/launching-matlab-mondays-a-crash-course-nb1</guid>
-      <description>&lt;h2&gt;
-  &lt;a href="#hello-everyone-get-ready-for-the-blast-launching-the-all-new-matlab-crash-course"&gt;
-  &lt;/a&gt;
-  Hello everyone⭐ Get ready for the blast💣❤️‍🔥 Launching the all new MATLAB crash course. 💎
-&lt;/h2&gt;
-
-
-
-
-&lt;p&gt;So dear friends ✔️ I have decided to launch a crash course 🧲 to cover all the basics of MATLAB 😇. This course will be launched on this platform every Monday😊 I will quickly 💨 cover all the basics required.🌤️ &lt;/p&gt;
-
-&lt;p&gt;This is ideally a binge-course for fast-tracking through MATLAB.🏃‍♀️🏃 All the blogs are 2-3 minutes read. 🎲&lt;/p&gt;
-
-&lt;p&gt;In case you want more advanced topics to be covered, please put them in the comment box below 👇 and I will cover them 💦 after the basics🎈🎈🎈&lt;/p&gt;
-
-
-
-
-&lt;p&gt;Before learning MATLAB, I would like to share a few words of caution.😵 MATLAB is neither free nor open. 😞 Unless you are a student ✍️ affiliated to any university 🏫 MATLAB might not be the best fit for you. However, there are good alternatives to MATLAB as mentioned &lt;a href="https://perso.crans.org/besson/matlab-clones.en.html"&gt;here&lt;/a&gt;.😎&lt;br&gt;
-Among these options, I would however advise two alternatives✋- Python (with scientific add-ons) and the Julia language. Julia is a better alternative 👌 to MATLAB with syntax very similar to it.🔆 You can read more about the benefits of Julia &lt;a href="https://www.linkedin.com/posts/wonderbiz-technologies_julia-programming-language-the-rising-star-activity-6812722852954017793-NDEd"&gt;here&lt;/a&gt;.👏 &lt;br&gt;
-However one point of advantage 🪔 is that the syntax of MATLAB is very similar to that of GNU Octave 🌈, so in case you want to proceed your research there🥕, you might find this course of advantage.🌞&lt;/p&gt;
-
-</description>
-      <category>matlab</category>
-    </item>
-    <item>
-      <title>I bought new Macbook Air M1 (one of my goals completed)</title>
-      <author>Thu Htet Tun</author>
-      <pubDate>Sun, 27 Jun 2021 12:36:56 +0000</pubDate>
-      <link>https://dev.to/thuhtetdev/i-bought-new-macbook-air-m1-one-of-my-goals-completed-2kbb</link>
-      <guid>https://dev.to/thuhtetdev/i-bought-new-macbook-air-m1-one-of-my-goals-completed-2kbb</guid>
-      <description>&lt;p&gt;Hello Guys!&lt;/p&gt;
-
-&lt;p&gt;Buying a new macbook is one of my goals in this year.&lt;br&gt;
-And I got it. This is my very first macbook. &lt;br&gt;
-I'm ready to use this for my educational &amp;amp; career purposes.&lt;/p&gt;
-
-&lt;p&gt;I uploaded vlog on my YouTube Channel.&lt;br&gt;
-If you want to see my happiness, please go for it. &lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#youtube-link"&gt;
-  &lt;/a&gt;
-  YouTube link
-&lt;/h1&gt;
-
-&lt;p&gt;&lt;a href="https://www.youtube.com/watch?v=neagi_Pej1g"&gt;https://www.youtube.com/watch?v=neagi_Pej1g&lt;/a&gt;&lt;/p&gt;
-
-</description>
-      <category>productivity</category>
-      <category>programming</category>
-      <category>webdev</category>
-      <category>tooling</category>
-    </item>
-    <item>
-      <title>My Dev Journey: Week 8</title>
-      <author>Harry York</author>
-      <pubDate>Sun, 27 Jun 2021 12:07:16 +0000</pubDate>
-      <link>https://dev.to/harryyork97/my-dev-journey-week-8-4k8d</link>
-      <guid>https://dev.to/harryyork97/my-dev-journey-week-8-4k8d</guid>
-      <description>&lt;p&gt;This week was careers week on my coding bootcamp, and as such this week was a lot less new concept heavy as many of the previous weeks have been. Instead of new technologies we had a few lectures on CV writing, portfolio preparation, and technical tests.&lt;/p&gt;
-
-&lt;p&gt;If you've enjoyed any of my blog series, then maybe consider following me on &lt;a href="https://twitter.com/grand_oldduke"&gt;Twitter&lt;/a&gt; and &lt;a href="https://github.com/harryyork97"&gt;GitHub&lt;/a&gt; 😁 and I'd also really appreciate if you all could check out my new &lt;a href="https://harryyork.dev/"&gt;portfolio site&lt;/a&gt; 🙏🏼 and maybe leave a few beginner project ideas in the comments to give me some inspiration!&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#what-ive-done-this-week"&gt;
-  &lt;/a&gt;
-  What I've done this week
-&lt;/h2&gt;
-
-&lt;p&gt;Whilst I created my first development CV during this week the two most important things I've done this week were completing a back-end project I worked on during the back-end portion of the course, this involved a broad scope of unit and integration testing. And then once I was happy with the functionality of my API I hosted it on Heroku which what the first time I've hosted anything. And then I got to write my first README for the repo, and I wanted to make this one as good as I could becasue it's the first I've written and I've really enjoyed this project and didn't want to half-do the last thing 😁&lt;/p&gt;
-
-&lt;p&gt;But by far the thing I'm most excited about this week, is buying my first domain for my &lt;a href="https://harryyork.dev/"&gt;portfolio site&lt;/a&gt;, and creating my first front-end project. We've not done the front end block of the course (this starts next week) but I wanted to complete a portfolio site that I could link to in my CV, for job applications (if any hiring managers are reading my blog still on week 8, then please hire me 😅) and socials too! My portfolio uses a bootstrap template but I went through and dipped my toes in the luke warm waters of HTML and CSS to make it match a style closer to my CV styling.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#resources-ive-found-useful-this-week"&gt;
-  &lt;/a&gt;
-  Resources I've found useful this week
-&lt;/h2&gt;
-
-&lt;h3&gt;
-  &lt;a href="#setting-up-google-domains-on-github-pages"&gt;
-  &lt;/a&gt;
-  Setting up google domains on GitHub pages
-&lt;/h3&gt;
-
-&lt;p&gt;This &lt;a href="https://dev.to/trentyang/how-to-setup-google-domain-for-github-pages-1p58"&gt;dev&lt;/a&gt; article was really useful in helping guide through setting up my newly minted domain, with github pages, as well as the &lt;a href="https://docs.github.com/en/pages/configuring-a-custom-domain-for-your-github-pages-site"&gt;GitHub Pages docs&lt;/a&gt;.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#bootstrap-docs"&gt;
-  &lt;/a&gt;
-  Bootstrap docs
-&lt;/h3&gt;
-
-&lt;p&gt;The &lt;a href="https://getbootstrap.com/docs/5.0/getting-started/introduction/"&gt;bootstrap docs&lt;/a&gt; were crucial for my brief intro to HTML and CSS work.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#design-inspiration"&gt;
-  &lt;/a&gt;
-  Design inspiration
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;a href="https://www.canva.com/en/"&gt;Canva&lt;/a&gt; was pretty useful in getting design inspiration for structure of my CV, I then created my CV in Affinity Publisher, which took a fair bit of getting used to again, because I'm much more used to Adobe InDesign&lt;/p&gt;
-
-</description>
-      <category>beginners</category>
-      <category>javascript</category>
-      <category>codenewbie</category>
-      <category>bootcamp</category>
-    </item>
-    <item>
-      <title>Getting Started with 'Git'</title>
-      <author>BHAVIN VIRANI</author>
-      <pubDate>Sun, 27 Jun 2021 11:49:29 +0000</pubDate>
-      <link>https://dev.to/bhavinvirani/getting-started-with-git-1jlj</link>
-      <guid>https://dev.to/bhavinvirani/getting-started-with-git-1jlj</guid>
-      <description>&lt;p&gt;In this Blog i'll cover some basic commands of git, using that command you can easily work with git and Github as beginner.&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Before starting this this blog I want to mention that &lt;code&gt;Git&lt;/code&gt; and &lt;code&gt;Github&lt;/code&gt; are not same. many people are understandably confused😕 between this two words at their beginning.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h4&gt;
-  &lt;a href="#github-is-a-website-for-hosting-projects-that-use-git-for-version-control"&gt;
-  &lt;/a&gt;
-  GitHub is a website for hosting projects that use git for version control.
-&lt;/h4&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#what-is-raw-git-endraw-"&gt;
-  &lt;/a&gt;
-  What is &lt;code&gt;git&lt;/code&gt; ?
-&lt;/h2&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Git is a version control system (VCS) that makes easier to track changes to files(code). For example, when you edit a file, git can help you to determine exactly what changed in your file, who changed that file, and why change that.&lt;/li&gt;
-&lt;li&gt;Git is a command line tool. it is very useful when we are working on team project or multiple people working on same project&lt;/li&gt;
-&lt;/ul&gt;
-&lt;h2&gt;
-  &lt;a href="#what-is-raw-github-endraw-"&gt;
-  &lt;/a&gt;
-  What is &lt;code&gt;github&lt;/code&gt; ?
-&lt;/h2&gt;
-
-&lt;ul&gt;
-&lt;li&gt;GitHub is a Git repository hosting service, but it adds many of its own features. GitHub provides a Web-based graphical interface. It also provides access control and several collaboration features&lt;/li&gt;
-&lt;li&gt;Git also helps us to store our code safe and secure🔐 and many people use git and github daily to track their daily work. It makes them different from others.
-
-&lt;/li&gt;
-&lt;/ul&gt;
-&lt;h2&gt;
-  &lt;a href="#installation"&gt;
-  &lt;/a&gt;
-  Installation
-&lt;/h2&gt;
-
-&lt;ul&gt;
-&lt;li&gt;&lt;p&gt;To use git we'll need to download and install git on our system by using &lt;a href="https://git-scm.com/downloads"&gt;git&lt;/a&gt;. There are both options are available in market. command-line interface(CLI) and graphical user interface(GUI) as Github desktop but I recommend CLI for beginners.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;After installation to check if git was installed properly or not execute the command:&lt;br&gt;
-&lt;/p&gt;&lt;/li&gt;
-&lt;/ul&gt;
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;git &lt;span class="nt"&gt;--version&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-&lt;h2&gt;
-  &lt;a href="#first-step-after-installing-git"&gt;
-  &lt;/a&gt;
-  First step after Installing Git
-&lt;/h2&gt;
-
-&lt;ul&gt;
-&lt;li&gt;The first thing you should do when you install Git is to set your user-name and email address. This is important because every Git commit uses this information&lt;/li&gt;
-&lt;li&gt;you can set your user-name and email using this commands and  also change them at any time
-&lt;/li&gt;
-&lt;/ul&gt;
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;git config &lt;span class="nt"&gt;--global&lt;/span&gt; user.name &lt;span class="s2"&gt;"&amp;lt;User-Name&amp;gt;"&lt;/span&gt;
-git config &lt;span class="nt"&gt;--global&lt;/span&gt; user.email &amp;lt;Email&amp;gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-&lt;h2&gt;
-  &lt;a href="#create-local-git-repository"&gt;
-  &lt;/a&gt;
-  Create local git repository
-&lt;/h2&gt;
-
-&lt;ul&gt;
-&lt;li&gt;We'll require git repository to use functionalities of git by using given command.
-&lt;/li&gt;
-&lt;/ul&gt;
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;git init
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-&lt;ul&gt;
-&lt;li&gt;This'll create hidden &lt;code&gt;.git&lt;/code&gt; folder in current directory. this is the "repository"(or repo) where git stores all of its internal tracking data. Any changes you make to any files within the original folder will now be possible to track.&lt;/li&gt;
-&lt;li&gt;The original directory is now referred as working directory.
-
-&lt;/li&gt;
-&lt;/ul&gt;
-&lt;h2&gt;
-  &lt;a href="#staging"&gt;
-  &lt;/a&gt;
-  Staging
-&lt;/h2&gt;
-
-&lt;p&gt;The staging area (aka index) is a container where git collects all changes which will be part of the next commit.&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;use below showen comannd to add individual files into staging area
-&lt;code&gt;git add &amp;lt;File1 path&amp;gt; &amp;lt;File2 path&amp;gt;...&lt;/code&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;git add README.md app/&lt;span class="k"&gt;*&lt;/span&gt;.txt
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-&lt;p&gt;we also stage all changes together&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;git add -A
-OR
-git add .
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-&lt;h2&gt;
-  &lt;a href="#status"&gt;
-  &lt;/a&gt;
-  status
-&lt;/h2&gt;
-
-&lt;p&gt;&lt;code&gt;git staus&lt;/code&gt;&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Above command is very useful. It gives overall status of working git directory&lt;/li&gt;
-&lt;li&gt;The git status command displays the state of the working directory and the staging area. It lets you see which changes have been staged, which haven't, and which files aren't being tracked by Git.
-
-&lt;/li&gt;
-&lt;/ul&gt;
-&lt;h2&gt;
-  &lt;a href="#commit"&gt;
-  &lt;/a&gt;
-  Commit
-&lt;/h2&gt;
-
-&lt;p&gt;The "commit" command is used to save your changes to the local repository. we also need commit message it is important to help other people understand what was changed and why you changed it.&lt;br&gt;
-&lt;/p&gt;
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;git commit &lt;span class="nt"&gt;-m&lt;/span&gt; &lt;span class="s2"&gt;" &amp;lt;Commit message&amp;gt; "&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-&lt;h2&gt;
-  &lt;a href="#push"&gt;
-  &lt;/a&gt;
-  push
-&lt;/h2&gt;
-
-&lt;p&gt;The &lt;code&gt;git push&lt;/code&gt; command is used to upload local repository content to a remote repository.&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;But there is one problem. we can't push directly our local repository to remote repo. in Order to do that first we need create repository on githuib and configure that remote repository with local repository. let's see how&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;git remote add &amp;lt;remote_name&amp;gt; &amp;lt;remote_repo_url&amp;gt;&lt;/code&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;git remote add origin https://github.com/bhavinvirani/my_repo.git
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-&lt;p&gt;after creatig a repository on the GitHub, You will find the link on that repository itself&lt;/p&gt;
-
-&lt;p&gt;Now, we can push our data on remote repository using this command&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;
-&lt;code&gt;git push &amp;lt;remote_name&amp;gt; &amp;lt;remote_branch_name&amp;gt;&lt;/code&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;git push &lt;span class="nt"&gt;-u&lt;/span&gt; origin master
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-&lt;ul&gt;
-&lt;li&gt;If you are pushinga local branch for the first time on a remote, the "-u" option is helpful. It makes sure that a tracking connection between the local and your remote branch.
-&lt;/li&gt;
-&lt;/ul&gt;
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;git push
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-&lt;ul&gt;
-&lt;li&gt;After having set tracking connection, you can perform future pushes without providing additional options - since the tracking connection provides default values for the push command.&lt;/li&gt;
-&lt;/ul&gt;
-
-
-
-&lt;h3&gt;
-  &lt;a href="#here-i-show-whole-flow-of-git-commands"&gt;
-  &lt;/a&gt;
-  Here i Show whole flow of git commands
-&lt;/h3&gt;
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="nx"&gt;git&lt;/span&gt; &lt;span class="nx"&gt;init&lt;/span&gt;
-&lt;span class="c1"&gt;// make same changes in working directory&lt;/span&gt;
-&lt;span class="nx"&gt;git&lt;/span&gt; &lt;span class="nx"&gt;add&lt;/span&gt; &lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="nx"&gt;A&lt;/span&gt;
-&lt;span class="nx"&gt;git&lt;/span&gt; &lt;span class="nx"&gt;commit&lt;/span&gt; &lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="nx"&gt;m&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;made some changes in working directory&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
-&lt;span class="nx"&gt;git&lt;/span&gt; &lt;span class="nx"&gt;remote&lt;/span&gt; &lt;span class="nx"&gt;add&lt;/span&gt; &lt;span class="nx"&gt;origin&lt;/span&gt; &lt;span class="nx"&gt;https&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="c1"&gt;//github.com/bhavinvirani/my_repo.git&lt;/span&gt;
-&lt;span class="nx"&gt;git&lt;/span&gt; &lt;span class="nx"&gt;push&lt;/span&gt; &lt;span class="nx"&gt;origin&lt;/span&gt; &lt;span class="nx"&gt;master&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-&lt;h1&gt;
-  &lt;a href="#conclusion"&gt;
-  &lt;/a&gt;
-  Conclusion
-&lt;/h1&gt;
-
-&lt;p&gt;In this blog we learned basic command of git and how to push our local repository to remote repository, It is good to use git and github daily to track our code or data.&lt;/p&gt;
-
-&lt;p&gt;Stay tuned for some advanced git commands and topics like branches and operations with remote repository which I cover in next article of this series&lt;br&gt;
-&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#checkout-my-raw-github-%F0%9F%91%81-endraw-"&gt;
-  &lt;/a&gt;
-  checkout my &lt;code&gt;Github 👁&lt;/code&gt;
-&lt;/h3&gt;
-
-
-&lt;div class="ltag-github-readme-tag"&gt;
-  &lt;div class="readme-overview"&gt;
-    &lt;h2&gt;
-      &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--i3JOwpme--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/github-logo-ba8488d21cd8ee1fee097b8410db9deaa41d0ca30b004c0c63de0a479114156f.svg" alt="GitHub logo"&gt;
-      &lt;a href="https://github.com/bhavinvirani"&gt;
-        bhavinvirani
-      &lt;/a&gt; / &lt;a href="https://github.com/bhavinvirani/bhavinvirani"&gt;
-        bhavinvirani
-      &lt;/a&gt;
-    &lt;/h2&gt;
-    &lt;h3&gt;
-      
-    &lt;/h3&gt;
-  &lt;/div&gt;
-  &lt;div class="ltag-github-body"&gt;
-    
-&lt;div id="readme" class="md"&gt;
-&lt;div&gt;
-
-&lt;/div&gt;  
-
-&lt;h1&gt;
-Hi 👋, I'm Bhavin!&lt;/h1&gt;
-
-&lt;ul&gt;
-&lt;li&gt;
-🌱 currently I'm &lt;code&gt;learning&lt;/code&gt;
-&lt;/li&gt;
-&lt;li&gt;
-🥅 2021 Goal: Contribute to Open Source stuff&lt;/li&gt;
-&lt;li&gt;
-👯 I’m looking to collaborate on JS project&lt;/li&gt;
-&lt;li&gt;
-📪 How to reach me: &lt;code&gt;bhavinvirani45@gmail.com&lt;/code&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-
-
-
-
-&lt;h3&gt;
-Connect with me&lt;/h3&gt;
-
-&lt;p&gt;
-&lt;a href="https://www.linkedin.com/in/bhavin-virani-2a14441b7/" rel="nofollow"&gt;&lt;img src="https://camo.githubusercontent.com/5e3d78e5310a41c0667e07077cf93596229de398b154b83885dc068874ed5365/68747470733a2f2f696d672e736869656c64732e696f2f62616467652f6c696e6b6564696e2d2532333145373742352e7376673f267374796c653d666f722d7468652d6261646765266c6f676f3d6c696e6b6564696e266c6f676f436f6c6f723d7768697465" alt="[/in/bhavin-virani-2a14441b7/](https://www.linkedin.com/in/bhavin-virani-2a14441b7/)" height="30" width="120"&gt;&lt;/a&gt;
-&lt;a href="https://twitter.com/BhavinVirani45" rel="nofollow"&gt;&lt;img src="https://camo.githubusercontent.com/13039975938e719b60e38191d050a182c1615f0e64a87494792c510ee111917a/68747470733a2f2f696d672e736869656c64732e696f2f62616467652f747769747465722d2532333030616365652e7376673f267374796c653d666f722d7468652d6261646765266c6f676f3d74776974746572266c6f676f436f6c6f723d7768697465" alt="[BhavinVirani45](twitter.com/BhavinVirani45)" height="30" width="100"&gt;&lt;/a&gt;
-&lt;a href="https://dev.to/bhavinvirani" rel="nofollow"&gt;&lt;img src="https://camo.githubusercontent.com/cd31e3397cb63ddbff05c6cc2c20e40ea5f2764cb752980c7dc62e2e09edc72d/68747470733a2f2f696d672e736869656c64732e696f2f62616467652f6465762d2532333234323932652e7376673f267374796c653d666f722d7468652d6261646765266c6f676f3d646576646f74746f266c6f676f436f6c6f723d7768697465" alt="[/bhavinvirani](https://dev.to/bhavinvirani)" height="30" width="100"&gt;&lt;/a&gt;
-&lt;a href="https://discord.com/channels/bhavin_45#0852" rel="nofollow"&gt;
-&lt;img src="https://camo.githubusercontent.com/8cdc282c3750da790f197e36002d577eeee4bf783e0be1f946a73eaf1340d6a9/68747470733a2f2f696d672e736869656c64732e696f2f62616467652f646973636f72642d253233303042332e7376673f267374796c653d666f722d7468652d6261646765266c6f676f3d646973636f7264266c6f676f436f6c6f723d7768697465" alt="https://discord.com/channels/bhavin_45#0852" height="30" width="100"&gt;
-
-&lt;/a&gt;
-&lt;/p&gt;
-
-
-
-
-&lt;h3&gt;
-Languages and Tools&lt;/h3&gt;
-
-&lt;p&gt;
-&lt;a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript" rel="nofollow"&gt; &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--QG_b2spU--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/devicons/devicon/master/icons/javascript/javascript-original.svg" alt="javascript" width="40" height="40"&gt; &lt;/a&gt; 
-&lt;a href="https://nodejs.org/en/docs/" rel="nofollow"&gt; &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--MbyWitP7--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/devicons/devicon/master/icons/nodejs/nodejs-original.svg" alt="javascript" width="40" height="40"&gt; &lt;/a&gt;
-&lt;a rel="noopener noreferrer" href="https://raw.githubusercontent.com/devicons/devicon/master/icons/react/react-original.svg"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--7B8eMcKv--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/devicons/devicon/master/icons/react/react-original.svg" width="40" height="40"&gt;&lt;/a&gt;
-&lt;a href="https://raw.githubusercontent.com/bhavinvirani/bhavinvirani/main/#"&gt; &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--V-ExagyZ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/devicons/devicon/master/icons/mongodb/mongodb-original-wordmark.svg" alt="mongodb" width="40" height="40"&gt; &lt;/a&gt;
-
- &lt;a href="https://www.python.org" rel="nofollow"&gt; &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Ka8K9yX2--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/devicons/devicon/master/icons/python/python-original.svg" alt="python" width="40" height="40"&gt; &lt;/a&gt; 
-&lt;a href="https://www.w3.org/html/" rel="nofollow"&gt; &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--QXRvq6Ke--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/devicons/devicon/master/icons/html5/html5-original-wordmark.svg" alt="html5" width="40" height="40"&gt; &lt;/a&gt; 
-&lt;a href="https://git-scm.com/" rel="nofollow"&gt; &lt;img src="https://camo.githubusercontent.com/fbfcb9e3dc648adc93bef37c718db16c52f617ad055a26de6dc3c21865c3321d/68747470733a2f2f7777772e766563746f726c6f676f2e7a6f6e652f6c6f676f732f6769742d73636d2f6769742d73636d2d69636f6e2e737667" alt="git" width="40" height="40"&gt; &lt;/a&gt; 
-&lt;a href="https://www.w3schools.com/css/" rel="nofollow"&gt; &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--mHD1LdvX--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/devicons/devicon/master/icons/css3/css3-original-wordmark.svg" alt="css3" width="40" height="40"&gt; &lt;/a&gt; 
-&lt;a href="https://getbootstrap.com" rel="nofollow"&gt; &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--38b8DYFn--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/devicons/devicon/master/icons/bootstrap/bootstrap-plain-wordmark.svg" alt="bootstrap" width="40" height="40"&gt; &lt;/a&gt; 
-&lt;a href="https://heroku.com" rel="nofollow"&gt; &lt;img src="https://camo.githubusercontent.com/df12cb598044a3f38efc1f45e3580558c324cf8789b79487125044eeebcc4dee/68747470733a2f2f7777772e766563746f726c6f676f2e7a6f6e652f6c6f676f732f6865726f6b752f6865726f6b752d69636f6e2e737667" alt="heroku" width="40" height="40"&gt; &lt;/a&gt; 
-&lt;a href="https://www.mysql.com/" rel="nofollow"&gt; &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--IfMZ2i4X--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/devicons/devicon/master/icons/mysql/mysql-original-wordmark.svg" alt="mysql" width="40" height="40"&gt; &lt;/a&gt;
-&lt;a href="https://www.linux.org/" rel="nofollow"&gt; &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--vSVMkLYQ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/devicons/devicon/master/icons/linux/linux-original.svg" alt="linux" width="40" height="40"&gt; &lt;/a&gt;
-&lt;/p&gt;
-
-
-
-
-&lt;div&gt;
-&lt;p&gt;&lt;a rel="noopener noreferrer" href="https://camo.githubusercontent.com/884e0d1886d6bf88350bbc1f4b0163c618ce8412fd378bfa53718748b0b4082b/68747470733a2f2f6769746875622d726561646d652d73746174732e76657263656c2e6170702f6170692f746f702d6c616e67733f757365726e616d653d62686176696e766972616e69267468656d653d6461726b266c616e67735f636f756e743d36266c6f63616c653d656e266c61796f75743d636f6d70616374"&gt;&lt;img src="https://camo.githubusercontent.com/884e0d1886d6bf88350bbc1f4b0163c618ce8412fd378bfa53718748b0b4082b/68747470733a2f2f6769746875622d726561646d652d73746174732e76657263656c2e6170702f6170692f746f702d6c616e67733f757365726e616d653d62686176696e766972616e69267468656d653d6461726b266c616e67735f636f756e743d36266c6f63616c653d656e266c61796f75743d636f6d70616374" alt="bhavinvirani"&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt; &lt;a rel="noopener noreferrer" href="https://camo.githubusercontent.com/170978bac3ed2ee09947e74522f9fca4080a98d146f5d1544fa14299db390a13/68747470733a2f2f6769746875622d726561646d652d73746174732e76657263656c2e6170702f6170693f757365726e616d653d62686176696e766972616e69267468656d653d6461726b2626636f756e745f707269766174653d7472756573686f775f69636f6e733d7472756526686964653d697373756573"&gt;&lt;img src="https://camo.githubusercontent.com/170978bac3ed2ee09947e74522f9fca4080a98d146f5d1544fa14299db390a13/68747470733a2f2f6769746875622d726561646d652d73746174732e76657263656c2e6170702f6170693f757365726e616d653d62686176696e766972616e69267468656d653d6461726b2626636f756e745f707269766174653d7472756573686f775f69636f6e733d7472756526686964653d697373756573" alt="bhavinvirani"&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;a rel="noopener noreferrer" href="https://camo.githubusercontent.com/1fe71c8ea351bccd471794d02679f8277357816c52c5fb454bfee7d08c865e5e/68747470733a2f2f6769746875622d726561646d652d73747265616b2d73746174732e6865726f6b756170702e636f6d2f3f757365723d62686176696e766972616e69267468656d653d6461726b"&gt;&lt;img src="https://camo.githubusercontent.com/1fe71c8ea351bccd471794d02679f8277357816c52c5fb454bfee7d08c865e5e/68747470733a2f2f6769746875622d726561646d652d73747265616b2d73746174732e6865726f6b756170702e636f6d2f3f757365723d62686176696e766972616e69267468656d653d6461726b" alt="bhavinvirani"&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt; &lt;a rel="noopener noreferrer" href="https://camo.githubusercontent.com/029218399283d3a9edf6117b31cb75fde56adf885cfbbea312100f3793be6c49/68747470733a2f2f6b6f6d617265762e636f6d2f67687076632f3f757365726e616d653d62686176696e766972616e69266c6162656c3d50726f66696c65253230766965777326636f6c6f723d306537356236267374796c653d666c6174"&gt;&lt;img src="https://camo.githubusercontent.com/029218399283d3a9edf6117b31cb75fde56adf885cfbbea312100f3793be6c49/68747470733a2f2f6b6f6d617265762e636f6d2f67687076632f3f757365726e616d653d62686176696e766972616e69266c6162656c3d50726f66696c65253230766965777326636f6c6f723d306537356236267374796c653d666c6174" alt="bhavinvirani" width="130" height="25"&gt;&lt;/a&gt; &lt;/p&gt;
-&lt;/div&gt;
-
-&lt;/div&gt;
-&lt;br&gt;
-&lt;br&gt;
-  &lt;/div&gt;
-&lt;br&gt;
-  &lt;div class="gh-btn-container"&gt;&lt;a class="gh-btn" href="https://github.com/bhavinvirani/bhavinvirani"&gt;View on GitHub&lt;/a&gt;&lt;/div&gt;
-&lt;br&gt;
-&lt;/div&gt;
-&lt;br&gt;
-
-
-</description>
-      <category>beginners</category>
-      <category>github</category>
-      <category>git</category>
-    </item>
-    <item>
-      <title>How to create a smooth draggable list with react in 10 mins</title>
-      <author>Augustus Otu</author>
-      <pubDate>Sun, 27 Jun 2021 11:43:01 +0000</pubDate>
-      <link>https://dev.to/augani/how-to-create-a-smooth-draggable-list-with-react-in-10-mins-2fbn</link>
-      <guid>https://dev.to/augani/how-to-create-a-smooth-draggable-list-with-react-in-10-mins-2fbn</guid>
-      <description>&lt;p&gt;Welcome to another tutorial!!&lt;/p&gt;
-
-&lt;p&gt;Today, we are going to create a draggable list that you can use in your react applications with ease, using framer-motion. If you go to their examples page on  &lt;a href="https://codesandbox.io/s/framer-motion-2-drag-to-reorder-fc4rt"&gt;codesandbox&lt;/a&gt; , you will see this implemented. In case you want to know how you can do it yourself, read on.&lt;/p&gt;
-
-&lt;p&gt;To start, if you have a list of items in a container or div that you want to have your users reorder by just dragging one item over another to swap positions, it's not a hustle since you are in the right place. This is what we are going to build in a few minutes.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--SRiw6JXr--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1624633429677/_MvQHtavH.gif" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--SRiw6JXr--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1624633429677/_MvQHtavH.gif" alt="chrome-capture.gif"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Now the code, my favorite part!!&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="nx"&gt;React&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;react&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;./style.css&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-
-&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;List&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;3&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;4&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;5&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;6&lt;/span&gt;&lt;span class="p"&gt;];&lt;/span&gt;
-
-&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="k"&gt;default&lt;/span&gt; &lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;App&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
-    &lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nt"&gt;div&lt;/span&gt; &lt;span class="na"&gt;className&lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="s"&gt;"container"&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;
-      &lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;List&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;map&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;n&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;index&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
-        &lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nc"&gt;Item&lt;/span&gt; &lt;span class="na"&gt;key&lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;index&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;n&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt; &lt;span class="p"&gt;/&amp;gt;&lt;/span&gt;
-      &lt;span class="p"&gt;))&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;
-    &lt;span class="p"&gt;&amp;lt;/&lt;/span&gt;&lt;span class="nt"&gt;div&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;
-  &lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;Item&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="nx"&gt;name&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nt"&gt;div&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;name&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="p"&gt;&amp;lt;/&lt;/span&gt;&lt;span class="nt"&gt;div&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;This is a normal react app where you are exporting the main component called App. We have another component below that will be the item in the main we will be dragging. A list that we map to produce our six items in the main app.&lt;/p&gt;
-
-&lt;p&gt;For now, our item component is just normal div with no properties to make it interactive, we add the framer motion package since that is what we will be using.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;yarn add framer-motion //or
-npm i framer-motion
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;When its done doing it magic, we import it into our file and get the &lt;strong&gt;motion&lt;/strong&gt; element from &lt;em&gt;'framer-motion'&lt;/em&gt;. Then change our normal div in the &lt;strong&gt;Item&lt;/strong&gt; component to &lt;em&gt;motion.div&lt;/em&gt;, so we have properties we can use to drag and reorder the item when rendered.&lt;/p&gt;
-
-&lt;p&gt;Next, we will have to add the properties we want to use;&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;
-&lt;strong&gt;drag&lt;/strong&gt;- this will allow us drag our div when rendered in the page. This takes in two types, a boolean and string(x or y). When set to true, we can drag the component in both direction, when set to &lt;strong&gt;y&lt;/strong&gt; we can only drag it up or down and &lt;strong&gt;x&lt;/strong&gt;, left or right. For this tutorial we only want our users dragging it either up or down, so we set it to &lt;strong&gt;y&lt;/strong&gt;.
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;Item&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="nx"&gt;name&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nt"&gt;motion&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nt"&gt;div&lt;/span&gt; &lt;span class="na"&gt;drag&lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="s"&gt;"y"&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;name&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="p"&gt;&amp;lt;/&lt;/span&gt;&lt;span class="nt"&gt;motion&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nt"&gt;div&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;This is what the code looks like now. If you dragged the element, you will realise it goes outside our container that the list rendered in. We don't want that, so we need to add constraints to make sure users can only drag within the container.&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;
-&lt;strong&gt;dragConstraints&lt;/strong&gt; - this takes an object of the four sides of the area the item is in, top, bottom, left, right. These accept values as pixels. How far away from the top, bottom, left or right should be the limit, where the component can't be dragged across. If you give it a &lt;strong&gt;top&lt;/strong&gt; of &lt;strong&gt;0&lt;/strong&gt;, it means the element can only be dragged to the very edge of the top of the parent component, in this case, our container.
-If you give it a &lt;strong&gt;10&lt;/strong&gt;, it means it can be dragged up to 10px from the top of the parent component. For our case, we want it to be able to reach the edges and since we are only dragging on the &lt;strong&gt;y&lt;/strong&gt; axis, we only need to take care of the top and bottom.&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;dragListeners&lt;/strong&gt; - One thing we also need to take care of is to know when the item is being dragged and when it is dropped after dragging. This will help us be able to reorder the items very well. 
-When dragging the item, we might want to help the users know by performing some form of animation on the item being dragged by either increasing it in size or decreasing it, just to differentiate that from the other items.&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;layout&lt;/strong&gt; - We will add this property as well to help us animate the item when dragging as it will be changing position i n the list. Framer motion has done a lot of work for us to have these cool stuff. &lt;a href="https://www.framer.com/api/motion/animation/#layout-animations"&gt;Read more&lt;/a&gt;.&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;animations&lt;/strong&gt; - We also might want to add a couple of animations to the item that will be dragged, in our case, we can add the whileHover and whileTap properties or leave it, I ill but you can check the docs later and add. I think the name gives a hint about what each does. When the item is hovered, do this, when the item is tapped or clicked, do that.&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;controls&lt;/strong&gt; - We want to add the various functions that will be called to help us reorder our list when it is dragged from one position to the other. They are &lt;strong&gt;updateOrder&lt;/strong&gt; and &lt;strong&gt;updatePosition&lt;/strong&gt;, and we will use the &lt;a href="https://codesandbox.io/s/framer-motion-2-drag-to-reorder-fc4rt?file=/src/use-position-reorder.js:0-1772"&gt;usePositionReOrder&lt;/a&gt; and &lt;a href="https://codesandbox.io/s/framer-motion-2-drag-to-reorder-fc4rt?file=/src/use-measure-position.js"&gt;useMeasurePosition&lt;/a&gt; hooks. We don't need to rewrite our own.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;What &lt;strong&gt;usePositionReorder&lt;/strong&gt; hook does is reorder our list that is rendered when we drag an item from one position to the other and also updates the position of the item given its new position after the drag event. Use measure position uses the ref of the item to determine its position from where it was dragged from and where it has been placed and its index in the list. This is what it uses to send the data to &lt;strong&gt;updatePosition&lt;/strong&gt; from the &lt;strong&gt;usePositionReOrder&lt;/strong&gt; hook. So it will take data from the item being dragged such as its dragoffset vertically, since we are only dragging along the y axis. This will help the hook swap the item that we are changing positions with the dragged item.&lt;/p&gt;
-
-&lt;p&gt;When the item is being dragged, aside from letting the component itself know that it is in a dragging state, we have to let our &lt;strong&gt;usePositionReOrder&lt;/strong&gt; hook know, using another property which is the &lt;strong&gt;onViewBoxUpdate&lt;/strong&gt; prop. This property is a callback that will fire every time the viewport is updated due to a drag activity. And it sends the delta of the item and the index to &lt;strong&gt;updateOrder&lt;/strong&gt; from the &lt;strong&gt;usePositionReorder&lt;/strong&gt; hook. The list is reordered and sent back to us in the &lt;strong&gt;orderedList&lt;/strong&gt; and a new list is rendered into our view. &lt;/p&gt;
-
-&lt;p&gt;Our code finally looks like this&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="nx"&gt;React&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;react&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;./style.css&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;motion&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;framer-motion&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;usePositionReorder&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;./usePositionReorder&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;useMeasurePosition&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;./useMeasurePosition&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-
-&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;List&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Item One&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Item Two&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Item Three&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Item Four&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;];&lt;/span&gt;
-
-&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="k"&gt;default&lt;/span&gt; &lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;App&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;updatedList&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;updatePosition&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;updateOrder&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;usePositionReorder&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;List&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-
-  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
-    &lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nt"&gt;ul&lt;/span&gt; &lt;span class="na"&gt;className&lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="s"&gt;"container"&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;
-      &lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;updatedList&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;map&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;name&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;index&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
-        &lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nc"&gt;Item&lt;/span&gt;
-          &lt;span class="na"&gt;key&lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;name&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;
-          &lt;span class="na"&gt;ind&lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;index&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;
-          &lt;span class="na"&gt;updateOrder&lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;updateOrder&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;
-          &lt;span class="na"&gt;updatePosition&lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;updatePosition&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;
-          &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;name&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;
-        &lt;span class="p"&gt;/&amp;gt;&lt;/span&gt;
-      &lt;span class="p"&gt;))&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;
-    &lt;span class="p"&gt;&amp;lt;/&lt;/span&gt;&lt;span class="nt"&gt;ul&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;
-  &lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;Item&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="nx"&gt;name&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;updateOrder&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;updatePosition&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;ind&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;isdragged&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;setIsDragged&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;React&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;useState&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kc"&gt;false&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-
-  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;itemRef&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;useMeasurePosition&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;pos&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;updatePosition&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;ind&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;pos&lt;/span&gt;&lt;span class="p"&gt;));&lt;/span&gt;
-
-  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
-      &lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nt"&gt;li&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;
-        &lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nt"&gt;motion&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nt"&gt;div&lt;/span&gt;
-      &lt;span class="na"&gt;style&lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;
-        &lt;span class="na"&gt;zIndex&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;isdragged&lt;/span&gt; &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="mi"&gt;2&lt;/span&gt; &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-        &lt;span class="na"&gt;height&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;name&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;length&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt; &lt;span class="mi"&gt;10&lt;/span&gt;
-      &lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;
-      &lt;span class="na"&gt;dragConstraints&lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;
-        &lt;span class="na"&gt;top&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-        &lt;span class="na"&gt;bottom&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt;
-      &lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;
-      &lt;span class="na"&gt;dragElastic&lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;
-      &lt;span class="na"&gt;layout&lt;/span&gt;
-      &lt;span class="na"&gt;ref&lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;itemRef&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;
-      &lt;span class="na"&gt;onDragStart&lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;setIsDragged&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;
-      &lt;span class="na"&gt;onDragEnd&lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;setIsDragged&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kc"&gt;false&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;
-      &lt;span class="na"&gt;animate&lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;
-        &lt;span class="na"&gt;scale&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;isdragged&lt;/span&gt; &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="mf"&gt;1.05&lt;/span&gt; &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;
-      &lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;
-      &lt;span class="na"&gt;onViewportBoxUpdate&lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;_&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;delta&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-       &lt;span class="nx"&gt;isdragged&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; &lt;span class="nx"&gt;updateOrder&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;ind&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;delta&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;y&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;translate&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-      &lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;
-      &lt;span class="na"&gt;drag&lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="s"&gt;"y"&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;
-      &lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;name&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;
-    &lt;span class="p"&gt;&amp;lt;/&lt;/span&gt;&lt;span class="nt"&gt;motion&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nt"&gt;div&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;
-        &lt;span class="p"&gt;&amp;lt;/&lt;/span&gt;&lt;span class="nt"&gt;li&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;
-  &lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;When clicking to drag the items in the list, you will realize they are a bit hard to drag from one end to the other. We can add the &lt;strong&gt;dragElastic&lt;/strong&gt; property of 1 to make it smoother.&lt;/p&gt;
-
-&lt;p&gt;Now this is our look&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--GOI_l7fK--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1624791455644/WYNY6AiNu.gif" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--GOI_l7fK--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1624791455644/WYNY6AiNu.gif" alt="chrome-capture (1).gif"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;The possibilities are endless, so go ahead and build something with it. A &lt;a href="https://github.com/Augani/react-draggable-list"&gt;link&lt;/a&gt; to the repo to view the entire code and &lt;a href="https://react-wt4hcq.stackblitz.io"&gt;live&lt;/a&gt;.&lt;br&gt;
-And explore more with framer motion &lt;a href="https://www.framer.com/api/motion/"&gt;here&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Till next time..&lt;/p&gt;
-
-</description>
-      <category>react</category>
-      <category>javascript</category>
     </item>
   </channel>
 </rss>
