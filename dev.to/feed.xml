@@ -7,6 +7,490 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>Provisioning an RDS Database with CloudFormation</title>
+      <author>Jenna Pederson</author>
+      <pubDate>Mon, 28 Jun 2021 15:43:13 +0000</pubDate>
+      <link>https://dev.to/aws/provisioning-an-rds-database-with-cloudformation-part-2-i6n</link>
+      <guid>https://dev.to/aws/provisioning-an-rds-database-with-cloudformation-part-2-i6n</guid>
+      <description>&lt;p&gt;In &lt;a href="https://jennapederson.com/blog/2021/6/21/provisioning-an-ec2-instance-with-cloudformation-part-1/"&gt;part 1&lt;/a&gt;, we automated the provisioning of your Amazon EC2 instance using AWS CloudFormation. When you built the EC2 instance manually in the past, you were seeing inconsistencies between environments, had to manually test your infrastructure setup, manually deploy your team's web app, which happens all to infrequently. All of this has been error prone and time consuming. Bugs introduced into production code are more difficult and expensive to fix and your customers were ultimately the ones who suffered.&lt;/p&gt;
+
+&lt;p&gt;In addition to the EC2 instance, you also need a Postgresql database. In the past, it was running on the same instance as your webapp and sometimes web app traffic impacted the database and vice versa. In this post, part 2, you'll add an Amazon RDS Postgresql database to the CloudFormation template you built in &lt;a href="https://jennapederson.com/blog/2021/6/21/provisioning-an-ec2-instance-with-cloudformation-part-1/"&gt;part 1&lt;/a&gt; so that both the EC2 instance and the database can be provisioned together as a set of resources. And since RDS is a managed service, you won’t have to do operating system patches or database patches — it’s all managed for you. And eventually, you want to introduce a continuous integration/continuous deployment (CI/CD) pipeline to automate the build, test, and deploy phases of your release process. Both part 1 and part 2 set you up to do that.&lt;/p&gt;
+
+&lt;p&gt;As a reminder, here's what we covered and where we're going:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;automate the provisioning of your Amazon EC2 instance using AWS CloudFormation (&lt;a href="https://jennapederson.com/blog/2021/6/21/provisioning-an-ec2-instance-with-cloudformation-part-1/"&gt;part 1&lt;/a&gt;),&lt;/li&gt;
+&lt;li&gt;add an Amazon RDS Postgresql database to your stack with CloudFormation (this post, part 2), and&lt;/li&gt;
+&lt;li&gt;create an AWS CodePipeline with CloudFormation (part 3).&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h2&gt;
+  &lt;a href="#prerequisites"&gt;
+  &lt;/a&gt;
+  Prerequisites
+&lt;/h2&gt;
+
+&lt;p&gt;To work through the examples in this post, you’ll need:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;an AWS account (you can create your account &lt;a href="https://aws.amazon.com/premiumsupport/knowledge-center/create-and-activate-aws-account/"&gt;here&lt;/a&gt; if you don’t already have one),&lt;/li&gt;
+&lt;li&gt;the AWS CLI installed (you can find instructions for installing the AWS CLI &lt;a href="https://aws.amazon.com/cli/"&gt;here&lt;/a&gt;), and&lt;/li&gt;
+&lt;li&gt;a key-pair to use for SSH (you can create a key-pair following &lt;a href="https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-key-pairs.html#having-ec2-create-your-key-pair"&gt;these instructions&lt;/a&gt;).&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Unfamiliar with CloudFormation or feeling a little rusty? Check out &lt;a href="https://jennapederson.com/blog/2021/6/21/provisioning-an-ec2-instance-with-cloudformation-part-1/"&gt;part 1&lt;/a&gt; or my &lt;a href="https://jennapederson.com/blog/2021/5/10/introduction-to-aws-cloudformation/"&gt;Intro to CloudFormation post&lt;/a&gt; before getting started.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#updating-the-cloudformation-template"&gt;
+  &lt;/a&gt;
+  Updating the CloudFormation Template
+&lt;/h2&gt;
+
+&lt;p&gt;First we'll add the RDS database and then we'll add a security group to allow inbound traffic on port 5432. At the end of this post, you’ll delete the stack you’ve created and any snapshots so that you don’t incur any charges and then you can (quickly) customize and recreate the stack in the future.&lt;/p&gt;
+
+&lt;p&gt;Just want the code? Grab it &lt;a href="https://github.com/jennapederson/cloudformation-examples"&gt;here&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;Let’s get started!&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#1-add-rds-postgresql-database"&gt;
+  &lt;/a&gt;
+  1. Add RDS Postgresql Database
+&lt;/h3&gt;
+
+&lt;p&gt;First, we'll add an RDS database resource with the type &lt;code&gt;AWS::RDS::DBInstance&lt;/code&gt; to the CloudFormation template. We set the &lt;code&gt;Engine&lt;/code&gt; to the database engine we want to use, in this case &lt;code&gt;postgres&lt;/code&gt;.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="c1"&gt;# 05_rds.yaml&lt;/span&gt;
+&lt;span class="na"&gt;AWSTemplateFormatVersion&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;2010-09-09&lt;/span&gt;
+&lt;span class="na"&gt;Description&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Part 2 - Add a database with CloudFormation&lt;/span&gt;
+
+&lt;span class="na"&gt;Parameters&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;AvailabilityZone&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;AWS::EC2::AvailabilityZone::Name&lt;/span&gt;
+  &lt;span class="na"&gt;EnvironmentType&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Description&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;Specify&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;the&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;Environment&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;type&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;of&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;the&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;stack.'&lt;/span&gt;
+    &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;String&lt;/span&gt;
+    &lt;span class="na"&gt;Default&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;dev&lt;/span&gt;
+    &lt;span class="na"&gt;AllowedValues&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;dev&lt;/span&gt;
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;test&lt;/span&gt;
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;prod&lt;/span&gt;
+  &lt;span class="na"&gt;AmiID&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;AWS::SSM::Parameter::Value&amp;lt;AWS::EC2::Image::Id&amp;gt;&lt;/span&gt;
+    &lt;span class="na"&gt;Description&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;The&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;ID&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;of&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;the&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;AMI.'&lt;/span&gt;
+    &lt;span class="na"&gt;Default&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2&lt;/span&gt;
+  &lt;span class="na"&gt;KeyPairName&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;String&lt;/span&gt;
+    &lt;span class="na"&gt;Description&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;The name of an existing Amazon EC2 key pair in this region to use to SSH into the Amazon EC2 instances.&lt;/span&gt;
+
+  &lt;span class="na"&gt;DBInstanceIdentifier&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;String&lt;/span&gt;
+    &lt;span class="na"&gt;Default&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;webapp-db'&lt;/span&gt;
+  &lt;span class="na"&gt;DBUsername&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;NoEcho&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;true'&lt;/span&gt;
+    &lt;span class="na"&gt;Description&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Username for Postgresql database access&lt;/span&gt;
+    &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;String&lt;/span&gt;
+    &lt;span class="na"&gt;MinLength&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;1'&lt;/span&gt;
+    &lt;span class="na"&gt;MaxLength&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;16'&lt;/span&gt;
+    &lt;span class="na"&gt;AllowedPattern&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;[a-zA-Z][a-zA-Z0-9]*'&lt;/span&gt;
+    &lt;span class="na"&gt;ConstraintDescription&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Must begin with a letter and contain only alphanumeric characters.&lt;/span&gt;
+    &lt;span class="na"&gt;Default&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;postgres'&lt;/span&gt;
+  &lt;span class="na"&gt;DBPassword&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;NoEcho&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;true'&lt;/span&gt;
+    &lt;span class="na"&gt;Description&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Password Postgresql database access&lt;/span&gt;
+    &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;String&lt;/span&gt;
+    &lt;span class="na"&gt;MinLength&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;8'&lt;/span&gt;
+    &lt;span class="na"&gt;MaxLength&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;41'&lt;/span&gt;
+    &lt;span class="na"&gt;AllowedPattern&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;[a-zA-Z0-9]*'&lt;/span&gt;
+    &lt;span class="na"&gt;ConstraintDescription&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Must contain only alphanumeric characters.&lt;/span&gt;
+
+&lt;span class="na"&gt;Mappings&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;EnvironmentToInstanceType&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;dev&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;InstanceType&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;t2.nano&lt;/span&gt;
+    &lt;span class="na"&gt;test&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;InstanceType&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;t2.micro&lt;/span&gt;
+    &lt;span class="na"&gt;prod&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;InstanceType&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;t2.small&lt;/span&gt;
+
+&lt;span class="na"&gt;Resources&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;WebAppInstance&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;AWS::EC2::Instance&lt;/span&gt;
+    &lt;span class="na"&gt;Properties&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;AvailabilityZone&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="s"&gt;AvailabilityZone&lt;/span&gt;
+      &lt;span class="na"&gt;ImageId&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="s"&gt;AmiID&lt;/span&gt;
+      &lt;span class="na"&gt;InstanceType&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!FindInMap&lt;/span&gt; &lt;span class="pi"&gt;[&lt;/span&gt;&lt;span class="nv"&gt;EnvironmentToInstanceType&lt;/span&gt;&lt;span class="pi"&gt;,&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="nv"&gt;EnvironmentType&lt;/span&gt;&lt;span class="pi"&gt;,&lt;/span&gt; &lt;span class="nv"&gt;InstanceType&lt;/span&gt;&lt;span class="pi"&gt;]&lt;/span&gt;
+      &lt;span class="na"&gt;KeyName&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="s"&gt;KeyPairName&lt;/span&gt;
+      &lt;span class="na"&gt;SecurityGroupIds&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="s"&gt;WebAppSecurityGroup&lt;/span&gt;
+
+  &lt;span class="na"&gt;WebAppSecurityGroup&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;AWS::EC2::SecurityGroup&lt;/span&gt;
+    &lt;span class="na"&gt;Properties&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;GroupName&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Join&lt;/span&gt; &lt;span class="pi"&gt;[&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;-'&lt;/span&gt;&lt;span class="pi"&gt;,&lt;/span&gt; &lt;span class="pi"&gt;[&lt;/span&gt; &lt;span class="nv"&gt;webapp-security-group&lt;/span&gt;&lt;span class="pi"&gt;,&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="nv"&gt;EnvironmentType&lt;/span&gt; &lt;span class="pi"&gt;]&lt;/span&gt; &lt;span class="pi"&gt;]&lt;/span&gt;
+      &lt;span class="na"&gt;GroupDescription&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;Allow&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;HTTP/HTTPS&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;and&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;SSH&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;inbound&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;and&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;outbound&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;traffic'&lt;/span&gt;
+      &lt;span class="na"&gt;SecurityGroupIngress&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;IpProtocol&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;tcp&lt;/span&gt;
+          &lt;span class="na"&gt;FromPort&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;80&lt;/span&gt;
+          &lt;span class="na"&gt;ToPort&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;80&lt;/span&gt;
+          &lt;span class="na"&gt;CidrIp&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;0.0.0.0/0&lt;/span&gt;
+        &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;IpProtocol&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;tcp&lt;/span&gt;
+          &lt;span class="na"&gt;FromPort&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;443&lt;/span&gt;
+          &lt;span class="na"&gt;ToPort&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;443&lt;/span&gt;
+          &lt;span class="na"&gt;CidrIp&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;0.0.0.0/0&lt;/span&gt;
+        &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;IpProtocol&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;tcp&lt;/span&gt;
+          &lt;span class="na"&gt;FromPort&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;22&lt;/span&gt;
+          &lt;span class="na"&gt;ToPort&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;22&lt;/span&gt;
+          &lt;span class="na"&gt;CidrIp&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;0.0.0.0/0&lt;/span&gt;
+
+  &lt;span class="na"&gt;WebAppEIP&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;AWS::EC2::EIP&lt;/span&gt;
+    &lt;span class="na"&gt;Properties&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;Domain&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;vpc&lt;/span&gt;
+      &lt;span class="na"&gt;InstanceId&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="s"&gt;WebAppInstance&lt;/span&gt;
+      &lt;span class="na"&gt;Tags&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;Key&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Name&lt;/span&gt;
+          &lt;span class="na"&gt;Value&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Join&lt;/span&gt; &lt;span class="pi"&gt;[&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;-'&lt;/span&gt;&lt;span class="pi"&gt;,&lt;/span&gt; &lt;span class="pi"&gt;[&lt;/span&gt; &lt;span class="nv"&gt;webapp-eip&lt;/span&gt;&lt;span class="pi"&gt;,&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="nv"&gt;EnvironmentType&lt;/span&gt; &lt;span class="pi"&gt;]&lt;/span&gt; &lt;span class="pi"&gt;]&lt;/span&gt;
+
+  &lt;span class="na"&gt;WebAppDatabase&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;AWS::RDS::DBInstance&lt;/span&gt;
+    &lt;span class="na"&gt;Properties&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;DBInstanceIdentifier&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="s"&gt;DBInstanceIdentifier&lt;/span&gt;
+      &lt;span class="na"&gt;AllocatedStorage&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;5'&lt;/span&gt;
+      &lt;span class="na"&gt;DBInstanceClass&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;db.t2.small&lt;/span&gt;
+      &lt;span class="na"&gt;Engine&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;postgres&lt;/span&gt;
+      &lt;span class="na"&gt;MasterUsername&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="s"&gt;DBUsername&lt;/span&gt;
+      &lt;span class="na"&gt;MasterUserPassword&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="s"&gt;DBPassword&lt;/span&gt;
+      &lt;span class="na"&gt;Tags&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;Key&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Name&lt;/span&gt;
+          &lt;span class="na"&gt;Value&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Join&lt;/span&gt; &lt;span class="pi"&gt;[&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;-'&lt;/span&gt;&lt;span class="pi"&gt;,&lt;/span&gt; &lt;span class="pi"&gt;[&lt;/span&gt; &lt;span class="nv"&gt;webapp-rds&lt;/span&gt;&lt;span class="pi"&gt;,&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="nv"&gt;EnvironmentType&lt;/span&gt; &lt;span class="pi"&gt;]&lt;/span&gt; &lt;span class="pi"&gt;]&lt;/span&gt;
+    &lt;span class="na"&gt;DeletionPolicy&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Snapshot&lt;/span&gt;
+    &lt;span class="na"&gt;UpdateReplacePolicy&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Snapshot&lt;/span&gt;
+
+&lt;span class="na"&gt;Outputs&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;WebsiteURL&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Value&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Sub&lt;/span&gt; &lt;span class="s"&gt;http://${WebAppEIP}&lt;/span&gt;
+    &lt;span class="na"&gt;Description&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;WebApp URL&lt;/span&gt;
+
+  &lt;span class="na"&gt;WebServerPublicDNS&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Description&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;Public&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;DNS&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;of&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;EC2&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;instance'&lt;/span&gt;
+    &lt;span class="na"&gt;Value&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!GetAtt&lt;/span&gt; &lt;span class="s"&gt;WebAppInstance.PublicDnsName&lt;/span&gt;
+
+  &lt;span class="na"&gt;WebAppDatabaseEndpoint&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Description&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;Connection&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;endpoint&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;for&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;the&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;database'&lt;/span&gt;
+    &lt;span class="na"&gt;Value&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!GetAtt&lt;/span&gt; &lt;span class="s"&gt;WebAppDatabase.Endpoint.Address&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;In the template above, we've also added new parameters to customize the name of the database, the username, and password, as well as two new outputs to make our work easier: &lt;code&gt;WebServerPublicDNS&lt;/code&gt; and &lt;code&gt;WebAppDatabasePublicDNS&lt;/code&gt;. We'll use both of these outputs in step 2.&lt;/p&gt;
+
+&lt;p&gt;If you're creating your stack from scratch, you can run the &lt;code&gt;create-stack&lt;/code&gt; command:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;aws cloudformation create-stack &lt;span class="nt"&gt;--stack-name&lt;/span&gt; rds-example &lt;span class="nt"&gt;--template-body&lt;/span&gt; file://05_rds.yaml &lt;span class="se"&gt;\&lt;/span&gt;
+&lt;span class="nt"&gt;--parameters&lt;/span&gt; &lt;span class="nv"&gt;ParameterKey&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;AvailabilityZone,ParameterValue&lt;span class="o"&gt;=&lt;/span&gt;us-east-1a &lt;span class="se"&gt;\&lt;/span&gt;
+&lt;span class="nv"&gt;ParameterKey&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;EnvironmentType,ParameterValue&lt;span class="o"&gt;=&lt;/span&gt;dev &lt;span class="se"&gt;\&lt;/span&gt;
+&lt;span class="nv"&gt;ParameterKey&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;KeyPairName,ParameterValue&lt;span class="o"&gt;=&lt;/span&gt;jenna &lt;span class="se"&gt;\&lt;/span&gt;
+&lt;span class="nv"&gt;ParameterKey&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;DBPassword,ParameterValue&lt;span class="o"&gt;=&lt;/span&gt;Abcd1234
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Or, if you're updating the stack you created in &lt;a href="https://jennapederson.com/blog/2021/6/21/provisioning-an-ec2-instance-with-cloudformation-part-1/"&gt;part 1&lt;/a&gt;, you can use the &lt;code&gt;update-stack&lt;/code&gt; command instead.&lt;/p&gt;
+
+&lt;p&gt;Notice that we're only specifying the new &lt;code&gt;DBPassword&lt;/code&gt; parameter and relying on the default values for &lt;code&gt;DBInstanceIdentifier&lt;/code&gt; and &lt;code&gt;DBUsername&lt;/code&gt; that are specified in the template. If you'd like to customize these values, you can add them to the command in the same &lt;code&gt;ParameterKey,ParameterValue&lt;/code&gt; format shown above.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#deletionpolicy-and-updatereplacepolicy"&gt;
+  &lt;/a&gt;
+  DeletionPolicy and UpdateReplacePolicy
+&lt;/h3&gt;
+
+&lt;p&gt;You may have also noticed the &lt;code&gt;DeletionPolicy&lt;/code&gt; and &lt;code&gt;UpdateReplacePolicy&lt;/code&gt; properties set to &lt;code&gt;Snapshot&lt;/code&gt;. If and when you ever need to re-provision the database, you'll want to make sure you don't lose your precious data. Some template changes will require the resource to be recreated (as opposed to updated). When this happens, you'll want to be in control of how that happens and what happens to your data. These two properties give you that control. In the case of &lt;code&gt;Snapshot&lt;/code&gt;, CloudFormation will create a snapshot of the database when the stack is updated or deleted. You can read more about update and delete behaviors of stack resources &lt;a href="https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/using-cfn-updating-stacks-update-behaviors.html"&gt;here&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;After creating or updating the stack, you'll now have your EC2 instance (and supporting resources from &lt;a href="https://jennapederson.com/blog/2021/6/21/provisioning-an-ec2-instance-with-cloudformation-part-1/"&gt;part 1&lt;/a&gt;) and an RDS database. Right now, no one can access that database instance from the outside world, so next we'll enable inbound traffic to the Postgresql port.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#2-enable-inbound-traffic-on-port-5432"&gt;
+  &lt;/a&gt;
+  2. Enable Inbound Traffic on Port 5432
+&lt;/h2&gt;
+
+&lt;p&gt;To allow inbound traffic on port 5432 so that our EC2 instance can talk to the RDS database, we'll add a security group with type &lt;code&gt;AWS::EC2::SecurityGroup&lt;/code&gt;.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="c1"&gt;# 06_rds.yaml&lt;/span&gt;
+&lt;span class="na"&gt;AWSTemplateFormatVersion&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;2010-09-09&lt;/span&gt;
+&lt;span class="na"&gt;Description&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Part 2 - Add a database with CloudFormation&lt;/span&gt;
+
+&lt;span class="na"&gt;Parameters&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;AvailabilityZone&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;AWS::EC2::AvailabilityZone::Name&lt;/span&gt;
+  &lt;span class="na"&gt;EnvironmentType&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Description&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;Specify&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;the&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;Environment&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;type&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;of&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;the&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;stack.'&lt;/span&gt;
+    &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;String&lt;/span&gt;
+    &lt;span class="na"&gt;Default&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;dev&lt;/span&gt;
+    &lt;span class="na"&gt;AllowedValues&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;dev&lt;/span&gt;
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;test&lt;/span&gt;
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;prod&lt;/span&gt;
+  &lt;span class="na"&gt;AmiID&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;AWS::SSM::Parameter::Value&amp;lt;AWS::EC2::Image::Id&amp;gt;&lt;/span&gt;
+    &lt;span class="na"&gt;Description&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;The&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;ID&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;of&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;the&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;AMI.'&lt;/span&gt;
+    &lt;span class="na"&gt;Default&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2&lt;/span&gt;
+  &lt;span class="na"&gt;KeyPairName&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;String&lt;/span&gt;
+    &lt;span class="na"&gt;Description&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;The name of an existing Amazon EC2 key pair in this region to use to SSH into the Amazon EC2 instances.&lt;/span&gt;
+
+  &lt;span class="na"&gt;DBInstanceIdentifier&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;String&lt;/span&gt;
+    &lt;span class="na"&gt;Default&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;webapp-db'&lt;/span&gt;
+  &lt;span class="na"&gt;DBUsername&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;NoEcho&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;true'&lt;/span&gt;
+    &lt;span class="na"&gt;Description&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Username for Postgresql database access&lt;/span&gt;
+    &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;String&lt;/span&gt;
+    &lt;span class="na"&gt;MinLength&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;1'&lt;/span&gt;
+    &lt;span class="na"&gt;MaxLength&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;16'&lt;/span&gt;
+    &lt;span class="na"&gt;AllowedPattern&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;[a-zA-Z][a-zA-Z0-9]*'&lt;/span&gt;
+    &lt;span class="na"&gt;ConstraintDescription&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Must begin with a letter and contain only alphanumeric characters.&lt;/span&gt;
+    &lt;span class="na"&gt;Default&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;postgres'&lt;/span&gt;
+  &lt;span class="na"&gt;DBPassword&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;NoEcho&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;true'&lt;/span&gt;
+    &lt;span class="na"&gt;Description&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Password Postgresql database access&lt;/span&gt;
+    &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;String&lt;/span&gt;
+    &lt;span class="na"&gt;MinLength&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;8'&lt;/span&gt;
+    &lt;span class="na"&gt;MaxLength&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;41'&lt;/span&gt;
+    &lt;span class="na"&gt;AllowedPattern&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;[a-zA-Z0-9]*'&lt;/span&gt;
+    &lt;span class="na"&gt;ConstraintDescription&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Must contain only alphanumeric characters.&lt;/span&gt;
+
+&lt;span class="na"&gt;Mappings&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;EnvironmentToInstanceType&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;dev&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;InstanceType&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;t2.nano&lt;/span&gt;
+    &lt;span class="na"&gt;test&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;InstanceType&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;t2.micro&lt;/span&gt;
+    &lt;span class="na"&gt;prod&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;InstanceType&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;t2.small&lt;/span&gt;
+
+&lt;span class="na"&gt;Resources&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;WebAppInstance&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;AWS::EC2::Instance&lt;/span&gt;
+    &lt;span class="na"&gt;Properties&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;AvailabilityZone&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="s"&gt;AvailabilityZone&lt;/span&gt;
+      &lt;span class="na"&gt;ImageId&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="s"&gt;AmiID&lt;/span&gt;
+      &lt;span class="na"&gt;InstanceType&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!FindInMap&lt;/span&gt; &lt;span class="pi"&gt;[&lt;/span&gt;&lt;span class="nv"&gt;EnvironmentToInstanceType&lt;/span&gt;&lt;span class="pi"&gt;,&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="nv"&gt;EnvironmentType&lt;/span&gt;&lt;span class="pi"&gt;,&lt;/span&gt; &lt;span class="nv"&gt;InstanceType&lt;/span&gt;&lt;span class="pi"&gt;]&lt;/span&gt;
+      &lt;span class="na"&gt;KeyName&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="s"&gt;KeyPairName&lt;/span&gt;
+      &lt;span class="na"&gt;SecurityGroupIds&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="s"&gt;WebAppSecurityGroup&lt;/span&gt;
+
+  &lt;span class="na"&gt;WebAppSecurityGroup&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;AWS::EC2::SecurityGroup&lt;/span&gt;
+    &lt;span class="na"&gt;Properties&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;GroupName&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Join&lt;/span&gt; &lt;span class="pi"&gt;[&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;-'&lt;/span&gt;&lt;span class="pi"&gt;,&lt;/span&gt; &lt;span class="pi"&gt;[&lt;/span&gt; &lt;span class="nv"&gt;webapp-security-group&lt;/span&gt;&lt;span class="pi"&gt;,&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="nv"&gt;EnvironmentType&lt;/span&gt; &lt;span class="pi"&gt;]&lt;/span&gt; &lt;span class="pi"&gt;]&lt;/span&gt;
+      &lt;span class="na"&gt;GroupDescription&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;Allow&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;HTTP/HTTPS&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;and&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;SSH&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;inbound&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;and&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;outbound&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;traffic'&lt;/span&gt;
+      &lt;span class="na"&gt;SecurityGroupIngress&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;IpProtocol&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;tcp&lt;/span&gt;
+          &lt;span class="na"&gt;FromPort&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;80&lt;/span&gt;
+          &lt;span class="na"&gt;ToPort&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;80&lt;/span&gt;
+          &lt;span class="na"&gt;CidrIp&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;0.0.0.0/0&lt;/span&gt;
+        &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;IpProtocol&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;tcp&lt;/span&gt;
+          &lt;span class="na"&gt;FromPort&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;443&lt;/span&gt;
+          &lt;span class="na"&gt;ToPort&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;443&lt;/span&gt;
+          &lt;span class="na"&gt;CidrIp&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;0.0.0.0/0&lt;/span&gt;
+        &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;IpProtocol&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;tcp&lt;/span&gt;
+          &lt;span class="na"&gt;FromPort&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;22&lt;/span&gt;
+          &lt;span class="na"&gt;ToPort&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;22&lt;/span&gt;
+          &lt;span class="na"&gt;CidrIp&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;0.0.0.0/0&lt;/span&gt;
+
+  &lt;span class="na"&gt;WebAppEIP&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;AWS::EC2::EIP&lt;/span&gt;
+    &lt;span class="na"&gt;Properties&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;Domain&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;vpc&lt;/span&gt;
+      &lt;span class="na"&gt;InstanceId&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="s"&gt;WebAppInstance&lt;/span&gt;
+      &lt;span class="na"&gt;Tags&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;Key&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Name&lt;/span&gt;
+          &lt;span class="na"&gt;Value&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Join&lt;/span&gt; &lt;span class="pi"&gt;[&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;-'&lt;/span&gt;&lt;span class="pi"&gt;,&lt;/span&gt; &lt;span class="pi"&gt;[&lt;/span&gt; &lt;span class="nv"&gt;webapp-eip&lt;/span&gt;&lt;span class="pi"&gt;,&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="nv"&gt;EnvironmentType&lt;/span&gt; &lt;span class="pi"&gt;]&lt;/span&gt; &lt;span class="pi"&gt;]&lt;/span&gt;
+
+  &lt;span class="na"&gt;WebAppDatabase&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;AWS::RDS::DBInstance&lt;/span&gt;
+    &lt;span class="na"&gt;Properties&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;DBInstanceIdentifier&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="s"&gt;DBInstanceIdentifier&lt;/span&gt;
+      &lt;span class="na"&gt;VPCSecurityGroups&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="kt"&gt;!GetAtt&lt;/span&gt; &lt;span class="s"&gt;DBEC2SecurityGroup.GroupId&lt;/span&gt;
+      &lt;span class="na"&gt;AllocatedStorage&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;5'&lt;/span&gt;
+      &lt;span class="na"&gt;DBInstanceClass&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;db.t2.small&lt;/span&gt;
+      &lt;span class="na"&gt;Engine&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;postgres&lt;/span&gt;
+      &lt;span class="na"&gt;MasterUsername&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="s"&gt;DBUsername&lt;/span&gt;
+      &lt;span class="na"&gt;MasterUserPassword&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="s"&gt;DBPassword&lt;/span&gt;
+      &lt;span class="na"&gt;Tags&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;Key&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Name&lt;/span&gt;
+          &lt;span class="na"&gt;Value&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Join&lt;/span&gt; &lt;span class="pi"&gt;[&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;-'&lt;/span&gt;&lt;span class="pi"&gt;,&lt;/span&gt; &lt;span class="pi"&gt;[&lt;/span&gt; &lt;span class="nv"&gt;webapp-rds&lt;/span&gt;&lt;span class="pi"&gt;,&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="nv"&gt;EnvironmentType&lt;/span&gt; &lt;span class="pi"&gt;]&lt;/span&gt; &lt;span class="pi"&gt;]&lt;/span&gt;
+    &lt;span class="na"&gt;DeletionPolicy&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Snapshot&lt;/span&gt;
+    &lt;span class="na"&gt;UpdateReplacePolicy&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Snapshot&lt;/span&gt;
+
+  &lt;span class="na"&gt;DBEC2SecurityGroup&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;AWS::EC2::SecurityGroup&lt;/span&gt;
+    &lt;span class="na"&gt;Properties&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;GroupName&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Join&lt;/span&gt; &lt;span class="pi"&gt;[&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;-'&lt;/span&gt;&lt;span class="pi"&gt;,&lt;/span&gt; &lt;span class="pi"&gt;[&lt;/span&gt; &lt;span class="nv"&gt;webapp-db-security-group&lt;/span&gt;&lt;span class="pi"&gt;,&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="nv"&gt;EnvironmentType&lt;/span&gt; &lt;span class="pi"&gt;]&lt;/span&gt; &lt;span class="pi"&gt;]&lt;/span&gt;
+      &lt;span class="na"&gt;GroupDescription&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Allow postgres inbound traffic&lt;/span&gt;
+      &lt;span class="na"&gt;SecurityGroupIngress&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;IpProtocol&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;tcp&lt;/span&gt;
+        &lt;span class="na"&gt;FromPort&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;5432&lt;/span&gt;
+        &lt;span class="na"&gt;ToPort&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;5432&lt;/span&gt;
+        &lt;span class="na"&gt;SourceSecurityGroupName&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+          &lt;span class="na"&gt;Ref&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;WebAppSecurityGroup&lt;/span&gt;
+      &lt;span class="na"&gt;Tags&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;Key&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Name&lt;/span&gt;
+          &lt;span class="na"&gt;Value&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Join&lt;/span&gt; &lt;span class="pi"&gt;[&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;-'&lt;/span&gt;&lt;span class="pi"&gt;,&lt;/span&gt; &lt;span class="pi"&gt;[&lt;/span&gt; &lt;span class="nv"&gt;webapp-db-security-group&lt;/span&gt;&lt;span class="pi"&gt;,&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="nv"&gt;EnvironmentType&lt;/span&gt; &lt;span class="pi"&gt;]&lt;/span&gt; &lt;span class="pi"&gt;]&lt;/span&gt;
+
+&lt;span class="na"&gt;Outputs&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;WebsiteURL&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Value&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Sub&lt;/span&gt; &lt;span class="s"&gt;http://${WebAppEIP}&lt;/span&gt;
+    &lt;span class="na"&gt;Description&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;WebApp URL&lt;/span&gt;
+
+  &lt;span class="na"&gt;WebServerPublicDNS&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Description&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;Public&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;DNS&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;of&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;EC2&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;instance'&lt;/span&gt;
+    &lt;span class="na"&gt;Value&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!GetAtt&lt;/span&gt; &lt;span class="s"&gt;WebAppInstance.PublicDnsName&lt;/span&gt;
+
+  &lt;span class="na"&gt;WebAppDatabaseEndpoint&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Description&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;Connection&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;endpoint&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;for&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;the&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;database'&lt;/span&gt;
+    &lt;span class="na"&gt;Value&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!GetAtt&lt;/span&gt; &lt;span class="s"&gt;WebAppDatabase.Endpoint.Address&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;In the template above, we've added the database security group and added it to the &lt;code&gt;VPCSecurityGroups&lt;/code&gt; property. We've also set &lt;code&gt;SourceSecurityGroupName&lt;/code&gt; to the &lt;code&gt;WebAppSecurityGroup&lt;/code&gt; we created earlier, to restrict the inbound traffic to that coming from the &lt;code&gt;WebAppSecurityGroup&lt;/code&gt;, or our EC2 instance.&lt;/p&gt;
+
+&lt;p&gt;To update your stack, you'll use the &lt;code&gt;update-stack&lt;/code&gt; command with the same parameters and values as before:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;aws cloudformation update-stack &lt;span class="nt"&gt;--stack-name&lt;/span&gt; rds-example &lt;span class="nt"&gt;--template-body&lt;/span&gt; file://06_rds.yaml &lt;span class="se"&gt;\&lt;/span&gt;
+&lt;span class="nt"&gt;--parameters&lt;/span&gt; &lt;span class="nv"&gt;ParameterKey&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;AvailabilityZone,ParameterValue&lt;span class="o"&gt;=&lt;/span&gt;us-east-1a &lt;span class="se"&gt;\&lt;/span&gt;
+&lt;span class="nv"&gt;ParameterKey&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;EnvironmentType,ParameterValue&lt;span class="o"&gt;=&lt;/span&gt;dev &lt;span class="se"&gt;\&lt;/span&gt;
+&lt;span class="nv"&gt;ParameterKey&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;KeyPairName,ParameterValue&lt;span class="o"&gt;=&lt;/span&gt;jenna &lt;span class="se"&gt;\&lt;/span&gt;
+&lt;span class="nv"&gt;ParameterKey&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;DBPassword,ParameterValue&lt;span class="o"&gt;=&lt;/span&gt;Abcd1234
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Now, you should have your EC2 instance (and supporting resources from &lt;a href="https://jennapederson.com/blog/2021/6/21/provisioning-an-ec2-instance-with-cloudformation-part-1/"&gt;part 1&lt;/a&gt;), an RDS database, and another security group exposing the database port. But how do we know the EC2 instance can talk to the database?&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#testing-the-security-group"&gt;
+  &lt;/a&gt;
+  Testing the Security Group
+&lt;/h3&gt;
+
+&lt;p&gt;To test your security group to make sure your EC2 instance can talk to the RDS database you provisioned in the last step, you can SSH into the instance and use the &lt;code&gt;psql&lt;/code&gt; client to connect to the database.&lt;/p&gt;
+
+&lt;p&gt;If you don't remember how to SSH into the instance, you can read more about that in &lt;a href="https://jennapederson.com/blog/2021/6/21/provisioning-an-ec2-instance-with-cloudformation-part-1/"&gt;part 1&lt;/a&gt; or grab the &lt;code&gt;WebServerPublicDNS&lt;/code&gt; from the Outputs. Using the command below, replace the &lt;code&gt;WebServerPublicDNS&lt;/code&gt; and &lt;code&gt;YOUR_KEY_PAIR_NAME&lt;/code&gt; parts and SSH into the intstance:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;ssh &lt;span class="nt"&gt;-i&lt;/span&gt; &lt;span class="s2"&gt;"YOUR_KEY_PAIR_NAME.pem"&lt;/span&gt; ec2-user@WebServerPublicDNS
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Once you're in the EC2 instance, you'll need to enable the postgresql library from the Amazon Linux Extras repository and then install it. We could do this all in our CloudFormation template, but this is only for demonstration purposes, so we'll do it manually this one time. You can run these commands to do that:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nb"&gt;sudo &lt;/span&gt;amazon-linux-extras list &lt;span class="c"&gt;# Find the postgresql library and version to enable in the next command&lt;/span&gt;
+&lt;span class="nb"&gt;sudo &lt;/span&gt;amazon-linux-extras &lt;span class="nb"&gt;enable &lt;/span&gt;postgresql13 &lt;span class="nt"&gt;-y&lt;/span&gt;
+&lt;span class="nb"&gt;sudo &lt;/span&gt;yum clean metadata
+&lt;span class="nb"&gt;sudo &lt;/span&gt;yum &lt;span class="nb"&gt;install &lt;/span&gt;postgresql
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Now that &lt;code&gt;psql&lt;/code&gt; is available, you can test the connection to the database like this, replacing &lt;code&gt;WebAppDatabaseEndpoint&lt;/code&gt; with the corresponding value in the Outputs:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;psql &lt;span class="nt"&gt;-h&lt;/span&gt; WebAppDatabaseEndpoint &lt;span class="nt"&gt;-U&lt;/span&gt; postgres &lt;span class="nt"&gt;-d&lt;/span&gt; postgres
+Password &lt;span class="k"&gt;for &lt;/span&gt;user postgres:
+psql &lt;span class="o"&gt;(&lt;/span&gt;13.2, server 12.5&lt;span class="o"&gt;)&lt;/span&gt;
+SSL connection &lt;span class="o"&gt;(&lt;/span&gt;protocol: TLSv1.2, cipher: ECDHE-RSA-AES256-GCM-SHA384, bits: 256, compression: off&lt;span class="o"&gt;)&lt;/span&gt;
+Type &lt;span class="s2"&gt;"help"&lt;/span&gt; &lt;span class="k"&gt;for &lt;/span&gt;help.
+
+&lt;span class="nv"&gt;postgres&lt;/span&gt;&lt;span class="o"&gt;=&amp;gt;&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Congrats! You've successfully allowed your EC2 instance to talk to your RDS database.&lt;/p&gt;
+
+&lt;p&gt;If the connection isn't successful, check the CloudFormation console to make sure the RDS database and security group resources were created successfully. Additionally, you can check to make sure the database has the security group attached and the inbound rule opens up port 5432 (the default postgres port).&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#wrapping-up"&gt;
+  &lt;/a&gt;
+  Wrapping Up
+&lt;/h2&gt;
+
+&lt;h3&gt;
+  &lt;a href="#delete-your-stack-amp-snapshots"&gt;
+  &lt;/a&gt;
+  Delete Your Stack &amp;amp; Snapshots
+&lt;/h3&gt;
+
+&lt;p&gt;Don’t forget to delete your stack so you don’t accrue charges. You can do that with the &lt;code&gt;delete-stack&lt;/code&gt; command:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;aws cloudformation delete-stack &lt;span class="nt"&gt;--stack-name&lt;/span&gt; rds-example
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;If you left the &lt;code&gt;DeletionPolicy&lt;/code&gt; and &lt;code&gt;UpdateReplacePolicy&lt;/code&gt; properties set to snapshot and you no longer need those snapshots, then you can also delete those snapshots using the AWS Console so you don't accrue charges for those either.&lt;/p&gt;
+
+&lt;p&gt;Navigate to the RDS Management Console. From there, go to the Snapshots menu option. Select the snapshots created from your stack (hint: they will have a snapshot name that starts with your stack name) and select Delete snapshot from the Actions menu.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--LxUJvBe---/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/x9n50829jhepfqrjzifa.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--LxUJvBe---/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/x9n50829jhepfqrjzifa.png" alt="RDS Management Console showing selected snapshots to be deleted"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#what-you-learned"&gt;
+  &lt;/a&gt;
+  What You Learned
+&lt;/h3&gt;
+
+&lt;p&gt;In this post, we updated the CloudFormation template from &lt;a href="https://jennapederson.com/blog/2021/6/21/provisioning-an-ec2-instance-with-cloudformation-part-1/"&gt;part 1&lt;/a&gt; to provision an RDS database and enabled inbound traffic for the database. Now that both your EC2 instance and RDS database (and supporting resources) are all managed with code, you can setup and teardown the stack of resources together. This sets you up for part 3, where we'll create an AWS CodePipeline with CloudFormation (part 3) so we can build, test, and deploy our web app to the through each environment to production.&lt;/p&gt;
+
+&lt;p&gt;You can grab the final CloudFormation template we created &lt;a href="https://github.com/jennapederson/cloudformation-examples"&gt;here&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;&lt;em&gt;Like what you read? Follow me here on &lt;a href="https://dev.to/jennapederson"&gt;Dev.to&lt;/a&gt; or on &lt;a href="https://twitter.com/jennapederson"&gt;Twitter&lt;/a&gt; to stay updated!&lt;/em&gt;&lt;/p&gt;
+
+</description>
+      <category>aws</category>
+      <category>cloudformation</category>
+      <category>iac</category>
+      <category>rds</category>
+    </item>
+    <item>
       <title>LikedList Questions: Delete nth node from end in Two Pass</title>
       <author>Kathan Vakharia</author>
       <pubDate>Mon, 28 Jun 2021 15:37:37 +0000</pubDate>
@@ -3823,133 +4307,6 @@ among others.&lt;/p&gt;
 &lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--7O08C2pC--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/n4z9sh76ele8tf3orse2.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--7O08C2pC--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/n4z9sh76ele8tf3orse2.png" alt="A Vaadin Flow view connected consuming data from MySQL through an Apache DeltaSpike repository"&gt;&lt;/a&gt;&lt;/p&gt;
 
 </description>
-    </item>
-    <item>
-      <title>Production: Shield Art</title>
-      <author>Justin Horner</author>
-      <pubDate>Mon, 28 Jun 2021 14:14:50 +0000</pubDate>
-      <link>https://dev.to/justinhhorner/production-shield-art-2maf</link>
-      <guid>https://dev.to/justinhhorner/production-shield-art-2maf</guid>
-      <description>&lt;h1&gt;
-  &lt;a href="#introduction"&gt;
-  &lt;/a&gt;
-  Introduction
-&lt;/h1&gt;
-
-&lt;p&gt;In the &lt;a href="https://justinhhorner.com/2021/06/23/production-enemy-art"&gt;last post&lt;/a&gt;, we updated the enemy from a capsule to sprite art. Today we're going to add art for our shield powerup!&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#the-challenge"&gt;
-  &lt;/a&gt;
-  The Challenge
-&lt;/h1&gt;
-
-&lt;p&gt;The challenge is to add a child GameObject to the player with a &lt;code&gt;SpriteRenderer&lt;/code&gt; to render our new shield art.&lt;/p&gt;
-
-&lt;p&gt;Let's get started.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#add-spriterenderer"&gt;
-  &lt;/a&gt;
-  Add SpriteRenderer
-&lt;/h1&gt;
-
-&lt;p&gt;I'll and add a child GameObject to the Player called Shield and add a SpriteRenderer component with the new shield sprite.&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--aqJYGMJq--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://justinhhornerdotcom.files.wordpress.com/2021/06/screenshot-production-shield-art-inspector.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--aqJYGMJq--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://justinhhornerdotcom.files.wordpress.com/2021/06/screenshot-production-shield-art-inspector.png" alt="player shield inspector"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Since we need to activate and deactivate the shield GameObject, I'll reference it in the Player script where we are handling powerup activation. Then, I'll assign the shield GameObject in the inspector.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight csharp"&gt;&lt;code&gt;&lt;span class="k"&gt;public&lt;/span&gt; &lt;span class="k"&gt;class&lt;/span&gt; &lt;span class="nc"&gt;Player&lt;/span&gt; &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;MonoBehaviour&lt;/span&gt;
-&lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="p"&gt;...&lt;/span&gt;
-
-    &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;SerializeField&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt; &lt;span class="k"&gt;private&lt;/span&gt; &lt;span class="n"&gt;GameObject&lt;/span&gt; &lt;span class="n"&gt;_shieldPrefab&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-
-    &lt;span class="p"&gt;...&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;In a previous post, we added the &lt;code&gt;_shieldsRemaining&lt;/code&gt; variable which we can reuse here to know whether or not the shield should be active. I'll create a new method called &lt;code&gt;HandleShieldDisplay&lt;/code&gt; that we'll call from the &lt;code&gt;Update&lt;/code&gt; method.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight csharp"&gt;&lt;code&gt;&lt;span class="k"&gt;private&lt;/span&gt; &lt;span class="k"&gt;void&lt;/span&gt; &lt;span class="nf"&gt;HandleShieldDisplay&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
-&lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;_shieldsRemaining&lt;/span&gt; &lt;span class="p"&gt;&amp;gt;&lt;/span&gt; &lt;span class="m"&gt;0&lt;/span&gt; &lt;span class="p"&gt;&amp;amp;&amp;amp;&lt;/span&gt; &lt;span class="p"&gt;!&lt;/span&gt;&lt;span class="n"&gt;_shieldPrefab&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;activeSelf&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-    &lt;span class="p"&gt;{&lt;/span&gt;
-        &lt;span class="n"&gt;_shieldPrefab&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;SetActive&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="k"&gt;true&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-    &lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight csharp"&gt;&lt;code&gt;&lt;span class="k"&gt;private&lt;/span&gt; &lt;span class="k"&gt;void&lt;/span&gt; &lt;span class="nf"&gt;Update&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
-&lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nf"&gt;RespondToMovement&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
-    &lt;span class="nf"&gt;RespondToAttack&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
-    &lt;span class="nf"&gt;HandleShieldDisplay&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;In the &lt;code&gt;ProtectedByShield&lt;/code&gt; method, we'll call &lt;code&gt;SetActive(false)&lt;/code&gt; if we no longer have shields remaining.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight csharp"&gt;&lt;code&gt;&lt;span class="k"&gt;private&lt;/span&gt; &lt;span class="kt"&gt;bool&lt;/span&gt; &lt;span class="nf"&gt;ProtectedByShield&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
-&lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;_shieldsRemaining&lt;/span&gt; &lt;span class="p"&gt;&amp;gt;&lt;/span&gt; &lt;span class="m"&gt;0&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-    &lt;span class="p"&gt;{&lt;/span&gt;
-        &lt;span class="n"&gt;_shieldsRemaining&lt;/span&gt;&lt;span class="p"&gt;--;&lt;/span&gt;
-        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="k"&gt;true&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="p"&gt;}&lt;/span&gt;
-    &lt;span class="k"&gt;else&lt;/span&gt;
-    &lt;span class="p"&gt;{&lt;/span&gt;
-        &lt;span class="n"&gt;_shieldPrefab&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;SetActive&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="k"&gt;false&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-    &lt;span class="p"&gt;}&lt;/span&gt;
-
-    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="k"&gt;false&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Here's the result.&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--nhqrIJLx--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://justinhhornerdotcom.files.wordpress.com/2021/06/screenshot-production-shield-art.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--nhqrIJLx--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://justinhhornerdotcom.files.wordpress.com/2021/06/screenshot-production-shield-art.png" alt="player shield demo"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#summary"&gt;
-  &lt;/a&gt;
-  Summary
-&lt;/h1&gt;
-
-&lt;p&gt;We're done! We'll add more polish to the shield later, but for now it's functional and we can finally visualize the shield when the powerup is activated.&lt;/p&gt;
-
-&lt;p&gt;Stay tuned for the next post.&lt;br&gt;
-Take care.&lt;/p&gt;
-
-</description>
-      <category>gamedev</category>
-      <category>unity</category>
-      <category>madewithunity</category>
-      <category>csharp</category>
     </item>
   </channel>
 </rss>
