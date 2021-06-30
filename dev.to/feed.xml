@@ -7,6 +7,264 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>Death by Closure (and how Qwik solves it)</title>
+      <author>Miško Hevery</author>
+      <pubDate>Wed, 30 Jun 2021 16:01:43 +0000</pubDate>
+      <link>https://dev.to/mhevery/death-by-closure-and-how-qwik-solves-it-44jj</link>
+      <guid>https://dev.to/mhevery/death-by-closure-and-how-qwik-solves-it-44jj</guid>
+      <description>&lt;p&gt;In our [previous post],(&lt;a href="https://dev.to/mhevery/a-first-look-at-qwik-the-html-first-framework-af"&gt;https://dev.to/mhevery/a-first-look-at-qwik-the-html-first-framework-af&lt;/a&gt;) we introduced Qwik to the world. In that post, we glanced over many details, which we promised to get into later. Before we jump into Qwik and the design decisions behind it, it is important to understand how we (the industry) got to where we are today. What assumptions do the current generation of frameworks have which prevent them from getting good time-to-interactive scores? By understanding the current limitations of the current generation of frameworks we can better understand why Qwik’s design decisions may seem surprising, at first. &lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#lets-talk-tti"&gt;
+  &lt;/a&gt;
+  Let’s talk TTI
+&lt;/h2&gt;
+
+&lt;p&gt;TTI (or time-to-interactive) measures the time that passes from navigating to a URL and the page becoming interactive. To create the appearance of a responsive site, SSR (server-side-render) is a must. The thinking goes: Show the user the site quickly, and by the time they figure out what to click on the application will bootstrap itself and install all of the listeners. So, TTI is really a measure of how long it takes the framework to install the DOM listeners. &lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--85XBH76v--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/jlvs7wu983qt0846c2a1.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--85XBH76v--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/jlvs7wu983qt0846c2a1.png" alt="Where does the time go"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;In the graphic above we are interested in the time from bootstrap to interactive. Let’s start at interactive and walk backward to understand everything the framework needs to do to get there.&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;The framework needs to find where the listeners are. But this information is not easily available to the framework. The listeners are &lt;code&gt;described&lt;/code&gt; in templates.&lt;/li&gt;
+&lt;li&gt;Actually, I think &lt;code&gt;embedded&lt;/code&gt; would be a better word than &lt;code&gt;described.&lt;/code&gt; The information is embedded because it is not easily available to the framework. The framework needs to execute the template to get to the listener closure.&lt;/li&gt;
+&lt;li&gt;To execute the template, the template needs to be downloaded. But the downloaded template contains imports that require even more code to be downloaded. A template needs to download its sub-templates.&lt;/li&gt;
+&lt;li&gt;We have the template, but we still haven’t gotten to the listeners. Template execution really means merging the template with the state. Without the state, frameworks can’t run the template, which means they can’t get to the listeners.&lt;/li&gt;
+&lt;li&gt;The state needs to be downloaded and/or computed on the client. The computation oftentimes means that even more code needs to be downloaded in order to compute the state.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;Once all of the code is downloaded, the framework can compute the state, feed the state into the template, and finally get the listener’s closures and install these closures on the DOM.&lt;/p&gt;
+
+&lt;p&gt;That is a lot of work to do to get to an interactive state. Every current generation framework works this way. In the end, this means that most of the application needs to be downloaded and executed for the framework to be able to find the listeners and install them. &lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#lets-talk-about-closures"&gt;
+  &lt;/a&gt;
+  Let’s talk about closures
+&lt;/h2&gt;
+
+&lt;p&gt;The core problem described above is that it takes a lot of bandwidth to download the code, and a lot of CPU time for the framework to find the listeners so that the page can become interactive. But we are forgetting that the closures close over code and data. This is a very convenient property and why we love closures. But, it also means that all of the closure data and code needs to be available at the time of closure creation, rather than being lazy created at the time of closure execution. &lt;/p&gt;
+
+&lt;p&gt;Let’s look at a simple JSX template (but other templating systems have the same problem):&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;addToCart&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;./cart&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;MyBuyButton&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;props&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;cost&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;useState&lt;/span&gt;&lt;span class="p"&gt;(...);&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="nx"&gt;Price&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;cost&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;button&lt;/span&gt; &lt;span class="nx"&gt;onclick&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;addToCart&lt;/span&gt;&lt;span class="p"&gt;()}&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+      &lt;span class="nx"&gt;Add&lt;/span&gt; &lt;span class="nx"&gt;to&lt;/span&gt; &lt;span class="nx"&gt;cart&lt;/span&gt;
+    &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/button&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;  &lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;All we need for interactivity is to know where the listeners are. In the example above, that information is entangled with the template in a way that makes it hard to extract, without downloading and executing all of the templates on the page.&lt;/p&gt;
+
+&lt;p&gt;A page may easily have hundreds of event listeners, but the vast majority of them will never execute. Why do we spend time downloading code and creating closures for what-could-be, rather than delaying it until it is needed?&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#death-by-closure"&gt;
+  &lt;/a&gt;
+  Death by closure
+&lt;/h2&gt;
+
+&lt;p&gt;Closures are cheap and are everywhere. But are they cheap? Yes and no. Yes, they are cheap in the sense that they are cheap to create at runtime. But, they are expensive because they close over code, which needs to be downloaded much sooner than it could be done otherwise. And they are expensive in the sense that they prevent tree shaking from happening. And, so we have a situation I call “death by closure.” The closures are the listeners, which are placed on the DOM that close over code that will most likely never run. &lt;/p&gt;
+
+&lt;p&gt;A buy button on a page is complex and is clicked rarely. Yet the buy button eagerly forces us to download all of the code associated with it, because it is what closures do. &lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#qwik-makes-listeners-html-serializable"&gt;
+  &lt;/a&gt;
+  Qwik makes listeners HTML serializable
+&lt;/h2&gt;
+
+&lt;p&gt;Above, I’ve tried to make the point that closures can have hidden costs. These costs come in the form of eager code download. This makes closures hard to create and hence stand between the user and an interactive website. &lt;/p&gt;
+
+&lt;p&gt;Qwik wants to delay listener creation as much as possible. To achieve this, Qwik has these tenants:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;Listeners need to be HTML serializable.&lt;/li&gt;
+&lt;li&gt;Listeners do not close over code, until after the user interacts with the listener.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;Let’s have a look at how this is achieved in practice:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nt"&gt;button&lt;/span&gt; &lt;span class="na"&gt;on&lt;/span&gt;&lt;span class="err"&gt;:&lt;/span&gt;&lt;span class="na"&gt;click&lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="err"&gt;”&lt;/span&gt;&lt;span class="na"&gt;MyComponent_click&lt;/span&gt;&lt;span class="err"&gt;”&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;Click me!&lt;span class="p"&gt;&amp;lt;/&lt;/span&gt;&lt;span class="nt"&gt;button&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Then in file: &lt;code&gt;MyComponent_click.ts&lt;/code&gt;&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="k"&gt;default&lt;/span&gt; &lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="nx"&gt;alert&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Clicked&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Take a look at the code above. The SSR discovered the locations of the listeners during the rendering process. Instead of throwing that information away, the SSR serializes the listeners into the HTML in the form of the attributes. Now, the client does not need to replay the execution of the templates to discover where the listeners are. Instead, Qwik takes the following approach:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;Install &lt;code&gt;qwikloader.js&lt;/code&gt; onto the page. It is less than 1KB, and takes less than 1ms to execute. Because it is so small, the best practice is to inline it into the HTML, which saves a server round trip.&lt;/li&gt;
+&lt;li&gt;The &lt;code&gt;qwikloader.js&lt;/code&gt; can register one global event handler and take advantage of bubbling to listen to all events at once. Fewer calls to &lt;code&gt;addEventListener&lt;/code&gt; =&amp;gt; faster time to interactive.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;The result is that:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;No templates need to be downloaded to locate listeners. The listeners are serialized into the HTML in the form of attributes.&lt;/li&gt;
+&lt;li&gt;No template needs to be executed to retrieve the listeners.&lt;/li&gt;
+&lt;li&gt;No state has to be downloaded to execute the templates.&lt;/li&gt;
+&lt;li&gt;All of the code is now lazy and is only downloaded when a user interacts with the listener.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;Qwik short-circuits current generation frameworks’ bootstrap process and has replaced it with a single global event listener. The best part is that it is independent of the size of the application. No matter how large the app gets, it will always be just a single listener. The bootstrap code to download is constant and size independent of the complexity of the application because all of the information is serialized in the HTML.&lt;/p&gt;
+
+&lt;p&gt;To sum up, the basic idea behind Qwik is that it is resumable. It picks up where the server left off, with only 1KB that needs to execute on the client. And this code will stay constant no matter how large and complex your application gets. In the next coming weeks, we will look at how Qwik resumes, manages state, and renders components independently, so stay tuned!&lt;/p&gt;
+
+&lt;p&gt;We are very excited about the future of Qwik and the kind of uses cases that it opens up.&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Try it on &lt;a href="https://stackblitz.com/edit/qwik-todo-demo"&gt;StackBlitz&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;Star us on &lt;a href="https://github.com/builderio/qwik"&gt;github.com/builderio/qwik&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;Follow us on &lt;a href="https://twitter.com/QwikDev"&gt;@QwikDev&lt;/a&gt; and &lt;a href="https://twitter.com/builderio"&gt;@builderio&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;Chat us on &lt;a href="https://discord.gg/JHVpZmqSs4"&gt;Discord&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;Join &lt;a href="https://builder-io.rippling-ats.com/"&gt;builder.io&lt;/a&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+
+</description>
+      <category>javascript</category>
+      <category>webdev</category>
+      <category>frameworks</category>
+      <category>performance</category>
+    </item>
+    <item>
+      <title>Thinking about Ternary Operators</title>
+      <author>commdao</author>
+      <pubDate>Wed, 30 Jun 2021 15:38:45 +0000</pubDate>
+      <link>https://dev.to/commdao/thinking-about-ternary-operators-1167</link>
+      <guid>https://dev.to/commdao/thinking-about-ternary-operators-1167</guid>
+      <description>&lt;p&gt;This is sort of a more advanced topic, and I've been recommended not to worry about it too much. After all, you want to feel more comfortable with the basics before you simplify, and "simplification" can be a never-ending process.&lt;/p&gt;
+
+&lt;p&gt;That said, I know myself, and it's something I want to duck talk through so I can get back to the more important basics.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#drinking-age"&gt;
+  &lt;/a&gt;
+  Drinking Age
+&lt;/h2&gt;
+
+&lt;p&gt;First, let me review a more traditional if / else statement:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;var age = 22;
+var canDrink;
+     if (age &amp;gt; 21) {
+          canDrink = 'yes';
+     } else {
+          canDrink = 'no';
+     }
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;If someone is over 21, they can drink. If they're under, they can't. In this case we have someone who is 22, so they'll be okay.&lt;/p&gt;
+
+&lt;p&gt;Ternary Operators follow that logic too, but it manifests like this:&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;condition ? expression_1 : expression_2;&lt;/code&gt;&lt;/p&gt;
+
+&lt;p&gt;So using that drinking example:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;var age = 22;
+var canDrink = age &amp;gt; 21 ? 'yes' : 'no';
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Makes sense, right? Let's try with one more example. &lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#higher-salary-justifies-gaming-purchase"&gt;
+  &lt;/a&gt;
+  Higher Salary Justifies Gaming Purchase
+&lt;/h2&gt;
+
+&lt;p&gt;Let's say I want to make a certain salary before I can justify buying a PlayStation 5. (Honestly, we need some actual good console-exclusive games first, but bear with me here.)&lt;/p&gt;
+
+&lt;p&gt;I tell myself that I &lt;em&gt;can't&lt;/em&gt; justify buying a PS5 unless I make $70,000, and what if I make minimum wage?&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;var salary = 28000
+var buyPlaystation = salary &amp;gt; 70000 ? 'yes' : 'no';
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;And one more time more traditionally:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;var salary = 28000
+var buyPlaystation;
+     if (salary &amp;gt; 70000) {
+          buyPlaystation = 'yes';
+     } else {
+          buyPlaystation = 'no';
+     }
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;It can get even more mileage and usage than that, but this is a good digest for me now.&lt;/p&gt;
+
+
+
+
+&lt;p&gt;Photo by &lt;a href="https://photostockeditor.com"&gt;https://photostockeditor.com&lt;/a&gt;&lt;/p&gt;
+
+</description>
+      <category>functional</category>
+      <category>javascript</category>
+      <category>beginners</category>
+      <category>codenewbie</category>
+    </item>
+    <item>
       <title>How to test your API with Hoppscotch</title>
       <author>Linda</author>
       <pubDate>Wed, 30 Jun 2021 15:31:46 +0000</pubDate>
@@ -327,6 +585,599 @@
       <category>devops</category>
       <category>devtron</category>
       <category>opensource</category>
+    </item>
+    <item>
+      <title>How to manage internationalization in React ? react-intl like</title>
+      <author>Romain Trotard</author>
+      <pubDate>Wed, 30 Jun 2021 14:53:54 +0000</pubDate>
+      <link>https://dev.to/romaintrotard/how-to-manage-internationalization-in-react-react-intl-like-93i</link>
+      <guid>https://dev.to/romaintrotard/how-to-manage-internationalization-in-react-react-intl-like-93i</guid>
+      <description>&lt;p&gt;If you make an application which will be used all over the world, you probably want to handle internationalization for texts, dates and numbers.&lt;/p&gt;
+
+&lt;p&gt;It already exists libraries to do that like react-intl, LinguiJS or i18next. In this article we will do our own implementation which is similar to react-intl one.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#react-context"&gt;
+  &lt;/a&gt;
+  React context
+&lt;/h2&gt;
+
+&lt;p&gt;Before starting to code, it's important to know React context and understand its use.&lt;/p&gt;
+
+&lt;p&gt;Basically, it permits to put some data (object, callback, ...) in a Context which will be accessible through a Provider to all children component of this provider. It's useful to prevent props drilling through many components.&lt;/p&gt;
+
+&lt;p&gt;This code:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;App&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;div&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+      &lt;span class="nx"&gt;Gonna&lt;/span&gt; &lt;span class="nx"&gt;pass&lt;/span&gt; &lt;span class="nx"&gt;a&lt;/span&gt; &lt;span class="nx"&gt;prop&lt;/span&gt; &lt;span class="nx"&gt;through&lt;/span&gt; &lt;span class="nx"&gt;components&lt;/span&gt;
+      &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;ChildFirstLevel&lt;/span&gt; &lt;span class="nx"&gt;myProp&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;A prop to pass&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt; &lt;span class="o"&gt;/&amp;gt;&lt;/span&gt;
+    &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/div&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;  &lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;ChildFirstLevel&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="nx"&gt;myProp&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;ChildSecondLevel&lt;/span&gt; &lt;span class="nx"&gt;myProp&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;myProp&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="sr"&gt;/&amp;gt;&lt;/span&gt;&lt;span class="err"&gt;;
+&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;ChildSecondLevel&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="nx"&gt;myProp&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;ChildThirdLevel&lt;/span&gt; &lt;span class="nx"&gt;myProp&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;myProp&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="sr"&gt;/&amp;gt;&lt;/span&gt;&lt;span class="err"&gt;;
+&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;ChildThirdLevel&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="nx"&gt;myProp&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="c1"&gt;// Some process with myProp&lt;/span&gt;
+  &lt;span class="c1"&gt;// It's the only component that needs the props&lt;/span&gt;
+
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;p&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="nx"&gt;This&lt;/span&gt; &lt;span class="nx"&gt;component&lt;/span&gt; &lt;span class="nx"&gt;uses&lt;/span&gt; &lt;span class="nx"&gt;myProp&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/p&amp;gt;&lt;/span&gt;&lt;span class="err"&gt;;
+&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Can become:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;createContext&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;useContext&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;react&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;MyContext&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;createContext&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+
+&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;App&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;MyContext&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Provider&lt;/span&gt; &lt;span class="nx"&gt;value&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;A prop to pass&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+      &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;div&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+        &lt;span class="nx"&gt;Gonna&lt;/span&gt; &lt;span class="nx"&gt;pass&lt;/span&gt; &lt;span class="nx"&gt;a&lt;/span&gt; &lt;span class="nx"&gt;value&lt;/span&gt; &lt;span class="kd"&gt;with&lt;/span&gt; &lt;span class="nx"&gt;react&lt;/span&gt; &lt;span class="nx"&gt;context&lt;/span&gt;
+        &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;ChildFirstLevel&lt;/span&gt; &lt;span class="o"&gt;/&amp;gt;&lt;/span&gt;
+      &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/div&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;    &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/MyContext.Provider&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;  &lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;ChildFirstLevel&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;ChildSecondLevel&lt;/span&gt; &lt;span class="o"&gt;/&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;ChildSecondLevel&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;ChildThirdLevel&lt;/span&gt; &lt;span class="o"&gt;/&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;ChildThirdLevel&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;myProp&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;useContext&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;MyContext&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+  &lt;span class="c1"&gt;// Some process with myProp&lt;/span&gt;
+  &lt;span class="c1"&gt;// It's the only component that needs the props&lt;/span&gt;
+
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;p&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="nx"&gt;This&lt;/span&gt; &lt;span class="nx"&gt;component&lt;/span&gt; &lt;span class="nx"&gt;uses&lt;/span&gt; &lt;span class="nx"&gt;myProp&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/p&amp;gt;&lt;/span&gt;&lt;span class="err"&gt;;
+&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;blockquote&gt;
+&lt;p&gt;This is just an example that would probably not exist in real application &lt;/p&gt;
+
+&lt;p&gt;For more information the React documentation is awesome.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;h2&gt;
+  &lt;a href="#i18n-implementation"&gt;
+  &lt;/a&gt;
+  I18n implementation
+&lt;/h2&gt;
+
+&lt;h3&gt;
+  &lt;a href="#creation-of-the-provider"&gt;
+  &lt;/a&gt;
+  Creation of the Provider
+&lt;/h3&gt;
+
+&lt;p&gt;The first step is to create the React context with the Provider which will provides our utilities callback in next parts. This provider will take in parameter the locale which will be used for the current user, which could be the value of &lt;code&gt;navigator.language&lt;/code&gt; for example.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;createContext&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;useContext&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;useMemo&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;react&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;I18nContext&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;createContext&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;useI18nContext&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;useContext&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;I18nContext&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+
+&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;I18nProvider&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="nx"&gt;children&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;locale&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;value&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;useMemo&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;({&lt;/span&gt;
+      &lt;span class="nx"&gt;locale&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="p"&gt;}),&lt;/span&gt;
+    &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;locale&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+  &lt;span class="p"&gt;);&lt;/span&gt;
+
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;I18nContext&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Provider&lt;/span&gt; &lt;span class="nx"&gt;value&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;value&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+      &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;children&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/I18nContext.Provider&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;  &lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;blockquote&gt;
+&lt;p&gt;&lt;strong&gt;Note:&lt;/strong&gt; I have memoized the value, because in the project some components could be memoized because having performance problem (costly/long render)&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;In the next parts we will add some utilities functions in the context to get our value in function of the locale&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#translation-messages"&gt;
+  &lt;/a&gt;
+  Translation messages
+&lt;/h3&gt;
+
+&lt;h4&gt;
+  &lt;a href="#implementation"&gt;
+  &lt;/a&gt;
+  Implementation
+&lt;/h4&gt;
+
+&lt;p&gt;For our example we will just do an object of translations by locale with locale. Translations will be values by key.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;MESSAGES&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="na"&gt;en&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="na"&gt;title&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;This is a title for the application&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="na"&gt;body&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;You need a body content?&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+  &lt;span class="p"&gt;},&lt;/span&gt;
+  &lt;span class="na"&gt;fr&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="na"&gt;title&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Ceci est le titre de l&lt;/span&gt;&lt;span class="se"&gt;\'&lt;/span&gt;&lt;span class="s1"&gt;application&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="na"&gt;body&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Besoin de contenu pour le body?&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+  &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;};&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;These translations will be passed to our Provider (but not put in the context).&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;In applications, these translations can be separated in file for specific language for example: &lt;code&gt;messages-fr.properties&lt;/code&gt;, &lt;code&gt;messages-en.properties&lt;/code&gt;, ... Then you can build an object from these files ;)&lt;/p&gt;
+&lt;/blockquote&gt;
+
+
+
+
+&lt;p&gt;Now let's implement the method to get a message from its key in the Provider:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// The messages are passed to the Provider&lt;/span&gt;
+&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;I18nProvider&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="nx"&gt;children&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;locale&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;messages&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+
+  &lt;span class="c1"&gt;// The user needs to only pass the messageKey&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;getMessage&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;useCallback&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;messageKey&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+     &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;messages&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;locale&lt;/span&gt;&lt;span class="p"&gt;][&lt;/span&gt;&lt;span class="nx"&gt;messageKey&lt;/span&gt;&lt;span class="p"&gt;];&lt;/span&gt;
+  &lt;span class="p"&gt;},&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;locale&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;messages&lt;/span&gt;&lt;span class="p"&gt;]);&lt;/span&gt;
+
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;value&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;useMemo&lt;/span&gt;&lt;span class="p"&gt;(()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;({&lt;/span&gt;
+     &lt;span class="nx"&gt;locale&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+     &lt;span class="nx"&gt;getMessage&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="p"&gt;}),&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;locale&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;getMessage&lt;/span&gt;&lt;span class="p"&gt;]);&lt;/span&gt;
+
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
+     &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;I18nContext&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Provider&lt;/span&gt; &lt;span class="nx"&gt;value&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;value&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+       &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;children&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;
+     &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/I18nContext.Provider&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;  &lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+
+
+
+&lt;p&gt;It can happen that there is no translation in the current locale (maybe because you do translate messages from a specific enterprise). So it can be useful to give a &lt;code&gt;defaultLocale&lt;/code&gt; to fallback to with locale and/or a &lt;code&gt;defaultMessage&lt;/code&gt;. The Provider becomes:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// Pass an optional defaultLocale to the Provider&lt;/span&gt;
+&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;I18nProvider&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt;
+  &lt;span class="nx"&gt;children&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="nx"&gt;locale&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="nx"&gt;defaultLocale&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="nx"&gt;messages&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+&lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="c1"&gt;// Fallback to the `defaultMessage`, if there is no&lt;/span&gt;
+  &lt;span class="c1"&gt;// defaultMessage fallback to the `defaultLocale`&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;getMessage&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;useCallback&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="nx"&gt;messageKey&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;defaultMessage&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
+        &lt;span class="nx"&gt;messages&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;locale&lt;/span&gt;&lt;span class="p"&gt;]?.[&lt;/span&gt;&lt;span class="nx"&gt;messageKey&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt; &lt;span class="p"&gt;??&lt;/span&gt;
+        &lt;span class="nx"&gt;defaultMessage&lt;/span&gt; &lt;span class="p"&gt;??&lt;/span&gt;
+        &lt;span class="nx"&gt;messages&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;defaultLocale&lt;/span&gt;&lt;span class="p"&gt;][&lt;/span&gt;&lt;span class="nx"&gt;messageKey&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+      &lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="p"&gt;},&lt;/span&gt;
+    &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;locale&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;messages&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;defaultLocale&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+  &lt;span class="p"&gt;);&lt;/span&gt;
+
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;value&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;useMemo&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;({&lt;/span&gt;
+      &lt;span class="nx"&gt;locale&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+      &lt;span class="nx"&gt;getMessage&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="p"&gt;}),&lt;/span&gt;
+    &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;locale&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;getMessage&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+  &lt;span class="p"&gt;);&lt;/span&gt;
+
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;I18nContext&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Provider&lt;/span&gt; &lt;span class="nx"&gt;value&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;value&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+      &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;children&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/I18nContext.Provider&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;  &lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h4&gt;
+  &lt;a href="#get-a-message-value"&gt;
+  &lt;/a&gt;
+  Get a message value
+&lt;/h4&gt;
+
+&lt;p&gt;There is multiple possibilities to get a message:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;get the function &lt;code&gt;getMessage&lt;/code&gt; with &lt;code&gt;useI18nContext&lt;/code&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;getMessage&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;useI18nContext&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;title&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;getMessage&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="na"&gt;messageKey&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;title&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt; &lt;span class="p"&gt;});&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;ul&gt;
+&lt;li&gt;implements a component &lt;code&gt;I18nMessage&lt;/code&gt; that has &lt;code&gt;messageKey&lt;/code&gt; and &lt;code&gt;defaultMessage&lt;/code&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;I18nMessage&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="nx"&gt;messageKey&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;defaultMessage&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;getMessage&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;useI18nContext&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;getMessage&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="nx"&gt;messageKey&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;defaultMessage&lt;/span&gt; &lt;span class="p"&gt;});&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="c1"&gt;// Use&lt;/span&gt;
+&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;I18nMessage&lt;/span&gt; &lt;span class="nx"&gt;messageKey&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;title&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt; &lt;span class="o"&gt;/&amp;gt;&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;ul&gt;
+&lt;li&gt;implements an HOC &lt;code&gt;withI18n&lt;/code&gt; that injects &lt;code&gt;getMessage&lt;/code&gt; to our component
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;withI18n&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;WrappedComponent&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;Component&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;props&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;getMessage&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;useI18nContext&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
+      &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;WrappedComponent&lt;/span&gt;
+        &lt;span class="p"&gt;{...&lt;/span&gt;&lt;span class="nx"&gt;props&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;
+        &lt;span class="nx"&gt;getMessage&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;getMessage&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;
+      &lt;span class="sr"&gt;/&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;    &lt;span class="p"&gt;);&lt;/span&gt;
+  &lt;span class="p"&gt;};&lt;/span&gt;
+  &lt;span class="nx"&gt;Component&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;displayName&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;I18n&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="nx"&gt;WrappedComponent&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;name&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;Component&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;Title&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="nx"&gt;getMessage&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;title&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;getMessage&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="na"&gt;messageKey&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;title&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt; &lt;span class="p"&gt;});&lt;/span&gt;
+
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;h1&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="nx"&gt;title&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/h1&amp;gt;&lt;/span&gt;&lt;span class="err"&gt;;
+&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;I18nConnectedTitle&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;withI18n&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;Title&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#dates-handling"&gt;
+  &lt;/a&gt;
+  Dates handling
+&lt;/h3&gt;
+
+&lt;p&gt;Ok, now let's handle Date formatting. In function of the country (or locale) a date does not have the same displayed format. For example:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// Watch out the month is 0-based&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;date&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nb"&gt;Date&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;2021&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;5&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;23&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+
+&lt;span class="c1"&gt;// In en-US should be displayed&lt;/span&gt;
+&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;6/23/2021&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
+
+&lt;span class="c1"&gt;// In fr-FR should be displayed&lt;/span&gt;
+&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;23/06/2021&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
+
+&lt;span class="c1"&gt;// In en-IN should be displayed&lt;/span&gt;
+&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;23/6/2021&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;blockquote&gt;
+&lt;p&gt;&lt;strong&gt;Note:&lt;/strong&gt; The time is also not formatted the same way in function of the locale&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;To implements this feature, we are gonna use the &lt;code&gt;Intl.DateTimeFormat&lt;/code&gt; API which is accessible on all browsers. &lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;&lt;strong&gt;Note:&lt;/strong&gt; Intl relays on the &lt;code&gt;Common Locale Data Repository&lt;/code&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;h4&gt;
+  &lt;a href="#implementations"&gt;
+  &lt;/a&gt;
+  Implementations
+&lt;/h4&gt;
+
+&lt;p&gt;For the implementation we are gonna expose to the user the possibility to use all the option of the Intl API for more flexibility. &lt;/p&gt;
+
+&lt;p&gt;The previous &lt;code&gt;I18nProvider&lt;/code&gt; becomes:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;I18nProvider&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt;
+  &lt;span class="nx"&gt;children&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="nx"&gt;locale&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="nx"&gt;defaultLocale&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="nx"&gt;messages&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+&lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;getMessage&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;useCallback&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="nx"&gt;messageKey&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;defaultMessage&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
+        &lt;span class="nx"&gt;messages&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;locale&lt;/span&gt;&lt;span class="p"&gt;]?.[&lt;/span&gt;&lt;span class="nx"&gt;messageKey&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt; &lt;span class="p"&gt;??&lt;/span&gt;
+        &lt;span class="nx"&gt;defaultMessage&lt;/span&gt; &lt;span class="p"&gt;??&lt;/span&gt;
+        &lt;span class="nx"&gt;messages&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;defaultLocale&lt;/span&gt;&lt;span class="p"&gt;][&lt;/span&gt;&lt;span class="nx"&gt;messageKey&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+      &lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="p"&gt;},&lt;/span&gt;
+    &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;locale&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;messages&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;defaultLocale&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+  &lt;span class="p"&gt;);&lt;/span&gt;
+
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;getFormattedDate&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;useCallback&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;date&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;options&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{})&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt;
+      &lt;span class="nx"&gt;Intl&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;DateTimeFormat&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;locale&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;options&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;format&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;date&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+    &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;locale&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+  &lt;span class="p"&gt;);&lt;/span&gt;
+
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;value&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;useMemo&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;({&lt;/span&gt;
+      &lt;span class="nx"&gt;locale&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+      &lt;span class="nx"&gt;getMessage&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+      &lt;span class="nx"&gt;getFormattedDate&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="p"&gt;}),&lt;/span&gt;
+    &lt;span class="p"&gt;[&lt;/span&gt;
+      &lt;span class="nx"&gt;locale&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+      &lt;span class="nx"&gt;getMessage&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+      &lt;span class="nx"&gt;getFormattedDate&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="p"&gt;]&lt;/span&gt;
+  &lt;span class="p"&gt;);&lt;/span&gt;
+
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;I18nContext&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Provider&lt;/span&gt; &lt;span class="nx"&gt;value&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;value&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+      &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;children&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/I18nContext.Provider&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;  &lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;blockquote&gt;
+&lt;p&gt;&lt;strong&gt;Note:&lt;/strong&gt; I will not describe the usage, because it's exactly the same as translations but you can see the final implementation in the codesandbox in conclusion.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;h3&gt;
+  &lt;a href="#number-format-handling"&gt;
+  &lt;/a&gt;
+  Number format handling
+&lt;/h3&gt;
+
+&lt;p&gt;If you want to manage numbers, price, ... in your project, it can be useful to format these entities in the right one not to disturb users.&lt;/p&gt;
+
+&lt;p&gt;For example:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;separator symbol is not the same&lt;/li&gt;
+&lt;li&gt;the place and the symbol of the currency can be different&lt;/li&gt;
+&lt;li&gt;...
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;number&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="mf"&gt;123456.789&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="c1"&gt;// In en-US should be displayed&lt;/span&gt;
+&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;123,456.789&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
+
+&lt;span class="c1"&gt;// In fr-FR should be displayed&lt;/span&gt;
+&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;123 456,789&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
+
+&lt;span class="c1"&gt;// In en-IN should be displayed&lt;/span&gt;
+&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;1,23,456.789&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;To do that we are gonna use the API &lt;code&gt;Intl.NumberFormat&lt;/code&gt; which works on all browsers.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#implementations"&gt;
+  &lt;/a&gt;
+  Implementations
+&lt;/h3&gt;
+
+&lt;p&gt;If you look at the documentation of &lt;code&gt;Intl.NumberFormat&lt;/code&gt;, you can see that there is a tone of options available in second parameter, so in our implementation (like with date formatting) we will pass an options object.&lt;/p&gt;
+
+&lt;p&gt;Our &lt;code&gt;I18nProvider&lt;/code&gt; becomes then:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;I18nProvider&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt;
+  &lt;span class="nx"&gt;children&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="nx"&gt;locale&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="nx"&gt;defaultLocale&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="nx"&gt;messages&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+&lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;getMessage&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;useCallback&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="nx"&gt;messageKey&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;defaultMessage&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
+        &lt;span class="nx"&gt;messages&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;locale&lt;/span&gt;&lt;span class="p"&gt;]?.[&lt;/span&gt;&lt;span class="nx"&gt;messageKey&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt; &lt;span class="p"&gt;??&lt;/span&gt;
+        &lt;span class="nx"&gt;defaultMessage&lt;/span&gt; &lt;span class="p"&gt;??&lt;/span&gt;
+        &lt;span class="nx"&gt;messages&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;defaultLocale&lt;/span&gt;&lt;span class="p"&gt;][&lt;/span&gt;&lt;span class="nx"&gt;messageKey&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+      &lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="p"&gt;},&lt;/span&gt;
+    &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;locale&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;messages&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;defaultLocale&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+  &lt;span class="p"&gt;);&lt;/span&gt;
+
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;getFormattedDate&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;useCallback&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;date&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;options&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{})&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt;
+      &lt;span class="nx"&gt;Intl&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;DateTimeFormat&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;locale&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;options&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;format&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;date&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+    &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;locale&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+  &lt;span class="p"&gt;);&lt;/span&gt;
+
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;getFormattedNumber&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;useCallback&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;number&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;options&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{})&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt;
+      &lt;span class="nx"&gt;Intl&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;NumberFormat&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;locale&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;options&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;format&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;number&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+    &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;locale&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+  &lt;span class="p"&gt;);&lt;/span&gt;
+
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;value&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;useMemo&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;({&lt;/span&gt;
+      &lt;span class="nx"&gt;locale&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+      &lt;span class="nx"&gt;getMessage&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+      &lt;span class="nx"&gt;getFormattedDate&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+      &lt;span class="nx"&gt;getFormattedNumber&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="p"&gt;}),&lt;/span&gt;
+    &lt;span class="p"&gt;[&lt;/span&gt;
+      &lt;span class="nx"&gt;locale&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+      &lt;span class="nx"&gt;getMessage&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+      &lt;span class="nx"&gt;getFormattedDate&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+      &lt;span class="nx"&gt;getFormattedNumber&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="p"&gt;]&lt;/span&gt;
+  &lt;span class="p"&gt;);&lt;/span&gt;
+
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;I18nContext&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Provider&lt;/span&gt; &lt;span class="nx"&gt;value&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;value&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+      &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;children&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/I18nContext.Provider&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;  &lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;blockquote&gt;
+&lt;p&gt;&lt;strong&gt;Note:&lt;/strong&gt; When working with currency, it can be boring to always pass the right option so we could make a utility function name &lt;code&gt;getFormattedCurrency&lt;/code&gt; which only take the currency name in second parameter:&lt;br&gt;
+&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;getFormattedCurrency&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;useCallback&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+  &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;number&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;currency&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt;
+    &lt;span class="nx"&gt;Intl&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;NumberFormat&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;locale&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="na"&gt;style&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;currency&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+      &lt;span class="nx"&gt;currency&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="p"&gt;}).&lt;/span&gt;&lt;span class="nx"&gt;format&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;number&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+  &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;locale&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#conclusion"&gt;
+  &lt;/a&gt;
+  Conclusion
+&lt;/h2&gt;
+
+&lt;p&gt;We have seen together how to manage simply manage internationalization in React by using &lt;strong&gt;React context&lt;/strong&gt;. It consists to just pass the &lt;code&gt;locale&lt;/code&gt;, &lt;code&gt;message translations&lt;/code&gt; to the provider and then put utility methods in the context to get a message translated and formatted date, number or currency.&lt;/p&gt;
+
+&lt;p&gt;We also used the wonderful API &lt;code&gt;Intl&lt;/code&gt; for formatted date and number which relays on the CLDR.&lt;/p&gt;
+
+&lt;p&gt;You can play in live with internationalization here.&lt;br&gt;
+&lt;iframe src="https://codesandbox.io/embed/i18n-implem-c1msf"&gt;
+&lt;/iframe&gt;
+&lt;/p&gt;
+
+
+
+
+&lt;p&gt;Want to see more ? Follow me on &lt;a href="https://twitter.com/romain_trotard"&gt;Twitter&lt;/a&gt; or go to my &lt;a href="https://rainbowapps.io/"&gt;Website&lt;/a&gt;. 🐼&lt;/p&gt;
+
+</description>
+      <category>react</category>
+      <category>javascript</category>
+      <category>tutorial</category>
+      <category>beginners</category>
     </item>
     <item>
       <title>Animate on scroll using IntersectionObserver</title>
@@ -890,6 +1741,269 @@
       <category>tutorial</category>
     </item>
     <item>
+      <title>Web rendering methodologies, a quick snap .</title>
+      <author>Int_Shibin</author>
+      <pubDate>Wed, 30 Jun 2021 14:28:27 +0000</pubDate>
+      <link>https://dev.to/shibinlal/web-rendering-methodologies-a-quick-snap-210g</link>
+      <guid>https://dev.to/shibinlal/web-rendering-methodologies-a-quick-snap-210g</guid>
+      <description>&lt;p&gt;When it comes the performance tradeoffs in application development , rendering methodologies plays an important role.&lt;br&gt;
+Generally we classify this as server side rendering and client side rendering but there is more to it. for a detailed study anyone can refer this link &lt;a href="https://developers.google.com/web/updates/2019/02/rendering-on-the-web"&gt;https://developers.google.com/web/updates/2019/02/rendering-on-the-web&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;But in this article i am trying to share a quick introduction to three types of the rendering .&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Static rendering &lt;/li&gt;
+&lt;li&gt;Server rendering&lt;/li&gt;
+&lt;li&gt;Client side rendering&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Before getting into the subject let us check the performance time gaps which we can take for guaging the efficiency of a web application.&lt;/p&gt;
+
+&lt;p&gt;TTFB (Time To First Byte) - time between clicking link and first bit of content coming in.&lt;/p&gt;
+
+&lt;p&gt;FP (First Paint) - The first time any pixel becomes visible to the user.&lt;/p&gt;
+
+&lt;p&gt;FCP (First Content Paint) - The time when requested content becomes visible.&lt;/p&gt;
+
+&lt;p&gt;TTI (Time To Interactive) - The time at which a page becomes interactive.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--0Ko_hT9H--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/8bzjapsqmv2qnxtln2wq.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--0Ko_hT9H--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/8bzjapsqmv2qnxtln2wq.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;In Server rendering generally produces a first paint(FP) and first contentful paint(FCP) .Running page logic and rendering on the server makes it possible to avoid sending lots of javascript to the client. Which helps to achieve a fast TTI (Time To Interactive) .Primary drawback of SSR is that generating pages on server takes time, which can often result in slower Time To First Byte(TTFB).&lt;/p&gt;
+
+&lt;p&gt;Static rendering happens at build time offers a fast First Paint, First Content Paint and Time To Interactive assuming the client side js is limited.&lt;br&gt;
+Unlike server side rendering consistantly fast Time To First Byte since the HTML for a page doesnt have to be generated on the fly.&lt;/p&gt;
+
+&lt;p&gt;one of the drawback of the static rendering is that it individual HTML files must be generated for every possible Url.&lt;/p&gt;
+
+&lt;p&gt;Where as in client side rendering rendering pages directly in the browser using javascript. All logic , data fetching, templpating and routing are handled on the client rather than the server.&lt;br&gt;
+The primary downside to client side rendering is that the amount of javascript required tends to grow as an application grows. &lt;/p&gt;
+
+</description>
+      <category>webdev</category>
+      <category>javascript</category>
+      <category>html</category>
+    </item>
+    <item>
+      <title>React Portals, And how to use them (Next Js and CRA)</title>
+      <author>Ata Parvin Ghods</author>
+      <pubDate>Wed, 30 Jun 2021 14:16:51 +0000</pubDate>
+      <link>https://dev.to/ataparvinghods/react-portals-and-how-to-use-them-next-js-and-cra-2dic</link>
+      <guid>https://dev.to/ataparvinghods/react-portals-and-how-to-use-them-next-js-and-cra-2dic</guid>
+      <description>&lt;p&gt;Hi everyone.&lt;br&gt;
+In this post I want to show you how to work with react portals.&lt;br&gt;
+First I'm gonna create one then render some elements, such as modals, notifications, etc...&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;1. Create create-react-app&lt;/strong&gt;&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// Create a new app&lt;/span&gt;
+&lt;span class="nx"&gt;npx&lt;/span&gt; &lt;span class="nx"&gt;create&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="nx"&gt;react&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="nx"&gt;app&lt;/span&gt; &lt;span class="nx"&gt;my&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="nx"&gt;app&lt;/span&gt;
+
+&lt;span class="c1"&gt;// Run the created app&lt;/span&gt;
+&lt;span class="nx"&gt;cd&lt;/span&gt; &lt;span class="nx"&gt;my&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="nx"&gt;app&lt;/span&gt;
+&lt;span class="nx"&gt;yarn&lt;/span&gt; &lt;span class="nx"&gt;start&lt;/span&gt;
+
+&lt;span class="c1"&gt;// http://localhost:3000&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;strong&gt;2.Edit index.html and add you portal&lt;/strong&gt;&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="cp"&gt;&amp;lt;!DOCTYPE html&amp;gt;&lt;/span&gt;
+&lt;span class="nt"&gt;&amp;lt;html&lt;/span&gt; &lt;span class="na"&gt;lang=&lt;/span&gt;&lt;span class="s"&gt;"en"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
+   &lt;span class="nt"&gt;&amp;lt;head&amp;gt;&lt;/span&gt;
+      &lt;span class="nt"&gt;&amp;lt;meta&lt;/span&gt; &lt;span class="na"&gt;charset=&lt;/span&gt;&lt;span class="s"&gt;"utf-8"&lt;/span&gt; &lt;span class="nt"&gt;/&amp;gt;&lt;/span&gt;
+      &lt;span class="nt"&gt;&amp;lt;link&lt;/span&gt; &lt;span class="na"&gt;rel=&lt;/span&gt;&lt;span class="s"&gt;"icon"&lt;/span&gt; &lt;span class="na"&gt;href=&lt;/span&gt;&lt;span class="s"&gt;"%PUBLIC_URL%/favicon.ico"&lt;/span&gt; &lt;span class="nt"&gt;/&amp;gt;&lt;/span&gt;
+      &lt;span class="nt"&gt;&amp;lt;meta&lt;/span&gt; &lt;span class="na"&gt;name=&lt;/span&gt;&lt;span class="s"&gt;"viewport"&lt;/span&gt; &lt;span class="na"&gt;content=&lt;/span&gt;&lt;span class="s"&gt;"width=device-width, initial-scale=1"&lt;/span&gt; &lt;span class="nt"&gt;/&amp;gt;&lt;/span&gt;
+      &lt;span class="nt"&gt;&amp;lt;meta&lt;/span&gt; &lt;span class="na"&gt;name=&lt;/span&gt;&lt;span class="s"&gt;"theme-color"&lt;/span&gt; &lt;span class="na"&gt;content=&lt;/span&gt;&lt;span class="s"&gt;"#000000"&lt;/span&gt; &lt;span class="nt"&gt;/&amp;gt;&lt;/span&gt;
+      &lt;span class="nt"&gt;&amp;lt;meta&lt;/span&gt;
+         &lt;span class="na"&gt;name=&lt;/span&gt;&lt;span class="s"&gt;"description"&lt;/span&gt;
+         &lt;span class="na"&gt;content=&lt;/span&gt;&lt;span class="s"&gt;"Web site created using create-react-app"&lt;/span&gt;
+      &lt;span class="nt"&gt;/&amp;gt;&lt;/span&gt;
+      &lt;span class="nt"&gt;&amp;lt;link&lt;/span&gt; &lt;span class="na"&gt;rel=&lt;/span&gt;&lt;span class="s"&gt;"apple-touch-icon"&lt;/span&gt; &lt;span class="na"&gt;href=&lt;/span&gt;&lt;span class="s"&gt;"%PUBLIC_URL%/logo192.png"&lt;/span&gt; &lt;span class="nt"&gt;/&amp;gt;&lt;/span&gt;
+      &lt;span class="nt"&gt;&amp;lt;link&lt;/span&gt; &lt;span class="na"&gt;rel=&lt;/span&gt;&lt;span class="s"&gt;"manifest"&lt;/span&gt; &lt;span class="na"&gt;href=&lt;/span&gt;&lt;span class="s"&gt;"%PUBLIC_URL%/manifest.json"&lt;/span&gt; &lt;span class="nt"&gt;/&amp;gt;&lt;/span&gt;
+      &lt;span class="nt"&gt;&amp;lt;title&amp;gt;&lt;/span&gt;React App&lt;span class="nt"&gt;&amp;lt;/title&amp;gt;&lt;/span&gt;
+   &lt;span class="nt"&gt;&amp;lt;/head&amp;gt;&lt;/span&gt;
+   &lt;span class="nt"&gt;&amp;lt;body&amp;gt;&lt;/span&gt;
+      &lt;span class="nt"&gt;&amp;lt;noscript&amp;gt;&lt;/span&gt;You need to enable JavaScript to run this app.&lt;span class="nt"&gt;&amp;lt;/noscript&amp;gt;&lt;/span&gt;
+      &lt;span class="nt"&gt;&amp;lt;div&lt;/span&gt; &lt;span class="na"&gt;id=&lt;/span&gt;&lt;span class="s"&gt;"root"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&amp;lt;/div&amp;gt;&lt;/span&gt;
+      &lt;span class="nt"&gt;&amp;lt;---&lt;/span&gt; &lt;span class="na"&gt;Your&lt;/span&gt; &lt;span class="na"&gt;portal&lt;/span&gt; &lt;span class="na"&gt;here&lt;/span&gt; &lt;span class="na"&gt;---&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
+      &lt;span class="nt"&gt;&amp;lt;div&lt;/span&gt; &lt;span class="na"&gt;id=&lt;/span&gt;&lt;span class="s"&gt;"myportal"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&amp;lt;/div&amp;gt;&lt;/span&gt;
+   &lt;span class="nt"&gt;&amp;lt;/body&amp;gt;&lt;/span&gt;
+&lt;span class="nt"&gt;&amp;lt;/html&amp;gt;&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;strong&gt;3.Create HOC folder and inside it create Portal.js&lt;/strong&gt;&lt;br&gt;
+(src/HOC/Portal.js)&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="nx"&gt;ReactDOM&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;react-dom&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;Portal&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;Component&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;props&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+   &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;ReactDOM&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;createPortal&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+      &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Component&lt;/span&gt; &lt;span class="p"&gt;{...&lt;/span&gt;&lt;span class="nx"&gt;props&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="sr"&gt;/&amp;gt;&lt;/span&gt;&lt;span class="err"&gt;,
+&lt;/span&gt;      &lt;span class="nb"&gt;document&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;getElementById&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;myportal&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+   &lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="k"&gt;default&lt;/span&gt; &lt;span class="nx"&gt;Portal&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;strong&gt;4.Now let's create our Component&lt;/strong&gt;&lt;br&gt;
+&lt;em&gt;This component will render in "myportal" element&lt;/em&gt;&lt;br&gt;
+(src/components/MyComponent.js)&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="nx"&gt;Portal&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;./../HOC/Portal&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;MyComponent&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;div&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="nx"&gt;This&lt;/span&gt; &lt;span class="nx"&gt;component&lt;/span&gt; &lt;span class="nx"&gt;will&lt;/span&gt; &lt;span class="nx"&gt;be&lt;/span&gt; &lt;span class="nx"&gt;rendered&lt;/span&gt; &lt;span class="k"&gt;in&lt;/span&gt; &lt;span class="nx"&gt;myportal&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/div&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="k"&gt;default&lt;/span&gt; &lt;span class="nx"&gt;Portal&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;MyComponent&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;// trick is here&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;So, as you can see I wrapped MyComponent in Portal component, Portal will render everything that is wrapped in it. :)&lt;/p&gt;
+
+&lt;p&gt;&lt;em&gt;create-react-app is done. Let's go to Next Js&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;1.Create next app&lt;/strong&gt;&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// Create a new app&lt;/span&gt;
+&lt;span class="nx"&gt;npx&lt;/span&gt; &lt;span class="nx"&gt;create&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="nx"&gt;next&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="nx"&gt;app&lt;/span&gt; &lt;span class="nx"&gt;my&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="nx"&gt;app&lt;/span&gt;
+
+&lt;span class="c1"&gt;// Run the created app&lt;/span&gt;
+&lt;span class="nx"&gt;cd&lt;/span&gt; &lt;span class="nx"&gt;my&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="nx"&gt;app&lt;/span&gt;
+&lt;span class="nx"&gt;yarn&lt;/span&gt; &lt;span class="nx"&gt;dev&lt;/span&gt;
+
+&lt;span class="c1"&gt;// http://localhost:3000&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;In Next.Js we don't have any html file so we can't add div manually, But we have other choice.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;2.Let's create _document.js file in pages folder&lt;/strong&gt;&lt;br&gt;
+(pages/_document.js)&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="nx"&gt;Document&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;Html&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;Head&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;Main&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;NextScript&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;next/document&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
+
+&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="k"&gt;default&lt;/span&gt; &lt;span class="kd"&gt;class&lt;/span&gt; &lt;span class="nx"&gt;MyDocument&lt;/span&gt; &lt;span class="kd"&gt;extends&lt;/span&gt; &lt;span class="nx"&gt;Document&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+   &lt;span class="nx"&gt;render&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
+         &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Html&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+            &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Head&lt;/span&gt; &lt;span class="o"&gt;/&amp;gt;&lt;/span&gt;
+            &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;body&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+               &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Main&lt;/span&gt; &lt;span class="o"&gt;/&amp;gt;&lt;/span&gt;
+               &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;div&lt;/span&gt; &lt;span class="nx"&gt;id&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;myportal&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt; &lt;span class="o"&gt;/&amp;gt;&lt;/span&gt; &lt;span class="c1"&gt;//out portal is here...&lt;/span&gt;
+               &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;NextScript&lt;/span&gt; &lt;span class="o"&gt;/&amp;gt;&lt;/span&gt;
+            &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/body&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;         &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/Html&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;      &lt;span class="p"&gt;)&lt;/span&gt;
+   &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;So now we got our portal element.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;3.Time to create our HOC&lt;/strong&gt;&lt;br&gt;
+(HOC/Portal.js)&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;useEffect&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;useState&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;react&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
+&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;createPortal&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;react-dom&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;Portal&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="nx"&gt;children&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+   &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;mounted&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;setMounted&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;useState&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kc"&gt;false&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+   &lt;span class="nx"&gt;useEffect&lt;/span&gt;&lt;span class="p"&gt;(()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="nx"&gt;setMounted&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+      &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;setMounted&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kc"&gt;false&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+   &lt;span class="p"&gt;},&lt;/span&gt; &lt;span class="p"&gt;[])&lt;/span&gt;
+
+   &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;mounted&lt;/span&gt;
+      &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="nx"&gt;createPortal&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;children&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; 
+        &lt;span class="nb"&gt;document&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;querySelector&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;myportal&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;
+      &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kc"&gt;null&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="k"&gt;default&lt;/span&gt; &lt;span class="nx"&gt;Portal&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Now to use it we will put our components as a child in Portal component and return it as a children.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;4.For example in index.js/ Home page&lt;/strong&gt;&lt;br&gt;
+(pages/index.js)&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;Home&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+   &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
+      &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;div&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+         &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Head&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+         &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/Head&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;
+         &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Portal&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+            &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;MyComponent&lt;/span&gt; &lt;span class="o"&gt;/&amp;gt;&lt;/span&gt; &lt;span class="c1"&gt;//our component which will &lt;/span&gt;
+                            &lt;span class="c1"&gt;//be rendered inside myportal&lt;/span&gt;
+         &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/Portal&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;      &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/div&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;   &lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="k"&gt;default&lt;/span&gt; &lt;span class="nx"&gt;Home&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;em&gt;So you are all done my friends! Hope you enjoyed this post&lt;/em&gt;&lt;/p&gt;
+
+</description>
+      <category>react</category>
+      <category>javascript</category>
+      <category>nextjs</category>
+      <category>html</category>
+    </item>
+    <item>
       <title>Useful CSS units</title>
       <author>Vishnubhotla V D V Bharadwaj</author>
       <pubDate>Wed, 30 Jun 2021 14:14:01 +0000</pubDate>
@@ -1019,6 +2133,176 @@ We can use a combination of % and px also
       <category>webdev</category>
       <category>css</category>
       <category>100daysofcode</category>
+    </item>
+    <item>
+      <title>How to enforce Kubernetes Best Practices with Datree</title>
+      <author>Techworld with Nana</author>
+      <pubDate>Wed, 30 Jun 2021 14:12:39 +0000</pubDate>
+      <link>https://dev.to/techworld_with_nana/how-to-enforce-kubernetes-best-practices-with-datree-4pen</link>
+      <guid>https://dev.to/techworld_with_nana/how-to-enforce-kubernetes-best-practices-with-datree-4pen</guid>
+      <description>&lt;p&gt;&lt;a href="https://www.youtube.com/playlist?list=PLy7NrYWoggjztwSskGu59O38gL5v0LjUT"&gt;DevOps tool of the month&lt;/a&gt; is a series, where each month I introduce one new useful DevOps tool in 2021 🙌🏼&lt;/p&gt;
+
+&lt;p&gt;For June I chose: &lt;a href="https://www.datree.io/"&gt;&lt;strong&gt;Datree&lt;/strong&gt;&lt;/a&gt; 🎉 - a CLI tool that prevents Kubernetes misconfigurations from reaching production!&lt;/p&gt;
+
+
+
+
+&lt;h2&gt;
+  &lt;a href="#-youtube-hgufh9ab258-"&gt;
+  &lt;/a&gt;
+  &lt;iframe width="710" height="399" src="https://www.youtube.com/embed/hgUfH9Ab258"&gt;
+&lt;/iframe&gt;
+
+&lt;/h2&gt;
+
+&lt;h2&gt;
+  &lt;a href="#why-we-want-to-enforce-best-practices"&gt;
+  &lt;/a&gt;
+  Why we want to enforce best practices 🧐
+&lt;/h2&gt;
+
+&lt;p&gt;Let’s say that your company has multiple project teams, where developers are deploying their applications to K8s. A DevOps engineer, who is managing the K8s clusters in the company, wants every project team to &lt;strong&gt;follow certain rules and write K8s configuration files which follow the best practices&lt;/strong&gt;. &lt;/p&gt;
+
+&lt;p&gt;This way they want to &lt;strong&gt;prevent any misconfigurations or security issues from ending up in the cluster&lt;/strong&gt; when the applications are deployed. &lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#so-what-are-some-of-these-best-or-bad-practices"&gt;
+  &lt;/a&gt;
+  So what are some of these Best or Bad Practices?
+&lt;/h3&gt;
+
+&lt;p&gt;DO: &lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Specify a version on every image used in the Pod, instead of the latest tag. Why? Every time that image is pulled, the version will be a different version and might break your code
+&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--CeVtjoeX--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/8fjrc1dvmou7l2nyyjpg.png" alt="Best Practice"&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;DON'T:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Run a container with root privilege. Why? Containers are much more secure when their access is limited&lt;/li&gt;
+&lt;li&gt;Use deprecated K8s APIs for the components&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3&gt;
+  &lt;a href="#doing-it-manually-is-not-a-good-idea"&gt;
+  &lt;/a&gt;
+  Doing it manually is NOT a good idea 🤷🏻‍♂️
+&lt;/h3&gt;
+
+&lt;p&gt;So to avoid these, the K8s administrators will screen the configuration regularly and check for any misconfigurations or security issues. &lt;/p&gt;
+
+&lt;p&gt;After the K8s admins detect the issues in the configuration, they would notify the teams about the issues, which need to be fixed. And this needs to be done for all the clusters across the company. Sometimes the teams may not prioritize the issues or delay the fixes. &lt;/p&gt;
+
+&lt;p&gt;But also, if this validation process is not automated, the &lt;strong&gt;admins may miss something&lt;/strong&gt; and the misconfigurations and security issues may actually end up all the way in the production.&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;So the question is: How can we let developers create those manifests themselves, but at the same time make sure any configuration that ends up in the cluster is correct and follows the best practice rules that admins want? 🤔&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--2qoLPuxD--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/zaeg0oyjfgrughmgabwf.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--2qoLPuxD--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/zaeg0oyjfgrughmgabwf.png" alt="Preventing K8s misconfigurations"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#what-is-datree-and-how-it-solves-this-problem"&gt;
+  &lt;/a&gt;
+  What is Datree and how it solves this problem 😎
+&lt;/h2&gt;
+
+&lt;p&gt;It's actually very simple: Datree lets the K8s admins &lt;strong&gt;create policies&lt;/strong&gt; and best practices they want every team to follow, and then run these policies as &lt;strong&gt;automated checks&lt;/strong&gt; as part of the CI/CD pipeline or even earlier in the development workflow as a pre-commit hook, for example.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--i1dknaf3--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/20z7va20rl4huwo2mdlu.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--i1dknaf3--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/20z7va20rl4huwo2mdlu.png" alt="Datree Pre-Commit Hook"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;This moves the misconfiguration checks to the left, preventing them from ending up in the cluster, but also letting developers fix them right away, without the need of back and forth communication from K8s admins, explaining developers why and what needs to be fixed.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#how-to-use-datree"&gt;
+  &lt;/a&gt;
+  How to use Datree 🔥
+&lt;/h2&gt;
+
+&lt;h4&gt;
+  &lt;a href="#command-line-tool"&gt;
+  &lt;/a&gt;
+  💡 Command Line Tool 💡
+&lt;/h4&gt;
+
+&lt;p&gt;It's a command line tool, which you can install with a single command, which means you can install it on any machine and integrate it in any tool and trigger whenever you want, like every time developers commit changes, or create a pull request etc.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--8wkR9aQa--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/obo6fp1gke4kf0yzib2q.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--8wkR9aQa--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/obo6fp1gke4kf0yzib2q.png" alt="Datree CLI Output"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;So basically K8s admins, who actually know K8s and how to properly configure k8s components, will create policies with all the rules and best practices once. Integrate it in all the teams' development workflows and in this way make the &lt;strong&gt;company-wide consistent policies&lt;/strong&gt; that all projects will use.&lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#centralized-policies"&gt;
+  &lt;/a&gt;
+  💡 Centralized Policies 💡
+&lt;/h4&gt;
+
+&lt;p&gt;And to integrate it in multiple CI/CD pipelines, you actually don't have to copy and paste the policies and include them in every project. These policies are &lt;strong&gt;stored centrally in Datree&lt;/strong&gt; and not in the project as an additional project file, so by just referencing the policies you can use the same policy in all your CI pipelines.&lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#datree-validations"&gt;
+  &lt;/a&gt;
+  💡 Datree Validations 💡
+&lt;/h4&gt;
+
+&lt;p&gt;The following 3 things are validated:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;
+&lt;strong&gt;YAML&lt;/strong&gt;: Is the file a valid YAML file&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;Kubernetes Schema&lt;/strong&gt;: Is the file a valid Kubernetes file&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;Policy&lt;/strong&gt;: Is the file following your Kubernetes policy&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;h4&gt;
+  &lt;a href="#builtin-policies"&gt;
+  &lt;/a&gt;
+  💡 Built-In Policies 💡
+&lt;/h4&gt;
+
+&lt;p&gt;Also in addition to you being able to create policies, Datree already gives you a &lt;strong&gt;list of built-in policies&lt;/strong&gt;, which already covers almost all the best practices. This means, once you set it up, you can already start validating your YAML files with these built-in policies.  👍&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--fGWqd4Oc--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/6k8axkp8tsm1wf7p8n8i.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--fGWqd4Oc--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/6k8axkp8tsm1wf7p8n8i.png" alt="Built-In Policies"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#datree-in-action-demo"&gt;
+  &lt;/a&gt;
+  Datree in Action - Demo 👩🏻‍💻
+&lt;/h2&gt;
+
+&lt;p&gt;In the video, I will show you how to easily set up Datree and start validating your K8s configuration files right away:&lt;br&gt;
+&lt;iframe width="710" height="399" src="https://www.youtube.com/embed/hgUfH9Ab258"&gt;
+&lt;/iframe&gt;
+&lt;/p&gt;
+
+
+
+
+&lt;p&gt;More awesome tools coming up next on this series, so stay tuned for it! 🎬 😊&lt;/p&gt;
+
+
+
+
+&lt;p&gt;&lt;strong&gt;Like, share and follow me&lt;/strong&gt; 😍 for more content:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="https://twitter.com/Njuchi_"&gt;Twitter&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://www.youtube.com/channel/UCdngmbVKX1Tgre699-XLlUA?sub_confirmation=1"&gt;YouTube&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://www.instagram.com/techworld_with_nana/"&gt;Instagram&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="//linkedin.com/in/nana-janashia"&gt;LinkedIn&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://www.facebook.com/groups/techworldwithnana"&gt;Private FB group&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+</description>
+      <category>devops</category>
+      <category>kubernetes</category>
+      <category>docker</category>
+      <category>tutorial</category>
     </item>
     <item>
       <title>Neumorphism Sidebar Menu Using HTML and CSS</title>
@@ -1397,762 +2681,6 @@ We can use a combination of % and px also
       <category>css</category>
       <category>javascript</category>
       <category>webdev</category>
-    </item>
-    <item>
-      <title>BoxShadow property in CSS</title>
-      <author>Sumeet Yadav</author>
-      <pubDate>Wed, 30 Jun 2021 13:55:21 +0000</pubDate>
-      <link>https://dev.to/sumeet16/boxshadow-property-in-css-47j4</link>
-      <guid>https://dev.to/sumeet16/boxshadow-property-in-css-47j4</guid>
-      <description>&lt;p&gt;In this blog we are going to learn a CSS property called BoxShadow, so lets get started.&lt;/p&gt;
-
-&lt;p&gt;First of all, lets go through the syntax of this property.&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--GHilH_i1--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/t7ledm87ds6gig7wo5rq.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--GHilH_i1--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/t7ledm87ds6gig7wo5rq.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;br&gt;
-&lt;strong&gt;BoxShadow without blur filter&lt;/strong&gt;&lt;br&gt;
-&lt;br&gt;&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--BlE2dPnc--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/j2ddrwsujhbsc72t1mj7.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--BlE2dPnc--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/j2ddrwsujhbsc72t1mj7.png" alt="image"&gt;&lt;/a&gt; &lt;br&gt;
-As you can see in the picture there is a black shadow applied to our div but it still not look good, so in order to make it look cool we have to apply blur on it.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;BoxShadow with blur filter&lt;/strong&gt;&lt;br&gt;
-&lt;br&gt;&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--EM0jzoKF--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/rbp71x4iena4infkpzsg.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--EM0jzoKF--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/rbp71x4iena4infkpzsg.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Now it look cool doesn't it?? &lt;/p&gt;
-
-&lt;p&gt;CODE:&lt;br&gt;
-&lt;br&gt;&lt;br&gt;
-&lt;iframe height="600" src="https://codepen.io/sumeet1610/embed/NWjPYpY?height=600&amp;amp;default-tab=result&amp;amp;embed-version=2"&gt;
-&lt;/iframe&gt;
-&lt;br&gt;
-&lt;br&gt;&lt;br&gt;
-Now it's see some more example of Boxshadow Property.&lt;br&gt;
-&lt;strong&gt;Box-Shadow-2&lt;/strong&gt;&lt;br&gt;
-&lt;br&gt;&lt;br&gt;
-&lt;iframe height="600" src="https://codepen.io/sumeet1610/embed/jOmEzLv?height=600&amp;amp;default-tab=result&amp;amp;embed-version=2"&gt;
-&lt;/iframe&gt;
-&lt;br&gt;
-&lt;strong&gt;Box-Shadow-3&lt;/strong&gt;&lt;br&gt;
-&lt;br&gt;&lt;br&gt;
-&lt;iframe height="600" src="https://codepen.io/sumeet1610/embed/KKmwoXr?height=600&amp;amp;default-tab=result&amp;amp;embed-version=2"&gt;
-&lt;/iframe&gt;
-&lt;br&gt;
-&lt;strong&gt;Box-Shadow-4&lt;/strong&gt;&lt;br&gt;
-&lt;br&gt;&lt;br&gt;
-&lt;iframe height="600" src="https://codepen.io/sumeet1610/embed/BaRyrmY?height=600&amp;amp;default-tab=result&amp;amp;embed-version=2"&gt;
-&lt;/iframe&gt;
-&lt;br&gt;
-&lt;strong&gt;Box-Shadow-5&lt;/strong&gt;&lt;br&gt;
-&lt;br&gt;&lt;br&gt;
-&lt;iframe height="600" src="https://codepen.io/sumeet1610/embed/JjNoLMY?height=600&amp;amp;default-tab=result&amp;amp;embed-version=2"&gt;
-&lt;/iframe&gt;
-&lt;br&gt;
-&lt;strong&gt;Box-Shadow-6&lt;/strong&gt;&lt;br&gt;
-This effect is also known as Neomorphism and you can use this effect for buttons, for Nav-bar, Card etc. in your website.&lt;br&gt;
-&lt;br&gt;&lt;br&gt;
-&lt;iframe height="600" src="https://codepen.io/sumeet1610/embed/poPvLaG?height=600&amp;amp;default-tab=result&amp;amp;embed-version=2"&gt;
-&lt;/iframe&gt;
-&lt;br&gt;
-&lt;strong&gt;Box-Shadow-7&lt;/strong&gt;&lt;br&gt;
-&lt;br&gt;&lt;br&gt;
-&lt;iframe height="600" src="https://codepen.io/sumeet1610/embed/jOmEzzQ?height=600&amp;amp;default-tab=result&amp;amp;embed-version=2"&gt;
-&lt;/iframe&gt;
-&lt;br&gt;
-&lt;br&gt;&lt;/p&gt;
-
-&lt;p&gt;Hope you like this blog, plz do like this blog and more cool CSS properties do follow me 😃.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#next-blog-topic"&gt;
-  &lt;/a&gt;
-  Next Blog Topic:
-&lt;/h2&gt;
-
-&lt;p&gt;Best VSCODE extensions for beginners.&lt;/p&gt;
-
-</description>
-      <category>html</category>
-      <category>css</category>
-      <category>webdev</category>
-      <category>ux</category>
-    </item>
-    <item>
-      <title>Tagging  system with node js</title>
-      <author>XrGamer</author>
-      <pubDate>Wed, 30 Jun 2021 13:40:33 +0000</pubDate>
-      <link>https://dev.to/vahidxr11/tagging-system-with-node-js-2p8m</link>
-      <guid>https://dev.to/vahidxr11/tagging-system-with-node-js-2p8m</guid>
-      <description>&lt;p&gt;Hello, How can i implement tagging system like a dev.to with node js and mongodb.&lt;/p&gt;
-
-</description>
-      <category>help</category>
-    </item>
-    <item>
-      <title>My reasons to never finish some projects</title>
-      <author>Zygimantas Sniurevicius</author>
-      <pubDate>Wed, 30 Jun 2021 13:38:59 +0000</pubDate>
-      <link>https://dev.to/producthackers/my-reasons-to-never-finish-some-projects-17j6</link>
-      <guid>https://dev.to/producthackers/my-reasons-to-never-finish-some-projects-17j6</guid>
-      <description>&lt;p&gt;Hello, today I wanted to speak about a topic I have been dealing with my whole life, "why the hell I keep leaving things half done?" I imagine that just from reading the title of the article your mind already gently reminded you about X or Y that you never finished but pretend that you will come back to it once the "timing" is right, after speaking with colleagues and friends about it I have realized that the struggle is universally the same for developers around the globe.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#introduction"&gt;
-  &lt;/a&gt;
-  INTRODUCTION
-&lt;/h3&gt;
-
-&lt;p&gt;This is all coming from a developer's perspective that has been programming professionally for around 3 years, so after some deliberation, I came to a small list of 8 moments or signs of when a project is going to be abandoned, let's dig in.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#everything-is-half-done"&gt;
-  &lt;/a&gt;
-  EVERYTHING IS HALF DONE
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--plVAjFlb--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/r9bp4ehlvyvhg1ueehs6.jpg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--plVAjFlb--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/r9bp4ehlvyvhg1ueehs6.jpg" alt="Half build house"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Let's start with a big one, this one happens when I already have something working and instead of continuing polishing and finishing one thing I keep jumping from one thing to another, after some days have passed, I come to the realization that every single part of my application is half done, this is where I almost always stop working on a project.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#new-toy"&gt;
-  &lt;/a&gt;
-  NEW TOY
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--8tculuPK--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/wn7aqxlo8k7y92gfwglh.jpg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--8tculuPK--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/wn7aqxlo8k7y92gfwglh.jpg" alt="new toy"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;This one is self explanatory, it happens when one of the following things appears:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;I become obsessed with a new and "better" idea&lt;/li&gt;
-&lt;li&gt;New videogame release's&lt;/li&gt;
-&lt;li&gt;Some kind of new technology that I want to test&lt;/li&gt;
-&lt;li&gt;Any other type entertainment (tv shows, books, movies)&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;for me personally, it's always the new games :D, I get sucked into it and when am done with it I can't even remember what was I doing before.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#takes-too-long-to-finish"&gt;
-  &lt;/a&gt;
-  TAKES TOO LONG TO FINISH
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--aXVfNO2W--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/wtyr0ucjjd2je2kg7ruu.jpg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--aXVfNO2W--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/wtyr0ucjjd2je2kg7ruu.jpg" alt="Skeleton waiting"&gt;&lt;/a&gt;&lt;br&gt;
-Ideally, this should never happen, but once or twice I let my imagination run wild and on a blink of an eye I seem to be working on a gigantic app that in no way I can finish, after some days I realize that this will probably take me multiple months to finish, that's when the despair settles in and I loath the idea of continuing working on it.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#why-bother-there-are-similar-apps"&gt;
-  &lt;/a&gt;
-  WHY BOTHER, THERE ARE SIMILAR APPS
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--sJyjcOH3--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/en2wkbve6av651scb8nz.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--sJyjcOH3--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/en2wkbve6av651scb8nz.png" alt="Plagiarism"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Occasionally there are projects that I really enjoy and am having fun building it, but once I stop for a quick check up on "similar ideas" it hits me like a truck, I suddenly lose all motivation, why waste my time with this when there are hundred projects that are the same or better than mine?&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#missing-piece"&gt;
-  &lt;/a&gt;
-  MISSING PIECE
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--aU1QNwJK--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/k15n20mfug75sked2lqm.jpg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--aU1QNwJK--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/k15n20mfug75sked2lqm.jpg" alt="puzzle missing one piece"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Sometimes I really get interest in an idea and I start making a mental map of things needed to accomplish it, I try to rationalize every small feature and understand how it should work, after exploring this map there are always tiny details that escape my knowledge and I deem them impossible or too hard to execute because I can't find anything on the internet.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#refactor-loop"&gt;
-  &lt;/a&gt;
-  REFACTOR LOOP
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--0qxW2cue--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/vb0c43440rj7b4zfoq6a.jpg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--0qxW2cue--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/vb0c43440rj7b4zfoq6a.jpg" alt="on repeat"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;This happens when I make lazy design choices all around the project and I promise myself that I will fix them once I get it working, what follows is an eternal loop of refactors that lead me nowhere near the finish line, refactor on refactor on refactor...&lt;br&gt;
-The only thing left for me to do is to rush the project no matter the state it is and dump it as soon as I can.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#already-code-fulltime"&gt;
-  &lt;/a&gt;
-  Already code full-time
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--qQw0B5Ce--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/pehwot19d4f0k7dkwm2c.jpg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--qQw0B5Ce--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/pehwot19d4f0k7dkwm2c.jpg" alt="office worker"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Last but not least, sometimes I have this train of thoughts of why should I waste time on personal projects when I already work full time as a developer, I see people around me doing all kinds of stuff and I get the feeling that I should be doing the same and stop wasting my time, projects born from this fear are usually short of passion and never last long enough.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#conclusion"&gt;
-  &lt;/a&gt;
-  CONCLUSION
-&lt;/h3&gt;
-
-&lt;p&gt;Let me finish by telling you that these reasons are personal for me, everyone works differently, it would be amazing if you could share your reasons to abandon a project in the comments below, I'm really interested in seeing the others point of view on the subject.&lt;/p&gt;
-
-&lt;p&gt;Thanks for reading me and sorry if you see a typo, I leave you with some tips for anyone wanting to get better at finishing projects.&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Small arcievable objectives&lt;/li&gt;
-&lt;li&gt;Always start and focus on a minimal viable product&lt;/li&gt;
-&lt;li&gt;Try to start projects that makes your life easier &lt;/li&gt;
-&lt;li&gt;Make yourself accountable by telling other's about it.&lt;/li&gt;
-&lt;li&gt;Don't just do something for the sake of doing it&lt;/li&gt;
-&lt;li&gt;Set deadlines to push yourself&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--e3a7RZ3t--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/elhwquha6hvsqjmlivds.gif" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--e3a7RZ3t--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/elhwquha6hvsqjmlivds.gif" alt="Goodbye"&gt;&lt;/a&gt;&lt;/p&gt;
-
-</description>
-      <category>portfolio</category>
-      <category>discuss</category>
-      <category>productivity</category>
-      <category>programming</category>
-    </item>
-    <item>
-      <title>Las 30 mejores herramientas digitales para la educación en línea</title>
-      <author>meydele</author>
-      <pubDate>Wed, 30 Jun 2021 13:24:08 +0000</pubDate>
-      <link>https://dev.to/feygele/las-30-mejores-herramientas-digitales-para-la-educacion-en-linea-45p3</link>
-      <guid>https://dev.to/feygele/las-30-mejores-herramientas-digitales-para-la-educacion-en-linea-45p3</guid>
-      <description>&lt;p&gt;Debido a la pandemia de COVID-19, muchas empresas e instituciones educativas han recurrido al aprendizaje a distancia. En estos tiempos difíciles, esta es la manera más segura y efectiva de que las personas continúen &lt;a href="https://www.ispring.es/blog/capacitacion-de-personal"&gt;aprendiendo&lt;/a&gt;. Por esto es esencial contar con las herramientas adecuadas para que &lt;a href="https://www.ispring.es/blog/capacitacion-en-ventas"&gt;los empleados&lt;/a&gt; y los formadores, así como los estudiantes y los profesores, estén siempre conectados y tengan a mano el material de aprendizaje necesario. &lt;/p&gt;
-
-&lt;p&gt;En este artículo, hablaremos sobre cinco tipos de herramientas digitales para la educación en línea que puedes usar para ofrecer la mejor experiencia de aprendizaje posible a tus estudiantes. Compártelas en las redes sociales o añade esta página a tus favoritos para volver a consultar el artículo más tarde.&lt;/p&gt;
-
-&lt;p&gt;Para leer más sigue este artículo:&lt;br&gt;
-&lt;a href="https://www.ispring.es/blog/herramientas-digitales-para-la-educacion-en-linea"&gt;https://www.ispring.es/blog/herramientas-digitales-para-la-educacion-en-linea&lt;/a&gt; &lt;/p&gt;
-
-</description>
-    </item>
-    <item>
-      <title>Bootstrap 5 Lightbox</title>
-      <author>MD Bootstrap</author>
-      <pubDate>Wed, 30 Jun 2021 13:21:08 +0000</pubDate>
-      <link>https://dev.to/mdbootstrap/bootstrap-5-lightbox-3agb</link>
-      <guid>https://dev.to/mdbootstrap/bootstrap-5-lightbox-3agb</guid>
-      <description>&lt;h2&gt;
-  &lt;a href="#what-is-bootstrap-lightbox"&gt;
-  &lt;/a&gt;
-  What is Bootstrap Lightbox?
-&lt;/h2&gt;
-
-&lt;p&gt;Lightbox is a responsive gallery with the option to enlarge selected photos.&lt;/p&gt;
-
-
-
-
-&lt;h2&gt;
-  &lt;a href="#installation"&gt;
-  &lt;/a&gt;
-  Installation
-&lt;/h2&gt;
-
-&lt;h4&gt;
-  &lt;a href="#manual-installation-zip-package"&gt;
-  &lt;/a&gt;
-  Manual installation (zip package)
-&lt;/h4&gt;
-
-&lt;p&gt;To take advantage of  our Bootstrap images component and use them in your project, you first need to install the &lt;a href="https://mdbootstrap.com/docs/standard/getting-started/installation/#section-manual-installation"&gt;MDB 5 Free package&lt;/a&gt;&lt;/p&gt;
-
-
-
-
-&lt;h4&gt;
-  &lt;a href="#mdb-cli"&gt;
-  &lt;/a&gt;
-  MDB CLI
-&lt;/h4&gt;
-
-&lt;p&gt;Watch our &lt;a href="https://mdbootstrap.com/docs/standard/getting-started/quick-start/"&gt;&lt;strong&gt;Quick Start Tutorial&lt;/strong&gt;&lt;/a&gt; to discover and use the full potential of MDB 5 and MDB CLI&lt;/p&gt;
-
-
-
-
-&lt;h4&gt;
-  &lt;a href="#npm"&gt;
-  &lt;/a&gt;
-  NPM
-&lt;/h4&gt;
-
-&lt;h6&gt;
-  &lt;a href="#prerequisites"&gt;
-  &lt;/a&gt;
-  Prerequisites
-&lt;/h6&gt;
-
-&lt;p&gt;Before starting the project make sure to install &lt;a href="https://nodejs.org/en/"&gt;Node LTS (12.x.x recommended)&lt;/a&gt;.&lt;/p&gt;
-
-&lt;h6&gt;
-  &lt;a href="#installation"&gt;
-  &lt;/a&gt;
-  Installation
-&lt;/h6&gt;
-
-&lt;p&gt;To install MDB UI KIT in your project easily type the following command in the terminal:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight console"&gt;&lt;code&gt;&lt;span class="go"&gt;npm i mdb-ui-kit 
-&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h6&gt;
-  &lt;a href="#importing-js-modules"&gt;
-  &lt;/a&gt;
-  Importing JS modules
-&lt;/h6&gt;
-
-&lt;p&gt;You can import the entire library or just individual modules:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight console"&gt;&lt;code&gt;&lt;span class="gp"&gt;import * as mdb from 'mdb-ui-kit';&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;// lib
-&lt;span class="gp"&gt;import { Input } from 'mdb-ui-kit';&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;// module 
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h6&gt;
-  &lt;a href="#importing-css-file"&gt;
-  &lt;/a&gt;
-  Importing CSS file
-&lt;/h6&gt;
-
-&lt;p&gt;To import MDB stylesheet please use the following syntax:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight console"&gt;&lt;code&gt;&lt;span class="gp"&gt;@import '~mdb-ui-kit/css/mdb.min.css';&lt;/span&gt;&lt;span class="w"&gt; 
-&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h6&gt;
-  &lt;a href="#importing-scss-modules"&gt;
-  &lt;/a&gt;
-  Importing SCSS modules
-&lt;/h6&gt;
-
-&lt;p&gt;You can also import individual SCSS modules. To do it properly, we recommend to copy them from the node_modules/mdb-ui-kit/src/scss location directly to your project and import in the same way as CSS files.&lt;/p&gt;
-
-&lt;h6&gt;
-  &lt;a href="#webpack-integration"&gt;
-  &lt;/a&gt;
-  Webpack integration
-&lt;/h6&gt;
-
-&lt;p&gt;You can significantly speed up the process of creating a new project based on Webpack using our &lt;a href="https://github.com/mdbootstrap/mdb-webpack-starter"&gt;Starter&lt;/a&gt;.&lt;/p&gt;
-
-
-
-
-&lt;h4&gt;
-  &lt;a href="#cdn"&gt;
-  &lt;/a&gt;
-  CDN
-&lt;/h4&gt;
-
-&lt;p&gt;Installation via CDN is one of the easiest methods of integrating MDB UI KIT with your project. Just copy the latest compiled JS script tag and CSS link tag from &lt;a href="https://cdnjs.com/libraries/mdb-ui-kit"&gt;cdnjs&lt;/a&gt; to the application.&lt;/p&gt;
-
-&lt;p&gt;Don't forget to add also Font Awesome and Roboto font if you need. Here's an example code:&lt;/p&gt;
-
-&lt;h6&gt;
-  &lt;a href="#css"&gt;
-  &lt;/a&gt;
-  CSS
-&lt;/h6&gt;
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="o"&gt;&amp;lt;!&lt;/span&gt;&lt;span class="nt"&gt;--&lt;/span&gt; &lt;span class="nt"&gt;Font&lt;/span&gt; &lt;span class="nt"&gt;Awesome&lt;/span&gt; &lt;span class="nt"&gt;--&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
-&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nt"&gt;link&lt;/span&gt;
-  &lt;span class="nt"&gt;href&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s1"&gt;"https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.1/css/all.min.css"&lt;/span&gt;
-  &lt;span class="nt"&gt;rel&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s1"&gt;"stylesheet"&lt;/span&gt;
-&lt;span class="o"&gt;/&amp;gt;&lt;/span&gt;
-&lt;span class="o"&gt;&amp;lt;!&lt;/span&gt;&lt;span class="nt"&gt;--&lt;/span&gt; &lt;span class="nt"&gt;Google&lt;/span&gt; &lt;span class="nt"&gt;Fonts&lt;/span&gt; &lt;span class="nt"&gt;--&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
-&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nt"&gt;link&lt;/span&gt;
-  &lt;span class="nt"&gt;href&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s1"&gt;"https://fonts.googleapis.com/css?family=Roboto:300,400,500,700&amp;amp;display=swap"&lt;/span&gt;
-  &lt;span class="nt"&gt;rel&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s1"&gt;"stylesheet"&lt;/span&gt;
-&lt;span class="o"&gt;/&amp;gt;&lt;/span&gt;
-&lt;span class="o"&gt;&amp;lt;!&lt;/span&gt;&lt;span class="nt"&gt;--&lt;/span&gt; &lt;span class="nt"&gt;MDB&lt;/span&gt; &lt;span class="nt"&gt;--&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
-&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nt"&gt;link&lt;/span&gt;
-  &lt;span class="nt"&gt;href&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s1"&gt;"https://cdnjs.cloudflare.com/ajax/libs/mdb-ui-kit/3.3.0/mdb.min.css"&lt;/span&gt;
-  &lt;span class="nt"&gt;rel&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s1"&gt;"stylesheet"&lt;/span&gt;
-&lt;span class="o"&gt;/&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h6&gt;
-  &lt;a href="#js"&gt;
-  &lt;/a&gt;
-  JS
-&lt;/h6&gt;
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c"&gt;&amp;lt;!--&lt;/span&gt; &lt;span class="nx"&gt;MDB&lt;/span&gt; &lt;span class="o"&gt;--&amp;gt;&lt;/span&gt;
-&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;script&lt;/span&gt;
-  &lt;span class="nx"&gt;type&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;text/javascript&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
-  &lt;span class="nx"&gt;src&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;https://cdnjs.cloudflare.com/ajax/libs/mdb-ui-kit/3.3.0/mdb.min.js&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
-&lt;span class="o"&gt;&amp;gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/script&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
-&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-
-
-&lt;h2&gt;
-  &lt;a href="#customization"&gt;
-  &lt;/a&gt;
-  Customization
-&lt;/h2&gt;
-
-&lt;h5&gt;
-  &lt;a href="#basic-example"&gt;
-  &lt;/a&gt;
-  Basic example
-&lt;/h5&gt;
-
-&lt;p&gt;A basic example of a lightbox with the most common use case with the bootstrap grid.&lt;/p&gt;
-
-&lt;h6&gt;
-  &lt;a href="#html"&gt;
-  &lt;/a&gt;
-  HTML
-&lt;/h6&gt;
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;div&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"lightbox"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-  &lt;span class="nt"&gt;&amp;lt;div&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"row"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;div&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"col-lg-4"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-      &lt;span class="nt"&gt;&amp;lt;img&lt;/span&gt;
-        &lt;span class="na"&gt;src=&lt;/span&gt;&lt;span class="s"&gt;"https://mdbootstrap.com/img/Photos/Thumbnails/Slides/1.jpg"&lt;/span&gt;
-        &lt;span class="na"&gt;data-mdb-img=&lt;/span&gt;&lt;span class="s"&gt;"https://mdbootstrap.com/img/Photos/Slides/1.jpg"&lt;/span&gt;
-        &lt;span class="na"&gt;alt=&lt;/span&gt;&lt;span class="s"&gt;"Lightbox image 1"&lt;/span&gt;
-        &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"w-100"&lt;/span&gt;
-      &lt;span class="nt"&gt;/&amp;gt;&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;/div&amp;gt;&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;div&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"col-lg-4"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-      &lt;span class="nt"&gt;&amp;lt;img&lt;/span&gt;
-        &lt;span class="na"&gt;src=&lt;/span&gt;&lt;span class="s"&gt;"https://mdbootstrap.com/img/Photos/Thumbnails/Slides/2.jpg"&lt;/span&gt;
-        &lt;span class="na"&gt;data-mdb-img=&lt;/span&gt;&lt;span class="s"&gt;"https://mdbootstrap.com/img/Photos/Slides/2.jpg"&lt;/span&gt;
-        &lt;span class="na"&gt;alt=&lt;/span&gt;&lt;span class="s"&gt;"Lightbox image 2"&lt;/span&gt;
-        &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"w-100"&lt;/span&gt;
-      &lt;span class="nt"&gt;/&amp;gt;&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;/div&amp;gt;&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;div&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"col-lg-4"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-      &lt;span class="nt"&gt;&amp;lt;img&lt;/span&gt;
-        &lt;span class="na"&gt;src=&lt;/span&gt;&lt;span class="s"&gt;"https://mdbootstrap.com/img/Photos/Thumbnails/Slides/3.jpg"&lt;/span&gt;
-        &lt;span class="na"&gt;data-mdb-img=&lt;/span&gt;&lt;span class="s"&gt;"https://mdbootstrap.com/img/Photos/Slides/3.jpg"&lt;/span&gt;
-        &lt;span class="na"&gt;alt=&lt;/span&gt;&lt;span class="s"&gt;"Lightbox image 3"&lt;/span&gt;
-        &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"w-100"&lt;/span&gt;
-      &lt;span class="nt"&gt;/&amp;gt;&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;/div&amp;gt;&lt;/span&gt;
-  &lt;span class="nt"&gt;&amp;lt;/div&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;/div&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h5&gt;
-  &lt;a href="#image-optimization"&gt;
-  &lt;/a&gt;
-  Image optimization
-&lt;/h5&gt;
-
-&lt;p&gt;To ensure the proper performance of the page, it is recommended to include thumbnails of images in the src attribute. Then in the &lt;code&gt;data-mdb-img&lt;/code&gt; attribute add the path to the image with higher resolution. If the &lt;code&gt;data-mdb-img&lt;/code&gt; attribute is omitted, the lightbox will display the same image as in the reduced size.&lt;/p&gt;
-
-&lt;h6&gt;
-  &lt;a href="#html"&gt;
-  &lt;/a&gt;
-  HTML
-&lt;/h6&gt;
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;img&lt;/span&gt; &lt;span class="na"&gt;src=&lt;/span&gt;&lt;span class="s"&gt;"https://mdbootstrap.com/img/Photos/Thumbnails/Slides/1.jpg"&lt;/span&gt;
-  &lt;span class="na"&gt;data-mdb-img=&lt;/span&gt;&lt;span class="s"&gt;"https://mdbootstrap.com/img/Photos/Slides/1.jpg"&lt;/span&gt; &lt;span class="na"&gt;alt=&lt;/span&gt;&lt;span class="s"&gt;"Lightbox image 1"&lt;/span&gt;
-  &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"w-100"&lt;/span&gt; &lt;span class="nt"&gt;/&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h4&gt;
-  &lt;a href="#you-can-see-more-customization-examples-on-the-lightbox-documentation-page"&gt;
-  &lt;/a&gt;
-  You can see more customization examples on the &lt;a href="https://mdbootstrap.com/docs/standard/components/lightbox/"&gt;📄 Lightbox documentation page&lt;/a&gt;
-&lt;/h4&gt;
-
-
-
-
-&lt;h2&gt;
-  &lt;a href="#crucial-resources"&gt;
-  &lt;/a&gt;
-  Crucial Resources
-&lt;/h2&gt;
-
-&lt;p&gt;Here are the resources that we have prepared to help you work with this component:&lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;Read &lt;a href="https://mdbootstrap.com/docs/standard/components/lightbox/"&gt;📄 Lightbox documentation page&lt;/a&gt; &amp;lt;-- start here&lt;/li&gt;
-&lt;li&gt;In to get the most out of your project, you should also get acquainted with other Components options related to Lightbox. See the section below to find the list of them.&lt;/li&gt;
-&lt;li&gt;You can use predesigned Components elements in &lt;a href="https://mdbootstrap.com/freebies/"&gt;📥 Starter Bootstrap 5 templates&lt;/a&gt;
-&lt;/li&gt;
-&lt;li&gt;Templates are a part of &lt;a href="https://mdbootstrap.com/docs/standard/"&gt;📦 Free UI Kit for Bootstrap 5&lt;/a&gt;
-&lt;/li&gt;
-&lt;li&gt;After finishing the project you can publish it with CLI in order to receive &lt;a href="https://mdbootstrap.com/docs/standard/cli/"&gt;💽 Free hosting (beta)&lt;/a&gt;
-&lt;/li&gt;
-&lt;/ol&gt;
-
-
-
-
-&lt;h2&gt;
-  &lt;a href="#related-content-and-styles-options-amp-features"&gt;
-  &lt;/a&gt;
-  Related Content and Styles options &amp;amp; features
-&lt;/h2&gt;
-
-&lt;ul&gt;
-&lt;li&gt;&lt;a href="https://mdbootstrap.com/docs/standard/components/accordion/"&gt;Accordion&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://mdbootstrap.com/docs/standard/components/alerts/"&gt;Alerts &lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://mdbootstrap.com/docs/standard/components/buttons/"&gt;Buttons&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://mdbootstrap.com/docs/standard/components/badges/"&gt;Badges&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://mdbootstrap.com/docs/standard/components/cards/"&gt;Cards&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://mdbootstrap.com/docs/standard/components/button-group/"&gt;Button Group&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://mdbootstrap.com/docs/standard/components/carousel/"&gt;Carousel&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://mdbootstrap.com/docs/standard/components/chips/"&gt;Chips&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://mdbootstrap.com/docs/standard/components/collapse/"&gt;Collapse&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://mdbootstrap.com/docs/standard/components/dropdowns/"&gt;Dropdowns&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://mdbootstrap.com/docs/standard/components/list-group/"&gt;List Group&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://mdbootstrap.com/docs/standard/components/modal/"&gt;Modal&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://mdbootstrap.com/docs/standard/components/popconfirm/"&gt;Popconfirm&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://mdbootstrap.com/docs/standard/components/popovers/"&gt;Popovers&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://mdbootstrap.com/docs/standard/components/progress/"&gt;Progress&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://mdbootstrap.com/docs/standard/components/rating/"&gt;Rating&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://mdbootstrap.com/docs/standard/components/spinners/"&gt;Spinners&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://mdbootstrap.com/docs/standard/components/stepper/"&gt;Stepper&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://mdbootstrap.com/docs/standard/components/toasts/"&gt;Toasts&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://mdbootstrap.com/docs/standard/components/tooltips/"&gt;Tooltips&lt;/a&gt;&lt;/li&gt;
-&lt;/ul&gt;
-
-
-
-
-&lt;h2&gt;
-  &lt;a href="#learn-bootstrap-5-in-15h"&gt;
-  &lt;/a&gt;
-  Learn Bootstrap 5 in 1.5H
-&lt;/h2&gt;
-
-&lt;p&gt;&lt;iframe width="710" height="399" src="https://www.youtube.com/embed/c9B4TPnak1A"&gt;
-&lt;/iframe&gt;
-&lt;/p&gt;
-
-
-
-
-&lt;h2&gt;
-  &lt;a href="#additional-resources"&gt;
-  &lt;/a&gt;
-  Additional resources
-&lt;/h2&gt;
-
-&lt;p&gt;Learn web development with our &lt;strong&gt;learning roadmap&lt;/strong&gt;:&lt;br&gt;
-&lt;strong&gt;&lt;a href="https://mdbootstrap.com/docs/standard/getting-started/"&gt;🎓 Start Learning&lt;/a&gt;&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;Join our mailing list &amp;amp; receive &lt;strong&gt;exclusive resources&lt;/strong&gt; for developers&lt;br&gt;
-&lt;strong&gt;&lt;a href="https://mdbootstrap.com/newsletter/"&gt;🎁 Get gifts&lt;/a&gt;&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;Join our private FB group for &lt;strong&gt;inspiration &amp;amp; community experience&lt;/strong&gt;&lt;br&gt;
-&lt;strong&gt;&lt;a href="https://www.facebook.com/groups/682245759188413"&gt;👨‍👩‍👧‍👦 Ask to join&lt;/a&gt;&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Support creation of open-source packages&lt;/strong&gt; with a STAR on GitHub&lt;br&gt;
-&lt;a href="https://github.com/mdbootstrap/mdb-ui-kit/"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--KKY5TtAR--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://img.shields.io/github/stars/mdbootstrap/mdb-ui-kit%3Flabel%3DStar%2520now%26style%3Dsocial" alt="GitHub Stars"&gt;&lt;/a&gt;&lt;/p&gt;
-
-</description>
-      <category>bootstrap</category>
-      <category>javascript</category>
-      <category>webdev</category>
-      <category>html</category>
-    </item>
-    <item>
-      <title>Firebase: Start up your base or fire up your own servers?</title>
-      <author>Anurag Jayaraman</author>
-      <pubDate>Wed, 30 Jun 2021 13:17:54 +0000</pubDate>
-      <link>https://dev.to/anuragjwrites/firebase-start-up-your-base-or-fire-up-your-own-servers-i2n</link>
-      <guid>https://dev.to/anuragjwrites/firebase-start-up-your-base-or-fire-up-your-own-servers-i2n</guid>
-      <description>&lt;p&gt;&lt;em&gt;This article was originally published on &lt;a href="https://www.applozic.com/blog/firebase-start-up-your-base-or-fire-up-your-own-servers/"&gt;Applozic Blog&lt;/a&gt;.&lt;/em&gt;&lt;/p&gt;
-
-&lt;p&gt;If you clicked this article because of the word "Firebase", you have probably been a part of a mobile application development lifecycle at some point in your life. Some of the services offered by Firebase like &lt;a rel="noreferrer noopener" href="https://firebase.google.com/docs/cloud-messaging"&gt;Firebase Cloud Messaging (FCM)&lt;/a&gt;, &lt;a rel="noreferrer noopener" href="https://firebase.google.com/docs/dynamic-links/"&gt;Firebase Dynamic Links&lt;/a&gt;, &lt;a rel="noreferrer noopener" href="https://firebase.google.com/docs/remote-config/"&gt;Firebase Remote Config&lt;/a&gt; have become synonymous with the features they implement in your applications. At my current organization, &lt;a href="https://www.applozic.com"&gt;Applozic&lt;/a&gt;, FCM is used for &lt;a href="https://dev.to/applozic/applozic-android-sdk-tutorial-4-push-notifications-4a2h"&gt;push notifications for Android applications&lt;/a&gt; built on our platform. At a global level, Firebase is currently among one of the top app development platforms relied upon by developers across the globe.&lt;/p&gt;
-
-&lt;p&gt;That said, Firebase's offerings in the Backend-as-a-Service(BaaS) space are not the be all, end all in terms of application development. In this article, I would like to explore some of the features as well as shortcomings application developers have encountered with Firebase, and whether your application might be better suited with your own backend solution.&lt;/p&gt;
-
-&lt;h2&gt;What is Firebase?&lt;/h2&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;Firebase helps you develop high-quality apps, grow your user base, and earn more money. Each feature works independently, and they work even better together.&lt;/p&gt;
-&lt;cite&gt;https://firebase.google.com/use-cases&lt;/cite&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;Firebase is a mobile application development platform from Google with powerful features for developing, handling, and enhancing highly functional and versatile web, Android, and iOS platform applications. &lt;/p&gt;
-
-&lt;p&gt;Firebase categorizes its services and by creating solutions of these three main problems for developers:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;
-&lt;a rel="noreferrer noopener" href="https://firebase.google.com/products-build"&gt;Build&lt;/a&gt; : Accelerate and scale app development without managing infrastructure&lt;/li&gt;
-&lt;li&gt;
-&lt;a rel="noreferrer noopener" href="https://firebase.google.com/products-release"&gt;Release &amp;amp; Monitor&lt;/a&gt; : Release applications with confidence and monitor their performance and stability in realtime. &lt;/li&gt;
-&lt;li&gt;
-&lt;a rel="noreferrer noopener" href="https://firebase.google.com/products-engage"&gt;Engage&lt;/a&gt; : Boost engagement with rich analytics, A/B testing, and messaging campaigns&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h2&gt;Firebase's ideal customer&lt;/h2&gt;
-
-&lt;p&gt;Firebase Use Cases page has some interesting application use-cases which cover some of their more popular offerings and how these services solved &lt;a rel="noreferrer noopener" href="https://firebase.google.com/use-cases/onefootball"&gt;a business problem&lt;/a&gt; or &lt;a rel="noreferrer noopener" href="https://firebase.google.com/use-cases/fabulous"&gt;boosted the customer retention after onboarding&lt;/a&gt;. Of course, these are the high visibility success stories where businesses were profitable and Firebase helped them take the next step in their development journey. You can find their showcase &lt;a rel="noreferrer noopener" href="https://firebase.google.com/use-cases"&gt;use cases here.&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;To understand what type of customer would benefit the most from Firebase services, let's take a look at their &lt;a rel="noreferrer noopener" href="https://firebase.google.com/pricing"&gt;current pricing plan&lt;/a&gt;, and see how &lt;strong&gt;George &lt;/strong&gt;(a fictional character) created an application using Firebase. &lt;/p&gt;
-
-&lt;h2&gt;Building the basics for your app&lt;/h2&gt;
-
-&lt;p&gt;George woke up from bed with a great idea for an app and wanted to implement the minimum viable product to make sure the idea gets implemented. Firebase offered George unique services with dedicated APIs that helped with the initial setup of creating a database, managing authentication, storage, messaging, testing, etc., without ever having to understand what is going on in the backend. &lt;/p&gt;
-
-&lt;p&gt;The phrase "pace over perfection" is best suited for use cases like this, where the priority is to get a feature implemented over worrying about the nitty-gritty of implementation and since George used only the Free plan, he was able to get an application shipped in minimum possible time. &lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--vEdleSCB--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://www.applozic.com/blog/wp-content/uploads/2021/04/firebase-plans.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--vEdleSCB--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://www.applozic.com/blog/wp-content/uploads/2021/04/firebase-plans.png" alt="firebase pricing plans comparison"&gt;&lt;/a&gt;Firebase pricing plans comparison&lt;/p&gt;
-
-&lt;p&gt;A month has passed since George released his app, and he is happy with its success. The app has over 10,000 downloads on mobile and people are using and re-using the app at a moderate level. Everything is great on the public side of the picture. &lt;/p&gt;
-
-&lt;h3&gt;Storage Constraints&lt;/h3&gt;
-
-&lt;p&gt;Behind the scenes though, the application is reaching its quotas on most of the services. George's app has a lot of inbuilt messaging capabilities and users are sending rich messages (GIFs, emoticons, and animated features) and attaching files in one to one conversations and that is fulfilling his Cloud Storage quota rapidly. &lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--S58-xXui--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://www.applozic.com/blog/wp-content/uploads/2021/04/image-2.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--S58-xXui--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://www.applozic.com/blog/wp-content/uploads/2021/04/image-2.png" alt=""&gt;&lt;/a&gt;Free plan vs Paid plan for Firebase Cloud Storage&lt;/p&gt;
-
-&lt;p&gt;George considers moving his storage solution to a more cost efficient service like AWS S3, but finds out that due to a &lt;a rel="noreferrer noopener" href="https://en.wikipedia.org/wiki/Vendor_lock-in"&gt;Vendor lock-in&lt;/a&gt;, he cannot simply migrate from Google Cloud Storage without having to completely rebuild how the app functions. &lt;/p&gt;
-
-&lt;h3&gt;Security Constraints&lt;/h3&gt;
-
-&lt;p&gt;As the number of users increase, George wants to implement phone authentication as a security measure but finds that the quota for Firebase authentication has already reached its limit, and he needs to either scale up to the paid plan or not implement this feature. &lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--iaicw9Kw--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://www.applozic.com/blog/wp-content/uploads/2021/04/image-3.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--iaicw9Kw--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://www.applozic.com/blog/wp-content/uploads/2021/04/image-3.png" alt=""&gt;&lt;/a&gt;Free plan vs Paid plan for Firebase Authentication&lt;/p&gt;
-
-&lt;h3&gt;Customization Constraints&lt;/h3&gt;
-
-&lt;p&gt;Seeing the increasing challenges in maintaining his app in a free to download version, George wants to implement a few exclusive features which then he can ship as a paid app for regular users. He wants to implement customized API calls that will utilize the Realtime Database(RTDB) to provide the users with accurate data. However, Firebase APIs are non-customizable and the quotas for the RTDBs are constraining the ability to onboard new users or implement new features. &lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--8vvZUPTp--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://www.applozic.com/blog/wp-content/uploads/2021/04/image-4.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--8vvZUPTp--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://www.applozic.com/blog/wp-content/uploads/2021/04/image-4.png" alt=""&gt;&lt;/a&gt;Free plan vs Paid plan for Firebase RTDB&lt;/p&gt;
-
-&lt;h3&gt;Point of no return&lt;/h3&gt;
-
-&lt;p&gt;The time has arrived for George to make a decision regarding the app's future. To ensure his app keeps functioning, he has to take one of the following decisions:&lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;Move to the paid plan by sourcing investment and giving up partial/full control over his app. &lt;/li&gt;
-&lt;li&gt;Move to the paid plan by monetizing his app and asking users to pay to use the service.&lt;/li&gt;
-&lt;li&gt;Move away from Firebase services and create a robust backend and storage solution that can withstand scalability without causing disastrous financial repercussions. &lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;p&gt;Solution 1 and 2 might be good for the short term if the practicality of cost can be solved by George. However, unless George is able to scale up his development efforts and gain a lot more users for his app, these solutions are not going to help in the long term.  &lt;/p&gt;
-
-&lt;p&gt;Solution 3, while being the most suitable for the long term, is not viable from the perspective of development or immediate implementation. &lt;/p&gt;
-
-&lt;h2&gt;So who exactly is the ideal customer for Firebase?&lt;/h2&gt;
-
-&lt;ul&gt;
-&lt;li&gt;If you are just starting your app development journey, Firebase and its services are a great place to start implementing a minimum viable product. &lt;/li&gt;
-&lt;li&gt;If you are an Enterprise with oodles of funding and already use the Google Cloud platform, Firebase complements your application with robust APIs and services.&lt;/li&gt;
-&lt;li&gt;If you are somewhere in between, Firebase might not be the correct solution for you!&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h2&gt;What developers say &lt;/h2&gt;
-
-&lt;p&gt;Multiple articles on blogs and users across social media sites like Reddit, Twitter have opined their  views on Firebase, and I have tried my best to summarize them here.&lt;/p&gt;
-
-&lt;h3&gt;Costs increase exponentially based on data usage&lt;/h3&gt;
-
-&lt;p&gt;As we saw in George's case, Firebase's current pricing plans are suitable for the initial development of an app (free plan using less data) or enterprise level customers (high cost high value). While Firebase does offer a free plan, but that comes with hard quotas and restrictions that might hinder your application's usage.&lt;/p&gt;
-
-&lt;h3&gt;&lt;strong&gt;Works only with NoSQL Databases&lt;/strong&gt;&lt;/h3&gt;
-
-&lt;p&gt;Firebase offers two database options - Firestore and Firebase Realtime Database. Both of these have a NoSQL structure, and there is no option to use a relational database. &lt;/p&gt;
-
-&lt;p&gt;This becomes a big problem when a developer wants to migrate some or all of their services to other providers and since Firebase uses JSON to store data, there is almost no easy way to be able to migrate from the existing database. &lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--4kMSsDWj--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://eww-wp.s3.ap-south-1.amazonaws.com/wp-content/uploads/2019/06/11062817/MySQL-vs-NoSQL.jpg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--4kMSsDWj--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://eww-wp.s3.ap-south-1.amazonaws.com/wp-content/uploads/2019/06/11062817/MySQL-vs-NoSQL.jpg" alt=""&gt;&lt;/a&gt;Comparison between SQL and NoSQL&lt;/p&gt;
-
-&lt;h3&gt;&lt;strong&gt;Firebase can be geo restricted&lt;/strong&gt;&lt;/h3&gt;
-
-&lt;p&gt;Firebase is a subdomain of Google, and their official website is https://firebase.google.com, the services can be blocked in any country by a domain ban. This means that if George wanted to publish his app in a country where Google cannot be accessed, he will have to rebuild his core infrastructure to something that is available in that country. &lt;/p&gt;
-
-&lt;p&gt;You can find the list of &lt;a rel="noreferrer noopener" href="https://transparencyreport.google.com/traffic/overview"&gt;active disruptions to Google on this page.&lt;/a&gt; &lt;/p&gt;
-
-&lt;h3&gt;Vendor Lock In&lt;/h3&gt;
-
-&lt;p&gt;Developing an application using a non open source tool set can be frustrating when you want to add a certain feature or migrate to another service, but due to incompatibility, you are forced to stay with the same service, sometimes at a higher price or lower quality of service. This is called "Vendor Lock In", and it is a prominent detriment in complex applications which use multiple services. &lt;/p&gt;
-
-&lt;h2&gt;Conclusion&lt;/h2&gt;
-
-&lt;p&gt;If you are in the beginning stages of your app development journey, and your app can be considered "small" - it doesn’t require complex data queries and relies on real-time updates, Firebase is one of the most robust and cost efficient BaaS that you can utilize. &lt;/p&gt;
-
-&lt;p&gt;However, as the complexity of your app grows and there is an acute need for customization, high volume data transfers, better data structuring for analysis and querying, Firebase loses its sheen. As a developer, it would be more efficient to create your own backend or build upon existing &lt;a href="https://en.wikipedia.org/wiki/Infrastructure_as_a_service" rel="noreferrer noopener"&gt;IaaS&lt;/a&gt; platforms. &lt;/p&gt;
-
-&lt;p&gt;Have you used Firebase services and what prompted you to use/leave Firebase in search of a solution? If you have ever developed using Firebase, do share your experience as a comment below!&lt;/p&gt;
-
-&lt;p&gt;Learn how to set up your Android application with Firebase in 4 easy steps! &lt;/p&gt;
-&lt;div class="ltag__link"&gt;
-  &lt;a href="/applozic" class="ltag__link__link"&gt;
-    &lt;div class="ltag__link__org__pic"&gt;
-      &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--mOxz0ifG--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://res.cloudinary.com/practicaldev/image/fetch/s--CjW7Jl5P--/c_fill%2Cf_auto%2Cfl_progressive%2Ch_150%2Cq_auto%2Cw_150/https://dev-to-uploads.s3.amazonaws.com/uploads/organization/profile_image/4160/2cf95956-1adc-4cce-b895-d3bd1937450a.png" alt="Applozic Inc"&gt;
-      &lt;div class="ltag__link__user__pic"&gt;
-        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--OW7pBmt7--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://res.cloudinary.com/practicaldev/image/fetch/s--UpfxykjL--/c_fill%2Cf_auto%2Cfl_progressive%2Ch_150%2Cq_auto%2Cw_150/https://dev-to-uploads.s3.amazonaws.com/uploads/user/profile_image/636651/2b86e844-30eb-498b-a87f-956bf671e80b.jpg" alt=""&gt;
-      &lt;/div&gt;
-    &lt;/div&gt;
-  &lt;/a&gt;
-  &lt;a href="/applozic/applozic-android-sdk-tutorial-4-push-notifications-4a2h" class="ltag__link__link"&gt;
-    &lt;div class="ltag__link__content"&gt;
-      &lt;h2&gt;Applozic Android SDK Tutorial 4 – Push Notifications using Firebase&lt;/h2&gt;
-      &lt;h3&gt;Anurag Jayaraman for Applozic Inc ・ Jun 30 ・ 4 min read&lt;/h3&gt;
-      &lt;div class="ltag__link__taglist"&gt;
-        &lt;span class="ltag__link__tag"&gt;#android&lt;/span&gt;
-        &lt;span class="ltag__link__tag"&gt;#tutorial&lt;/span&gt;
-        &lt;span class="ltag__link__tag"&gt;#firebase&lt;/span&gt;
-        &lt;span class="ltag__link__tag"&gt;#applozic&lt;/span&gt;
-      &lt;/div&gt;
-    &lt;/div&gt;
-  &lt;/a&gt;
-&lt;/div&gt;
-
-
-</description>
-      <category>firebase</category>
-      <category>opinion</category>
-      <category>startup</category>
-      <category>technology</category>
     </item>
   </channel>
 </rss>
