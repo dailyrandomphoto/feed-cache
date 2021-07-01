@@ -7,6 +7,202 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>Adding Support for Multi-Audio Tracks in The Eyevinn Channel Engine</title>
+      <author>Nicholas Frederiksen</author>
+      <pubDate>Thu, 01 Jul 2021 07:57:06 +0000</pubDate>
+      <link>https://dev.to/video/adding-support-for-multi-audio-tracks-in-the-eyevinn-channel-engine-2bii</link>
+      <guid>https://dev.to/video/adding-support-for-multi-audio-tracks-in-the-eyevinn-channel-engine-2bii</guid>
+      <description>&lt;p&gt;In this blog post, I'll describe how I extended the current demuxed audio feature so that the Channel Engine could play multiple audio tracks. I will also assume that reader is somewhat familiar with the HLS straming format and Channel Engine or has at least read the documentation in the Channel Engine git repo &lt;a href="https://github.com/Eyevinn/channel-engine"&gt;link&lt;/a&gt;, or this article &lt;a href="https://eyevinntechnology.medium.com/server-less-ott-only-playout-bc5a7f2e6d04"&gt;link&lt;/a&gt; beforehand.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#introduction"&gt;
+  &lt;/a&gt;
+  Introduction
+&lt;/h3&gt;
+
+&lt;p&gt;The Eyevinn Channel Engine is an Open-Source service that works well with muxed VODs, but when it comes to demuxed VODs, it does the bare minimum at the moment, namely just using the first audio track it could find. This demuxed support feature can certainly be extended. &lt;/p&gt;
+
+&lt;p&gt;But before we get into it, I need to clarify what I mean when I say "audio tracks" and "audio groups", as I will be using these words throughout this post. &lt;/p&gt;
+
+&lt;p&gt;In an HLS master manifest, you can have a media item with the attribute &lt;code&gt;TYPE=AUDIO&lt;/code&gt; with a reference to a media playlist manifest containing the audio segments. This is what I will be referring to as an "audio track". Multiple audio tracks can exist in the HLS master manifest. These tracks can be grouped/categorized, by the media item's GROUP-ID attribute. Audio tracks that have the same GROUP-ID value is what I will refer as an "audio group". In other words, an audio group consists of one or more audio tracks. GROUP-IDs are an HLS requirement for media items.&lt;/p&gt;
+
+&lt;p&gt;Now, a quick overview as to how the old demuxed audio feature worked.&lt;/p&gt;
+
+&lt;p&gt;The Channel Engine would create a master manifest for its channel stream based on the specifications detailed in the &lt;code&gt;ChannelManager&lt;/code&gt; object, which one passes as an option to the Channel Engine instance. If we passed a variable signaling the Channel Engine that we want to use demuxed content then the Channel Engine will do the following extra steps when creating the master manifest.&lt;/p&gt;
+
+&lt;p&gt;The Channel Engine will add 1 media item of type audio to the master manifest with the GROUP-ID attribute set to the first GROUP-ID found in a stream item in the VOD asset's master manifest.&lt;/p&gt;
+
+&lt;p&gt;Then when the audio track is requested by the player/client, the Channel Engine will respond with an audio playlist manifest. The playlist will have references to audio segments belonging to the VOD asset's first available audio track for that audio group. Even if there are multiple audio groups in the VOD, they won't be used. Even if there are multiple audio tracks within the audio groups, they won't be used. There is clearly potential here to add support for using more than one specific audio track and audio group.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#challenges"&gt;
+  &lt;/a&gt;
+  Challenges
+&lt;/h3&gt;
+
+&lt;p&gt;The task in question will have some implementation challenges. &lt;br&gt;
+A few things needed to be taken into account. Namely:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;How to have the client select a track of a certain audio group.&lt;/li&gt;
+&lt;li&gt;How to have the client select a certain language/audio track within the selected audio group.&lt;/li&gt;
+&lt;li&gt;How to handle the case where the requested audio group is not present in the current VOD.&lt;/li&gt;
+&lt;li&gt;How to handle the case where the requested language is not present amongst the current VOD's audio tracks for that audio group.&lt;/li&gt;
+&lt;li&gt;How to handle VOD stitching when VODs have a different set of audio groups.&lt;/li&gt;
+&lt;li&gt;How to handle VOD stitching when VODs have a different set of languages/audio tracks.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3&gt;
+  &lt;a href="#delimitations"&gt;
+  &lt;/a&gt;
+  Delimitations
+&lt;/h3&gt;
+
+&lt;p&gt;My implemented solution in its current state did not cover every edge case. Meaning that some points mentioned in &lt;strong&gt;Challenges&lt;/strong&gt; have yet to be addressed. However, the implementation works fairly well for the most basic case and can be extended in the future to handle more edge cases.&lt;/p&gt;
+
+&lt;p&gt;My solution will assume that every VOD uses the same audio GROUP-ID and uses mostly the same languages in their audio tracks.&lt;/p&gt;
+
+&lt;p&gt;As a side-note, the effects of VODs not using the same GROUP-ID will result in an error. A proposed solution is mentioned in the &lt;strong&gt;Future Work&lt;/strong&gt; chapter.&lt;/p&gt;
+&lt;h3&gt;
+  &lt;a href="#implementation"&gt;
+  &lt;/a&gt;
+  Implementation
+&lt;/h3&gt;
+
+&lt;p&gt;The following steps give an overview of how I added support for multi-audio in the Channel Engine.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Step 1: Adding audio media items to the master manifest based on a set of predefined audio languages.&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;To address the challenge of how the client is to select a certain audio group and audio track, I extended the current method in place, which became a reiteration of the method used for selecting different VOD profiles.&lt;/p&gt;
+
+&lt;p&gt;The plan was to let the client select a track based on what's been predefined. So to have it work like it does for VOD profiles, I needed to extend the &lt;code&gt;ChannelManager&lt;/code&gt; class with an extra function.&lt;/p&gt;
+
+&lt;p&gt;Media Items are added to the Master Manifest with attribute values set according to a predefined JSON object, defined in a &lt;code&gt;_getAudioTracks()&lt;/code&gt; function in the &lt;code&gt;ChannelManager&lt;/code&gt; class/object.&lt;br&gt;
+&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--t0B-euqH--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/m9psssbj99ot492wk9oh.PNG" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--t0B-euqH--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/m9psssbj99ot492wk9oh.PNG" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Now the resulting master manifest may look something like this...&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;#EXTM3U
+#EXT-X-VERSION:4
+## Created with Eyevinn Channel Engine library (version=2.19.3)
+##    https://www.npmjs.com/package/eyevinn-channel-engine
+#EXT-X-SESSION-DATA:DATA-ID="eyevinn.tv.session.id",VALUE="1"
+#EXT-X-SESSION-DATA:DATA-ID="eyevinn.tv.eventstream",VALUE="/eventstream/1"
+
+# AUDIO groups
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",LANGUAGE="en", NAME="English",AUTOSELECT=YES,DEFAULT=YES,CHANNELS="2",URI="master-audio_en.m3u8;session=1"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",LANGUAGE="sv", NAME="Swedish",AUTOSELECT=YES,DEFAULT=NO,CHANNELS="2",URI="master-audio_sv.m3u8;session=1"
+
+#EXT-X-STREAM-INF:BANDWIDTH=6134000,RESOLUTION=1024x458,CODECS="avc1.4d001f,mp4a.40.2",AUDIO="audio"
+master6134000.m3u8;session=1
+#EXT-X-STREAM-INF:BANDWIDTH=2323000,RESOLUTION=640x286,CODECS="avc1.4d001f,mp4a.40.2",AUDIO="audio"
+master2323000.m3u8;session=1
+#EXT-X-STREAM-INF:BANDWIDTH=1313000,RESOLUTION=480x214,CODECS="avc1.4d001f,mp4a.40.2",AUDIO="audio"
+master1313000.m3u8;session=1
+
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;blockquote&gt;
+&lt;p&gt;Note: Notice that GROUP-ID is not a field in the audioTrack JSON, and so the GROUP-ID in the master manifest's media items are actually permanently set to the first GROUP-ID found in the very first VOD. This is how it worked before, and my feature extension has kept it that way for now. See &lt;strong&gt;Delimitations&lt;/strong&gt;. &lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;Next was to make some small adjustments to the route handler (specifically &lt;code&gt;_handleAudioManifest()&lt;/code&gt;) for the endpoint of a URI in a media item. &lt;br&gt;
+The Channel Engine reads parameter values from the client request in a clever way. Values can be extracted from the request path itself.&lt;br&gt;
+Values extracted are the audio group Id and language. This tells us what segments we are to include in the media manifest response.      &lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Step 2: Make it possible in HLS-vodtolive, to load in all audio groups, and also all audio tracks for each audio group.&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;Now that we know what segments the client is looking for, how do we find them? This is where the Eyevinn dependency package &lt;code&gt;hls-vodtolive&lt;/code&gt; comes into play.&lt;/p&gt;
+
+&lt;p&gt;In short, the &lt;code&gt;hls-vodtolive&lt;/code&gt; package creates an HLSVod class/object which given a VOD master manifest as input, will load and store all segments referenced in that manifest into a JSON object organized by profiles. An HLSVod object will also divide the segments into an array of subsets, that we call media sequences. So each subset/media sequence will be used to create a pseudo-live looking media manifest.  &lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--1-BotvSC--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/1htiuqwel07br58rueji.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--1-BotvSC--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/1htiuqwel07br58rueji.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;This class however, did not properly load segments from audio media manifests. An extension was needed. &lt;/p&gt;
+
+&lt;p&gt;Not going into detail, I can say that it was changed so that the HLSVod would load all audio segments from every audio media manifest and organize them by audio groups, then by languages.&lt;br&gt;
+Effectively, storing all audio segments possible from the original VOD manifest.    &lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Step 3: Make it so that you can stitch audio tracks between two HLSVods.&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;This step involves more expansions to the &lt;code&gt;hls-vodtolive&lt;/code&gt; package. Expansions are done to the HLSVod class function &lt;code&gt;_loadPrevious()&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;You see, an HLSVod can load after another when using the function &lt;code&gt;loadAfter()&lt;/code&gt;, and when doing so will inherit some segments from the HLSVod before it. This basically makes it possible to create media sequences that smoothly go from the contents of one VOD to the other, using HLS discontinuity tags. &lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;Look at the Channel Engine chapter in Server-less OTT-Only Playout article for more info on it &lt;a href="https://eyevinntechnology.medium.com/server-less-ott-only-playout-bc5a7f2e6d04"&gt;Link&lt;/a&gt;.    &lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;The tricky part is deciding who inherits what from who. &lt;br&gt;
+Ideally, if the 2 HLSVods in question have the same set of languages and audio group names, then it's fairly straightforward who gets what. But if they have nothing in common, then it suddenly becomes ambiguous. However, it is probably more likely that the Channel Engine User is using VOD assets that have at least some common languages/audio tracks.  &lt;/p&gt;
+
+&lt;p&gt;That being said, it is a possibility that the VOD assets may have named their GROUP-IDs differently. However, as of now, it is assumed that this is not the case. This addressed in the &lt;strong&gt;Delimitations&lt;/strong&gt; chapter, and then again in the &lt;strong&gt;Future Work&lt;/strong&gt; chapter below.&lt;/p&gt;
+
+&lt;p&gt;See the figures below for a visual representation of the challenge. The figure depicts a scenario where the prior HLSVod has audio tracks for the languages English, Swedish, and Russian. While the current HLSVod has audio tracks for English, Swedish, and Norwegian. &lt;br&gt;
+The outer box represents the current HLSVod object, and the inner colored boxes represent audio tracks in the HLSVod.&lt;br&gt;
+The blue and red represent the prior VOD segments and current VOD segments respectively. Again it is assumed that both HLSVods have the same audio group.&lt;/p&gt;
+
+&lt;p&gt;So... matching languages inherit segments from each other, but what segments does the unique languages inherit? &lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--9GHlI4cA--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/j9kgo2iuhk6mxmunxuk2.PNG" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--9GHlI4cA--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/j9kgo2iuhk6mxmunxuk2.PNG" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;The answer is... any segments really. What is important is that we can enable generating media sequences that transition smoothly and that the client gets the proper audio for the VOD. Sure it might not be in the expected language, but at least the HLS player will not be confused. &lt;/p&gt;
+
+&lt;p&gt;However, I thought it would be best for the unique languages to inherit segments from the previous VOD's default language, or more specifically the first loaded language (which usually corresponds to the default language in a demuxed VOD).&lt;br&gt;
+&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--eMCk4o10--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/9b2m1grsfv31h8369pal.PNG" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--eMCk4o10--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/9b2m1grsfv31h8369pal.PNG" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Lastly, in case a loaded language from the previous VOD did not get inherited at all, then we simply remove it from our collection of audio tracks for an audio group, so that we do not evoke any false positives when a request comes for that language.&lt;br&gt;
+&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--s0imneuN--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/wvnc8wapa5qxko8n8amy.PNG" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--s0imneuN--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/wvnc8wapa5qxko8n8amy.PNG" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;But this brings up an interesting question. What do we do if a request comes for a language that is not in the HLSVod's collection? &lt;/p&gt;
+
+&lt;p&gt;Well, we simply provide a fallback track. In other words, let's say the client is requesting an audio track in the language of Russian but the current VOD only has English and Swedish, then we will respond with the English audio track instead, assuming that English was the first loaded audio track for the HLSVod.&lt;/p&gt;
+
+&lt;p&gt;And that's all there was to it! &lt;br&gt;
+&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--7U5h1zmo--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/xncnqubaahd9gyrq28ks.gif" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--7U5h1zmo--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/xncnqubaahd9gyrq28ks.gif" alt="Alt Text"&gt;&lt;/a&gt;&lt;br&gt;
+After these steps it now became possible to play, select, and transition between audio tracks for demuxed VODs in the Channel Engine.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#future-work"&gt;
+  &lt;/a&gt;
+  Future Work
+&lt;/h3&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Add support for a fallback audio group&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Adding a fallback audio group when an audio group is not found will help to ensure that the Channel Engine stream will always have audio to play. Doing this, it is important to make sure that every audio track in the fallback audio group has segments from the prior VOD stitched in front of it. It would probably work again to distribute segments from the prior VODs first loaded audio track for its first loaded audio group. &lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Add support for presetting, selecting, and using multiple audio groups.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;As of now, we only support the use of a single audio group. If there ever is a need to want to use more than one audio group at a time in Channel Engine, then we would need to expand channel options in the &lt;code&gt;ChannelManager&lt;/code&gt;. However, there will be a challenge in how we then deal with mapping between audio groups of different names among VODs.  &lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Loading audio tracks that have the same language in a single VOD.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;We do not support the loading of duplicate languages, but they do occur in HLS manifests. For example, a VOD could have an English track and an English Commentary track in it, both setting their language value to "en". In our current state, only the first English track would be loaded.&lt;br&gt;
+Now the use case for having an English commentary track as a preset track is not very common, I'd imagine. But it could be nice to have support for it if it ever became a desired feature in Channel Engine.&lt;br&gt;
+That said... An immediate workaround would be to prepare the HLS manifest beforehand and just make sure that every media item has a unique language value. &lt;/p&gt;
+
+&lt;p&gt;&lt;em&gt;Nicholas Frederiksen is a developer at Eyevinn Technology, the European leading independent consultancy firm specializing in video technology and media distribution.&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;em&gt;If you need assistance in the development and implementation of this, our team of video developers are happy to help you out. If you have any questions or comments just drop a line in the comments section to this post.&lt;/em&gt;&lt;/p&gt;
+
+</description>
+      <category>opensource</category>
+      <category>streaming</category>
+      <category>hls</category>
+    </item>
+    <item>
       <title>Throttling and Debouncing in ReactJS</title>
       <author>Manish Kumar Sahu</author>
       <pubDate>Thu, 01 Jul 2021 07:18:26 +0000</pubDate>
@@ -1233,6 +1429,465 @@ If you enjoyed learning and find it useful please do like and share so that, it 
       <category>devops</category>
     </item>
     <item>
+      <title>Redis Streams in Action - Part 4 (Serverless Go app to monitor tweets processor)</title>
+      <author>Abhishek Gupta</author>
+      <pubDate>Thu, 01 Jul 2021 06:10:03 +0000</pubDate>
+      <link>https://dev.to/azure/redis-streams-in-action-part-4-serverless-go-app-to-monitor-tweets-processor-2n4a</link>
+      <guid>https://dev.to/azure/redis-streams-in-action-part-4-serverless-go-app-to-monitor-tweets-processor-2n4a</guid>
+      <description>&lt;p&gt;Welcome to this series of blog posts which covers &lt;a href="https://redis.io/topics/streams-intro"&gt;Redis Streams&lt;/a&gt; with the help of a practical example. We will use a sample application to make Twitter data available for search and query in real-time. &lt;a href="https://redisearch.io/"&gt;RediSearch&lt;/a&gt; and &lt;a href="https://redis.io/topics/streams-intro"&gt;Redis Streams&lt;/a&gt; serve as the backbone of this solution that consists of several co-operating components, each of which will we covered in a dedicated blog post. &lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;The code is available in this GitHub repo - &lt;a href="https://github.com/abhirockzz/redis-streams-in-action"&gt;https://github.com/abhirockzz/redis-streams-in-action&lt;/a&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;We will continue from where we left off in the previous blog post and see how to build a monitoring app to make the overall system more robust in the face of high load or failure scenarios. This is because our very often, data processing applications either slow down (due to high data volumes) or may even crash/stop due to circumstances beyond our control. If this happens with our Tweets processing application, the messages that were assigned to a specific instance will be left unprocessed. The monitoring component covered in this blog post, checks pending Tweets (using &lt;code&gt;XPENDING&lt;/code&gt;), claims (&lt;code&gt;XCLAIM&lt;/code&gt;), processes (store them as &lt;code&gt;HASH&lt;/code&gt; using &lt;code&gt;HSET&lt;/code&gt;) and finally acknowledges them (&lt;code&gt;XACK&lt;/code&gt;).&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--OsKixZqe--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/zcbm6qyuz6ub6bh7yznq.jpg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--OsKixZqe--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/zcbm6qyuz6ub6bh7yznq.jpg" alt=""&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;This is a Go application which will be deployed to Azure Functions - yes, we will be using a Serverless model, wherein the monitoring system will execute based on a pre-defined Timer trigger. As always, we will first configure and deploy it to Azure, see it working and finally walk through the code.&lt;/p&gt;
+
+&lt;p&gt;Before we move on, here is some background about Go support in Azure Functions. &lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#serverless-go-apps-on-azure-thanks-to-custom-handlers"&gt;
+  &lt;/a&gt;
+  Serverless Go apps on Azure, thanks to Custom Handlers
+&lt;/h2&gt;
+
+&lt;p&gt;Those who have worked with Azure Functions might recall that Go is &lt;em&gt;not&lt;/em&gt; one of the language handlers that is supported by default. That's where &lt;a href="https://docs.microsoft.com/azure/azure-functions/functions-custom-handlers?WT.mc_id=data-17927-abhishgu"&gt;Custom Handlers&lt;/a&gt; come into the picture.&lt;/p&gt;
+
+&lt;p&gt;In a nutshell, a Custom Handler is a lightweight web server that receive events from the Functions host. The only thing you need to implement a Custom Handler in your favorite runtime/language is - HTTP support! &lt;/p&gt;
+
+&lt;p&gt;An event trigger (via HTTP, Storage, Event Hubs etc.) invokes the Functions host. The way Custom Handlers differ from traditional functions is that the Functions host acts as a middle man: it issues a request payload to the web server of the Custom Handler (the function) along with a &lt;em&gt;payload&lt;/em&gt; that contains trigger, input binding data and other metadata for the function. The function returns a response back to the Functions host which passes data from the response to the function's output bindings for processing.&lt;/p&gt;
+
+&lt;p&gt;Here is a summary of how Custom Handlers work at a high level (the diagram below has been picked from the documentation)&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--yivf32Hn--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://docs.microsoft.com/en-us/azure/azure-functions/media/functions-custom-handlers/azure-functions-custom-handlers-overview.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--yivf32Hn--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://docs.microsoft.com/en-us/azure/azure-functions/media/functions-custom-handlers/azure-functions-custom-handlers-overview.png" alt=""&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Alright, let's move on to the practical bits now.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#prerequisites"&gt;
+  &lt;/a&gt;
+  Pre-requisites
+&lt;/h2&gt;
+
+&lt;p&gt;Please make sure that you read part 2, 3 of this series and have the respective applications up and running. Our monitoring application will build on top of the Tweets producer and processor services that you deploy.&lt;/p&gt;
+
+&lt;p&gt;You will need an Azure account which &lt;a href="(https://azure.microsoft.com/free/?WT.mc_id=data-17927-abhishgu)"&gt;you can get for free&lt;/a&gt; and the &lt;a href="https://docs.microsoft.com/cli/azure/install-azure-cli?WT.mc_id=data-17927-abhishgu"&gt;Azure CLI&lt;/a&gt;. Make sure to &lt;a href="https://golang.org/dl/"&gt;download and install Go&lt;/a&gt; if you don't have it already and also install the &lt;a href="https://docs.microsoft.com/azure/azure-functions/functions-run-local?tabs=macos%2Ccsharp%2Cbash&amp;amp;WT.mc_id=data-17927-abhishgu#v2"&gt;Azure functions Core Tools&lt;/a&gt; - this will allow you to deploy the function using a CLI (and also run it test and debug it locally)&lt;/p&gt;
+
+&lt;p&gt;The upcoming sections will guide you how to deploy and configure the Azure Function.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#deploy-the-monitoring-service-to-azure-functions"&gt;
+  &lt;/a&gt;
+  Deploy the monitoring service to Azure Functions
+&lt;/h2&gt;
+
+&lt;p&gt;You will:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Create the an Azure Functions app&lt;/li&gt;
+&lt;li&gt;Configure it&lt;/li&gt;
+&lt;li&gt;Deploy the Function to the app that you created&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Start by creating a &lt;a href="https://docs.microsoft.com/azure/azure-resource-manager/management/manage-resource-groups-portal?WT.mc_id=data-17927-abhishgu"&gt;Resource Group&lt;/a&gt; to host all the components of the solution.&lt;/p&gt;
+
+&lt;p&gt;Search for &lt;strong&gt;Function App&lt;/strong&gt; in the Azure Portal and click &lt;strong&gt;Add&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--xHGSGylL--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/iqft9fui63f2lyp4adda.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--xHGSGylL--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/iqft9fui63f2lyp4adda.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Enter the required details: you should select &lt;strong&gt;Custom Handler&lt;/strong&gt; as the &lt;strong&gt;Runtime stack&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--vj-B1et2--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/56jbqmm49i69a0wk0rbh.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--vj-B1et2--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/56jbqmm49i69a0wk0rbh.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;In the &lt;strong&gt;Hosting&lt;/strong&gt; section, choose &lt;strong&gt;Linux&lt;/strong&gt; and &lt;strong&gt;Consumption (Serverless)&lt;/strong&gt; for &lt;strong&gt;Operating system&lt;/strong&gt; and &lt;strong&gt;Plan type&lt;/strong&gt; respectively.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--e3fV50AA--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/kqwnpp28kcfw45at8gcb.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--e3fV50AA--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/kqwnpp28kcfw45at8gcb.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Enable Application Insights (if you need to)&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--fsONlF-h--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/7v5tula7t83xwwsz6zqt.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--fsONlF-h--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/7v5tula7t83xwwsz6zqt.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Review the final settings and click &lt;strong&gt;Create&lt;/strong&gt; to proceed&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--91TNgHoV--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/39ptz8ytwxuab85f4ztk.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--91TNgHoV--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/39ptz8ytwxuab85f4ztk.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Once the process is complete, the following resource will also be created along with the Function App:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;
+&lt;a href="https://docs.microsoft.com/azure/app-service/overview-hosting-plans?WT.mc_id=data-17927-abhishgu"&gt;App Service plan&lt;/a&gt; (a Consumption/Serverless plan in this case)&lt;/li&gt;
+&lt;li&gt;An &lt;a href="https://docs.microsoft.com/azure/storage/common/storage-account-overview?WT.mc_id=data-17927-abhishgu"&gt;Azure Storage account&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;An &lt;a href="https://docs.microsoft.com/azure/azure-monitor/app/app-insights-overview?WT.mc_id=data-17927-abhishgu"&gt;Azure Application Insights&lt;/a&gt; function)&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3&gt;
+  &lt;a href="#update-the-function-app-configuration"&gt;
+  &lt;/a&gt;
+  Update the Function App configuration
+&lt;/h3&gt;
+
+&lt;p&gt;Our function needs a few environment variables to work properly - these can be added as Function Configuration using the Azure portal. Here is the list:&lt;/p&gt;
+
+&lt;p&gt;Redis connectivity details:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;
+&lt;code&gt;REDIS_HOST&lt;/code&gt; - host and port for Redis instance e.g. myredis:10000&lt;/li&gt;
+&lt;li&gt;
+&lt;code&gt;REDIS_PASSWORD&lt;/code&gt; - access key (password) for Redis instance&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Redis Stream info:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;
+&lt;code&gt;STREAM_NAME&lt;/code&gt; - the name of the Redis Stream (use &lt;code&gt;tweets_stream&lt;/code&gt; as the value)&lt;/li&gt;
+&lt;li&gt;
+&lt;code&gt;STREAM_CONSUMER_GROUP_NAME&lt;/code&gt; - name of the Redis Streams consumer group (use &lt;code&gt;redisearch_app_group&lt;/code&gt; as the value)&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Monitoring app metadata:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;
+&lt;code&gt;MONITORING_CONSUMER_NAME&lt;/code&gt; - name of the consumer instance represented by the monitoring app (it is part of the aforementioned consumer group)&lt;/li&gt;
+&lt;li&gt;
+&lt;code&gt;MIN_IDLE_TIME_SEC&lt;/code&gt; - only pending messages that are older than the specified time interval will be claimed&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--tkRtzaKe--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/lh1qej0pur744qaw7ok9.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--tkRtzaKe--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/lh1qej0pur744qaw7ok9.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#were-now-ready-to-deploy-the-function"&gt;
+  &lt;/a&gt;
+  We're now ready to deploy the function
+&lt;/h3&gt;
+
+&lt;p&gt;First, clone the GitHub repo and build the function:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;git clone https://github.com/abhirockzz/redis-streams-in-action
+&lt;span class="nb"&gt;cd &lt;/span&gt;redis-streams-in-action/monitoring-app
+
+&lt;span class="nv"&gt;GOOS&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;linux go build &lt;span class="nt"&gt;-o&lt;/span&gt; processor_monitor cmd/main.go
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;blockquote&gt;
+&lt;p&gt;&lt;code&gt;GOOS=linux&lt;/code&gt; is used to build a &lt;code&gt;Linux&lt;/code&gt; executable since we chose a &lt;code&gt;Linux&lt;/code&gt; OS for our Function App&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;To deploy, use the Azure Functions core tools CLI:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;func azure functionapp publish &amp;lt;enter name of the Azure Function app&amp;gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Once completed, you should see the following logs:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;Getting site publishing info...
+Uploading package...
+Uploading 3.71 MB &lt;span class="o"&gt;[&lt;/span&gt;&lt;span class="c"&gt;###############################################################################]&lt;/span&gt;
+Upload completed successfully.
+Deployment completed successfully.
+Syncing triggers...
+Functions &lt;span class="k"&gt;in &lt;/span&gt;streams-monitor:
+    monitor - &lt;span class="o"&gt;[&lt;/span&gt;timerTrigger]
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;You should see the function in the Azure portal as well:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--O5MyvFDu--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/apotjm8lyer6737t00xs.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--O5MyvFDu--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/apotjm8lyer6737t00xs.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;The function is configured to trigger every &lt;code&gt;20&lt;/code&gt; seconds (as per &lt;a href="https://github.com/abhirockzz/redis-streams-in-action/blob/master/monitoring-app/monitor/function.json"&gt;function.json&lt;/a&gt;):&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight json"&gt;&lt;code&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"bindings"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"type"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"timerTrigger"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"direction"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"in"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"name"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"req"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"schedule"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"*/20 * * * * *"&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#monitoring-the-monitoring-app"&gt;
+  &lt;/a&gt;
+  Monitoring the monitoring app!
+&lt;/h2&gt;
+
+&lt;p&gt;As before, can introspect the state of our system using &lt;code&gt;redis-cli&lt;/code&gt; - execute the &lt;a href="https://redis.io/commands/XPENDING"&gt;XPENDING&lt;/a&gt; command:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;XPENDING tweets_stream redisearch_app_group
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;You will an output similar to this (the numbers will differ in your case depending on how many tweets processor instances you were running and for how long):&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;1&lt;span class="o"&gt;)&lt;/span&gt; &lt;span class="o"&gt;(&lt;/span&gt;integer&lt;span class="o"&gt;)&lt;/span&gt; 209
+2&lt;span class="o"&gt;)&lt;/span&gt; &lt;span class="s2"&gt;"1620973121009-0"&lt;/span&gt;
+3&lt;span class="o"&gt;)&lt;/span&gt; &lt;span class="s2"&gt;"1621054539960-0"&lt;/span&gt;
+4&lt;span class="o"&gt;)&lt;/span&gt; 1&lt;span class="o"&gt;)&lt;/span&gt; 1&lt;span class="o"&gt;)&lt;/span&gt; &lt;span class="s2"&gt;"consumer-1f20d41d-e63e-40d2-bc0f-749f11f15026"&lt;/span&gt;
+      2&lt;span class="o"&gt;)&lt;/span&gt; &lt;span class="s2"&gt;"3"&lt;/span&gt;
+   2&lt;span class="o"&gt;)&lt;/span&gt; 1&lt;span class="o"&gt;)&lt;/span&gt; &lt;span class="s2"&gt;"monitoring_app"&lt;/span&gt;
+      2&lt;span class="o"&gt;)&lt;/span&gt; &lt;span class="s2"&gt;"206"&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;As explained before, the monitoring app will &lt;em&gt;claim&lt;/em&gt; pending messages which haven't been processed by the other consumers (active or inactive). In the output above, notice that the no. messages currently being processed by &lt;code&gt;monitoring_app&lt;/code&gt; (name of our consumer) is &lt;code&gt;206&lt;/code&gt; - it actually claimed these from another consumer instance(s). Once these messages have been claimed, their ownership moves from their original consumer to the &lt;code&gt;monitoring_app&lt;/code&gt; consumer.&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;You can check the same using &lt;code&gt;XPENDING tweets_stream redisearch_app_group&lt;/code&gt; again, but it might be hard to detect since the messages actually get processed pretty quickly.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;Out of the &lt;code&gt;206&lt;/code&gt; messages that were claimed, only the ones that have not being processed in the last &lt;code&gt;10&lt;/code&gt; seconds (this is the &lt;code&gt;MIN_IDLE_TIME_SEC&lt;/code&gt; we had specified) will be processed - others will be ignored and picked up in the next run by &lt;code&gt;XPENDING&lt;/code&gt; call (if they are still in an unprocessed state). This is because we want to give some time for our consumer application to finish their work - 10 seconds is a pretty generous time-frame for the processing that involves saving to &lt;code&gt;HASH&lt;/code&gt; using &lt;code&gt;HSET&lt;/code&gt; followed by &lt;code&gt;XACK&lt;/code&gt;. . &lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;Please note that the 10 second time interval used above has been used as example and you should determine these figures based on the end to end latencies required for your data pipelines/processing.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;You have complete flexibility in terms of how you want to run/operate such a "monitoring" component. I chose a serverless function but you could run it as standalone program, as a scheduled Cron job or even as a Kubernetes Job!&lt;/p&gt;
+
+&lt;p&gt;Don't forget to execute &lt;code&gt;RediSearch&lt;/code&gt; queries to validate that you can search for tweets based on multiple criteria:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;FT.SEARCH tweets-index hello
+FT.SEARCH tweets-index hello|world
+FT.SEARCH tweets-index &lt;span class="s2"&gt;"@location:India"&lt;/span&gt;
+
+FT.SEARCH tweets-index &lt;span class="s2"&gt;"@user:jo* @location:India"&lt;/span&gt;
+FT.SEARCH tweets-index &lt;span class="s2"&gt;"@user:jo* | @location:India"&lt;/span&gt;
+
+FT.SEARCH tweets-index &lt;span class="s2"&gt;"@hashtags:{cov*}"&lt;/span&gt;
+FT.SEARCH tweets-index &lt;span class="s2"&gt;"@hashtags:{cov*|Med*}"&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Now that we have seen things in action, let's explore the code.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#code-walk-through"&gt;
+  &lt;/a&gt;
+  Code walk through
+&lt;/h2&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;Please refer to the &lt;a href="https://github.com/abhirockzz/redis-streams-in-action/tree/master/monitoring-app/cmd"&gt;code on GitHub&lt;/a&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;The app uses the excellent &lt;a href="https://github.com/go-redis/redis"&gt;go-redis client library&lt;/a&gt;. As usual, it all starts with connecting to Redis (note the usage of &lt;code&gt;TLS&lt;/code&gt;):&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight go"&gt;&lt;code&gt;    &lt;span class="n"&gt;client&lt;/span&gt; &lt;span class="o"&gt;:=&lt;/span&gt; &lt;span class="n"&gt;redis&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;NewClient&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;redis&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Options&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="n"&gt;Addr&lt;/span&gt;&lt;span class="o"&gt;:&lt;/span&gt; &lt;span class="n"&gt;host&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;Password&lt;/span&gt;&lt;span class="o"&gt;:&lt;/span&gt; &lt;span class="n"&gt;password&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;TLSConfig&lt;/span&gt;&lt;span class="o"&gt;:&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;tls&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Config&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="n"&gt;MinVersion&lt;/span&gt;&lt;span class="o"&gt;:&lt;/span&gt; &lt;span class="n"&gt;tls&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;VersionTLS12&lt;/span&gt;&lt;span class="p"&gt;}})&lt;/span&gt;
+
+    &lt;span class="n"&gt;err&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;client&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Ping&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;context&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Background&lt;/span&gt;&lt;span class="p"&gt;())&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Err&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="n"&gt;err&lt;/span&gt; &lt;span class="o"&gt;!=&lt;/span&gt; &lt;span class="no"&gt;nil&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="n"&gt;log&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Fatal&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;err&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Then comes the part where bulk of the processing happens - think of it as workflow with sub-parts:&lt;/p&gt;
+
+&lt;p&gt;We call &lt;code&gt;XPENDING&lt;/code&gt; to detect no. of pending messages e.g. &lt;code&gt;XPENDING tweets_stream group1&lt;/code&gt;&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight go"&gt;&lt;code&gt;&lt;span class="n"&gt;numPendingMessages&lt;/span&gt; &lt;span class="o"&gt;:=&lt;/span&gt; &lt;span class="n"&gt;client&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;XPending&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;context&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Background&lt;/span&gt;&lt;span class="p"&gt;(),&lt;/span&gt; &lt;span class="n"&gt;streamName&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;consumerGroupName&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Val&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Count&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;To get the pending messages, we invoke a different variant of &lt;code&gt;XPENDING&lt;/code&gt;, to which we pass on the no. of messages we obtained in previous call&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight go"&gt;&lt;code&gt;&lt;span class="n"&gt;xpendingResult&lt;/span&gt; &lt;span class="o"&gt;:=&lt;/span&gt; &lt;span class="n"&gt;client&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;XPendingExt&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;context&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Background&lt;/span&gt;&lt;span class="p"&gt;(),&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;redis&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;XPendingExtArgs&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="n"&gt;Stream&lt;/span&gt;&lt;span class="o"&gt;:&lt;/span&gt; &lt;span class="n"&gt;streamName&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="n"&gt;Group&lt;/span&gt;&lt;span class="o"&gt;:&lt;/span&gt; &lt;span class="n"&gt;consumerGroupName&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;Start&lt;/span&gt;&lt;span class="o"&gt;:&lt;/span&gt; &lt;span class="s"&gt;"-"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;End&lt;/span&gt;&lt;span class="o"&gt;:&lt;/span&gt; &lt;span class="s"&gt;"+"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;Count&lt;/span&gt;&lt;span class="o"&gt;:&lt;/span&gt; &lt;span class="n"&gt;numPendingMessages&lt;/span&gt;&lt;span class="p"&gt;})&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We can now claim the pending messages - the ownership of these will be changes from the previous consumer to the new consumer (&lt;code&gt;monitoringConsumerName&lt;/code&gt;) whose name we specified&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight go"&gt;&lt;code&gt;&lt;span class="n"&gt;xclaim&lt;/span&gt; &lt;span class="o"&gt;:=&lt;/span&gt; &lt;span class="n"&gt;client&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;XClaim&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;context&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Background&lt;/span&gt;&lt;span class="p"&gt;(),&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;redis&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;XClaimArgs&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="n"&gt;Stream&lt;/span&gt;&lt;span class="o"&gt;:&lt;/span&gt; &lt;span class="n"&gt;streamName&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;Group&lt;/span&gt;&lt;span class="o"&gt;:&lt;/span&gt; &lt;span class="n"&gt;consumerGroupName&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;Consumer&lt;/span&gt;&lt;span class="o"&gt;:&lt;/span&gt; &lt;span class="n"&gt;monitoringConsumerName&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;MinIdle&lt;/span&gt;&lt;span class="o"&gt;:&lt;/span&gt; &lt;span class="n"&gt;time&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Duration&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;minIdleTimeSec&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt; &lt;span class="n"&gt;time&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Second&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;Messages&lt;/span&gt;&lt;span class="o"&gt;:&lt;/span&gt; &lt;span class="n"&gt;toBeClaimed&lt;/span&gt;&lt;span class="p"&gt;})&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Once the ownership is transferred, we can process them. This involves, adding tweet info to &lt;code&gt;HASH&lt;/code&gt; (using &lt;code&gt;HSET&lt;/code&gt;) and acknowledging successful processing (&lt;code&gt;XACK&lt;/code&gt;). &lt;code&gt;goroutine&lt;/code&gt;s are used to keep things efficient for e.g. if we get &lt;code&gt;100&lt;/code&gt; claimed messages in a batch, a scatter-gather process is folloeed where a &lt;code&gt;goroutine&lt;/code&gt; is spawned to process each of these message. A &lt;a href="https://golang.org/pkg/sync/#WaitGroup"&gt;sync.WaitGroup&lt;/a&gt; is used to "wait" for the current batch to complete before looking for next set of pending messages (if any).&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight go"&gt;&lt;code&gt;        &lt;span class="k"&gt;for&lt;/span&gt; &lt;span class="n"&gt;_&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;claimed&lt;/span&gt; &lt;span class="o"&gt;:=&lt;/span&gt; &lt;span class="k"&gt;range&lt;/span&gt; &lt;span class="n"&gt;xclaim&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Val&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="n"&gt;exitSignalled&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+                &lt;span class="k"&gt;return&lt;/span&gt;
+            &lt;span class="p"&gt;}&lt;/span&gt;
+            &lt;span class="n"&gt;waitGroup&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Add&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="m"&gt;1&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+            &lt;span class="k"&gt;go&lt;/span&gt; &lt;span class="k"&gt;func&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;tweetFromStream&lt;/span&gt; &lt;span class="n"&gt;redis&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;XMessage&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+                &lt;span class="n"&gt;hashName&lt;/span&gt; &lt;span class="o"&gt;:=&lt;/span&gt; &lt;span class="n"&gt;fmt&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Sprintf&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"%s%s"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;indexDefinitionHashPrefix&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;tweetFromStream&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Values&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s"&gt;"id"&lt;/span&gt;&lt;span class="p"&gt;])&lt;/span&gt;
+
+                &lt;span class="n"&gt;processed&lt;/span&gt; &lt;span class="o"&gt;:=&lt;/span&gt; &lt;span class="no"&gt;false&lt;/span&gt;
+                &lt;span class="k"&gt;defer&lt;/span&gt; &lt;span class="k"&gt;func&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+                    &lt;span class="n"&gt;waitGroup&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Done&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+                &lt;span class="p"&gt;}()&lt;/span&gt;
+
+                &lt;span class="n"&gt;err&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;client&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;HSet&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;context&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Background&lt;/span&gt;&lt;span class="p"&gt;(),&lt;/span&gt; &lt;span class="n"&gt;hashName&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;claimed&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Values&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Err&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+
+                &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="n"&gt;err&lt;/span&gt; &lt;span class="o"&gt;!=&lt;/span&gt; &lt;span class="no"&gt;nil&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+                    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="c"&gt;// don't proceed (ACK) if HSET fails&lt;/span&gt;
+                &lt;span class="p"&gt;}&lt;/span&gt;
+
+                &lt;span class="n"&gt;err&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;client&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;XAck&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;context&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Background&lt;/span&gt;&lt;span class="p"&gt;(),&lt;/span&gt; &lt;span class="n"&gt;streamName&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;consumerGroupName&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;tweetFromStream&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;ID&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Err&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+                &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="n"&gt;err&lt;/span&gt; &lt;span class="o"&gt;!=&lt;/span&gt; &lt;span class="no"&gt;nil&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+                    &lt;span class="k"&gt;return&lt;/span&gt;
+                &lt;span class="p"&gt;}&lt;/span&gt;
+                &lt;span class="n"&gt;processed&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="no"&gt;true&lt;/span&gt;
+            &lt;span class="p"&gt;}(&lt;/span&gt;&lt;span class="n"&gt;claimed&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+        &lt;span class="p"&gt;}&lt;/span&gt;
+        &lt;span class="n"&gt;waitGroup&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Wait&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Before we dive into the other areas, it might help to understand the nitty gritty by exploring the code (which is relatively simple by the way)&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#quick-note-on-the-application-structure"&gt;
+  &lt;/a&gt;
+  Quick note on the application structure
+&lt;/h3&gt;
+
+&lt;p&gt;Here is how the app is setup (folder structure):&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nb"&gt;.&lt;/span&gt;
+├── cmd
+│   └── main.go
+├── monitor
+│   └── &lt;span class="k"&gt;function&lt;/span&gt;.json
+├── go.mod
+├── go.sum
+├── host.json
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;code&gt;host.json&lt;/code&gt; tells the Functions host where to send requests by pointing to a web server capable of processing HTTP events. Notice the &lt;code&gt;customHandler.description.defaultExecutablePath&lt;/code&gt; which defines that &lt;code&gt;processor_monitor&lt;/code&gt; is the name of the executable that'll be used to run the web server.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight json"&gt;&lt;code&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"version"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"2.0"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"extensionBundle"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="nl"&gt;"id"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"Microsoft.Azure.Functions.ExtensionBundle"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="nl"&gt;"version"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"[1.*, 2.0.0)"&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="p"&gt;},&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"customHandler"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="nl"&gt;"description"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"defaultExecutablePath"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"processor_monitor"&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="p"&gt;},&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="nl"&gt;"enableForwardingHttpRequest"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="p"&gt;},&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"logging"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="nl"&gt;"logLevel"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"default"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"Trace"&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#thats-a-wrap"&gt;
+  &lt;/a&gt;
+  That's a wrap!
+&lt;/h2&gt;
+
+&lt;p&gt;this brings us to the end of this blog series. let's recap what we learnt:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;In the first part you got an overview of the use case, architecture, it's components, along with an introduction to Redis Streams and &lt;code&gt;RediSearch&lt;/code&gt;. It setup the scene for rest of the series.&lt;/li&gt;
+&lt;li&gt;Part two dealt with the specifics of the Rust based tweets consumer app that consumed from the Twitter Streaming API and queued up the tweets in Redis Streams for further processing.&lt;/li&gt;
+&lt;li&gt;Third part was all about the Java app that processed these tweets using by leveraging the Redis Streams Consumer Group feature and scaling out processing across multiple instances.&lt;/li&gt;
+&lt;li&gt;... and final part (this one) was all about the Go app to monitor tweets that have been abandoned (in the pending entry list) either due to processing failure or consumer instance failure.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;I hope you found this useful and apply it to building scalable solutions with Redis Streams. Happy coding!&lt;/p&gt;
+
+</description>
+      <category>redis</category>
+      <category>database</category>
+      <category>programming</category>
+      <category>serverless</category>
+    </item>
+    <item>
       <title>CSS- The Cascade !</title>
       <author>Garima</author>
       <pubDate>Thu, 01 Jul 2021 05:49:58 +0000</pubDate>
@@ -2163,132 +2818,6 @@ Thank you all👍&lt;/p&gt;
       <category>learning</category>
       <category>career</category>
       <category>beginners</category>
-    </item>
-    <item>
-      <title>Clean Code</title>
-      <author>Clean Code Studio</author>
-      <pubDate>Thu, 01 Jul 2021 04:57:01 +0000</pubDate>
-      <link>https://dev.to/cleancodestudio/clean-code-3g8k</link>
-      <guid>https://dev.to/cleancodestudio/clean-code-3g8k</guid>
-      <description>&lt;blockquote&gt;
-&lt;p&gt;&lt;em&gt;Innovation starts with simplification, we can't create if we're always fixing.&lt;/em&gt;&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;h1&gt;
-  &lt;a href="#why-simply-designed-clean-code"&gt;
-  &lt;/a&gt;
-  Why Simply Designed Clean Code?
-&lt;/h1&gt;
-
-
-
-
-&lt;blockquote&gt;
-&lt;p&gt;&lt;em&gt;Why battle against technical debt?&lt;/em&gt;&lt;br&gt;
-&lt;em&gt;Why invest into refactoring?&lt;/em&gt; &lt;br&gt;
-&lt;em&gt;Why fight for Clean Code?&lt;/em&gt;&lt;/p&gt;
-&lt;/blockquote&gt;
-
-
-
-
-&lt;p&gt;To &lt;strong&gt;simplify&lt;/strong&gt; lives, save money, and improve the world through innovative invention.&lt;/p&gt;
-
-&lt;p&gt;Clean Code is &lt;strong&gt;DRY&lt;/strong&gt;, &lt;strong&gt;minimalistic&lt;/strong&gt;, &lt;strong&gt;tested&lt;/strong&gt;, &amp;amp; &lt;strong&gt;simple&lt;/strong&gt;&lt;/p&gt;
-
-
-
-
-&lt;h2&gt;
-  &lt;a href="#features-of-clean-code"&gt;
-  &lt;/a&gt;
-  Features of Clean Code
-&lt;/h2&gt;
-
-
-
-
-&lt;h3&gt;
-  &lt;a href="#clean-code-doesnt-repeat-itself"&gt;
-  &lt;/a&gt;
-  Clean Code doesn't repeat itself
-&lt;/h3&gt;
-
-&lt;p&gt;Clean code doesn't repeat itself, it's DRY (&lt;strong&gt;D&lt;/strong&gt;o not &lt;strong&gt;R&lt;/strong&gt;epeat &lt;strong&gt;Y&lt;/strong&gt;ourself). When we duplicated code, we have required the developer whom must make a change to one piece of code to be required to make a change to all duplicated pieces of that same code. &lt;/p&gt;
-
-&lt;p&gt;Cognitive load, technical debt, visual debt, &amp;amp; bugs increase.&lt;/p&gt;
-
-&lt;p&gt;Progress and passion decrease. &lt;/p&gt;
-
-
-
-
-&lt;h3&gt;
-  &lt;a href="#clean-code-is-minimalistic"&gt;
-  &lt;/a&gt;
-  Clean Code is minimalistic
-&lt;/h3&gt;
-
-&lt;p&gt;More code is more stuff that each of those things making up all of that stuff depends on. More than that developers are now required to keep all of that extra stuff in their head and if it's not already in their head they must go through all of the extra fluff to understand what's going on. &lt;/p&gt;
-
-&lt;p&gt;Less code is less buggy.&lt;br&gt;
-Less code is less onboarding.&lt;br&gt;
-Less code is less maintenance.&lt;/p&gt;
-
-&lt;p&gt;Code in of itself is liability. You are liable to maintain, update, refactor, understand, teach, and utilize code. &lt;/p&gt;
-
-&lt;p&gt;Simply put, &lt;strong&gt;less code&lt;/strong&gt; is &lt;strong&gt;less liability&lt;/strong&gt;.&lt;/p&gt;
-
-
-
-
-&lt;h3&gt;
-  &lt;a href="#clean-code-passes-all-tests"&gt;
-  &lt;/a&gt;
-  Clean Code passes all tests
-&lt;/h3&gt;
-
-&lt;p&gt;90% of all of your tests passed ~ ouch. This is not clean code. You know you messed up if your not passing all of your tests. You also know you messed up when your test coverage is 0%. &lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Clean Code is tested thoroughly and passes those tests with flying colors&lt;/strong&gt;&lt;/p&gt;
-
-
-
-
-&lt;h3&gt;
-  &lt;a href="#clean-code-simplifies"&gt;
-  &lt;/a&gt;
-  Clean Code simplifies
-&lt;/h3&gt;
-
-&lt;p&gt;Clean code is easier to understand, simpler to utilize, cheaper to maintain, and effective towards the goals in which it is created towards. &lt;/p&gt;
-
-&lt;p&gt;Clean Code Studio&lt;br&gt;
-&lt;a href="https://cleancode.studio"&gt;https://cleancode.studio&lt;/a&gt;&lt;br&gt;
-Clean Code Clean Life ~ Simplify!&lt;br&gt;
-&lt;a href="https://youtube.com/c/cleancodestudio"&gt;https://youtube.com/c/cleancodestudio&lt;/a&gt;&lt;/p&gt;
-
-</description>
-      <category>cleancode</category>
-      <category>refactoring</category>
-      <category>technicaldebt</category>
-      <category>simpledesign</category>
-    </item>
-    <item>
-      <title>Modal File Manager: Update and Extensions</title>
-      <author>Richard Guay</author>
-      <pubDate>Thu, 01 Jul 2021 04:34:19 +0000</pubDate>
-      <link>https://dev.to/raguay/modal-file-manager-update-and-extensions-2kb5</link>
-      <guid>https://dev.to/raguay/modal-file-manager-update-and-extensions-2kb5</guid>
-      <description>&lt;p&gt;I recently wrote an update to my &lt;a href="https://github.com/raguay/ModalFileManager"&gt;Modal File Manager project&lt;/a&gt; called &lt;a href="https://blog.customct.com/modal-file-manager-update-and-extensions"&gt;Modal File Manager: Update and Extensions&lt;/a&gt;. It goes into many new features that I've added to the Modal File Manager, how to install the macOS version that I bundled for downloading, and all the themes and extensions that I've created for the Modal File Manager. &lt;/p&gt;
-
-&lt;p&gt;I hope you enjoy this fun little project and decide to help me in the journey to create a very powerful, dual file pane file manager together!&lt;/p&gt;
-
-</description>
-      <category>svelte</category>
-      <category>nwjs</category>
-      <category>html</category>
-      <category>css</category>
     </item>
   </channel>
 </rss>
