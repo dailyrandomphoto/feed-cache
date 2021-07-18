@@ -365,6 +365,411 @@ Let's call it as &lt;code&gt;drive&lt;/code&gt; located at &lt;code&gt;/home/man
       <category>paperless</category>
     </item>
     <item>
+      <title>Rust and the JVM</title>
+      <author>Nicolas Frankel</author>
+      <pubDate>Sun, 18 Jul 2021 15:35:35 +0000</pubDate>
+      <link>https://dev.to/nfrankel/rust-and-the-jvm-1jbg</link>
+      <guid>https://dev.to/nfrankel/rust-and-the-jvm-1jbg</guid>
+      <description>&lt;p&gt;So far, we have learned the basics of Rust syntax, developed a custom Kubernetes controller, and integrated with the front-end with Wasm.&lt;/p&gt;
+
+&lt;p&gt;I've been using the JVM for two decades now, mainly in Java. The JVM is a fantastic piece of technology. IMHO, its most significant benefit is its ability to adapt the native code to the current workload; if the workload changes and the native code is not optimal, it will recompile the &lt;em&gt;bytecode&lt;/em&gt; accordingly.&lt;/p&gt;
+
+&lt;p&gt;On the other side, the JVM automatically releases objects from memory when they are not needed anymore. This process is known as &lt;em&gt;Garbage Collection&lt;/em&gt;. In languages with no GC, developers have to take care of releasing objects. With legacy languages and within big codebases, releasing was not applied consistently, and bugs found their way in production.&lt;/p&gt;
+
+&lt;p&gt;While GC algorithms have improved over time, GC itself is still a big complex machine. Fine-tuning GC is complex and depends heavily on the context. What worked yesterday might not work today. All in all, configuring the JVM for the best handling of GC in your context is like magic.&lt;/p&gt;
+
+&lt;p&gt;As the ecosystem around the JVM is well developed, it makes sense to develop applications using the JVM and delegate the parts that require predictability to Rust.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#existing-alternatives-for-jvmrust-integration"&gt;
+  &lt;/a&gt;
+  Existing alternatives for JVM-Rust integration
+&lt;/h2&gt;
+
+&lt;p&gt;During the research for this post, I found quite a couple of approaches for JVM-Rust integration:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;
+&lt;p&gt;Asmble:&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;Asmble is a compiler that compiles WebAssembly code to JVM bytecode. It also contains an interpreter and utilities for working with WASM code from the command line and from JVM languages.&lt;/p&gt;
+
+&lt;p&gt;-- &lt;a href="https://github.com/cretz/asmble"&gt;https://github.com/cretz/asmble&lt;/a&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;Asmble is released under the MIT License but is not actively maintained (the last commit is from 2 years ago).&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;GraalVM:&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;GraalVM is a high-performance JDK distribution designed to accelerate the execution of applications written in Java and other JVM languages along with support for JavaScript, Ruby, Python, and a number of other popular languages. GraalVM’s polyglot capabilities make it possible to mix multiple programming languages in a single application while eliminating foreign language call costs.&lt;/p&gt;
+
+&lt;p&gt;-- &lt;a href="https://www.graalvm.org/"&gt;https://www.graalvm.org/&lt;/a&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;GraalVM allows to run &lt;a href="https://llvm.org/"&gt;LLVM bitcode&lt;/a&gt;. Rust can compile to LLVM. Hence, &lt;a href="https://www.graalvm.org/reference-manual/llvm/Compiling/"&gt;GraalVM can run your Rust-generated LLVM code&lt;/a&gt; along with your Java/Scala/Kotlin/Groovy-generated &lt;em&gt;bytecode&lt;/em&gt;.&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;jni crate:&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;This crate provides a (mostly) safe way to implement methods in Java using the JNI. Because who wants to &lt;em&gt;actually&lt;/em&gt; write Java?&lt;/p&gt;
+
+&lt;p&gt;-- &lt;a href="https://docs.rs/jni/0.19.0/jni/"&gt;https://docs.rs/jni/0.19.0/jni/&lt;/a&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;JNI has been &lt;strong&gt;the&lt;/strong&gt; way to integrate C/C++ with Java in the past. While it's not the most glamorous approach, it requires no specific platform and is stable. For this reason, I'll describe it in detail in the next section.&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h2&gt;
+  &lt;a href="#integrating-java-and-rust-via-jni"&gt;
+  &lt;/a&gt;
+  Integrating Java and Rust via JNI
+&lt;/h2&gt;
+
+&lt;p&gt;From a bird's eye view, integrating Java and Rust requires the following steps:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;Create the "skeleton" methods in Java&lt;/li&gt;
+&lt;li&gt;Generate the C headers file from them&lt;/li&gt;
+&lt;li&gt;Implement them in Rust&lt;/li&gt;
+&lt;li&gt;Compile Rust to generate a system library&lt;/li&gt;
+&lt;li&gt;Load the library from the Java program&lt;/li&gt;
+&lt;li&gt;Call the methods defined in the first step. At this point, the library contains the implementation, and the integration is done.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;Old-timers will have realized those are the same steps as when you need to integrate with C or C++. It's because they also can generate a system library. Let's have a look at each step in detail.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#java-skeleton-methods"&gt;
+  &lt;/a&gt;
+  Java skeleton methods
+&lt;/h3&gt;
+
+&lt;p&gt;We first need to create the Java skeleton methods. In Java, we learn that methods need to have a body unless they are &lt;code&gt;abstract&lt;/code&gt;. Alternatively, they can be &lt;code&gt;native&lt;/code&gt;: a native method delegates its implementation to a library.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight java"&gt;&lt;code&gt;&lt;span class="kd"&gt;public&lt;/span&gt; &lt;span class="kd"&gt;native&lt;/span&gt; &lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="nf"&gt;doubleRust&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="n"&gt;input&lt;/span&gt;&lt;span class="o"&gt;);&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;Next, we need to generate the corresponding C header file. To automate generation, we can leverage the Maven compiler plugin:&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight xml"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;plugin&amp;gt;&lt;/span&gt;
+    &lt;span class="nt"&gt;&amp;lt;artifactId&amp;gt;&lt;/span&gt;maven-compiler-plugin&lt;span class="nt"&gt;&amp;lt;/artifactId&amp;gt;&lt;/span&gt;
+    &lt;span class="nt"&gt;&amp;lt;version&amp;gt;&lt;/span&gt;3.8.1&lt;span class="nt"&gt;&amp;lt;/version&amp;gt;&lt;/span&gt;
+    &lt;span class="nt"&gt;&amp;lt;configuration&amp;gt;&lt;/span&gt;
+        &lt;span class="nt"&gt;&amp;lt;compilerArgs&amp;gt;&lt;/span&gt;
+            &lt;span class="nt"&gt;&amp;lt;arg&amp;gt;&lt;/span&gt;-h&lt;span class="nt"&gt;&amp;lt;/arg&amp;gt;&lt;/span&gt;                           &lt;span class="c"&gt;&amp;lt;!--1--&amp;gt;&lt;/span&gt;
+            &lt;span class="nt"&gt;&amp;lt;arg&amp;gt;&lt;/span&gt;target/headers&lt;span class="nt"&gt;&amp;lt;/arg&amp;gt;&lt;/span&gt;               &lt;span class="c"&gt;&amp;lt;!--2--&amp;gt;&lt;/span&gt;
+        &lt;span class="nt"&gt;&amp;lt;/compilerArgs&amp;gt;&lt;/span&gt;
+    &lt;span class="nt"&gt;&amp;lt;/configuration&amp;gt;&lt;/span&gt;
+&lt;span class="nt"&gt;&amp;lt;/plugin&amp;gt;&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;ol&gt;
+&lt;li&gt;Generate header files...&lt;/li&gt;
+&lt;li&gt;...in this location&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;The generated header of the above Java snippet should be the following:&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight c"&gt;&lt;code&gt;&lt;span class="cp"&gt;#include &amp;lt;jni.h&amp;gt;
+&lt;/span&gt;
+&lt;span class="cp"&gt;#ifndef _Included_ch_frankel_blog_rust_Main
+#define _Included_ch_frankel_blog_rust_Main
+#ifdef __cplusplus
+&lt;/span&gt;&lt;span class="k"&gt;extern&lt;/span&gt; &lt;span class="s"&gt;"C"&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+&lt;span class="cp"&gt;#endif
+&lt;/span&gt;&lt;span class="cm"&gt;/*
+ * Class:     ch_frankel_blog_rust_Main
+ * Method:    doubleRust
+ * Signature: (I)I
+ */&lt;/span&gt;
+&lt;span class="n"&gt;JNIEXPORT&lt;/span&gt; &lt;span class="n"&gt;jint&lt;/span&gt; &lt;span class="n"&gt;JNICALL&lt;/span&gt; &lt;span class="n"&gt;Java_ch_frankel_blog_rust_Main_doubleRust&lt;/span&gt;
+  &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;JNIEnv&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;jobject&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;jint&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+
+&lt;span class="cp"&gt;#ifdef __cplusplus
+&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="cp"&gt;#endif
+#endif
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+&lt;h3&gt;
+  &lt;a href="#rust-implementation"&gt;
+  &lt;/a&gt;
+  Rust implementation
+&lt;/h3&gt;
+
+&lt;p&gt;Now, we can start the Rust implementation. Let's create a new project:&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;cargo new lib-rust
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight toml"&gt;&lt;code&gt;&lt;span class="nn"&gt;[package]&lt;/span&gt;
+&lt;span class="py"&gt;name&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="s"&gt;"dummymath"&lt;/span&gt;
+&lt;span class="py"&gt;version&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="s"&gt;"0.1.0"&lt;/span&gt;
+&lt;span class="py"&gt;authors&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s"&gt;"Nicolas Frankel &amp;lt;nicolas@frankel.ch&amp;gt;"&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+&lt;span class="py"&gt;edition&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="s"&gt;"2018"&lt;/span&gt;
+
+&lt;span class="nn"&gt;[dependencies]&lt;/span&gt;
+&lt;span class="py"&gt;jni&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="s"&gt;"0.19.0"&lt;/span&gt;                                     &lt;span class="err"&gt;//&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;
+
+&lt;span class="nn"&gt;[lib]&lt;/span&gt;
+&lt;span class="py"&gt;crate_type&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="nn"&gt;["cdylib"]&lt;/span&gt;                            &lt;span class="err"&gt;//&lt;/span&gt; &lt;span class="mi"&gt;2&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;ol&gt;
+&lt;li&gt;Use the &lt;code&gt;jni&lt;/code&gt; crate&lt;/li&gt;
+&lt;li&gt;Generate a &lt;em&gt;system&lt;/em&gt; library. Several crate types are available: &lt;code&gt;cdylib&lt;/code&gt; is for dynamic system libraries that you can load from other languages. You can check all other available types &lt;a href="https://doc.rust-lang.org/reference/linkage.html"&gt;in the documentation&lt;/a&gt;.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;Here's an abridged of the API offered by the crate:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s---SlXV15Y--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/8v1oyz0bubskh7n6cjus.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s---SlXV15Y--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/8v1oyz0bubskh7n6cjus.png" alt="jni crate API"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;The API maps one-to-one to the generated C code. We can use it accordingly:&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight rust"&gt;&lt;code&gt;&lt;span class="nd"&gt;#[no_mangle]&lt;/span&gt;
+&lt;span class="k"&gt;pub&lt;/span&gt; &lt;span class="k"&gt;extern&lt;/span&gt; &lt;span class="s"&gt;"system"&lt;/span&gt; &lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;Java_ch_frankel_blog_rust_Main_doubleRust&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;_&lt;/span&gt;&lt;span class="n"&gt;env&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;JNIEnv&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;_&lt;/span&gt;&lt;span class="n"&gt;obj&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;JObject&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;x&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;jint&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="k"&gt;-&amp;gt;&lt;/span&gt; &lt;span class="n"&gt;jint&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="n"&gt;x&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt; &lt;span class="mi"&gt;2&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;A lot happens in the above code. Let's detail it.&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;The &lt;code&gt;no_mangle&lt;/code&gt; macro tells the compiler to keep the same function signature in the compiled code. It's crucial as the JVM will use this signature.&lt;/li&gt;
+&lt;li&gt;Most of the times, we use &lt;code&gt;extern&lt;/code&gt; in Rust functions to delegate the implementations to other languages: this is known as FFI. It's the same as we did in Java with &lt;code&gt;native&lt;/code&gt;. However, Rust also uses &lt;code&gt;extern&lt;/code&gt; for the opposite, &lt;em&gt;i.e.&lt;/em&gt;, to make functions callable from other languages.&lt;/li&gt;
+&lt;li&gt;The signature itself should precisely mimic the code in the C header, hence the funny-looking name&lt;/li&gt;
+&lt;li&gt;Finally, &lt;code&gt;x&lt;/code&gt; is a &lt;code&gt;jint&lt;/code&gt;, an alias for &lt;code&gt;i32&lt;/code&gt;. For the record, here's how Java primitives map to Rust types:&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;div class="table-wrapper-paragraph"&gt;&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;Java&lt;/th&gt;
+&lt;th&gt;Native&lt;/th&gt;
+&lt;th&gt;Rust&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;boolean&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;jboolean&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;u8&lt;/code&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;char&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;jchar&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;u16&lt;/code&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;byte&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;jbyte&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;i8&lt;/code&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;short&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;jshort&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;i16&lt;/code&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;int&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;jint&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;i32&lt;/code&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;long&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;jlong&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;i64&lt;/code&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;float&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;jfloat&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;f32&lt;/code&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;code&gt;double&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;jdouble&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;f64&lt;/code&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;jsize&lt;/code&gt;&lt;/td&gt;
+&lt;td&gt;&lt;code&gt;jint&lt;/code&gt;&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;&lt;/div&gt;
+
+&lt;p&gt;We can now build the project:&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;cargo build
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;The build produces a system-dependent library. For example, on OSX, the artifact has a &lt;code&gt;dylib&lt;/code&gt; extension; on Linux, it will have a &lt;code&gt;so&lt;/code&gt; one, etc.&lt;/p&gt;
+&lt;h3&gt;
+  &lt;a href="#use-the-library-on-the-java-side"&gt;
+  &lt;/a&gt;
+  Use the library on the Java side
+&lt;/h3&gt;
+
+&lt;p&gt;The final part is to use the generated library on the Java side. It requires first to load it. Two methods are available for this purpose, &lt;code&gt;System.load(filename)&lt;/code&gt; and &lt;code&gt;System.loadLibrary(libname)&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;load()&lt;/code&gt; requires the absolute path to the library, including its extension, &lt;em&gt;e.g.&lt;/em&gt;, &lt;code&gt;/path/to/lib.so&lt;/code&gt;. For applications that need to work across systems, that's unpractical. &lt;code&gt;loadLibrary()&lt;/code&gt; allows you to only pass the library's name - without extension. Beware that libraries are loaded in the location indicated by the &lt;code&gt;java.library.path&lt;/code&gt; System property.&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight java"&gt;&lt;code&gt;&lt;span class="kd"&gt;public&lt;/span&gt; &lt;span class="kd"&gt;class&lt;/span&gt; &lt;span class="nc"&gt;Main&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+
+    &lt;span class="kd"&gt;static&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+        &lt;span class="nc"&gt;System&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;loadLibrary&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"dummymath"&lt;/span&gt;&lt;span class="o"&gt;);&lt;/span&gt;
+    &lt;span class="o"&gt;}&lt;/span&gt;
+&lt;span class="o"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;Note that on Mac OS, the &lt;code&gt;lib&lt;/code&gt; prefix is &lt;strong&gt;not&lt;/strong&gt; part of the library's name.&lt;/p&gt;
+&lt;h3&gt;
+  &lt;a href="#working-with-objects"&gt;
+  &lt;/a&gt;
+  Working with objects
+&lt;/h3&gt;
+
+&lt;p&gt;The above code is pretty simple: it involves a &lt;strong&gt;pure&lt;/strong&gt; function, which depends only on its input parameter(s) by definition. Suppose we want to have something a bit more involved. We come up with a new method that multiplies the argument with another one from the object's state:&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight java"&gt;&lt;code&gt;&lt;span class="kd"&gt;public&lt;/span&gt; &lt;span class="kd"&gt;class&lt;/span&gt; &lt;span class="nc"&gt;Main&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+
+    &lt;span class="kd"&gt;private&lt;/span&gt; &lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="n"&gt;state&lt;/span&gt;&lt;span class="o"&gt;;&lt;/span&gt;
+
+    &lt;span class="kd"&gt;public&lt;/span&gt; &lt;span class="nf"&gt;Main&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="n"&gt;state&lt;/span&gt;&lt;span class="o"&gt;)&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+        &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;state&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;state&lt;/span&gt;&lt;span class="o"&gt;;&lt;/span&gt;
+    &lt;span class="o"&gt;}&lt;/span&gt;
+
+    &lt;span class="kd"&gt;public&lt;/span&gt; &lt;span class="kd"&gt;static&lt;/span&gt; &lt;span class="kt"&gt;void&lt;/span&gt; &lt;span class="nf"&gt;main&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="nc"&gt;String&lt;/span&gt;&lt;span class="o"&gt;[]&lt;/span&gt; &lt;span class="n"&gt;args&lt;/span&gt;&lt;span class="o"&gt;)&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+        &lt;span class="k"&gt;try&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+            &lt;span class="kt"&gt;var&lt;/span&gt; &lt;span class="n"&gt;arg1&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nc"&gt;Integer&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;parseInt&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="n"&gt;args&lt;/span&gt;&lt;span class="o"&gt;[&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="o"&gt;]);&lt;/span&gt;
+            &lt;span class="kt"&gt;var&lt;/span&gt; &lt;span class="n"&gt;arg2&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nc"&gt;Integer&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;parseInt&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="n"&gt;args&lt;/span&gt;&lt;span class="o"&gt;[&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="o"&gt;]);&lt;/span&gt;
+            &lt;span class="kt"&gt;var&lt;/span&gt; &lt;span class="n"&gt;result&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nc"&gt;Main&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="n"&gt;arg1&lt;/span&gt;&lt;span class="o"&gt;).&lt;/span&gt;&lt;span class="na"&gt;timesRust&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="n"&gt;arg2&lt;/span&gt;&lt;span class="o"&gt;);&lt;/span&gt;                &lt;span class="c1"&gt;// 1&lt;/span&gt;
+            &lt;span class="nc"&gt;System&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;out&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;println&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="n"&gt;arg1&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="s"&gt;"x"&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="n"&gt;arg2&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="s"&gt;" = "&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="n"&gt;result&lt;/span&gt;&lt;span class="o"&gt;);&lt;/span&gt;
+        &lt;span class="o"&gt;}&lt;/span&gt; &lt;span class="k"&gt;catch&lt;/span&gt; &lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="nc"&gt;NumberFormatException&lt;/span&gt; &lt;span class="n"&gt;e&lt;/span&gt;&lt;span class="o"&gt;)&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+            &lt;span class="k"&gt;throw&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nf"&gt;IllegalArgumentException&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Arguments must be ints"&lt;/span&gt;&lt;span class="o"&gt;);&lt;/span&gt;
+        &lt;span class="o"&gt;}&lt;/span&gt;
+    &lt;span class="o"&gt;}&lt;/span&gt;
+
+    &lt;span class="kd"&gt;public&lt;/span&gt; &lt;span class="kd"&gt;native&lt;/span&gt; &lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="nf"&gt;timesRust&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="n"&gt;input&lt;/span&gt;&lt;span class="o"&gt;);&lt;/span&gt;
+&lt;span class="o"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;ol&gt;
+&lt;li&gt;Should compute &lt;code&gt;arg1 * arg2&lt;/code&gt;
+&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;The &lt;code&gt;native&lt;/code&gt; method looks precisely the same as above, but its name. Hence, the generated C header also looks the same. The magic needs to happen on the Rust side.&lt;/p&gt;
+
+&lt;p&gt;In the pure function, we didn't use the &lt;code&gt;JNIEnv&lt;/code&gt; and &lt;code&gt;JObject&lt;/code&gt; parameters: &lt;code&gt;JObject&lt;/code&gt; represents the Java object, &lt;em&gt;i.e.&lt;/em&gt;, &lt;code&gt;Main&lt;/code&gt; and &lt;code&gt;JNIEnv&lt;/code&gt; allows accessing its data (or behavior).&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight rust"&gt;&lt;code&gt;&lt;span class="nd"&gt;#[no_mangle]&lt;/span&gt;
+&lt;span class="k"&gt;pub&lt;/span&gt; &lt;span class="k"&gt;extern&lt;/span&gt; &lt;span class="s"&gt;"system"&lt;/span&gt; &lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;Java_ch_frankel_blog_rust_Main_timesRust&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;env&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;JNIEnv&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;obj&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;JObject&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;x&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;jint&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="k"&gt;-&amp;gt;&lt;/span&gt; &lt;span class="n"&gt;jint&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="c"&gt;// 1&lt;/span&gt;
+    &lt;span class="k"&gt;let&lt;/span&gt; &lt;span class="n"&gt;state&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;env&lt;/span&gt;&lt;span class="nf"&gt;.get_field&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;obj&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;"state"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;"I"&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;           &lt;span class="c"&gt;// 2&lt;/span&gt;
+    &lt;span class="n"&gt;state&lt;/span&gt;&lt;span class="nf"&gt;.unwrap&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="nf"&gt;.i&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="nf"&gt;.unwrap&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt; &lt;span class="n"&gt;x&lt;/span&gt;                         &lt;span class="c"&gt;// 3&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;ol&gt;
+&lt;li&gt;Same as above&lt;/li&gt;
+&lt;li&gt;Pass the object's reference, the field's name in Java and its type. The type refers to the correct &lt;a href="https://docs.oracle.com/en/java/javase/11/docs/specs/jni/types.html#type-signatures"&gt;JVM type signature&lt;/a&gt;, &lt;em&gt;e.g.&lt;/em&gt; &lt;code&gt;"I"&lt;/code&gt; for &lt;code&gt;int&lt;/code&gt;.&lt;/li&gt;
+&lt;li&gt;
+&lt;code&gt;state&lt;/code&gt; is a &lt;code&gt;Result&amp;lt;JValue&amp;gt;&lt;/code&gt;. We need to unwrap it to a &lt;code&gt;JValue&lt;/code&gt;, and then "cast" it to a &lt;code&gt;Result&amp;lt;jint&amp;gt;&lt;/code&gt; via &lt;code&gt;i()&lt;/code&gt;
+&lt;/li&gt;
+&lt;/ol&gt;
+&lt;h2&gt;
+  &lt;a href="#conclusion"&gt;
+  &lt;/a&gt;
+  Conclusion
+&lt;/h2&gt;
+
+&lt;p&gt;In this post, we have seen how to call Rust from Java. It involves flagging methods to be delegated as &lt;code&gt;native&lt;/code&gt;, generating the C header file, and using the &lt;code&gt;jni&lt;/code&gt; crate. We have only scraped the surface with simple examples: yet, we've laid the road to more complex usages.&lt;/p&gt;
+
+&lt;p&gt;The complete source code for this post can be found on Github:&lt;/p&gt;
+
+
+&lt;div class="ltag-github-readme-tag"&gt;
+  &lt;div class="readme-overview"&gt;
+    &lt;h2&gt;
+      &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--i3JOwpme--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/github-logo-ba8488d21cd8ee1fee097b8410db9deaa41d0ca30b004c0c63de0a479114156f.svg" alt="GitHub logo"&gt;
+      &lt;a href="https://github.com/ajavageek"&gt;
+        ajavageek
+      &lt;/a&gt; / &lt;a href="https://github.com/ajavageek/rust-jvm"&gt;
+        rust-jvm
+      &lt;/a&gt;
+    &lt;/h2&gt;
+    &lt;h3&gt;
+      
+    &lt;/h3&gt;
+  &lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;strong&gt;To go further:&lt;/strong&gt;&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="https://doc.rust-lang.org/reference/linkage.html"&gt;Linkage&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://doc.rust-lang.org/std/keyword.extern.html"&gt;keyword extern&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://doc.rust-lang.org/book/ch19-01-unsafe-rust.html#calling-rust-functions-from-other-languages"&gt;Calling Rust Functions from Other Languages&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://docs.oracle.com/en/java/javase/11/docs/specs/jni/"&gt;JNI Specification&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;&lt;em&gt;Originally published at &lt;a href="https://blog.frankel.ch/start-rust/7/"&gt;A Java Geek&lt;/a&gt; on July 18&lt;sup&gt;th&lt;/sup&gt;, 2021&lt;/em&gt;&lt;/p&gt;
+
+</description>
+      <category>rust</category>
+      <category>beginners</category>
+      <category>java</category>
+      <category>jni</category>
+    </item>
+    <item>
       <title>Tic Tac Toe C++</title>
       <author>Muhammad Bilal Mohib-ul-Nabi</author>
       <pubDate>Sun, 18 Jul 2021 15:21:30 +0000</pubDate>
@@ -2200,172 +2605,6 @@ git bisect
       <category>beginners</category>
       <category>webdev</category>
       <category>git</category>
-    </item>
-    <item>
-      <title>I. Implementing ICMP in Rust</title>
-      <author>Dave</author>
-      <pubDate>Sun, 18 Jul 2021 14:38:01 +0000</pubDate>
-      <link>https://dev.to/xphoniex/i-implementing-icmp-in-rust-296o</link>
-      <guid>https://dev.to/xphoniex/i-implementing-icmp-in-rust-296o</guid>
-      <description>&lt;p&gt;This post is inspired by &lt;a href="https://twitter.com/jonhoo"&gt;Jon Gjengset&lt;/a&gt; series titled &lt;a href="https://www.youtube.com/watch?v=bzja9fQWzdA"&gt;"Implementing TCP in Rust"&lt;/a&gt;.&lt;/p&gt;
-
-&lt;p&gt;This should be an interesting read for anyone who wants to get a better understanding of networking protocols down to bits and doesn't mind diving into RFCs.&lt;/p&gt;
-
-&lt;p&gt;So what is ICMP anyway? It's the protocol that makes &lt;code&gt;ping&lt;/code&gt; and &lt;code&gt;traceroute&lt;/code&gt; possible. If you're a gamer or ever joined an online call, then you know how important those ping/latency numbers are.&lt;/p&gt;
-
-&lt;p&gt;Unlike TCP/UDP, which are Layer 4 protocols in OSI Model, ICMP actually belongs to Layer 3 which is the same level as IP, itself the &lt;strong&gt;main&lt;/strong&gt; protocol of the Internet.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--vm46rTxg--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ew5c1p4s7frl9ecfp90m.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--vm46rTxg--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ew5c1p4s7frl9ecfp90m.png" alt="osi-model"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#1-ip-packet"&gt;
-  &lt;/a&gt;
-  1. IP Packet
-&lt;/h2&gt;
-
-&lt;p&gt;First, I'll show you what an IPv4 (&lt;a href="https://datatracker.ietf.org/doc/html/rfc791#section-3.1"&gt;RFC-791&lt;/a&gt;) header looks like, remember all your connections on the internet start with one of these:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt; 0                   1                   2                   3
- 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|Version|  IHL  |Type of Service|          Total Length         |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|         Identification        |Flags|      Fragment Offset    |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|  Time to Live |    Protocol   |         Header Checksum       |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                       Source Address                          |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                    Destination Address                        |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                    Options                    |    Padding    |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-
-                  Example Internet Datagram Header
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;To capture a raw IP frame, ping &lt;code&gt;localhost&lt;/code&gt; in another terminal and listen with:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;$ tcpdump -i lo -p icmp -X
-15:23:33.885666 IP localhost &amp;gt; localhost: ICMP echo request, id 21780, seq 1, length 64
-    0x0000:  4500 0054 9210 4000 4001 aa96 7f00 0001  E..T..@.@.......
-    0x0010:  7f00 0001 0800 492b 5514 0001 2d08 f460  ......I+U...-..`
-    0x0020:  0000 0000 6c83 0d00 0000 0000 1011 1213  ....l...........
-    0x0030:  1415 1617 1819 1a1b 1c1d 1e1f 2021 2223  .............!"#
-    0x0040:  2425 2627 2829 2a2b 2c2d 2e2f 3031 3233  $%&amp;amp;'()*+,-./0123
-    0x0050:  3435 3637                                4567
-15:23:33.885695 IP localhost &amp;gt; localhost: ICMP echo reply, id 21780, seq 1, length 64
-    0x0000:  4500 0054 9211 0000 4001 ea95 7f00 0001  E..T....@.......
-    0x0010:  7f00 0001 0000 512b 5514 0001 2d08 f460  ......Q+U...-..`
-    0x0020:  0000 0000 6c83 0d00 0000 0000 1011 1213  ....l...........
-    0x0030:  1415 1617 1819 1a1b 1c1d 1e1f 2021 2223  .............!"#
-    0x0040:  2425 2627 2829 2a2b 2c2d 2e2f 3031 3233  $%&amp;amp;'()*+,-./0123
-    0x0050:  3435 3637                                4567
-
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Let's start with the first IP and decode the header — the first 20 bytes of &lt;code&gt;4500 0054 9210 4000 4001 aa96 7f00 0001 7f00 0001 ...&lt;/code&gt;:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;▼
-4           Version                 = IPv4 version
-5           IHL                     = 20 bytes
-00          ToS
-0054        Total Length            = 84 bytes
-9210        Identification
-4           Flags
-000         Fragment Offset
-40          Time to Live            = 64 TTL
-01          Protocol                = ICMP
-aa96        Header Checksum
-7f00 0001   Source IP Address       = 127.0.0.1
-7f00 0001   Destination IP Address  = 127.0.0.1
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#2-icmp-packet"&gt;
-  &lt;/a&gt;
-  2. ICMP Packet
-&lt;/h2&gt;
-
-&lt;p&gt;From &lt;a href="https://datatracker.ietf.org/doc/html/rfc792"&gt;RFC-792&lt;/a&gt; we can see the layout of &lt;em&gt;Echo or Echo reply message&lt;/em&gt;:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt; 0                   1                   2                   3
- 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|     Type      |     Code      |          Checksum             |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|           Identifier          |        Sequence Number        |
-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|     Data ...
-+-+-+-+-+-
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;And by replacing &lt;code&gt;data&lt;/code&gt; bytes, the remaining bytes after the header, we get our ICMP header:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;08          Type                    = Echo message
-00          Code                     
-492b        Checksum
-5514        Identifier              = id 21780 (in raw capture)
-0001        Sequence Number         = seq 1
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;If you compare this ICMP packet with the one from second IP frame, two fields have changed:&lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;
-&lt;code&gt;Type&lt;/code&gt; which has become &lt;code&gt;00&lt;/code&gt; or Echo &lt;strong&gt;reply&lt;/strong&gt; message&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;Checksum&lt;/code&gt;, naturally because content has changed&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;h2&gt;
-  &lt;a href="#3-implementation-in-rust"&gt;
-  &lt;/a&gt;
-  3. Implementation in Rust
-&lt;/h2&gt;
-
-&lt;p&gt;Now that we know what an ICMP packet looks like, we are ready to implement it in Rust. &lt;/p&gt;
-
-&lt;p&gt;Unlike TCP/UDP, we have no concept of ports here and only use IPs to find our path. (Now you understand why ping has no port?).&lt;/p&gt;
-
-&lt;p&gt;Furthermore, astute reader may have noticed that the only thing that changes in the ICMP echo reply is the &lt;code&gt;Type&lt;/code&gt; which goes from &lt;code&gt;08&lt;/code&gt; to &lt;code&gt;00&lt;/code&gt;. &lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;We've got all we need. Check out:&lt;/strong&gt; &lt;a href="https://dev.to/xphoniex/ii-implementing-icmp-in-rust-3bk5"&gt;II. Implementing ICMP in Rust&lt;/a&gt;&lt;/p&gt;
-
-</description>
-      <category>icmp</category>
-      <category>rust</category>
-      <category>networkprogramming</category>
     </item>
   </channel>
 </rss>
