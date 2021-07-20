@@ -7,6 +7,402 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>Dynamic import with HTTP URLs in Node.js</title>
+      <author>Maximilian Fellner</author>
+      <pubDate>Tue, 20 Jul 2021 23:17:46 +0000</pubDate>
+      <link>https://dev.to/mxfellner/dynamic-import-with-http-urls-in-node-js-7og</link>
+      <guid>https://dev.to/mxfellner/dynamic-import-with-http-urls-in-node-js-7og</guid>
+      <description>&lt;p&gt;Is it possible to import code in Node.js from HTTP(S) URLs just like in the browser or in &lt;a href="https://deno.land"&gt;Deno&lt;/a&gt;? After all, Node.js has had stable support for &lt;a href="https://nodejs.org/api/esm.html"&gt;ECMAScript modules&lt;/a&gt; since version 14, released in April 2020. So what happens if we just write something like &lt;code&gt;import('https://cdn.skypack.dev/uuid')&lt;/code&gt;?&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--VRmZFVP1--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/6n64wzxqnrul0hlree8i.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--VRmZFVP1--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/6n64wzxqnrul0hlree8i.png" alt="import('https://cdn.skypack.dev/uuid') causes ERR_UNSUPPORTED_ESM_URL_SCHEME"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Unfortunately it's neither possible import code from HTTP URLs statically nor dynamically because the URL scheme is not supported.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#loaders-and-vm"&gt;
+  &lt;/a&gt;
+  Loaders and VM
+&lt;/h2&gt;
+
+&lt;p&gt;An experimental feature of Node.js are custom &lt;a href="https://github.com/nodejs/loaders"&gt;loaders&lt;/a&gt;. A loader is basically a set of "hook" functions to resolve and load source code. There is even an example of an &lt;a href="https://nodejs.org/api/esm.html#esm_https_loader"&gt;HTTP loader&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;Such a loader would be passed to Node.js as a command line argument:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;node &lt;span class="nt"&gt;--experimental-loader&lt;/span&gt; ./https-loader.mjs
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;A downside to this approach is that a loader's influence is quite limited. For instance, the execution context of the downloaded code cannot be modified. The &lt;a href="https://github.com/nodejs/loaders"&gt;team&lt;/a&gt; working on loaders is still modifying their API, so this could still be subject to change.&lt;/p&gt;
+
+&lt;p&gt;Another Node.js API that offers more low-level control is &lt;a href="https://nodejs.org/api/vm.html"&gt;vm&lt;/a&gt;. It enables the execution of raw JavaScript code within the V8 virtual machine.&lt;/p&gt;
+
+&lt;p&gt;In this blog post, we're going to use it to create our own dynamic import implementation!&lt;/p&gt;
+&lt;h2&gt;
+  &lt;a href="#downloading-code"&gt;
+  &lt;/a&gt;
+  Downloading code
+&lt;/h2&gt;
+
+&lt;p&gt;Let's start with downloading the remotely hosted code. A very simple and naive solution is to just use "node-fetch" or a similar library:&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="nx"&gt;fetch&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;node-fetch&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;fetchCode&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;url&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;response&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;fetch&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;url&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+  &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;response&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;ok&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;response&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;text&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+  &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;else&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="k"&gt;throw&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nb"&gt;Error&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+      &lt;span class="s2"&gt;`Error fetching &lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;url&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;: &lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;response&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;statusText&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;
+    &lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;We can use this function to download any ECMAScript module from a remote server. In this example we are going to use the &lt;a href="https://www.skypack.dev/view/lodash-es"&gt;lodash-es&lt;/a&gt; module from Skypack&lt;sup id="fnref1"&gt;&lt;a href="#fn1"&gt;1&lt;/a&gt;&lt;/sup&gt;, the CDN and package repository of the &lt;a href="https://www.snowpack.dev"&gt;Snowpack&lt;/a&gt; build tool.&lt;/p&gt;
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;url&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;import cdn.skypack.dev/lodash-es&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;source&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;fetchCode&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;url&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;Obviously important security and performance aspects have been neglected here. A more fully-featured solution would handle request headers, timeouts, and caching amongst other things.&lt;/p&gt;
+&lt;h2&gt;
+  &lt;a href="#evaluating-code"&gt;
+  &lt;/a&gt;
+  Evaluating code
+&lt;/h2&gt;
+
+&lt;p&gt;For the longest time, Node.js has provided the &lt;a href="https://nodejs.org/api/vm.html#vm_class_vm_script"&gt;vm.Script&lt;/a&gt; class to compile and execute raw source code. It's a bit like &lt;code&gt;eval&lt;/code&gt; but more sophisticated. However, this API only works with the classic CommonJS modules.&lt;/p&gt;
+
+&lt;p&gt;For ECMAScript modules, the new &lt;a href="https://nodejs.org/api/vm.html#vm_class_vm_module"&gt;vm.Module&lt;/a&gt; API must be used and it is still experimental. To enable it, Node.js must be run with the &lt;code&gt;--experimental-vm-modules&lt;/code&gt; flag.&lt;/p&gt;
+
+&lt;p&gt;To use &lt;code&gt;vm.Module&lt;/code&gt; we are going to implement the 3 distinct steps creation/parsing, linking, and evaluation:&lt;/p&gt;
+&lt;h3&gt;
+  &lt;a href="#creationparsing"&gt;
+  &lt;/a&gt;
+  Creation/parsing
+&lt;/h3&gt;
+
+&lt;p&gt;First, we need to create an execution context. This is going to be the global context in which the code will be executed. The context can be just an empty object but some code may require certain global variables, like &lt;a href="https://nodejs.org/api/globals.html"&gt;those defined by Node.js itself&lt;/a&gt;.&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="nx"&gt;vm&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;vm&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;context&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;vm&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;createContext&lt;/span&gt;&lt;span class="p"&gt;({});&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;Next, we create an instance of &lt;code&gt;vm.SourceTextModule&lt;/code&gt; which is a subclass of &lt;code&gt;vm.Module&lt;/code&gt; specifically for raw source code strings.&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;vm&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;SourceTextModule&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;source&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="na"&gt;identifier&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;url&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="nx"&gt;context&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+&lt;span class="p"&gt;});&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;The &lt;code&gt;identifier&lt;/code&gt; is the name of the module. We set it to the original HTTP URL because we are going to need it for resolving additional imports in the next step.&lt;/p&gt;
+&lt;h3&gt;
+  &lt;a href="#linking"&gt;
+  &lt;/a&gt;
+  Linking
+&lt;/h3&gt;
+
+&lt;p&gt;In order to resolve additional static &lt;code&gt;import&lt;/code&gt; statements in the code, we must implement a custom &lt;code&gt;link&lt;/code&gt; function. This function should return a new &lt;code&gt;vm.SourceTextModule&lt;/code&gt; instance for the two arguments it receives:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;The &lt;strong&gt;specifier&lt;/strong&gt; of the imported dependency. In ECMAScript modules this can either be an absolute or a relative URL to another file, or a "bare specifier" like &lt;code&gt;"lodash-es"&lt;/code&gt;.&lt;/li&gt;
+&lt;li&gt;The &lt;strong&gt;referencing module&lt;/strong&gt; which is an instance of &lt;code&gt;vm.Module&lt;/code&gt; and the "parent" module of the imported dependency.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;In this example we are only going to deal with URL imports for now:&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;link&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;specifier&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;referencingModule&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="c1"&gt;// Create a new absolute URL from the imported&lt;/span&gt;
+  &lt;span class="c1"&gt;// module's URL (specifier) and the parent module's&lt;/span&gt;
+  &lt;span class="c1"&gt;// URL (referencingModule.identifier).&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;url&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;URL&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="nx"&gt;specifier&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="nx"&gt;referencingModule&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;identifier&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;toString&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+  &lt;span class="c1"&gt;// Download the raw source code.&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;source&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;fetchCode&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;url&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+  &lt;span class="c1"&gt;// Instantiate a new module and return it.&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;vm&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;SourceTextModule&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;source&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="na"&gt;identifier&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;url&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="na"&gt;context&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;referencingModule&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;context&lt;/span&gt;
+  &lt;span class="p"&gt;});&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;mod&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;link&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;link&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt; &lt;span class="c1"&gt;// Perform the "link" step.&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+&lt;h3&gt;
+  &lt;a href="#evaluation"&gt;
+  &lt;/a&gt;
+  Evaluation
+&lt;/h3&gt;
+
+&lt;p&gt;After the &lt;code&gt;link&lt;/code&gt; step, the original module instance is fully initialised and any exports could already be extracted from its namespace. However, if there are any imperative statements in the code that should be executed, this additional step is necessary.&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;mod&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;evaluate&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt; &lt;span class="c1"&gt;// Executes any imperative code.&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+&lt;h3&gt;
+  &lt;a href="#getting-the-exports"&gt;
+  &lt;/a&gt;
+  Getting the exports
+&lt;/h3&gt;
+
+&lt;p&gt;The very last step is to extract whatever the module exports from its namespace.&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// The following corresponds to &lt;/span&gt;
+&lt;span class="c1"&gt;// import { random } from 'https://cdn.skypack.dev/lodash-es';&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;random&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;mod&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;namespace&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+&lt;h3&gt;
+  &lt;a href="#providing-global-dependencies"&gt;
+  &lt;/a&gt;
+  Providing global dependencies
+&lt;/h3&gt;
+
+&lt;p&gt;Some modules may require certain global variables in their execution context. For instance, the &lt;a href="https://www.skypack.dev/view/uuid"&gt;uuid&lt;/a&gt; package depends on &lt;code&gt;crypto&lt;/code&gt;, which is the &lt;a href="https://developer.mozilla.org/en-US/docs/Web/API/Web_Crypto_API"&gt;Web Crypto API&lt;/a&gt;. Node.js provides an &lt;a href="https://nodejs.org/api/webcrypto.html"&gt;implementation&lt;/a&gt; of this API since version 15 and we can inject it into the context as a global variable.&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;webcrypto&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;crypto&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="nx"&gt;vm&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;vm&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;context&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;vm&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;createContext&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="na"&gt;crypto&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;webcrypto&lt;/span&gt; &lt;span class="p"&gt;});&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;By default, no additional global variables are available to the executed code. It's very important to consider the security implications of giving potentially untrusted code access to additional global variables, e.g. &lt;code&gt;process&lt;/code&gt;.&lt;/p&gt;
+&lt;h2&gt;
+  &lt;a href="#bare-module-specifiers"&gt;
+  &lt;/a&gt;
+  Bare module specifiers
+&lt;/h2&gt;
+
+&lt;p&gt;The ECMAScript module specification allows for a type of import declaration that is sometimes called "bare module specifier". Basically, it's similar to how a &lt;code&gt;require&lt;/code&gt; statement of CommonJS would look like when importing a module from &lt;code&gt;node_modules&lt;/code&gt;.&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="nx"&gt;uuid&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;uuid&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; &lt;span class="c1"&gt;// Where does 'uuid' come from?&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;Because ECMAScript modules were designed for the web, it's not immediately clear how a bare module specifier should be treated. Currently there is a draft proposal by the W3C community for &lt;a href="https://wicg.github.io/import-maps"&gt;"import maps"&lt;/a&gt;. So far, some browsers and other runtimes have already added support for import maps, including &lt;a href="https://deno.land/manual/linking_to_external_code/import_maps"&gt;Deno&lt;/a&gt;. An import map could look like this:&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight json"&gt;&lt;code&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+   &lt;/span&gt;&lt;span class="nl"&gt;"imports"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+      &lt;/span&gt;&lt;span class="nl"&gt;"uuid"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"https://www.skypack.dev/view/uuid"&lt;/span&gt;&lt;span class="w"&gt;
+   &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;Using this construct, the &lt;code&gt;link&lt;/code&gt; function that is used by &lt;code&gt;SourceTextModule&lt;/code&gt; to resolve additional imports could be updated to look up entries in the map:&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;imports&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;importMap&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;url&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt;
+  &lt;span class="nx"&gt;specifier&lt;/span&gt; &lt;span class="k"&gt;in&lt;/span&gt; &lt;span class="nx"&gt;imports&lt;/span&gt;
+    &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="nx"&gt;imports&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;specifier&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+    &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;URL&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;specifier&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;referencingModule&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;identifier&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;toString&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+&lt;h2&gt;
+  &lt;a href="#importing-core-node-modules"&gt;
+  &lt;/a&gt;
+  Importing core node modules
+&lt;/h2&gt;
+
+&lt;p&gt;As we have seen, some modules may depend on certain global variables while others may use bare module specifiers. But what if a module wants to import a core node module like &lt;code&gt;fs&lt;/code&gt;?&lt;/p&gt;
+
+&lt;p&gt;We can further enhance the &lt;code&gt;link&lt;/code&gt; function to detect wether an import is for a Node.js builtin module. One possibility would be to look up the specifier in the list of &lt;a href="https://nodejs.org/api/module.html#module_module_builtinmodules"&gt;builtin module names&lt;/a&gt;.&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;builtinModules&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;module&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="c1"&gt;// Is the specifier, e.g. "fs", for a builtin module?&lt;/span&gt;
+&lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;builtinModules&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;includes&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;specifier&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="c1"&gt;// Create a vm.Module for a Node.js builtin module&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt; 
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;Another option would be to use the import map and the convention that every builtin module can be imported with the &lt;code&gt;node:&lt;/code&gt; URL protocol. In fact, Node.js ECMAScript modules already support &lt;code&gt;node:&lt;/code&gt;, &lt;code&gt;file:&lt;/code&gt; and &lt;code&gt;data:&lt;/code&gt; &lt;a href="https://nodejs.org/api/esm.html#esm_urls"&gt;protocols&lt;/a&gt; for their import statements (and we just added support for &lt;code&gt;http/s:&lt;/code&gt;).&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// An import map with an entry for "fs"&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;imports&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="na"&gt;imports&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;fs&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;node:fs/promises&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;};&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;url&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt;
+  &lt;span class="nx"&gt;specifier&lt;/span&gt; &lt;span class="k"&gt;in&lt;/span&gt; &lt;span class="nx"&gt;imports&lt;/span&gt;
+    &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;URL&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;imports&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;specifier&lt;/span&gt;&lt;span class="p"&gt;])&lt;/span&gt;
+    &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;URL&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;specifier&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+
+&lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
+  &lt;span class="nx"&gt;url&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;protocol&lt;/span&gt; &lt;span class="o"&gt;===&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;http:&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt; &lt;span class="o"&gt;||&lt;/span&gt;
+  &lt;span class="nx"&gt;url&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;protocol&lt;/span&gt; &lt;span class="o"&gt;===&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;https:&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="c1"&gt;// Download code and create a vm.SourceTextModule&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;else&lt;/span&gt; &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;url&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;protocol&lt;/span&gt; &lt;span class="o"&gt;===&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;node:&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="c1"&gt;// Create a vm.Module for a Node.js builtin module.&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;else&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="c1"&gt;// Other possible schemes could be file: and data:&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+&lt;h3&gt;
+  &lt;a href="#creating-a-vmmodule-for-a-nodejs-builtin"&gt;
+  &lt;/a&gt;
+  Creating a vm.Module for a Node.js builtin
+&lt;/h3&gt;
+
+&lt;p&gt;So how do we create a &lt;code&gt;vm.Module&lt;/code&gt; for a Node.js builtin module? If we used another SourceTextModule with an &lt;code&gt;export&lt;/code&gt; statement for, e.g. &lt;code&gt;fs&lt;/code&gt;, it would lead to an endlessly recursive loop of calling the &lt;code&gt;link&lt;/code&gt; function over and over again. &lt;/p&gt;
+
+&lt;p&gt;On the other hand, if we use a SourceTextModule with the code &lt;code&gt;export default fs&lt;/code&gt;, where &lt;code&gt;fs&lt;/code&gt; is a global variable on the context, the exported module would be wrapped inside an object with the &lt;code&gt;default&lt;/code&gt; property.&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// This leads to an endless loop, calling the "link" function.&lt;/span&gt;
+&lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;vm&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;SourceTextModule&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`export * from 'fs';`&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="c1"&gt;// This ends up as an object like { default: {...} }&lt;/span&gt;
+&lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;vm&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;SourceTextModule&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`export default fs;`&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="na"&gt;context&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;fs&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="k"&gt;import&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;fs&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;});&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;However, we can use &lt;a href="https://nodejs.org/api/vm.html#vm_class_vm_syntheticmodule"&gt;vm.SyntheticModule&lt;/a&gt;. This implementation of &lt;code&gt;vm.Module&lt;/code&gt; allows us to programatically construct a module without a source code string.&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// Actually import the Node.js builtin module&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;imported&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="k"&gt;import&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;identifier&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;exportNames&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nb"&gt;Object&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;keys&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;imported&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="c1"&gt;// Construct a new module from the actual import&lt;/span&gt;
+&lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;vm&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;SyntheticModule&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+  &lt;span class="nx"&gt;exportNames&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="k"&gt;for&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;name&lt;/span&gt; &lt;span class="k"&gt;of&lt;/span&gt; &lt;span class="nx"&gt;exportNames&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;setExport&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;name&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;imported&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;name&lt;/span&gt;&lt;span class="p"&gt;]);&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+  &lt;span class="p"&gt;},&lt;/span&gt;
+  &lt;span class="p"&gt;{&lt;/span&gt; 
+    &lt;span class="nx"&gt;identifier&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="na"&gt;context&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;referencingModule&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;context&lt;/span&gt;
+  &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+&lt;h2&gt;
+  &lt;a href="#conclusion"&gt;
+  &lt;/a&gt;
+  Conclusion
+&lt;/h2&gt;
+
+&lt;p&gt;The (still experimental) APIs of Node.js allow us to implement a solution for dynamically importing code from HTTP URLs "in user space". While ECMAScript modules and &lt;code&gt;vm.Module&lt;/code&gt; were used in this blog post, &lt;code&gt;vm.Script&lt;/code&gt; could be used to implement a similar solution for CommonJS modules.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Loaders&lt;/strong&gt; are another way to achieve some of the same goals. They provide a simpler API and enhance the behaviour of the native &lt;code&gt;import&lt;/code&gt; statements. On the other hand, they are less flexible and they're possibly &lt;em&gt;even more experimental&lt;/em&gt; than &lt;code&gt;vm.Module&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;There are many details and potential pitfalls to safely downloading and caching remotely hosted code that were not covered. Not to even mention the &lt;strong&gt;security implications&lt;/strong&gt; of running arbitrary code. A more "production ready" (and potentially safer) runtime that uses HTTP imports is already available in &lt;strong&gt;Deno&lt;/strong&gt;.&lt;/p&gt;
+
+&lt;p&gt;That said, it's interesting to see what can be achieved with the experimental APIs and there may be certain use cases where the risks to use them are calculable enough.&lt;/p&gt;
+&lt;h2&gt;
+  &lt;a href="#complete-example"&gt;
+  &lt;/a&gt;
+  Complete example
+&lt;/h2&gt;
+
+&lt;p&gt;Check out a complete working example on Code Sandbox:&lt;/p&gt;
+
+&lt;p&gt;&lt;iframe src="https://codesandbox.io/embed/react-micro-frontendsdynamic-import-uols2?module=/index&amp;amp;view=editor"&gt;
+&lt;/iframe&gt;
+&lt;/p&gt;
+
+&lt;p&gt;Or find the code in this repository:&lt;/p&gt;
+
+
+&lt;div class="ltag-github-readme-tag"&gt;
+  &lt;div class="readme-overview"&gt;
+    &lt;h2&gt;
+      &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--i3JOwpme--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/github-logo-ba8488d21cd8ee1fee097b8410db9deaa41d0ca30b004c0c63de0a479114156f.svg" alt="GitHub logo"&gt;
+      &lt;a href="https://github.com/mfellner"&gt;
+        mfellner
+      &lt;/a&gt; / &lt;a href="https://github.com/mfellner/react-micro-frontends"&gt;
+        react-micro-frontends
+      &lt;/a&gt;
+    &lt;/h2&gt;
+    &lt;h3&gt;
+      Examples for React micro frontends
+    &lt;/h3&gt;
+  &lt;/div&gt;
+&lt;/div&gt;
+
+
+
+
+
+
+&lt;ol&gt;
+
+&lt;li id="fn1"&gt;
+&lt;p&gt;Skypack is nice because it offers ESM versions of most npm packages. &lt;a href="#fnref1"&gt;↩&lt;/a&gt;&lt;/p&gt;
+&lt;/li&gt;
+
+&lt;/ol&gt;
+
+</description>
+      <category>node</category>
+      <category>deno</category>
+    </item>
+    <item>
       <title>Building A New Programming Language In Ruby: The Interpreter</title>
       <author>Honeybadger Staff</author>
       <pubDate>Tue, 20 Jul 2021 22:18:44 +0000</pubDate>
@@ -517,6 +913,32 @@ end
 
 </description>
       <category>ruby</category>
+    </item>
+    <item>
+      <title>Introduction to software testing in .NET</title>
+      <author>Chris Noring</author>
+      <pubDate>Tue, 20 Jul 2021 20:26:07 +0000</pubDate>
+      <link>https://dev.to/azure/introduction-to-software-testing-in-net-52gb</link>
+      <guid>https://dev.to/azure/introduction-to-software-testing-in-net-52gb</guid>
+      <description>&lt;p&gt;Testing is crucial part of software development. We want to make sure the software we ship is as tested as much as possible. However, there are many ways to test, and the scenario and the application is usually what determines what the best approach is. Upskill your testing knowledge and get a good high-level view of all types of testing that exist, so you are better informed how to approach testing for your next program - cause you do test right?&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#this-module-covers"&gt;
+  &lt;/a&gt;
+  This module covers:
+&lt;/h2&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Evaluate if testing is right for your scenarios.&lt;/li&gt;
+&lt;li&gt;Describe how different types of testing, the testing - pyramid, and different testing schools of thought answer the demands of modern development.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Check it out: &lt;a href="https://docs.microsoft.com/en-us/learn/modules/visual-studio-test-concepts/"&gt;.NET testing&lt;/a&gt;&lt;/p&gt;
+
+</description>
+      <category>dotnet</category>
+      <category>test</category>
+      <category>tutorial</category>
     </item>
     <item>
       <title>5 tools for Designing,  Developing, and Testing Accessibility </title>
@@ -1368,6 +1790,419 @@ end
       <category>metrics</category>
     </item>
     <item>
+      <title>Currying React components</title>
+      <author>yossarian</author>
+      <pubDate>Tue, 20 Jul 2021 18:36:37 +0000</pubDate>
+      <link>https://dev.to/captainyossarian/currying-react-components-13h0</link>
+      <guid>https://dev.to/captainyossarian/currying-react-components-13h0</guid>
+      <description>&lt;p&gt;&lt;em&gt;Cover image made by Victoria Smith&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;First of all, let me remind you what &lt;code&gt;currying&lt;/code&gt; actually means.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;add&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;x&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;number&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;y&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;number&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;x&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="nx"&gt;y&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;result&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;add&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;4&lt;/span&gt;&lt;span class="p"&gt;)(&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;// 6&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;This is all what you need to know for this moment.&lt;br&gt;
+Let's get straight to the point.&lt;/p&gt;
+
+&lt;p&gt;Consider this example:&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="nx"&gt;React&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;FC&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;react&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="cm"&gt;/**
+ * Converts 
+ * ['hello', 'holla', 'hi']
+ * into
+ * {hello: 0, holla: 1, hi: 2}
+ * 
+ */&lt;/span&gt;
+&lt;span class="kd"&gt;type&lt;/span&gt; &lt;span class="nx"&gt;ToRecord&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;
+    &lt;span class="nx"&gt;T&lt;/span&gt; &lt;span class="kd"&gt;extends&lt;/span&gt; &lt;span class="kr"&gt;string&lt;/span&gt;&lt;span class="p"&gt;[],&lt;/span&gt;
+    &lt;span class="nx"&gt;Cache&lt;/span&gt; &lt;span class="kd"&gt;extends&lt;/span&gt; &lt;span class="nb"&gt;Record&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="kr"&gt;string&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="kr"&gt;number&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{}&lt;/span&gt;
+    &lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt;
+    &lt;span class="nx"&gt;T&lt;/span&gt; &lt;span class="kd"&gt;extends&lt;/span&gt; &lt;span class="p"&gt;[]&lt;/span&gt;
+    &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="nx"&gt;Cache&lt;/span&gt;
+    &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;T&lt;/span&gt; &lt;span class="kd"&gt;extends&lt;/span&gt; &lt;span class="p"&gt;[...&lt;/span&gt;&lt;span class="nx"&gt;infer&lt;/span&gt; &lt;span class="nx"&gt;Head&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;infer&lt;/span&gt; &lt;span class="nx"&gt;Last&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+    &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="nx"&gt;Last&lt;/span&gt; &lt;span class="kd"&gt;extends&lt;/span&gt; &lt;span class="kr"&gt;string&lt;/span&gt;
+    &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="nx"&gt;Head&lt;/span&gt; &lt;span class="kd"&gt;extends&lt;/span&gt; &lt;span class="kr"&gt;string&lt;/span&gt;&lt;span class="p"&gt;[]&lt;/span&gt;
+    &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="nx"&gt;ToRecord&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;
+        &lt;span class="nx"&gt;Head&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;Cache&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&lt;/span&gt; &lt;span class="nb"&gt;Record&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Last&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;Head&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;length&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+    &lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+    &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;never&lt;/span&gt;
+    &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;never&lt;/span&gt;
+    &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;never&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;Curry&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;
+    &lt;span class="nx"&gt;Elem&lt;/span&gt; &lt;span class="kd"&gt;extends&lt;/span&gt; &lt;span class="kr"&gt;string&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="nx"&gt;Data&lt;/span&gt; &lt;span class="kd"&gt;extends&lt;/span&gt; &lt;span class="nx"&gt;Elem&lt;/span&gt;&lt;span class="p"&gt;[]&lt;/span&gt;
+&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;[...&lt;/span&gt;&lt;span class="nx"&gt;Data&lt;/span&gt;&lt;span class="p"&gt;]):&lt;/span&gt; &lt;span class="nx"&gt;FC&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;ToRecord&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Data&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt;
+    &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;props&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt;
+        &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;div&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nb"&gt;Object&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;keys&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;props&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;map&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;elem&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;p&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;elem&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/p&amp;gt;&lt;/span&gt;&lt;span class="se"&gt;)&lt;/span&gt;&lt;span class="sr"&gt;}&amp;lt;/&lt;/span&gt;&lt;span class="nx"&gt;div&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+
+&lt;span class="c1"&gt;// FC&amp;lt;{ greeting: string; }&amp;gt;&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;Result&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;Curry&lt;/span&gt;&lt;span class="p"&gt;([&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;hello&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;holla&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;hi&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;])&lt;/span&gt; 
+
+&lt;span class="c1"&gt;// hello - is a required property&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;jsx&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Result&lt;/span&gt; &lt;span class="nx"&gt;hello&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="nx"&gt;holla&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="nx"&gt;hi&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="sr"&gt;/&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;Thanks to &lt;code&gt;Curry&lt;/code&gt; function, we can apply some constraints on our &lt;code&gt;Result&lt;/code&gt; component. If you are curious how to infer &lt;code&gt;['hello', 'holla', 'hi']&lt;/code&gt; tuple, you might be interested in my previous article.&lt;/p&gt;
+
+
+&lt;div class="ltag__link"&gt;
+  &lt;a href="/captainyossarian" class="ltag__link__link"&gt;
+    &lt;div class="ltag__link__pic"&gt;
+      &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--XzeE7GaW--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://res.cloudinary.com/practicaldev/image/fetch/s--E_L3tVBx--/c_fill%2Cf_auto%2Cfl_progressive%2Ch_150%2Cq_auto%2Cw_150/https://dev-to-uploads.s3.amazonaws.com/uploads/user/profile_image/453148/3032da1f-b992-4f6d-b723-3f5681575058.png" alt="captainyossarian"&gt;
+    &lt;/div&gt;
+  &lt;/a&gt;
+  &lt;a href="/captainyossarian/typescript-type-inference-on-function-arguments-2n93" class="ltag__link__link"&gt;
+    &lt;div class="ltag__link__content"&gt;
+      &lt;h2&gt;Typescript: Type Inference on function arguments&lt;/h2&gt;
+      &lt;h3&gt;yossarian ・ Jul 18 ・ 4 min read&lt;/h3&gt;
+      &lt;div class="ltag__link__taglist"&gt;
+        &lt;span class="ltag__link__tag"&gt;#typescript&lt;/span&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/a&gt;
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;code&gt;ToRecord&lt;/code&gt; recursively iterates through each element in the tuple and accumulates each &lt;code&gt;key/value&lt;/code&gt; in the &lt;code&gt;Cache&lt;/code&gt; record.&lt;br&gt;
+Please don't focus too much on this utility type.&lt;/p&gt;
+
+&lt;p&gt;It looks like we can do more. What about component factory?&lt;/p&gt;
+
+&lt;p&gt;This example I found here&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="ltag__stackexchange--container"&gt;
+  &lt;div class="ltag__stackexchange--title-container"&gt;
+    
+      &lt;div class="ltag__stackexchange--title"&gt;
+        &lt;h1&gt;
+          &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--7Gn-iPj_--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/stackoverflow-logo-b42691ae545e4810b105ee957979a853a696085e67e43ee14c5699cf3e890fb4.svg" alt=""&gt;
+            &lt;a href="https://stackoverflow.com/questions/68397897/typing-a-react-component-factory-function" rel="noopener noreferrer"&gt;
+               Typing a React Component Factory Function
+            &lt;/a&gt;
+        &lt;/h1&gt;
+        &lt;div class="ltag__stackexchange--post-metadata"&gt;
+          &lt;span&gt;Jul 15 '21&lt;/span&gt;
+            &lt;span&gt;Comments: 1&lt;/span&gt;
+            &lt;span&gt;Answers: 1&lt;/span&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+      &lt;a class="ltag__stackexchange--score-container" href="https://stackoverflow.com/questions/68397897/typing-a-react-component-factory-function" rel="noopener noreferrer"&gt;
+        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Y9mJpuJP--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/stackexchange-arrow-up-eff2e2849e67d156181d258e38802c0b57fa011f74164a7f97675ca3b6ab756b.svg" alt=""&gt;
+        &lt;div class="ltag__stackexchange--score-number"&gt;
+          3
+        &lt;/div&gt;
+        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--wif5Zq3z--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/stackexchange-arrow-down-4349fac0dd932d284fab7e4dd9846f19a3710558efde0d2dfd05897f3eeb9aba.svg" alt=""&gt;
+      &lt;/a&gt;
+    
+  &lt;/div&gt;
+  &lt;div class="ltag__stackexchange--body"&gt;
+    
+&lt;p&gt;Given the type&lt;/p&gt;
+&lt;pre class="lang-js prettyprint-override"&gt;&lt;code&gt;type EnumerableComponentFactory = &amp;lt;C, I&amp;gt;(config: {
+  Container: React.ComponentType&amp;lt;C&amp;amp;gt
+  Item: React.ComponentType&amp;lt;I&amp;gt;;
+}) =&amp;gt; React.FC&amp;lt;{ items: I[] }&amp;gt;;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;with the following implementation&lt;/p&gt;
+&lt;pre class="lang-js prettyprint-override"&gt;&lt;code&gt;const Enumerable: EnumerableComponentFactory =
+  ({ Container, Item }) =&amp;gt;
+  ({ items }) =&amp;gt;
+    (
+      &amp;lt;Container&amp;gt;
+        {items.map((props, index) =&amp;gt; (
+          &amp;lt;Item key={index} {...props} /&amp;gt;
+        ))}
+      &amp;lt;/Container&amp;gt;
+    );
+&lt;/code&gt;&lt;/pre&gt;
+&lt;p&gt;and…&lt;/p&gt;
+    
+  &lt;/div&gt;
+  &lt;div class="ltag__stackexchange--btn--container"&gt;
+    
+      &lt;a href="https://stackoverflow.com/questions/68397897/typing-a-react-component-factory-function" rel="noopener noreferrer"&gt;Open Full Question&lt;/a&gt;
+    
+  &lt;/div&gt;
+&lt;/div&gt;
+&lt;br&gt;
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="nx"&gt;React&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;FC&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;ComponentType&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;react&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="kd"&gt;type&lt;/span&gt; &lt;span class="nx"&gt;EnumerableComponentFactory&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;I&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;config&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="nl"&gt;Container&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;FC&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;children&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;JSX&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Element&lt;/span&gt;&lt;span class="p"&gt;[]&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+    &lt;span class="nl"&gt;Item&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;ComponentType&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;I&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;FC&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;items&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;I&lt;/span&gt;&lt;span class="p"&gt;[]&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;Enumerable&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;EnumerableComponentFactory&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt;
+    &lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="nx"&gt;Container&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;Item&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt;
+        &lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="nx"&gt;items&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt;
+        &lt;span class="p"&gt;(&lt;/span&gt;
+            &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Container&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+                &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;items&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;map&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;props&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;index&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
+                    &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Item&lt;/span&gt; &lt;span class="nx"&gt;key&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;index&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="p"&gt;{...&lt;/span&gt;&lt;span class="nx"&gt;props&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="sr"&gt;/&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;                &lt;span class="p"&gt;))}&lt;/span&gt;
+            &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/Container&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;        &lt;span class="p"&gt;);&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;UnorderedList&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;Enumerable&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt;
+    &lt;span class="na"&gt;Container&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="nx"&gt;children&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;ul&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;children&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/ul&amp;gt;&lt;/span&gt;&lt;span class="err"&gt;,
+&lt;/span&gt;    &lt;span class="na"&gt;Item&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="nx"&gt;title&lt;/span&gt; &lt;span class="p"&gt;}:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;title&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;string&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;li&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;title&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/li&amp;gt;&lt;/span&gt;&lt;span class="err"&gt;,
+&lt;/span&gt;&lt;span class="p"&gt;});&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;result&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;UnorderedList&lt;/span&gt; &lt;span class="nx"&gt;items&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{[{&lt;/span&gt; &lt;span class="na"&gt;title&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Something&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt; &lt;span class="p"&gt;}]}&lt;/span&gt; &lt;span class="sr"&gt;/&amp;gt;&lt;/span&gt;&lt;span class="err"&gt;;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;It took me a bit to understand what's going on here.&lt;br&gt;
+So, I hope you understood the main idea. You have a function which returns a react functional components &lt;code&gt;FC&lt;/code&gt;. First function receives some arguments. &lt;code&gt;Props&lt;/code&gt; of returned &lt;code&gt;FC&lt;/code&gt; depends on these arguments.&lt;/p&gt;
+
+&lt;p&gt;How about creating Accordeon component and writing some crazy an unreadable typings?&lt;/p&gt;
+
+&lt;p&gt;It should have a children with &lt;code&gt;isOpen&lt;/code&gt; prop. Each child is also a React component that needs unique props from the parent that other children may not use. &lt;code&gt;isOpen&lt;/code&gt; property is required for each component.&lt;br&gt;
+I know, it hards to understand my requirements :D.&lt;/p&gt;
+
+&lt;p&gt;Here you have expected behaviour:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="nx"&gt;React&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;FC&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;react&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="kd"&gt;type&lt;/span&gt; &lt;span class="nx"&gt;BaseProps&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="na"&gt;isOpen&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;boolean&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;};&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;WithTitle&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;FC&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;BaseProps&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;title&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;string&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt;
+    &lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="nx"&gt;isOpen&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;title&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;p&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;title&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/p&amp;gt;&lt;/span&gt;&lt;span class="err"&gt;;
+&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;WithCount&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;FC&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;BaseProps&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;count&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;number&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt;
+    &lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="nx"&gt;isOpen&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;count&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;p&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;count&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/p&amp;gt;&lt;/span&gt;&lt;span class="err"&gt;;
+&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;Container&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;Curry&lt;/span&gt;&lt;span class="p"&gt;([&lt;/span&gt;&lt;span class="nx"&gt;WithCount&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;WithTitle&lt;/span&gt;&lt;span class="p"&gt;]);&lt;/span&gt;
+
+&lt;span class="cm"&gt;/**
+ * Ok
+ */&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;result&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Container&lt;/span&gt; &lt;span class="nx"&gt;title&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;hello&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="nx"&gt;count&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="mi"&gt;42&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="sr"&gt;/&amp;gt;; /&lt;/span&gt;&lt;span class="o"&gt;/&lt;/span&gt; &lt;span class="nx"&gt;ok&lt;/span&gt;
+
+&lt;span class="cm"&gt;/**
+ * Error
+ */&lt;/span&gt;
+
+&lt;span class="c1"&gt;// because [count] is string instead of number&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;result_&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Container&lt;/span&gt; &lt;span class="nx"&gt;title&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;hello&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="nx"&gt;count&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;42&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="sr"&gt;/&amp;gt;&lt;/span&gt;&lt;span class="err"&gt;;
+&lt;/span&gt;
+&lt;span class="c1"&gt;// because second component does not expect [isOpen] property&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;Container_&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;Curry&lt;/span&gt;&lt;span class="p"&gt;([&lt;/span&gt;&lt;span class="nx"&gt;WithCount&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="kc"&gt;null&lt;/span&gt;&lt;span class="p"&gt;]);&lt;/span&gt;
+
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;code&gt;WithCount&lt;/code&gt; and &lt;code&gt;WithTitle&lt;/code&gt; expects &lt;code&gt;{title: string}&lt;/code&gt; and &lt;code&gt;{count: number}&lt;/code&gt; accordingly, hence &lt;code&gt;Container&lt;/code&gt; should expect &lt;code&gt;{title: string, count: number}&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;Let's start with some utility types.&lt;/p&gt;
+
+&lt;p&gt;First of all, we need to be able to infer props from &lt;code&gt;FC&amp;lt;Props&amp;gt;&lt;/code&gt;&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="kd"&gt;type&lt;/span&gt; &lt;span class="nx"&gt;ExtractProps&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;F&lt;/span&gt; &lt;span class="kd"&gt;extends&lt;/span&gt; &lt;span class="nx"&gt;FC&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="kr"&gt;any&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;F&lt;/span&gt; &lt;span class="kd"&gt;extends&lt;/span&gt; &lt;span class="nx"&gt;FC&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;infer&lt;/span&gt; &lt;span class="nx"&gt;Props&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+    &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="nx"&gt;Props&lt;/span&gt;
+    &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;never&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;type&lt;/span&gt; &lt;span class="nx"&gt;Test&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;ExtractProps&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;FC&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;age&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;number&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&amp;gt;&lt;/span&gt; &lt;span class="c1"&gt;// { age: number }&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Then, we need to check if every component has expected props.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="kd"&gt;type&lt;/span&gt; &lt;span class="nx"&gt;IsValid&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;
+    &lt;span class="nx"&gt;Components&lt;/span&gt; &lt;span class="kd"&gt;extends&lt;/span&gt; &lt;span class="nb"&gt;Array&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;FC&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;BaseProps&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&amp;gt;&lt;/span&gt;
+    &lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt;
+    &lt;span class="nx"&gt;ExtractProps&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="p"&gt;[...&lt;/span&gt;&lt;span class="nx"&gt;Components&lt;/span&gt;&lt;span class="p"&gt;][&lt;/span&gt;&lt;span class="kr"&gt;number&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="kd"&gt;extends&lt;/span&gt; &lt;span class="nx"&gt;BaseProps&lt;/span&gt;
+    &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="nx"&gt;Components&lt;/span&gt;
+    &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;never&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;type&lt;/span&gt; &lt;span class="nx"&gt;Test1&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;IsValid&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;FC&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;unknown&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="c1"&gt;// never&lt;/span&gt;
+    &lt;span class="kd"&gt;type&lt;/span&gt; &lt;span class="nx"&gt;Test2&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;IsValid&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;FC&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;BaseProps&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="c1"&gt;//[React.FC&amp;lt;BaseProps&amp;gt;]&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Now, we need to extract all properties from all passed components, merge them and omit &lt;code&gt;isOpen&lt;/code&gt;, because our &lt;code&gt;Result&lt;/code&gt; should not accept it.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// credits goes to https://stackoverflow.com/a/50375286&lt;/span&gt;
+&lt;span class="kd"&gt;type&lt;/span&gt; &lt;span class="nx"&gt;UnionToIntersection&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;U&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt;
+    &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;U&lt;/span&gt; &lt;span class="kd"&gt;extends&lt;/span&gt; &lt;span class="kr"&gt;any&lt;/span&gt; &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;k&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;U&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="k"&gt;void&lt;/span&gt; &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;never&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="kd"&gt;extends&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
+        &lt;span class="nx"&gt;k&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;infer&lt;/span&gt; &lt;span class="nx"&gt;I&lt;/span&gt;
+    &lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="k"&gt;void&lt;/span&gt;
+    &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="nx"&gt;I&lt;/span&gt;
+    &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;never&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="kd"&gt;type&lt;/span&gt; &lt;span class="nx"&gt;GetRequired&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;T&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;UnionToIntersection&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;
+    &lt;span class="c1"&gt;// make sure we have a deal with array&lt;/span&gt;
+    &lt;span class="nx"&gt;T&lt;/span&gt; &lt;span class="kd"&gt;extends&lt;/span&gt; &lt;span class="nb"&gt;Array&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;infer&lt;/span&gt; &lt;span class="nx"&gt;F&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+    &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="c1"&gt;// make sure that element in the array extends FC&lt;/span&gt;
+    &lt;span class="nx"&gt;F&lt;/span&gt; &lt;span class="kd"&gt;extends&lt;/span&gt; &lt;span class="nx"&gt;FC&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;infer&lt;/span&gt; &lt;span class="nx"&gt;Props&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+    &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="c1"&gt;// if Props extends BaseProps&lt;/span&gt;
+    &lt;span class="nx"&gt;Props&lt;/span&gt; &lt;span class="kd"&gt;extends&lt;/span&gt; &lt;span class="nx"&gt;BaseProps&lt;/span&gt;
+    &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="c1"&gt;// Omit isOpen property, since it is not needed&lt;/span&gt;
+    &lt;span class="nx"&gt;Omit&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Props&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;isOpen&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+    &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;never&lt;/span&gt;
+    &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;never&lt;/span&gt;
+    &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;never&lt;/span&gt;
+&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+&lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;type&lt;/span&gt; &lt;span class="nx"&gt;Test&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="kr"&gt;keyof&lt;/span&gt; &lt;span class="nx"&gt;GetRequired&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;
+        &lt;span class="nx"&gt;FC&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;BaseProps&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;title&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;string&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+        &lt;span class="nx"&gt;FC&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;BaseProps&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;count&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;number&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+    &lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="c1"&gt;// "title" | "count"&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We can put it all other.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="nx"&gt;React&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;FC&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;react&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="kd"&gt;type&lt;/span&gt; &lt;span class="nx"&gt;BaseProps&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="na"&gt;isOpen&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;boolean&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;};&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;WithTitle&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;FC&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;BaseProps&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;title&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;string&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt;
+    &lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="nx"&gt;isOpen&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;title&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;p&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;title&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/p&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;WithCount&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;FC&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;BaseProps&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;count&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;number&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt;
+    &lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="nx"&gt;isOpen&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;count&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;p&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;count&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/p&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;
+&lt;span class="c1"&gt;// credits goes to https://stackoverflow.com/a/50375286&lt;/span&gt;
+&lt;span class="kd"&gt;type&lt;/span&gt; &lt;span class="nx"&gt;UnionToIntersection&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;U&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt;
+    &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;U&lt;/span&gt; &lt;span class="kd"&gt;extends&lt;/span&gt; &lt;span class="kr"&gt;any&lt;/span&gt; &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;k&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;U&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="k"&gt;void&lt;/span&gt; &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;never&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="kd"&gt;extends&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
+        &lt;span class="nx"&gt;k&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;infer&lt;/span&gt; &lt;span class="nx"&gt;I&lt;/span&gt;
+    &lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="k"&gt;void&lt;/span&gt;
+    &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="nx"&gt;I&lt;/span&gt;
+    &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;never&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="kd"&gt;type&lt;/span&gt; &lt;span class="nx"&gt;GetRequired&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;T&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;UnionToIntersection&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;
+    &lt;span class="c1"&gt;// make sure we have a deal with array&lt;/span&gt;
+    &lt;span class="nx"&gt;T&lt;/span&gt; &lt;span class="kd"&gt;extends&lt;/span&gt; &lt;span class="nb"&gt;Array&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;infer&lt;/span&gt; &lt;span class="nx"&gt;F&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+    &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="c1"&gt;// make sure that element in the array extends FC&lt;/span&gt;
+    &lt;span class="nx"&gt;F&lt;/span&gt; &lt;span class="kd"&gt;extends&lt;/span&gt; &lt;span class="nx"&gt;FC&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;infer&lt;/span&gt; &lt;span class="nx"&gt;Props&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+    &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="c1"&gt;// if Props extends BaseProps&lt;/span&gt;
+    &lt;span class="nx"&gt;Props&lt;/span&gt; &lt;span class="kd"&gt;extends&lt;/span&gt; &lt;span class="nx"&gt;BaseProps&lt;/span&gt;
+    &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="c1"&gt;// Omit isOpen property, since it is not needed&lt;/span&gt;
+    &lt;span class="nx"&gt;Omit&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Props&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;isOpen&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+    &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;never&lt;/span&gt;
+    &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;never&lt;/span&gt;
+    &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;never&lt;/span&gt;
+&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+&lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;type&lt;/span&gt; &lt;span class="nx"&gt;Test&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="kr"&gt;keyof&lt;/span&gt; &lt;span class="nx"&gt;GetRequired&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;
+        &lt;span class="nx"&gt;FC&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;BaseProps&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;title&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;string&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+        &lt;span class="nx"&gt;FC&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;BaseProps&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;count&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;number&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+    &lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="c1"&gt;// "title" | "count"&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="kd"&gt;type&lt;/span&gt; &lt;span class="nx"&gt;ExtractProps&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;F&lt;/span&gt; &lt;span class="kd"&gt;extends&lt;/span&gt; &lt;span class="nx"&gt;FC&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="kr"&gt;any&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;F&lt;/span&gt; &lt;span class="kd"&gt;extends&lt;/span&gt; &lt;span class="nx"&gt;FC&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;infer&lt;/span&gt; &lt;span class="nx"&gt;Props&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+    &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="nx"&gt;Props&lt;/span&gt;
+    &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;never&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;type&lt;/span&gt; &lt;span class="nx"&gt;Test&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;ExtractProps&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;FC&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;age&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;number&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&amp;gt;&lt;/span&gt; &lt;span class="c1"&gt;// { age: number }&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="kd"&gt;type&lt;/span&gt; &lt;span class="nx"&gt;IsValid&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;
+&lt;span class="nx"&gt;Components&lt;/span&gt; &lt;span class="kd"&gt;extends&lt;/span&gt; &lt;span class="nb"&gt;Array&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;FC&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;BaseProps&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&amp;gt;&lt;/span&gt;
+&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt;
+    &lt;span class="nx"&gt;ExtractProps&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="p"&gt;[...&lt;/span&gt;&lt;span class="nx"&gt;Components&lt;/span&gt;&lt;span class="p"&gt;][&lt;/span&gt;&lt;span class="kr"&gt;number&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="kd"&gt;extends&lt;/span&gt; &lt;span class="nx"&gt;BaseProps&lt;/span&gt; 
+    &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="nx"&gt;Components&lt;/span&gt; 
+    &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;never&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="c1"&gt;// never&lt;/span&gt;
+    &lt;span class="kd"&gt;type&lt;/span&gt; &lt;span class="nx"&gt;Test1&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;IsValid&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;FC&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;unknown&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; 
+    &lt;span class="c1"&gt;// [React.FC&amp;lt;BaseProps&amp;gt;]&lt;/span&gt;
+    &lt;span class="kd"&gt;type&lt;/span&gt; &lt;span class="nx"&gt;Test2&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;IsValid&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;FC&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;BaseProps&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; 
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;Curry&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt;
+    &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Comps&lt;/span&gt; &lt;span class="kd"&gt;extends&lt;/span&gt; &lt;span class="nx"&gt;FC&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="kr"&gt;any&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;[],&lt;/span&gt; &lt;span class="nx"&gt;Valid&lt;/span&gt; &lt;span class="kd"&gt;extends&lt;/span&gt; &lt;span class="nx"&gt;IsValid&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Comps&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+        &lt;span class="cm"&gt;/**
+         * If each Component expects BaseProps,
+         * sections argument will evaluate to [...Comps] &amp;amp; [...Comps],
+         * otherwise to [...Comps] &amp;amp; never === never
+         */&lt;/span&gt;
+        &lt;span class="nx"&gt;sections&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;[...&lt;/span&gt;&lt;span class="nx"&gt;Comps&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&lt;/span&gt; &lt;span class="nx"&gt;Valid&lt;/span&gt;
+    &lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt;
+        &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;props&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;GetRequired&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="p"&gt;[...&lt;/span&gt;&lt;span class="nx"&gt;Comps&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt;
+        &lt;span class="p"&gt;(&lt;/span&gt;
+            &lt;span class="o"&gt;&amp;lt;&amp;gt;&lt;/span&gt;
+                &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;sections&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;map&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="na"&gt;Comp&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;FC&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;BaseProps&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
+                    &lt;span class="c1"&gt;// isOpen is required&lt;/span&gt;
+                    &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Comp&lt;/span&gt; &lt;span class="nx"&gt;isOpen&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="p"&gt;{...&lt;/span&gt;&lt;span class="nx"&gt;props&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="sr"&gt;/&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;                &lt;span class="p"&gt;))}&lt;/span&gt;
+            &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;        &lt;span class="p"&gt;);&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;Container&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;Curry&lt;/span&gt;&lt;span class="p"&gt;([&lt;/span&gt;&lt;span class="nx"&gt;WithCount&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;WithTitle&lt;/span&gt;&lt;span class="p"&gt;]);&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;result&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Container&lt;/span&gt; &lt;span class="nx"&gt;title&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;hello&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="nx"&gt;count&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="mi"&gt;42&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="sr"&gt;/&amp;gt;; /&lt;/span&gt;&lt;span class="o"&gt;/&lt;/span&gt; &lt;span class="nx"&gt;ok&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;result_&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Container&lt;/span&gt; &lt;span class="nx"&gt;title&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;hello&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="nx"&gt;count&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;42&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="sr"&gt;/&amp;gt;; /&lt;/span&gt;&lt;span class="o"&gt;/&lt;/span&gt; &lt;span class="nx"&gt;expected&lt;/span&gt; &lt;span class="nx"&gt;error&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;Container_&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;Curry&lt;/span&gt;&lt;span class="p"&gt;([&lt;/span&gt;&lt;span class="nx"&gt;WithCount&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="kc"&gt;null&lt;/span&gt;&lt;span class="p"&gt;]);&lt;/span&gt; &lt;span class="c1"&gt;// expected error&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;P.S. If you have some interesting examples of composing React components, please let me know.&lt;/p&gt;
+
+&lt;p&gt;The end.&lt;/p&gt;
+
+</description>
+      <category>typescript</category>
+      <category>react</category>
+      <category>javascript</category>
+      <category>functional</category>
+    </item>
+    <item>
       <title>Laravel 8.0 CRUD Tutorial Using Mysql Database
 </title>
       <author>devcse</author>
@@ -1712,255 +2547,6 @@ Do not use your AWSaccount root user access key to make programmatic requests to
 </description>
       <category>opensource</category>
       <category>node</category>
-    </item>
-    <item>
-      <title> Top Javascript Project For Beginners</title>
-      <author>Rocky</author>
-      <pubDate>Tue, 20 Jul 2021 18:05:33 +0000</pubDate>
-      <link>https://dev.to/codelivly/top-javascript-project-for-beginners-2ca4</link>
-      <guid>https://dev.to/codelivly/top-javascript-project-for-beginners-2ca4</guid>
-      <description>&lt;p&gt; &lt;span&gt;This page lists over &lt;/span&gt;&lt;span&gt;10 JavaScript projects for beginners&lt;/span&gt;&lt;span&gt;! There are no frameworks and each completed project includes the description, my summary, and the source files to download. We've compiled the list with over 100 JavaScript projects for beginners because the key to becoming a great JavaScript Developer is to practice, practice, practice. You know this, and I know this.&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;10 Days of Code challenges you to code for 10 days. Wouldn't it be nice if you actually built a new JavaScript project each day? It's very difficult to find a comprehensive list of JavaScript projects for beginners on the internet.&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;So, how do you, as a beginner to intermediate JavaScript developer begin to find projects for #100DaysofCode to consistently code for 100 days? Where do you get your motivation to make your own JavaScript projects?&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;It's a tough decision.&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;I know.&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;This is why I created this site with over &lt;/span&gt;&lt;span&gt;10 JavaScript projects for beginners&lt;/span&gt;&lt;span&gt;! I wanted you to no longer have to endlessly surf the internet to find 100 projects in 100 different locations that you could do as a JavaScript beginner!&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;This list is composed of over 100 recommended JavaScript projects for beginners and intermediate JavaScript developers alike! In other words, now you have no more excuses! You're going to do better because &lt;/span&gt;&lt;span&gt;you are determined to be the best JavaScript developer in your field&lt;/span&gt;&lt;span&gt;. And because you've come across this page looking for JavaScript projects for beginners, boy do I have a list of JavaScript projects for you!&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;You'll find more than 10 small to medium sized JavaScript projects that I challenge you to build BEFORE you jump to learning a new Framework such as React, Angular, or Vue. And you should definitely do each and every one of the projects on this list of JavaScript projects for beginners &lt;/span&gt;&lt;span&gt;before&lt;/span&gt;&lt;span&gt; moving on to client-side scripting with Node.js.&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;List of 10+ JavaScript Projects for Beginners&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;Follow the link to read the project's objective, see it in action, and to download the source files. &lt;/span&gt;&lt;span&gt;If no link, I haven't completed it&lt;/span&gt;&lt;span&gt; &lt;/span&gt;&lt;span&gt;yet&lt;/span&gt;&lt;span&gt;. But you can get all the projects and the video solutions from the recommended courses below this list on this page.&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;br&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;h2&gt;&lt;span&gt;&lt;span&gt;Read More: &lt;a href="https://www.codelivly.com/the-best-beginner-javascript-projects-for-2021/"&gt;Javascript Project For Beginners&lt;/a&gt;&lt;/span&gt;&lt;/span&gt;&lt;/h2&gt;
-&lt;p&gt;&lt;span&gt;&lt;br&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;br&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;br&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;br&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;br&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;br&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;br&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;br&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;p&gt;&lt;span&gt;&lt;br&gt;&lt;/span&gt;&lt;/p&gt;
-
-</description>
-      <category>javascript</category>
-    </item>
-    <item>
-      <title>IBM Cloud Deployment 4 Ways: IBM Cloud Kubernetes Service</title>
-      <author>Jenna Ritten</author>
-      <pubDate>Tue, 20 Jul 2021 17:52:57 +0000</pubDate>
-      <link>https://dev.to/ibmdeveloper/ibm-cloud-deployment-4-ways-ibm-cloud-kubernetes-service-4if</link>
-      <guid>https://dev.to/ibmdeveloper/ibm-cloud-deployment-4-ways-ibm-cloud-kubernetes-service-4if</guid>
-      <description>&lt;h1&gt;
-  &lt;a href="#welcome-back-to-tutorial-tuesday"&gt;
-  &lt;/a&gt;
-  Welcome back to Tutorial Tuesday!
-&lt;/h1&gt;
-
-&lt;p&gt;This week we'll be exploring cloud and hybrid &lt;strong&gt;Platform-as-a-Service&lt;/strong&gt; (&lt;strong&gt;PaaS&lt;/strong&gt;) deployment models, and we'll take a look at the IBM PaaS products and offerings. If you're new to cloud computing, you might have been put off by the overbearing amount of acronyms used. Just about everything is sold as a service (aaS) these days, even transportation. &lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--nIjTqXWR--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/l2xdacd0x0uggnp22ozl.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--nIjTqXWR--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/l2xdacd0x0uggnp22ozl.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;To clarify some of the deployment models, let’s have a look at some of these aaS acronyms. IaaS is Infrastructure-as-a-Service, PaaS is Platform-as-a-Service, CaaS is Containers-as-a-Service, and FaaS is Serverless, which is also known as Function-as-a-Service.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#platformasaservice-paas"&gt;
-  &lt;/a&gt;
-  &lt;a href="https://www.ibm.com/cloud/learn/paas"&gt;Platform-as-a-Service&lt;/a&gt; (&lt;strong&gt;PaaS&lt;/strong&gt;)
-&lt;/h2&gt;
-
-&lt;p&gt;PaaS, or Platform-as-a-Service, is a cloud computing model that provides customers a complete platform—hardware, software, and infrastructure—for developing, running, and managing applications without the cost, complexity, and inflexibility of building and maintaining that platform on-premises.&lt;/p&gt;
-
-&lt;p&gt;The PaaS provider hosts everything—servers, networks, storage, operating system software, databases—at their data center; the customer uses it all for a for a monthly fee based on usage and can purchase more resources on-demand as needed. In this way, PaaS lets your development teams to build, test, deploy, maintain, update, and scale applications (and to innovate in response to market opportunities and threats) much more quickly and less expensively than they could if you had to build out and manage your own on-premises platform.&lt;/p&gt;
-
-&lt;p&gt;IBM PaaS &lt;a href="https://www.ibm.com/cloud/learn/paas"&gt;Products &amp;amp; Offerings&lt;/a&gt;: &lt;a href="https://www.ibm.com/cloud/kubernetes-service"&gt;IBM Cloud Kubernetes Service&lt;/a&gt;, &lt;a href="https://www.ibm.com/cloud/cloud-foundry"&gt;IBM Cloud Foundry&lt;/a&gt; &amp;amp; &lt;a href="https://www.ibm.com/cloud/openshift"&gt;Red Hat OpenShift on IBM Cloud&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Pros to &lt;strong&gt;PaaS&lt;/strong&gt;:&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Faster Time to Market&lt;/strong&gt; &lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Faster, Easier, Less-Risky Adoption of a Wider Range of Resources&lt;/strong&gt; &lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Easy, Cost-Effective Scalability&lt;/strong&gt; &lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Lower Costs&lt;/strong&gt; &lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#ibm-cloud-kubernetes-service"&gt;
-  &lt;/a&gt;
-  &lt;a href="https://www.ibm.com/cloud/kubernetes-service"&gt;IBM Cloud Kubernetes Service&lt;/a&gt;
-&lt;/h2&gt;
-
-&lt;p&gt;Deploy secure, highly available clusters in a native Kubernetes experience.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#what-is-ibm-cloud-kubernetes-service"&gt;
-  &lt;/a&gt;
-  &lt;a href="https://www.ibm.com/cloud/kubernetes-service"&gt;What is IBM Cloud Kubernetes Service&lt;/a&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;IBM Cloud Kubernetes Service is a managed offering built for creating a Kubernetes cluster of compute hosts to deploy and manage containerized apps on IBM Cloud. A certified Kubernetes solution, it provides intelligent scheduling, self-healing, horizontal scaling and more.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#benefits"&gt;
-  &lt;/a&gt;
-  &lt;a href="https://www.ibm.com/cloud/kubernetes-service/features"&gt;Benefits&lt;/a&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;Drive innovation, security and scale.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Native Kubernetes&lt;/strong&gt;&lt;br&gt;
-Use tools and APIs you know for a consistent experience, even working across cloud infrastructures.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Secure Clusters&lt;/strong&gt;&lt;br&gt;
-Guard your cluster infrastructure, isolate compute resources and ensure compliance in deployments.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Leverage IBM Watson&lt;/strong&gt;&lt;br&gt;
-Integrate cognitive solutions with a variety of IBM Watson® APIs to extend the power of your apps.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Intelligent Scheduling&lt;/strong&gt;&lt;br&gt;
-Automatically deploy containers on compute hosts based on available resources across the cluster.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Self-Healing Containers&lt;/strong&gt;&lt;br&gt;
-Configure a custom Kubernetes cluster that autoscales and recovers containers per defined policies.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Logging &amp;amp; Monitoring&lt;/strong&gt;&lt;br&gt;
-Use the built-in logging and metrics service to monitor the performance of clusters and containers.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#addon-capabilities"&gt;
-  &lt;/a&gt;
-  &lt;a href="https://www.ibm.com/cloud/kubernetes-service/features"&gt;Add-On Capabilities&lt;/a&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;Open source technologies to add to your Kubernetes cluster.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Istio on IBM Cloud&lt;/strong&gt;&lt;br&gt;
-Connect, manage and secure networks of microservices — regardless of platform, source or vendor.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Knative on IBM Cloud&lt;/strong&gt;&lt;br&gt;
-Build, deploy and run cloud-native, serverless applications on Kubernetes.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Tekton on IBM Cloud&lt;/strong&gt;&lt;br&gt;
-Create Kubernetes-native CI/CD pipelines with maximum speed and flexibility.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#try-it-out"&gt;
-  &lt;/a&gt;
-  &lt;a href="https://ibm.biz/cloud-sign-up"&gt;Try It Out!&lt;/a&gt;
-&lt;/h1&gt;
-
-&lt;h2&gt;
-  &lt;a href="#create-a-kubernetes-cluster-for-free"&gt;
-  &lt;/a&gt;
-  Create a Kubernetes Cluster for FREE!
-&lt;/h2&gt;
-
-&lt;p&gt;Create one IBM Cloud Kubernetes Service cluster at no charge, available for 30 days. Plus, get access to over 40 always-free products, a USD 200 credit, and try Kubernetes-native integrations to extend the capabilities of your cluster.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#dev-setup"&gt;
-  &lt;/a&gt;
-  Dev Setup
-&lt;/h2&gt;
-
-&lt;p&gt;&lt;strong&gt;Sign Up for a Free &lt;a href="https://ibm.biz/cloud-sign-up"&gt;IBM Cloud Account&lt;/a&gt;&lt;/strong&gt;&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#set-up-your-free-kubernetes-cluster"&gt;
-  &lt;/a&gt;
-  Set Up Your Free Kubernetes Cluster
-&lt;/h2&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--O7_v8bE_--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/8gni7c2ucc5ojgt8kibp.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--O7_v8bE_--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/8gni7c2ucc5ojgt8kibp.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Find &lt;strong&gt;Kubernetes Service&lt;/strong&gt; from the search bar and click on it.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--GVyKWzT9--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/bnv3morrdab0j0jw5bfa.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--GVyKWzT9--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/bnv3morrdab0j0jw5bfa.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Select &lt;strong&gt;Free&lt;/strong&gt; from the Pricing Plan dropdown menu.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--6xts4hvU--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/6dvn04e1a16uf05or93e.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--6xts4hvU--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/6dvn04e1a16uf05or93e.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Click &lt;strong&gt;Create&lt;/strong&gt;.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--gx7uYF6g--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/coonwytbtkco39shtp7f.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--gx7uYF6g--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/coonwytbtkco39shtp7f.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Wait for your Kubernetes cluster to be deployed.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--RGdkg-Zy--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/828d86goj0147096pzu5.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--RGdkg-Zy--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/828d86goj0147096pzu5.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Scroll down to view the &lt;strong&gt;Capabilities Add-Ons&lt;/strong&gt;.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#addons"&gt;
-  &lt;/a&gt;
-  Add-Ons
-&lt;/h2&gt;
-
-&lt;p&gt;Enhance your cluster's capabilities by installing add-ons.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Z94BDejn--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ro48xlc0n3f4vkhwndka.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Z94BDejn--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ro48xlc0n3f4vkhwndka.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;One-click install capabilities add-ons.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#kubernetes-dashboard"&gt;
-  &lt;/a&gt;
-  Kubernetes Dashboard
-&lt;/h2&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--RGdkg-Zy--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/828d86goj0147096pzu5.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--RGdkg-Zy--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/828d86goj0147096pzu5.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Click &lt;strong&gt;Kubernetes dashboard&lt;/strong&gt; to access the Kubernetes Dashboard.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#complete-the-kubernetes-on-ibm-cloud-open-labs-to-earn-your-kubernetes-certification-badge-for-free"&gt;
-  &lt;/a&gt;
-  Complete the &lt;a href="https://developer.ibm.com/openlabs/iks"&gt;Kubernetes on IBM Cloud Open Labs&lt;/a&gt; to Earn Your Kubernetes Certification Badge for FREE!
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Q-phL4m4--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/71te5w7i6q1rmzzdauad.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Q-phL4m4--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/71te5w7i6q1rmzzdauad.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#congratulations"&gt;
-  &lt;/a&gt;
-  CONGRATULATIONS!
-&lt;/h1&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--EnI1C-97--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/t8tvevzwh914dfudp224.gif" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--EnI1C-97--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/t8tvevzwh914dfudp224.gif" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Tune in next week for our next Tutorial Tuesday post.&lt;/p&gt;
-
-&lt;p&gt;Connect w Me!&lt;br&gt;
-&lt;a href="https://linktr.ee/jritten"&gt;https://linktr.ee/jritten&lt;/a&gt;&lt;/p&gt;
-
-</description>
-    </item>
-    <item>
-      <title>How to send the authorization header using Axios
-</title>
-      <author>devcse</author>
-      <pubDate>Tue, 20 Jul 2021 17:51:07 +0000</pubDate>
-      <link>https://dev.to/jewelcse/how-to-send-the-authorization-header-using-axios-a70</link>
-      <guid>https://dev.to/jewelcse/how-to-send-the-authorization-header-using-axios-a70</guid>
-      <description>&lt;p&gt;Axios is mostly used javascript promise-based HTTP client for end-to-end requesting resources from the serve side application. Generally, in simple application we don’t have to put the header for any get or post request. but most of the cases, security is a big issue sometimes we need to add authorization header to get resources from the server or save resource to the server. That’s why we need to add the headers with request.&lt;/p&gt;
-
-&lt;p&gt;So, let’s create a header object according you needs:&lt;/p&gt;
-
-&lt;p&gt;const token = "your_token"&lt;/p&gt;
-
-&lt;p&gt;let headers = {&lt;br&gt;
-        "Content-type": "application/json; charset=UTF-8",&lt;br&gt;
-        "Authorization": 'Bearer ' + token&lt;br&gt;
- };&lt;/p&gt;
-
-&lt;p&gt;Learn more: &lt;a href="https://codesnipeet.com/how-to-send-the-authorization-header-using-axios/"&gt;https://codesnipeet.com/how-to-send-the-authorization-header-using-axios/&lt;/a&gt;&lt;/p&gt;
-
-</description>
-      <category>react</category>
-      <category>javascript</category>
-      <category>programming</category>
-      <category>webdev</category>
     </item>
   </channel>
 </rss>
