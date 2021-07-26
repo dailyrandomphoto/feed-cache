@@ -7,6 +7,456 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>HowTo Examine &amp; Modify Executables</title>
+      <author>Shekhar Chandra</author>
+      <pubDate>Mon, 26 Jul 2021 21:20:32 +0000</pubDate>
+      <link>https://dev.to/ranuzz/howto-examine-modify-executables-48jp</link>
+      <guid>https://dev.to/ranuzz/howto-examine-modify-executables-48jp</guid>
+      <description>&lt;h2&gt;
+  &lt;a href="#introduction"&gt;
+  &lt;/a&gt;
+  Introduction
+&lt;/h2&gt;
+
+&lt;p&gt;I have been working with C all my professional and student life. There have been times when I had to look a little deeper to understand what is going on with my buggy program. There are many tools and techniques to examine an executable and this post is about that and a little bit of reverse engineering.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#test-code"&gt;
+  &lt;/a&gt;
+  Test Code
+&lt;/h2&gt;
+
+&lt;p&gt;As an example I wrote a pretty basic piece of code with some intentional inclusions. There are two global variables &lt;code&gt;msga&lt;/code&gt; and &lt;code&gt;msgb&lt;/code&gt;. Two user defined routines &lt;code&gt;allow&lt;/code&gt; and &lt;code&gt;deny&lt;/code&gt; that get executed inside the &lt;code&gt;main&lt;/code&gt; function. One conditional call to an external program using &lt;code&gt;execvp&lt;/code&gt;. The idea here is to examine the executable this program creates. Find out where the code I wrote lands in the executable and what compiler adds on top of it. Later I'll showcase some basic reverse engineering that can be done by pretending we haven't seen the code.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://github.com/ranuzz/makeall-code/blob/main/examinebin/examinebin.c"&gt;GitHub&lt;/a&gt;&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight c"&gt;&lt;code&gt;&lt;span class="cp"&gt;#include &amp;lt;stdio.h&amp;gt;
+#include &amp;lt;unistd.h&amp;gt;
+&lt;/span&gt;
+&lt;span class="kt"&gt;char&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="n"&gt;msga&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s"&gt;"Allow"&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="kt"&gt;char&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="n"&gt;msgb&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s"&gt;"Deny"&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="kt"&gt;void&lt;/span&gt; &lt;span class="nf"&gt;allow&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="n"&gt;printf&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"%s&lt;/span&gt;&lt;span class="se"&gt;\n&lt;/span&gt;&lt;span class="s"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;msga&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="kt"&gt;void&lt;/span&gt; &lt;span class="nf"&gt;deny&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="n"&gt;printf&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"%s&lt;/span&gt;&lt;span class="se"&gt;\n&lt;/span&gt;&lt;span class="s"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;msgb&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="nf"&gt;main&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="n"&gt;argc&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="kt"&gt;char&lt;/span&gt; &lt;span class="o"&gt;**&lt;/span&gt;&lt;span class="n"&gt;argv&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="n"&gt;deny&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+    &lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="n"&gt;runExternal&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;runExternal&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="kt"&gt;char&lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt; &lt;span class="n"&gt;lsargs&lt;/span&gt;&lt;span class="p"&gt;[]&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="s"&gt;"ls"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;"-l"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nb"&gt;NULL&lt;/span&gt;&lt;span class="p"&gt;};&lt;/span&gt;
+        &lt;span class="n"&gt;execvp&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"ls"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;lsargs&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;While dealing with executable we'll encounter a lot of hexadecimal values, I prefer using Python to do quick arithmetic whenever the need arises.&lt;br&gt;
+Also, some of the output is going to be too big to paste here in the post so I'll link them in the end.&lt;/p&gt;
+&lt;h2&gt;
+  &lt;a href="#goal"&gt;
+  &lt;/a&gt;
+  Goal
+&lt;/h2&gt;
+
+&lt;p&gt;Let's compile the program and get our &lt;code&gt;a.out&lt;/code&gt;.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;gcc examinebin.c
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;As we see in the code the execution of the program basically runs the &lt;code&gt;deny&lt;/code&gt; and halts. I am creating a goal for myself that I'll identify the instruction inside the executable and change it to make sure that &lt;code&gt;allow&lt;/code&gt; is called and then 'ls&lt;code&gt;is executed with&lt;/code&gt;-a` argument.&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;PS: The tools used to do analysis and their output are listed at the bottom of this post for reference.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;h2&gt;
+  &lt;a href="#call-sequence"&gt;
+  &lt;/a&gt;
+  Call Sequence
+&lt;/h2&gt;
+
+&lt;p&gt;If we look at the &lt;code&gt;objdump&lt;/code&gt; output, it is very neatly divided into segment and clearly labeled with symbol names. The code we are interested in is the one we wrote but it's nice to know what everything else is.&lt;/p&gt;
+
+&lt;p&gt;The short version is every C program needs a &lt;code&gt;main&lt;/code&gt; routing which marks the start and end of user written code. C runtime executes &lt;code&gt;main&lt;/code&gt; within its framework and takes care of all static and runtime dependencies. The order of execution can be determined very easily by hooking up the executable with &lt;code&gt;gdb&lt;/code&gt; and adding breakpoint to all symbols defined in &lt;code&gt;.text&lt;/code&gt; section and &lt;code&gt;_init&lt;/code&gt; &amp;amp; &lt;code&gt;_fini&lt;/code&gt;. Let's see what happens.&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;breakpoint : _init, _start, deregister_tm_clones, register_tm_clones, __do_global_dtors_aux, frame_dummy, allow, deny, main, __libc_csu_init, __libc_csu_fini, _fini&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;This is the call sequence labelled by me based on what my understanding of the usual meaning of these symbols&lt;/p&gt;
+
+&lt;p&gt;// Initialisation&lt;br&gt;
+_init (argc=1, argv=0x7fffffffdfd8, envp=0x7fffffffdfe8)&lt;br&gt;
+_start ()&lt;br&gt;
+__libc_csu_init ()&lt;br&gt;
+_init ()&lt;br&gt;
+frame_dummy ()&lt;br&gt;
+register_tm_clones ()&lt;/p&gt;
+
+&lt;p&gt;// User Code&lt;br&gt;
+main ()&lt;br&gt;
+deny () // we want to call allow and execvp here instead&lt;/p&gt;
+
+&lt;p&gt;// Deconstruction and finalisation&lt;br&gt;
+__do_global_dtors_aux ()&lt;br&gt;
+deregister_tm_clones ()&lt;br&gt;
+deregister_tm_clones ()&lt;br&gt;
+_fini ()&lt;/p&gt;
+&lt;h2&gt;
+  &lt;a href="#identification"&gt;
+  &lt;/a&gt;
+  Identification
+&lt;/h2&gt;
+
+&lt;p&gt;Now that we know what we don't have to explore we can focus on the task at hand, calling allow and &lt;code&gt;ls&lt;/code&gt; with &lt;code&gt;-a&lt;/code&gt;. To do that we will specify our goal properly, basically we want to:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;call allow instead of deny.&lt;/li&gt;
+&lt;li&gt;change &lt;code&gt;runExternal&lt;/code&gt; flag value to non-zero.&lt;/li&gt;
+&lt;li&gt;change &lt;code&gt;"-l"&lt;/code&gt; to &lt;code&gt;"-a" in &lt;/code&gt;lsargs`&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;To do that we have to know where these values are in binary and then change them manually without disturbing everything else.&lt;/p&gt;
+&lt;h2&gt;
+  &lt;a href="#replace-raw-deny-endraw-"&gt;
+  &lt;/a&gt;
+  Replace &lt;code&gt;deny&lt;/code&gt;
+&lt;/h2&gt;
+
+&lt;p&gt;The hexadecimal code calling &lt;code&gt;deny&lt;/code&gt; from &lt;code&gt;objdump&lt;/code&gt; output&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;0000000000001189 &amp;lt;allow&amp;gt;:
+
+00000000000011a3 &amp;lt;deny&amp;gt;:
+
+00000000000011bd &amp;lt;main&amp;gt;:
+    11e4:    e8 ba ff ff ff           callq  11a3 &amp;lt;deny&amp;gt;
+    11e9:    c7 45 dc 00 00 00 00     movl   $0x0,-0x24(%rbp)
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;from the &lt;a href="https://www.felixcloutier.com/x86/call"&gt;callq&lt;/a&gt; reference we know that opcode &lt;code&gt;e8&lt;/code&gt; takes the operand &lt;code&gt;ba ff ff ff&lt;/code&gt; (0xffffffba) which is basically the offset from next instruction  &lt;code&gt;0x11e9&lt;/code&gt;. So, it should point to (0x11a3)&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="n"&gt;offset&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nb"&gt;hex&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mh"&gt;0xffffffba&lt;/span&gt; &lt;span class="o"&gt;-&lt;/span&gt; &lt;span class="mh"&gt;0x100000000&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;# getting the negative value
+&lt;/span&gt;&lt;span class="n"&gt;deny_addr&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nb"&gt;hex&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mh"&gt;0x11e9&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="nb"&gt;int&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;offset&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;16&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;
+&lt;span class="k"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;deny_addr&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;To call &lt;code&gt;allow&lt;/code&gt; instead we will have to change (0xffffffba) to something that gives (0x1189) instead.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="n"&gt;allow_addr&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nb"&gt;hex&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mh"&gt;0x1189&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="n"&gt;offset&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nb"&gt;hex&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nb"&gt;int&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nb"&gt;hex&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nb"&gt;int&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;allow_addr&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;16&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;-&lt;/span&gt; &lt;span class="mh"&gt;0x11e9&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt; &lt;span class="mi"&gt;16&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="mh"&gt;0x100000000&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="k"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;offset&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="c1"&gt;# 0xffffffa0 -&amp;gt; a0 ff ff ff
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;strong&gt;So all we need to do is change &lt;code&gt;ba&lt;/code&gt; to &lt;code&gt;a0&lt;/code&gt; in the binary&lt;/strong&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#change-raw-runexternal-endraw-"&gt;
+  &lt;/a&gt;
+  Change &lt;code&gt;runExternal&lt;/code&gt;
+&lt;/h2&gt;
+
+&lt;p&gt;This is quite simple, all we need to do is locate the &lt;code&gt;mov&lt;/code&gt; instruction that is putting the value in the flag.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;    11e9:    c7 45 dc 00 00 00 00     movl   $0x0,-0x24(%rbp)
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;and change the value to any non-zero one. &lt;a href="https://www.felixcloutier.com/x86/mov"&gt;ref&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;00 00 00 00 -&amp;gt; 01 00 00 00&lt;/strong&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#change-raw-l-endraw-"&gt;
+  &lt;/a&gt;
+  Change &lt;code&gt;"-l"&lt;/code&gt;
+&lt;/h2&gt;
+
+&lt;p&gt;We basically want to change the arguments going into &lt;code&gt;execvp&lt;/code&gt; function call. In the assembly we can see the location where the &lt;code&gt;callq&lt;/code&gt; to execvp has been made and there should be &lt;code&gt;push&lt;/code&gt; or &lt;code&gt;lea&lt;/code&gt; instruction before that to add the argument into the stack. Since these values are hardcoded in binaries all we need to do is get the location of &lt;code&gt;-l&lt;/code&gt; and change it to &lt;code&gt;-a&lt;/code&gt;.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;    11f6:    48 8d 05 12 0e 00 00     lea    0xe12(%rip),%rax        # 200f &amp;lt;_IO_stdin_used+0xf&amp;gt;
+    11fd:    48 89 45 e0              mov    %rax,-0x20(%rbp)
+    1201:    48 8d 05 0a 0e 00 00     lea    0xe0a(%rip),%rax        # 2012 &amp;lt;_IO_stdin_used+0x12&amp;gt;
+    1208:    48 89 45 e8              mov    %rax,-0x18(%rbp)
+    121b:    48 8d 3d ed 0d 00 00     lea    0xded(%rip),%rdi        # 200f &amp;lt;_IO_stdin_used+0xf&amp;gt;
+    1222:    e8 69 fe ff ff           callq  1090 &amp;lt;execvp@plt&amp;gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;a href="https://www.felixcloutier.com/x86/lea"&gt;lea&lt;/a&gt; instruction is basically calculating the effective address which in every case here is an offset to the next instruction pointer. So we have three addresses, which can be calculated or seen in the objdump output as well.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="k"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nb"&gt;hex&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mh"&gt;0xe12&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="mh"&gt;0x11fd&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt; &lt;span class="c1"&gt;# 0x200f
+&lt;/span&gt;&lt;span class="k"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nb"&gt;hex&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mh"&gt;0xe0a&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="mh"&gt;0x1208&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt; &lt;span class="c1"&gt;# 0x2012
+&lt;/span&gt;&lt;span class="k"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nb"&gt;hex&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mh"&gt;0xded&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="mh"&gt;0x1222&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt; &lt;span class="c1"&gt;# 0x200f
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;from the hexdump output we can clearly see that our strings are really there.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;00002000: 0100 0200 416c 6c6f 7700 4465 6e79 006c  ....Allow.Deny.l
+00002010: 7300 2d6c 0000 0000 011b 033b 5400 0000  s.-l.......;T...
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Changing the fourth byte from the right &lt;strong&gt;6c -&amp;gt; 61&lt;/strong&gt; will make &lt;code&gt;l-&amp;gt;a&lt;/code&gt;.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#changes"&gt;
+  &lt;/a&gt;
+  Changes
+&lt;/h2&gt;
+
+&lt;p&gt;Let's summarize and do all the necessary changes to the text output provided by &lt;code&gt;xxd&lt;/code&gt; utility.&lt;/p&gt;
+
+&lt;p&gt;Changes for &lt;code&gt;allow&lt;/code&gt;&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;000011e0: 0000 0000 e8(ba) ffff ffc7 45dc 0000 0000 
+000011e0: 0000 0000 e8(a0) ffff ffc7 45dc 0000 0000 
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Changes for &lt;code&gt;runExternal&lt;/code&gt; flag&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;000011e0: 0000 0000 e8ba ffff ffc7 45dc (00)00 0000 
+000011e0: 0000 0000 e8ba ffff ffc7 45dc (01)00 0000 
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Changes for &lt;code&gt;l -&amp;gt; a&lt;/code&gt;&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;00002010: 7300 2d(6c) 0000 0000 011b 033b 5400 0000 
+00002010: 7300 2d(61) 0000 0000 011b 033b 5400 0000 
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#create-new-executable"&gt;
+  &lt;/a&gt;
+  Create new executable
+&lt;/h2&gt;
+
+&lt;p&gt;Using xxd utility&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;xxd &lt;span class="nt"&gt;-r&lt;/span&gt; modified-xxd.txt &lt;span class="o"&gt;&amp;gt;&lt;/span&gt; a2.out
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;change permission&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nb"&gt;chmod&lt;/span&gt; +x a2.out
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#run"&gt;
+  &lt;/a&gt;
+  Run
+&lt;/h2&gt;
+
+&lt;p&gt;Well I can tell you that it actually works but it's better to try yourself. The output is:&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#before"&gt;
+  &lt;/a&gt;
+  Before
+&lt;/h3&gt;
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;Deny
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#after"&gt;
+  &lt;/a&gt;
+  After
+&lt;/h3&gt;
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;Allow
+&lt;span class="nb"&gt;.&lt;/span&gt;  ..  a.out  a2.out
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#tools"&gt;
+  &lt;/a&gt;
+  Tools
+&lt;/h2&gt;
+
+&lt;p&gt;Lets review some tools that tell us about the file from the outside.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#file"&gt;
+  &lt;/a&gt;
+  file
+&lt;/h3&gt;
+
+&lt;p&gt;utility that gives the file name, file type and other format related information.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://github.com/ranuzz/makeall-code/blob/main/examinebin/file.txt"&gt;output&lt;/a&gt;&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#sum"&gt;
+  &lt;/a&gt;
+  sum
+&lt;/h3&gt;
+
+&lt;p&gt;Get the checksum and number of blocks in the file. Once we do some reverese engineering this output will tell us that the new executable is not genuine.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://github.com/ranuzz/makeall-code/blob/main/examinebin/sum.txt"&gt;output&lt;/a&gt;&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#ldd"&gt;
+  &lt;/a&gt;
+  ldd
+&lt;/h3&gt;
+
+&lt;p&gt;Gives the list of shared objects required by the executable&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://github.com/ranuzz/makeall-code/blob/main/examinebin/ldd.txt"&gt;output&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;There are some utilities that give a quick peek about the executable if in depth examination is not something you need.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#strings"&gt;
+  &lt;/a&gt;
+  strings
+&lt;/h3&gt;
+
+&lt;p&gt;Displays all printable characters and strings in the file. Works on any file in fact not just executable&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://github.com/ranuzz/makeall-code/blob/main/examinebin/strings.txt"&gt;output&lt;/a&gt;&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#nm"&gt;
+  &lt;/a&gt;
+  nm
+&lt;/h3&gt;
+
+&lt;p&gt;Lists all the symbols present in the executable file address map.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://github.com/ranuzz/makeall-code/blob/main/examinebin/nm.txt"&gt;output&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Now comes the in depth analysis of executable, this includes intrepreting the machine code into human readable form and also figuring out a way to edit the file.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#objdump"&gt;
+  &lt;/a&gt;
+  objdump
+&lt;/h3&gt;
+
+&lt;p&gt;using the &lt;code&gt;-d&lt;/code&gt; option you can get the detailed version of each section and segment of your executable along with the interpreted assembly instruction.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://github.com/ranuzz/makeall-code/blob/main/examinebin/objdump.txt"&gt;output&lt;/a&gt;&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#xxd-or-hexdump"&gt;
+  &lt;/a&gt;
+  xxd or hexdump
+&lt;/h3&gt;
+
+&lt;p&gt;These are plain read-write tools to deal with binary files and not just executables. Reading part creates a text file showing hexadecimal values at each byte and if possible there is a printable version side by side. Any changes to this output text file can be fed back to the tool, which can then create a binary file.&lt;/p&gt;
+
+&lt;p&gt;I am using &lt;code&gt;xxd&lt;/code&gt; for reading and writing the executable here.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://github.com/ranuzz/makeall-code/blob/main/examinebin/xxd.txt"&gt;output&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Feel free to send me an &lt;a href="mailto:ranuzz@makeall.dev"&gt;email&lt;/a&gt; for any suggestion or feedback. Follow me on &lt;a href="https://twitter.com/ranuzzzz"&gt;twitter&lt;/a&gt; and &lt;a href="https://github.com/ranuzz"&gt;github&lt;/a&gt;.&lt;/p&gt;
+
+</description>
+    </item>
+    <item>
       <title>Understanding Functions In Python </title>
       <author>Tito</author>
       <pubDate>Mon, 26 Jul 2021 20:54:44 +0000</pubDate>
@@ -303,6 +753,55 @@ Follow for more post &lt;/p&gt;
       <category>tutorial</category>
       <category>webdev</category>
       <category>programming</category>
+    </item>
+    <item>
+      <title>3 More Free Tailwind templates</title>
+      <author>michael-andreuzza</author>
+      <pubDate>Mon, 26 Jul 2021 19:53:28 +0000</pubDate>
+      <link>https://dev.to/michaelandreuzza/3-more-free-tailwind-templates-2f17</link>
+      <guid>https://dev.to/michaelandreuzza/3-more-free-tailwind-templates-2f17</guid>
+      <description>&lt;p&gt;Hello everyone,&lt;/p&gt;
+
+&lt;p&gt;Just wanted to let you know that if anyone needs a template for a blog, documentation or a profile card I have pushed 3 more free templates to &lt;a href="http://www.wickedtemplates.com"&gt;www.wickedtemplates.com&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Get them on wickedtemplates.com/demos&lt;/p&gt;
+
+&lt;p&gt;The templates are built with Tailwind CSS, Alpin.js .&lt;/p&gt;
+
+&lt;p&gt;Please enjoy them and make the most out of them, they are 100% FREE to use.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#the-documentation-site"&gt;
+  &lt;/a&gt;
+  The documentation site.
+&lt;/h2&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--QeHU9juo--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://d33wubrfki0l68.cloudfront.net/97f7cd2c4f3b724376c860fd434098dc0cb1a842/df212/images/thumbnails/dockerz.webp" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--QeHU9juo--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://d33wubrfki0l68.cloudfront.net/97f7cd2c4f3b724376c860fd434098dc0cb1a842/df212/images/thumbnails/dockerz.webp" alt="1"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#the-three-blogs"&gt;
+  &lt;/a&gt;
+  The three blogs.
+&lt;/h2&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--OPQfJT4C--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://d33wubrfki0l68.cloudfront.net/3ad9968c148d2f8161820b54ef4e225bdf81a6cb/4988e/images/thumbnails/free2.webp" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--OPQfJT4C--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://d33wubrfki0l68.cloudfront.net/3ad9968c148d2f8161820b54ef4e225bdf81a6cb/4988e/images/thumbnails/free2.webp" alt="2"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--u08sBZGN--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://d33wubrfki0l68.cloudfront.net/c0987af1c1a78da87b3586e659d207ecf4f4b19f/75215/images/thumbnails/betamax.webp" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--u08sBZGN--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://d33wubrfki0l68.cloudfront.net/c0987af1c1a78da87b3586e659d207ecf4f4b19f/75215/images/thumbnails/betamax.webp" alt="3"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--N6YyUdbs--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://d33wubrfki0l68.cloudfront.net/8e1b16c617e2efd846e5c3fb7056afac0b3b1715/f3d3e/images/thumbnails/synthwave.webp" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--N6YyUdbs--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://d33wubrfki0l68.cloudfront.net/8e1b16c617e2efd846e5c3fb7056afac0b3b1715/f3d3e/images/thumbnails/synthwave.webp" alt="4"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#the-profile-card"&gt;
+  &lt;/a&gt;
+  The profile card
+&lt;/h2&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--tmKmR3eF--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://d33wubrfki0l68.cloudfront.net/09512261e52f00c97249731f0ecbcf20644d6301/b8515/images/thumbnails/free1.webp" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--tmKmR3eF--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://d33wubrfki0l68.cloudfront.net/09512261e52f00c97249731f0ecbcf20644d6301/b8515/images/thumbnails/free1.webp" alt="5"&gt;&lt;/a&gt;&lt;/p&gt;
+
+</description>
+      <category>tailwindcss</category>
+      <category>javascript</category>
+      <category>productivity</category>
     </item>
     <item>
       <title>Free API Servers - Open-source REST products: Django, Node JS, Flask </title>
@@ -1643,495 +2142,6 @@ python &lt;span class="nt"&gt;-m&lt;/span&gt; timeit &lt;span class="nt"&gt;-s&l
 
 </description>
       <category>python</category>
-    </item>
-    <item>
-      <title>Difference Between SLICE and SPLICE in JavaScript</title>
-      <author>capscode</author>
-      <pubDate>Mon, 26 Jul 2021 18:33:59 +0000</pubDate>
-      <link>https://dev.to/capscode/difference-between-slice-and-splice-in-javascript-4ahg</link>
-      <guid>https://dev.to/capscode/difference-between-slice-and-splice-in-javascript-4ahg</guid>
-      <description>&lt;h2&gt;
-  &lt;a href="#difference-between-slice-amp-splice-in-javascript"&gt;
-  &lt;/a&gt;
-  Difference between SLICE &amp;amp; SPLICE in JavaScript
-&lt;/h2&gt;
-
-&lt;p&gt;Hello Devs,&lt;/p&gt;
-
-&lt;p&gt;In this article, we will discuss what's the difference between the two most important methods of Array in JavaScript (i.e Slice and Splice)&lt;/p&gt;
-
-&lt;p&gt;The  &lt;code&gt;splice()&lt;/code&gt;  method &lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;returns the removed items in an array. &lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;The  &lt;code&gt;slice()&lt;/code&gt;  method &lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;returns the selected element(s) in an array, as a new array object.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;The  &lt;code&gt;splice()&lt;/code&gt;  method &lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;changes the original array but&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;&lt;code&gt;slice()&lt;/code&gt;  method &lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;doesn’t change the original array.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;Lets see some of the simple examples to get the small clarification.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;arr1&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;3&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;4&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;5&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
-&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;arr2&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;3&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;4&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;5&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
-&lt;span class="nx"&gt;arr1&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;splice&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;3&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;//returns [2, 3, 4]&lt;/span&gt;
-&lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;arr1&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;//[1, 5]&lt;/span&gt;
-
-&lt;span class="nx"&gt;arr2&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;slice&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;3&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;//returns [2, 3]&lt;/span&gt;
-&lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;arr2&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;//[1, 2, 3, 4, 5]&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#lets-discuss-these-two-methods-in-more-details"&gt;
-  &lt;/a&gt;
-  Lets discuss these two methods in more details.
-&lt;/h2&gt;
-
-&lt;h3&gt;
-  &lt;a href="#first-we-will-discuss-the-splice-method-in-detail"&gt;
-  &lt;/a&gt;
-  First we will discuss the splice method in detail.
-&lt;/h3&gt;
-
-&lt;p&gt;Syntax:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="nx"&gt;splice&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;start&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;deleteCount&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;item1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;item2&lt;/span&gt;&lt;span class="p"&gt;,...&lt;/span&gt; &lt;span class="nx"&gt;itemN&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;where,&lt;br&gt;
-&lt;strong&gt;start (required)&lt;/strong&gt; -&amp;gt; where you want to start editing the array.&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;if start is not provided then empty array is returned and it will not affect the original array&lt;/li&gt;
-&lt;li&gt;If start is greater than length of array then start will set to length of an array.&lt;/li&gt;
-&lt;li&gt;If negative then it is treated as &lt;strong&gt;array.length-start&lt;/strong&gt; and if now the negative value will come then treat it as 0&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;&lt;strong&gt;deleteCount(optional)&lt;/strong&gt; -&amp;gt; number of element you want to delete from &lt;strong&gt;&lt;em&gt;start&lt;/em&gt;&lt;/strong&gt; index&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;if it is not provided or greater than or equal to array.length then all the element from start to end of an array is deleted.&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;If &lt;code&gt;deleteCount&lt;/code&gt; is &lt;code&gt;0&lt;/code&gt; or negative, no elements will be deleted.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;&lt;strong&gt;item1, item2...itemN(optional)&lt;/strong&gt; -&amp;gt;The elements to add to the array, beginning from &lt;strong&gt;&lt;em&gt;start&lt;/em&gt;&lt;/strong&gt;.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;If you do not specify any elements, &lt;code&gt;splice()&lt;/code&gt; will only remove elements from the array.&lt;/p&gt;&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;lets see some of examples.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;a&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;3&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;4&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;5&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
-&lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;splice&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="c1"&gt;//[]&lt;/span&gt;
-&lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;// [1,2,3,4,5]&lt;/span&gt;
-
-&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;a&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;3&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;4&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;5&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
-&lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;splice&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;//returns [3,4,5]&lt;/span&gt;
-&lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;//[1,2]&lt;/span&gt;
-
-&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;3&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;4&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;5&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
-&lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;splice&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="mi"&gt;3&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;//returns [3,4,5], here start is treated as array.length-start&lt;/span&gt;
-&lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;//[1,2]&lt;/span&gt;
-
-&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;3&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;4&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;5&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
-&lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;splice&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="mi"&gt;7&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;//returns [1,2,3,4,5], here start is treated as array.length-start and this is ngative so start will now be treated as 0&lt;/span&gt;
-&lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;//[]&lt;/span&gt;
-&lt;span class="c1"&gt;//(an empty array)&lt;/span&gt;
-
-&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;3&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;4&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;5&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
-&lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;splice&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;9&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;//returns [3,4,5]&lt;/span&gt;
-&lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;//[1,2]&lt;/span&gt;
-
-&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;3&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;4&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;5&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
-&lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;splice&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;a&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;b&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;c&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;d&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;//returns [3, 4]&lt;/span&gt;
-&lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;//[1, 2, "a", "b", "c", "d", 5]&lt;/span&gt;
-&lt;span class="c1"&gt;//slice has removed 2 elements starting from index '2' and added the item1, item2, ...itemN at start positon&lt;/span&gt;
-
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h3&gt;
-  &lt;a href="#now-lets-discuss-the-slice-method"&gt;
-  &lt;/a&gt;
-  Now lets discuss the slice method.
-&lt;/h3&gt;
-
-&lt;p&gt;This method just extract the a part from an array.&lt;/p&gt;
-
-&lt;p&gt;Syntax:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="nx"&gt;slice&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;start&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;end&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;where,&lt;br&gt;
-&lt;strong&gt;start(required)&lt;/strong&gt; -&amp;gt; starting index from where to start the extraction from an array.&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;if the value of start is negative then it is treated as arr.length-1&lt;/li&gt;
-&lt;li&gt;if &lt;code&gt;start&lt;/code&gt; is undefined, &lt;code&gt;slice&lt;/code&gt; starts from the index &lt;code&gt;0&lt;/code&gt;.&lt;/li&gt;
-&lt;li&gt;if start is greater than length of an array, then an empty array is returned.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;&lt;strong&gt;end (optional)&lt;/strong&gt;-&amp;gt; denotes till which index (excluding) you want to extract from the start,&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;If &lt;code&gt;end&lt;/code&gt; is omitted, then its treated as array.length&lt;/li&gt;
-&lt;li&gt;If end is negative then it is treated as array.length-end&lt;/li&gt;
-&lt;li&gt;If end is non-negative &amp;amp; less than start, then empty array is returned&lt;/li&gt;
-&lt;li&gt;If end is greater than length of an array, then it is treated as array.length&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;Lets see some of the examples,&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;arr&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;3&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;4&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;5&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
-&lt;span class="nx"&gt;arr&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;slice&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="c1"&gt;//returns [1,2,3,4,5]&lt;/span&gt;
-&lt;span class="nx"&gt;arr&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;slice&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;//returns [3,4,5]&lt;/span&gt;
-&lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;arr&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;//[1,2,3,4,5]&lt;/span&gt;
-
-&lt;span class="nx"&gt;arr&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;slice&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;//returns []&lt;/span&gt;
-&lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;arr&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;//[1,2,3,4,5]&lt;/span&gt;
-
-&lt;span class="nx"&gt;arr&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;slice&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;//returns [3,4], here end is treated as arr.length-1 which is 4 i.e arr.slice(2,4)&lt;/span&gt;
-&lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;arr&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;//[1,2,3,4,5]&lt;/span&gt;
-
-&lt;span class="nx"&gt;arr&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;slice&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="mi"&gt;9&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;//[3,4,5]&lt;/span&gt;
-&lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;arr&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;//[1,2,3,4,5]&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Using slice we can also convert an array like objects to an array ?&lt;br&gt;
-Syntax:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;Array.prototype.slice.call(arguments)
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;example,&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;array_like_obj&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;john&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;doe&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;capscode&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="na"&gt;length&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="mi"&gt;3&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nb"&gt;Array&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;prototype&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;slice&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;call&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;array_like_obj&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt; 
-&lt;span class="c1"&gt;//["john", "doe", "capscode"]&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Thank you for reading this far. This is a brief introduction of &lt;strong&gt;Difference between SLICE &amp;amp; SPLICE method on Array in JS&lt;/strong&gt; .&lt;br&gt;
-If you find this article useful, like and share this article. Someone could find it useful too. If you find anything technically inaccurate please feel free to comment below.&lt;br&gt;
-Now you can also play around the objects in JS.&lt;/p&gt;
-
-&lt;p&gt;Hope its a nice and informative read for you.&lt;br&gt;
-VISIT &lt;a href="https://www.capscode.in/#/blog"&gt;https://www.capscode.in/#/blog&lt;/a&gt; TO LEARN MORE...&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#if-my-article-helped-you"&gt;
-  &lt;/a&gt;
-  IF MY ARTICLE HELPED YOU
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;a href="https://www.buymeacoffee.com/capscode"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--zQj764Ae--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.buymeacoffee.com/buttons/default-orange.png" alt="Buy Me A Coffee"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Thanks,&lt;br&gt;
-&lt;a class="mentioned-user" href="https://dev.to/capscode"&gt;@capscode&lt;/a&gt;
-&lt;/p&gt;
-
-</description>
-      <category>javascript</category>
-      <category>webdev</category>
-      <category>programming</category>
-      <category>frontend</category>
-    </item>
-    <item>
-      <title>How to add a dark theme to a web app without begging a designer for help</title>
-      <author>Sasha Verbilo</author>
-      <pubDate>Mon, 26 Jul 2021 17:39:02 +0000</pubDate>
-      <link>https://dev.to/akveo/how-to-add-a-dark-theme-to-a-web-app-without-begging-a-designer-for-help-25bk</link>
-      <guid>https://dev.to/akveo/how-to-add-a-dark-theme-to-a-web-app-without-begging-a-designer-for-help-25bk</guid>
-      <description>&lt;p&gt;Have you ever been in a situation where you needed to make a dark theme for your new app, but there was no designer to help? You are on a deadline, and, seemingly, there is no hope to finish the project in time. If you find yourself in this situation now, you are in the right place to find the way out of it.&lt;/p&gt;
-
-&lt;p&gt;From this article, you will know how to create a dark theme for your app without a designer’s help. Without further ado, let’s dive into the process.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#add-a-dark-theme"&gt;
-  &lt;/a&gt;
-  Add a Dark Theme
-&lt;/h2&gt;
-
-&lt;p&gt;Adding the themes is a quite easy process that is done in 3 steps:&lt;/p&gt;
-
-&lt;p&gt;Step 1 - choose the colors:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="nd"&gt;:root&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="py"&gt;--primary-color&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;#2e3a59&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Step 2 - add a use case:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="nt"&gt;html&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="nl"&gt;color&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;var&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;--primary-color&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Step 3 - add a new theme:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="nd"&gt;:root&lt;/span&gt;&lt;span class="nc"&gt;.other-theme&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="py"&gt;--primary-color&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;#8f9bb3&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;If you cannot use &lt;a href="https://caniuse.com/css-variables"&gt;CSS Custom Properties&lt;/a&gt;, you will have to write a few cycles on SASS. You can’t call this task a piece of cake, but we’ll manage to complete it.&lt;/p&gt;
-
-&lt;p&gt;But there’s a catch - you can have a few themes only if a designer made it for you first. Although you don’t always have one by hand, you want to add a dark theme to a default one. Accessibility matters.&lt;/p&gt;
-
-&lt;p&gt;Once, I participated in a project where a designer worked only at an early stage. All the designers were busy, so we couldn’t count on them after they finished their part. But at the end of the project came an idea to make it better by adding a dark theme.&lt;/p&gt;
-
-&lt;p&gt;Creating the first version, we didn’t want to add complex logic and additional controls. Therefore, we decided not to allow a user to change the theme. We had to act in line with system settings because it was the only way to keep the first option simple.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#define-the-rules-for-the-dark-theme"&gt;
-  &lt;/a&gt;
-  Define the rules for the Dark Theme
-&lt;/h2&gt;
-
-&lt;p&gt;Now we need to know when to display the dark theme. There is a special CSS media inquiry for that purpose: &lt;code&gt;prefers-color-scheme&lt;/code&gt;.&lt;br&gt;
-Support is practically the same as in CSS Custom Properties (&lt;a href="https://caniuse.com/prefers-color-scheme"&gt;https://caniuse.com/prefers-color-scheme&lt;/a&gt;).&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="k"&gt;@media&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;prefers-color-scheme&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;dark&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#what-about-the-colors"&gt;
-  &lt;/a&gt;
-  What about the colors?
-&lt;/h2&gt;
-
-&lt;p&gt;Alright, we have established how to define what theme to display. But what to do if there are no colors for the dark theme? And there is the answer to that question too. We can apply color inverse filters to the whole page. Again, support will be similar to CSS Custom Properties (&lt;a href="https://caniuse.com/css-filters"&gt;https://caniuse.com/css-filters&lt;/a&gt;).&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="k"&gt;@media&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;prefers-color-scheme&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;dark&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="nd"&gt;:root&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;filter&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;invert&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="m"&gt;100%&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-  &lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Now let’s add a text on the page. Looks sharp, huh? Then we add a list, a citation, and a random text item - they look just as good as the previous one. Even so, the moment we add a picture, it turns negative.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--76JXZlqD--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/p26qrvrn2ubn3dxgxbq8.jpg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--76JXZlqD--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/p26qrvrn2ubn3dxgxbq8.jpg" alt="The UI before &amp;amp; after we've made an inversion"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;At this stage, we invert the whole page. It means that &lt;strong&gt;all&lt;/strong&gt; the elements will change their color to the opposite. The inversion works well with the text, but I don’t want my photos to turn negative. To avoid that, you need to add an exception.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="k"&gt;@media&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;prefers-color-scheme&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;dark&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="nd"&gt;:root&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt;
-  &lt;span class="nd"&gt;:root&lt;/span&gt; &lt;span class="nt"&gt;img&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;filter&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;invert&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="m"&gt;100%&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-  &lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;But in this case, it would rather be a reinversion than an exception. Now, we’ve applied “reinversion” for images only. If you have a video or iFrame, or other content that is not to be reversed, you should apply the same rule to them too.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--nmTe6Lws--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/hi7r70ynp5mj4231500g.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--nmTe6Lws--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/hi7r70ynp5mj4231500g.png" alt="The UI after the reinversion"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Excellent!&lt;/p&gt;
-
-&lt;p&gt;But you will ask me: “why do we need to apply a filter to &lt;code&gt;:root&lt;/code&gt; and reverse visual elements to their initial state?”. Why can’t we just write the following CSS code:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="nd"&gt;:not&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="nt"&gt;img&lt;/span&gt;&lt;span class="o"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="nl"&gt;filter&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;invert&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="m"&gt;100%&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Selector will allow us to apply the filter to all the elements except images. Although, you should consider that the filter has some peculiarities. Let’s look at them in the case of the page layout below:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;div&amp;gt;&lt;/span&gt;
-  &lt;span class="nt"&gt;&amp;lt;p&amp;gt;&lt;/span&gt;
-    Text in p
-    &lt;span class="nt"&gt;&amp;lt;span&amp;gt;&lt;/span&gt;and in span.&lt;span class="nt"&gt;&amp;lt;/span&amp;gt;&lt;/span&gt;
-  &lt;span class="nt"&gt;&amp;lt;/p&amp;gt;&lt;/span&gt;
-  With picture of me:
-  &lt;span class="nt"&gt;&amp;lt;img&lt;/span&gt; &lt;span class="na"&gt;src=&lt;/span&gt;&lt;span class="s"&gt;"./pic.jpg"&lt;/span&gt; &lt;span class="nt"&gt;/&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;/div&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;ol&gt;
-&lt;li&gt;So as &lt;code&gt;div&lt;/code&gt; matches our selector, the filter will apply to it. As a result, everything will be negative.&lt;/li&gt;
-&lt;li&gt;Since &lt;code&gt;p&lt;/code&gt; is inside the &lt;code&gt;div&lt;/code&gt;, it matches the selector and will change too. Thus, we will have it reinverted so that the colors get back to normal.&lt;/li&gt;
-&lt;li&gt;The &lt;code&gt;span&lt;/code&gt; also matches the selector. Whereas the &lt;code&gt;p&lt;/code&gt; has become normal, the contents of the &lt;code&gt;span&lt;/code&gt; went negative.&lt;/li&gt;
-&lt;li&gt;Finally, the &lt;code&gt;img&lt;/code&gt; selector is not influenced by the filter, so no inversion happens. However, as the &lt;code&gt;img&lt;/code&gt; is a part of the element that we have inverted, the image will be negative.&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;p&gt;That is how it will look like on your screen:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--il18bHik--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/shruh124wg42xisxp4n4.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--il18bHik--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/shruh124wg42xisxp4n4.png" alt="Broken invert"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;That’s why we apply the filter to the &lt;code&gt;root&lt;/code&gt; element once. Then, we invert the elements that we want to stay the same, again to bring them to the initial state.&lt;/p&gt;
-
-&lt;p&gt;Done! The first version works just fine, and the client is happy.&lt;/p&gt;
-
-&lt;p&gt;In the second stage of the process, we add a switch for our themes.&lt;/p&gt;
-
-&lt;p&gt;To do this, we’ll add &lt;code&gt;select&lt;/code&gt; to the header of our app, allowing users to choose the theme they prefer. The select will include 3 choices: &lt;code&gt;light&lt;/code&gt;, &lt;code&gt;dark&lt;/code&gt;, and &lt;code&gt;auto&lt;/code&gt;.&lt;/p&gt;
-
-&lt;p&gt;Therefore, the &lt;code&gt;auto&lt;/code&gt; will be a default value that will allow the app to inherit system settings. At the same time, when choosing &lt;code&gt;light&lt;/code&gt; or &lt;code&gt;dark&lt;/code&gt;, we are adding a &lt;code&gt;theme-light&lt;/code&gt; or &lt;code&gt;theme-dark&lt;/code&gt; class correspondingly to the &lt;code&gt;root&lt;/code&gt; element of a document. Then, we delete a theme class if using &lt;code&gt;auto&lt;/code&gt;. To top it off, we save these settings in &lt;code&gt;localStorage&lt;/code&gt;, which allows us to show the previous theme.&lt;/p&gt;
-
-&lt;p&gt;After we’ve added a few classes, we will modify CSS:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="k"&gt;@media&lt;/span&gt; &lt;span class="n"&gt;screen&lt;/span&gt; &lt;span class="n"&gt;and&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;prefers-color-scheme&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;dark&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="nd"&gt;:root:not&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="nc"&gt;.theme-light&lt;/span&gt;&lt;span class="o"&gt;)&lt;/span&gt;&lt;span class="nd"&gt;:not&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="nc"&gt;.theme-dark&lt;/span&gt;&lt;span class="o"&gt;),&lt;/span&gt;
-  &lt;span class="nd"&gt;:root:not&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="nc"&gt;.theme-light&lt;/span&gt;&lt;span class="o"&gt;)&lt;/span&gt;&lt;span class="nd"&gt;:not&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="nc"&gt;.theme-dark&lt;/span&gt;&lt;span class="o"&gt;)&lt;/span&gt; &lt;span class="nt"&gt;img&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;filter&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;invert&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="m"&gt;100%&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-  &lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;span class="nd"&gt;:root&lt;/span&gt;&lt;span class="nc"&gt;.theme-dark&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt;
-&lt;span class="nd"&gt;:root&lt;/span&gt;&lt;span class="nc"&gt;.theme-dark&lt;/span&gt; &lt;span class="nt"&gt;img&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="nl"&gt;filter&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;invert&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="m"&gt;100%&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#wrap-up"&gt;
-  &lt;/a&gt;
-  Wrap up
-&lt;/h2&gt;
-
-&lt;p&gt;That’s it! You are ready to add the dark theme to your app without a designer’s help. But before you go and nail it, take a glance at the resume of the article to memorize the main points better.&lt;/p&gt;
-
-&lt;p&gt;We have the following process logic:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;If the light theme is chosen - do nothing;&lt;/li&gt;
-&lt;li&gt;If the dark one - always invert;&lt;/li&gt;
-&lt;li&gt;If neither a dark nor light theme is chosen - invert depending on the system's settings.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;“Generating” a dark theme by applying a filter is quite easy and quick.&lt;/p&gt;
-
-&lt;p&gt;Although, there can be some nuances regarding the page contents that are not to be inverted. In the majority of cases, you solve that problem by simple reinversion of such objects. But it doesn’t always work, so we need to use some hacks.&lt;/p&gt;
-
-&lt;p&gt;However, there are some drawbacks of this method:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Not all of the colors invert “aesthetically”, which can tarnish the UI a little bit;&lt;/li&gt;
-&lt;li&gt;You cannot change the hues of light and dark to create different visual experiences of the interface;&lt;/li&gt;
-&lt;li&gt;And the last but not least thing to remember is that all of the colors get inverted. Thereby, your “brand colors” will change too, which can harm your corporate identity.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;Regardless of all the drawbacks, it is still a credible and fast way to add a dark theme to your app. Besides, it can be helpful when you want to experiment with different themes, make PoC (Proof of concept), and see if it suits your application.&lt;/p&gt;
-
-</description>
-      <category>css</category>
-      <category>design</category>
-      <category>webdev</category>
-      <category>frontend</category>
     </item>
   </channel>
 </rss>
