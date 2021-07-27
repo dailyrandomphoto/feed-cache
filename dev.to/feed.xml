@@ -7,6 +7,1763 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>Working with parameters and variables in Amazon Managed Workflows for Apache Airflow</title>
+      <author>Ricardo Sueiras</author>
+      <pubDate>Tue, 27 Jul 2021 23:15:58 +0000</pubDate>
+      <link>https://dev.to/aws/working-with-parameters-and-variables-in-amazon-managed-workflows-for-apache-airflow-4f5h</link>
+      <guid>https://dev.to/aws/working-with-parameters-and-variables-in-amazon-managed-workflows-for-apache-airflow-4f5h</guid>
+      <description>&lt;p&gt;&lt;strong&gt;Maximising the re-use of your DAGs in MWAA&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;During some recently conversations with customers, one of the topics that they were interested in was how to create re-usable, parameterised Apache Airflow workflows (DAGs) that could be executed dynamically through the use variables and/or parameters (either submitted via the UI or the command line). This makes a lot of sense, as you may find that you repeat similar tasks in your workflows, and so this approach allows you to maximise the re-use of that work.&lt;/p&gt;
+
+&lt;p&gt;Looking at some of the threads in the Apache Airflow slack channel, as well as some of the internal channels we use, it became clear that some guidance on how to do this when using Managed Workflows for Apache Airflow (MWAA) would help those, either new to MWAA or coming to MWAA from self managed Apache Airflow.&lt;/p&gt;
+
+&lt;p&gt;As I looked into this area, I noticed that there was also more interest in the integration of MWAA with AWS Secrets Manager as a way of storing and retrieving those variables securely. &lt;/p&gt;
+
+&lt;p&gt;To address these, I thought I would put together this post to dive a little deeper into some of your options when looking to create parameterised and re-usable workflows (DAGs) that you can run on MWAA. This is by no means an exhaustive list, and welcome feedback on other ways that I might have missed or are improvements on what is listed below.&lt;/p&gt;
+
+&lt;p&gt;All the source code in this blog post can be found in &lt;a href="https://github.com/094459/blog-mwaa-variables"&gt;this GitHub repository&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Please let me know if you find this post useful. I have a very short survey which you &lt;a href="https://eventbox.dev/survey/0R1JFG1"&gt;can complete here&lt;/a&gt;, and the first 20 will receive $25 AWS credit codes.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;What will you need&lt;/strong&gt;&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;An AWS account with the right level of privileges&lt;/li&gt;
+&lt;li&gt;An environment with the AWS CLI tools configured and running&lt;/li&gt;
+&lt;li&gt;Access to an AWS region where Managed Workflows for Apache Airflow is supported, as well as an environment of Amazon Managed Workflows for Apache Airflow already setup - &lt;a href="https://aws-oss.beachgeek.co.uk/3h"&gt;you can follow my previous link here&lt;/a&gt;.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3&gt;
+  &lt;a href="#using-variables-in-apache-airflow"&gt;
+  &lt;/a&gt;
+  Using Variables in Apache Airflow
+&lt;/h3&gt;
+
+&lt;p&gt;In this particular post I want to look at how you can use variables in Apache Airflow, and more specifically MWAA to do a couple of things:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;first, where you want to define a standard set of variables and then use these within a standard, parameterised DAG&lt;/li&gt;
+&lt;li&gt;second, where you want to define a dynamic set of variables, that you submit when you want to run a standard parameterised DAG &lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;When working with MWAA, you need to be aware of a few things when working with (or more specifically, setting) variables.&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;p&gt;If you have been used to using the Apache Airflow cli to work with variables, then some of the Airflow commands may or may not be available to you. You can check out the summarised list of Airflow commands that work &lt;a href="https://docs.aws.amazon.com/mwaa/latest/userguide/airflow-cli-command-reference.html"&gt;here&lt;/a&gt; and you will notice that this does vary between Airflow 1.x and 2.x&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;You cannot use the Apache Airflow REST API within MWAA. Instead, use the Apache Airflow cli either via the MWAA API or via the bash and python operators within a DAG&lt;/p&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;&lt;strong&gt;Note! Further reading&lt;/strong&gt;&lt;br&gt;
+There are lots of great blog posts that dive into detail on how to work with variables in Apache Airflow. I can recommend these ones to get started (on top of the documentation you will find at airflow.apache.org)&lt;br&gt;
+&lt;a href="https://marclamberti.com/blog/variables-with-apache-airflow/"&gt;https://marclamberti.com/blog/variables-with-apache-airflow/&lt;/a&gt;&lt;br&gt;
+&lt;a href="https://www.applydatascience.com/airflow/airflow-variables/"&gt;https://www.applydatascience.com/airflow/airflow-variables/&lt;/a&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;When working with variables in your workflows (DAGs), then consider some best practices:&lt;/p&gt;
+
+&lt;p&gt;&lt;em&gt;Careful you do not reveal your secrets&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;When you define variables within the Apache Airflow UI (via the Admin tab) they are stored securely (encrypted) within the Apache Airflow metastore. If you store your variables in other places, then it will depend. For example, if you use AWS Secrets Manager, your variables will also be encrypted.&lt;/p&gt;
+
+&lt;p&gt;This helps you to improve your security by reducing the need to store sensitive information (such as passwords, shared keys, etc) that your DAGs might need when connecting to downstream services.&lt;/p&gt;
+
+&lt;p&gt;There are some gotcha's you should be aware of and you should test.&lt;/p&gt;
+
+&lt;p&gt;The first, and something that I found out when using some of the Airflow operators, is that sometime passwords may be printed as part of the log files that are produced by your Tasks. You should therefore check those Task logs, and importantly ensure that you lock down access and encrypt these if any sensitive information is output. If you are creating your own operators, think about this when you look at how your operator will generate output.&lt;/p&gt;
+
+&lt;p&gt;The second is that you can potentially see those passwords in the Admin UI (again, lock that down to reduce this risk). You can mitigate this by naming your variables to contain a key string that will make Airflow hide the string. For example, if you create a variable called "myconnection_secret" the value will be hidden. You can read more about this &lt;a href="https://airflow.apache.org/docs/apache-airflow/stable/security/secrets/index.html"&gt;here&lt;/a&gt; with the values set to : ‘password’, ‘secret’, ‘passwd’, ‘authorization’, ‘api_key’, ‘apikey’ and ‘access_token’&lt;/p&gt;
+
+&lt;p&gt;The third is to be wary of using environment variables when setting/retrieve secret values. This is not a good idea and those values may be exposed and will not be protected.&lt;/p&gt;
+
+&lt;p&gt;&lt;em&gt;Optimise your code when working with variables&lt;/em&gt; &lt;/p&gt;
+
+&lt;p&gt;The way that Apache Airflow works under the covers means that where you locate the code that reads/writes variables within your DAGs can have an impact on the overall performance of your MWAA environment. Your DAG is parsed by the MWAA schedulers every second&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;processor_poll_interval = 1
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;So when thinking about overall scalability and performance of your workflows, you should look to:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Keep variables that you store in the metastore inside of the task/operator rather than in the main body of your DAG. This will stop the scheduler polling the metastore&lt;/li&gt;
+&lt;li&gt;Use a single variable with a JSON value. This will allow you to minimise calls to the metastore&lt;/li&gt;
+&lt;li&gt;Use Jinja templates as placeholders for your variables. When you do this, the call to the metastore will only be done during execution of the workflow. The caveat here is that you need to make sure that the operators you are working with support passing variables this way.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;Note! The quickest way of knowing what parameters your operators support for passing in these Jinja templates is to either check the documentation of the operator, and/or review the source code of the operator and look for the "templated" value which tells you which parameters are supported.&lt;br&gt;
+If we look at the source code for the bash operator we can see the following lines in the code&lt;/p&gt;
+
+
+&lt;/blockquote&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;template_fields = ('bash_command', 'env')
+template_fields_renderers = {'bash_command': 'bash', 'env': 'json'}
+
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;blockquote&gt;
+&lt;p&gt;Which show that this supports templating when using either the bash_command or env argument within the Bash operator as follows&lt;/p&gt;
+
+
+&lt;/blockquote&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;param = BashOperator(task_id="demo", bash_command="echo {{ params.my_param }}", 
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;blockquote&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;&lt;em&gt;System Environment variables&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;If you have been using environment variables within your DAGs then you need to be aware of the ephemeral workers in MWAA that execute your tasks, which mean that tasks may not execute on the same host. &lt;/p&gt;
+
+&lt;p&gt;Using environment variables in your DAGs may generate unpredictable results&lt;/p&gt;
+
+&lt;p&gt;You can explore the environment variables that are available and that might be useful for you using a simple DAG such as:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;from airflow import DAG
+from airflow.operators.bash_operator import BashOperator
+from airflow.utils.dates import days_ago
+with DAG(dag_id="info-mwaa-env", schedule_interval=None, catchup=False, start_date=days_ago(1)) as dag:
+    env_cli_command = BashOperator(
+        task_id="env_cli_command",
+        bash_command="env"
+    )
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;em&gt;Overwrite&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;One thing to take note is that when importing/setting variables in the Apache Airflow metastore, you will overwrite any existing value that might already be set.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Where is my Admin tab gone?&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;When working with the Apache Airflow UI, depending on how your access has been set up, you may or may not have full admin access to Apache Airflow. I covered this in an earlier post, Working with Managed Workflows for &lt;a href="https://aws-oss.beachgeek.co.uk/3n"&gt;Apache Airflow Permissions&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;If in your set up you only have user access, you will not be able to define/set variables via the UI. In the examples below, this may mean you need to take one of the other approaches to defining/setting variables you want to use.&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;MWAA uses the &lt;a href="https://airflow.apache.org/docs/apache-airflow/1.10.6/security.html?highlight=ldap#default-roles"&gt;standard Apache Airflow roles&lt;/a&gt;; Admin, User, Ops, etc - Admin and Ops both enable the Admin tab within the UI but you may not want to provide that to your Airflow users, and just provide them with the level of access needed to view/trigger their workflows (User)&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;&lt;strong&gt;Example variables we want to set&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;To help put all of this together, let us run through some examples of the different ways we can work with variables in MWAA. We start with our variables. In our scenario, we want to define these set of variables that our DAG will use.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;{
+    "cli_test": "newvalue/",
+    "cli_test2": "12341234",
+    "cli_test3": "https://grouplens.org/datasets/movielens/latest/"
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We can save this in a file which we will call "variables.json".&lt;/p&gt;
+
+&lt;p&gt;We will run through some examples and see how we can cover a number of use cases that should help simplify and cover how you can do this for yourself.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#setting-variables-in-aws-secrets-manager"&gt;
+  &lt;/a&gt;
+  Setting variables in AWS Secrets Manager
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;strong&gt;Setting up MWAA to use AWS Secrets Manager&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;We can use AWS Secrets Manager to store variables that we want to use within our DAGs. We need to make a change to our MWAA environment however before we can do that.&lt;/p&gt;
+
+&lt;p&gt;We need to modify the MWAA environment and add the following Airflow configurations (within MWAA, you are not able to modify the airflow.cfg, so you make changes via this mechanism). Making this change will cause your MWAA environment to update, so it will be unavailable for approx. 20-25 minutes.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;secrets.backend: airflow.contrib.secrets.aws_secrets_manager.SecretsManagerBackend
+        secrets.backend_kwargs: '{"connections_prefix" : "airflow/connections", "variables_prefix" : "airflow/variables"}'  
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;You will need to update the IAM execution role that your MWAA environment is running to be able to access the secrets you create. You can add the "SecretsManagerReadWrite" managed policy to your role, but this will provide very broad access to your secrets. You should lock that down to just the secrets that you want your MWAA to have access to. You can review the notes below on how to lock that down to the minimum, on both the Secrets Manager API calls as well as the resource scope.&lt;/p&gt;
+
+&lt;p&gt;In the GitHub repo you will find a CDK application that deploys a MWAA environment with the minimum permissions scoped down to just the variables you want MWAA to access.&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;Note! If you plan to use the MWAA CDK application from one of my MWAA blog post series, you can update the following lines to automate this - the lines beginning with # are the new entries:&lt;/p&gt;
+
+
+&lt;/blockquote&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;         options = {
+            'core.load_default_connections': False,
+            'core.load_examples': False,
+            'webserver.dag_default_view': 'tree',
+            #'secrets.backend' : 'airflow.contrib.secrets.aws_secrets_manager.SecretsManagerBackend',
+            #'secrets.backend_kwargs' : '{"connections_prefix" : "airflow/connections", "variables_prefix" : "airflow/variables"}',
+            'webserver.dag_orientation': 'TB'
+            }
+
+        #mwaa_secrets_policy_document = iam.Policy(self, "MWAASecrets", 
+        #            statements=[
+        #                iam.PolicyStatement(
+        #                    actions=[
+        #                        "secretsmanager:GetSecretValue",
+        #                        "secretsmanager:DescribeSecret"
+        #                    ],
+        #                    effect=iam.Effect.ALLOW,
+        #                    resources=[f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:{mwaa_props['mwaa_secrets']}*"],
+        #                ),
+        #            ]
+        #)
+        mwaa_service_role.attach_inline_policy(mwaa_secrets_policy_document)
+
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;blockquote&gt;
+&lt;p&gt;You can uncomment these out, then you can adjust the value in the app.py to align with the prefix you want to use for selecting secrets in AWS Secrets Manager&lt;br&gt;
+&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt; mwaa_props = {
+    'dagss3location': 'airflow-ricsue-cdk-demo',
+    'mwaa_env' : 'cdk-ricsue-demo-delete',
+    #'mwaa_secrets' : 'airflow/variables'}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;blockquote&gt;
+&lt;p&gt;to point to the AWS Secrets you created via the console or AWS cli (see next step). Once you save you can then redeploy.  &lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;So what have you done? You have created a hook that will now do a look up in AWS Secrets Manager when you do a 'Variable.get("{my_variable}")' within your DAG, looking for a secret key of "airflow/variables/my_variable" in AWS Secrets Manager.&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;Note! Remember to ensure that these are both in the same AWS region, as MWAA will look in the current region it is deploy into for those secrets&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;So now all you have to do is store your variables in AWS Secrets Manager in the right forward and key, and they will be picked up automatically in your DAGs.&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;Check out the blog from John Jackson, &lt;a href="https://aws.amazon.com/blogs/opensource/move-apache-airflow-connections-variables-aws-secrets-manager/"&gt;Move your Apache Airflow connections and variables to AWS Secrets Manager&lt;/a&gt; where he dives deep into this.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;&lt;strong&gt;Storing our variables via AWS Secrets Manager&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;Lets put our variables in AWS Secrets Manager&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;{
+    "cli_test": "newvalue/",
+    "cli_test2": "12341234",
+    "cli_test3": "https://grouplens.org/datasets/movielens/latest/"
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We are going to use the AWS cli to do this.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;aws secretsmanager create-secret --name airflow/variables/cli_test --description "Cli variable 1" --secret-string "newvalue/" --region={your region}"
+aws secretsmanager create-secret --name airflow/variables/cli_test2 --description "Cli variable 2" --secret-string "007007" --region={your region}"         
+aws secretsmanager create-secret --name airflow/variables/cli_test3 --description "Cli variable 3" --secret-string "https://grouplens.org/datasets/movielens/latest/" --region={your region}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This will generate output similar to the following:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;{
+    "ARN": "arn:aws:secretsmanager:eu-central-1:704533066374:secret:airflow/variables/cli_test-OsNI9S",
+    "Name": "airflow/variables/cli_test",
+    "VersionId": "988f7bd5-b0fb-47ca-ab0b-343c665b0d24"
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;And we can view any of these defined variables using the describe-secret option&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;aws secretsmanager describe-secret --secret-id airflow/variables/cli_test
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Which outputs the metadata, and does not expose the secret.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;{
+    "ARN": "arn:aws:secretsmanager:eu-central-1:704533066374:secret:airflow/variables/cli_test-OsNI9S",
+    "Name": "airflow/variables/cli_test",
+    "Description": "Cli variable 1",
+    "LastChangedDate": 1627293097.284,
+    "VersionIdsToStages": {
+        "988f7bd5-b0fb-47ca-ab0b-343c665b0d24": [
+            "AWSCURRENT"
+        ]
+    },
+    "CreatedDate": 1627293097.25
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We can also see this via the AWS console&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--1YVFNQbF--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://github.com/094459/blog-mwaa-variables/blob/main/images/airflow-console-secret.png%3Fraw%3Dtrue" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--1YVFNQbF--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://github.com/094459/blog-mwaa-variables/blob/main/images/airflow-console-secret.png%3Fraw%3Dtrue" alt="screen"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#using-variables-in-aws-secrets-manager-in-our-dags"&gt;
+  &lt;/a&gt;
+  Using variables in AWS Secrets Manager in our DAGs
+&lt;/h3&gt;
+
+&lt;p&gt;Now we can use these variables in our DAG as follows. Here I am showing two methods, the first by assigning it directly with the workflow, and the second (preferred) way is to use the Jinja templates. In the DAG below, when we reference the variable "cli_test", the integration between MWAA and AWS which we have configured via the "secrets.backend/secrets.backend_kwargs" configuration within MWAA, MWAA will look for a variable in AWS Secrets manager called "airflow/variables/cli_test"&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;from airflow import DAG
+from airflow.operators.bash_operator import BashOperator
+from airflow.utils.dates import days_ago
+from airflow.models import Variable
+
+demo =  Variable.get("cli_test", default_var="undefined")
+
+with DAG(
+    dag_id="aws_secrets_variables",
+    schedule_interval=None,
+    catchup=False,
+    start_date=days_ago(1)) as dag:
+
+    get_var_sec1 = BashOperator(
+        task_id="disp_aws_secret_variable_1",
+        bash_command='echo "The value of the variable is: {var}"'.format(var=demo),
+    )
+
+    get_var_sec2 = BashOperator(
+        task_id="disp_aws_secret_variable_2",
+        bash_command='echo "The value of the second variable is: {{var.value.cli_test2}}"',
+    )
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;And when we trigger this DAG, we can see the following output&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;[2021-07-26 11:31:40,040] {{bash.py:158}} INFO - Running command: echo "The value of the variable is: newvalue/"
+[2021-07-26 11:31:40,078] {{bash.py:169}} INFO - Output:
+[2021-07-26 11:31:40,113] {{bash.py:173}} INFO - The value of the variable is: newvalue/
+...
+...
+[2021-07-26 11:31:40,089] {{bash.py:158}} INFO - Running command: echo "The value of the second variable is: 123456"
+[2021-07-26 11:31:40,185] {{bash.py:169}} INFO - Output:
+[2021-07-26 11:31:40,273] {{bash.py:173}} INFO - The value of the second variable is: 123456
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Now lets move onto the next method, using the Apache Airflow UI and metastore.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#setting-variables-via-the-apache-airflow-ui"&gt;
+  &lt;/a&gt;
+  Setting variables via the Apache Airflow UI
+&lt;/h3&gt;
+
+&lt;p&gt;Assuming we have the right level of access (Admin or Ops) then from the Apache Airflow UI, we will see the ADMIN tab and from that we can select VARIABLES, which will show us variables we can use.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--V7EKPBMT--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://github.com/094459/blog-mwaa-variables/blob/main/images/var_ui_blank.png%3Fraw%3Dtrue" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--V7EKPBMT--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://github.com/094459/blog-mwaa-variables/blob/main/images/var_ui_blank.png%3Fraw%3Dtrue" alt="blank_variable"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;We can add variables either one at a time (by clicking on the + next to the ACTIONS button) or via a parameterised file by first browsing to our file and then clicking on the IMPORT VARIABLES at the top of the screen. (See above for the file variables.json) Which will show up now in the UI&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--St8-frRm--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://github.com/094459/blog-mwaa-variables/blob/main/images/var_ui_imported.png%3Fraw%3Dtrue" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--St8-frRm--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://github.com/094459/blog-mwaa-variables/blob/main/images/var_ui_imported.png%3Fraw%3Dtrue" alt="ui_var_show"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;When you do this those variables are being stored in the Apache Airflow metastore. They are encrypted so the values you set are safe.&lt;/p&gt;
+
+&lt;p&gt;At this stage I have not disabled the AWS Secrets Manager integration with MWAA, so what happens if we choose variable names that DUPLICATE of the ones we have stored in AWS Secrets Manager? Lets find out, as one of the variables has different values (cli_test2, when we set this in AWS Secrets Manager we used the value 007007, but in the variables.json file, it is 12341234) &lt;/p&gt;
+
+&lt;p&gt;When we run the DAGs again, we can see from the output&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;[2021-07-26 11:56:45,329] {{bash.py:158}} INFO - Running command: echo "The value of the second variable is: 123456"
+[2021-07-26 11:56:45,402] {{bash.py:173}} INFO - The value of the second variable is: 123456
+
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Which is what we would expect. If a variable exists in both AWS Secrets Manager AND is defined via the Airflow UI, AWS Secrets Manager will be used. If I delete the secret from AWS Secrets Manager and re-run the DAG, you will see the following error in the log&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;An error occurred (InvalidRequestException) when calling the GetSecretValue operation: You can't perform this operation on the secret because it was marked for deletion.
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This is normal, and as expected. Once AWS Secrets manager has cleared the secret (which you define when you delete it) this error will go away and it will pick up the value from the Apache Airflow metastore. Make sure you are aware of this as you think about how you will use variables in your workflows.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;What happens if we define a variable that doesn't exist?&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;If we use a variable in our DAGs that have not been defined, either directly within the DAG itself, via something like AWS Secrets Manager or Apache Airflow Variables, then the Task will fail with an error. I modified the DAG as follows:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;    get_var_sec2 = BashOperator(
+        task_id="disp_aws_secret_variable_2",
+        bash_command='echo "The value of the second variable is: {{var.value.cli_test4}}"',
+    )
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;But I did not yet create this variable. When I run the DAG, it generates a Task failure with the following error:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;KeyError: 'Variable cli_test4 does not exist'
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;If I now use the Apache Airflow UI to add a new variable called "cli_test4" with a value "I am feeling better now" and then re-run the DAG, we now get:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;[2021-07-26 12:28:18,320] {{bash.py:158}} INFO - Running command: echo "The value of the second variable is: I am feeling better now"
+[2021-07-26 12:28:18,399] {{bash.py:173}} INFO - The value of the second variable is: I am feeling better now
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#setting-variables-when-launchingtriggering-dags"&gt;
+  &lt;/a&gt;
+  Setting variables when launching/triggering DAGs
+&lt;/h3&gt;
+
+&lt;p&gt;So far we have set the variables we wanted to use either directly within Apache Airflow (in the metastore via the Apache Airflow UI) or via the integration with AWS Secrets Manager. &lt;/p&gt;
+
+&lt;p&gt;We might want to set variables every time we run our workflow. When we trigger our workflows via the Apache Airflow UI, we get the opportunity to provide a configuration json file (which is optional) which you will have seen via this screen:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--8mvFUTBA--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://github.com/094459/blog-mwaa-variables/blob/main/images/trigger_var.png%3Fraw%3Dtrue" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--8mvFUTBA--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://github.com/094459/blog-mwaa-variables/blob/main/images/trigger_var.png%3Fraw%3Dtrue" alt="ui-param"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;You will notice that it says you can access these values via&lt;br&gt;
+&lt;br&gt;
+ &lt;code&gt;"{{ dag_run.conf }}"&lt;/code&gt;&lt;br&gt;
+&lt;/p&gt;
+
+&lt;p&gt;We can use this within our DAGs in MWAA as follows:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;from airflow import DAG
+from airflow.operators.bash_operator import BashOperator
+from airflow.utils.dates import days_ago
+
+with DAG(
+    dag_id="airflow_variables_atruntime",
+    schedule_interval=None,
+    catchup=False,
+    start_date=days_ago(1)) as dag:
+
+    get_var_filename = BashOperator(
+        task_id="get_var_filename",
+        bash_command='echo "You are running this DAG with the following variable file: \'{{ dag_run.conf["cli_test"] if dag_run.conf else "" }}\'"',
+    )
+    get_var_filename = BashOperator(
+        task_id="get_var_filename2",
+        bash_command='echo "You are running this DAG with the following variable file: \'{{ dag_run.conf["cli_test2"] if dag_run.conf else "" }}\'"',
+    )
+    get_var_filename = BashOperator(
+        task_id="get_var_filename3",
+        bash_command='echo "You are running this DAG with the following variable file: \'{{ dag_run.conf["cli_test3"] if dag_run.conf else "" }}\'"',
+    )
+
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;When you trigger this DAG and do not submit any parameters, in the logs you should see that all the task have output&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;[2021-07-26 12:54:57,278] {{bash.py:158}} INFO - Running command: echo "You are running this DAG with the following variable file: ''"
+[2021-07-26 12:54:57,379] {{bash.py:173}} INFO - You are running this DAG with the following variable file: ''
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;blockquote&gt;
+&lt;p&gt;Note! If when you trigger the DAG and leave the blank, you  get errors such as&lt;br&gt;
+&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;jinja2.exceptions.UndefinedError: 'dict object' has no attribute 'cli_test'
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;blockquote&gt;
+&lt;p&gt;check to make sure you are using dag_run.conf and not just dag_run. You will see in the examples below the correct format that allows you to combine a number of different sources for your variables.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;When we submit the following into the the parameter form and kick off the DAG&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;{
+    "cli_test": "newvalue/",
+    "cli_test2": "12341234",
+    "cli_test3": "https://grouplens.org/datasets/movielens/latest/"
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We can now see that the DAG processes fine and we see the following in the logs (just showing one of the task outputs)&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;[2021-07-26 12:54:57,278] {{bash.py:158}} INFO - Running command: echo "You are running this DAG with the following variable file: '12341234'"
+[2021-07-26 12:54:57,379] {{bash.py:173}} INFO - You are running this DAG with the following variable file: '12341234'
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;strong&gt;Overiding variables&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;You can combine all the techniques above so that you can store variables, either in Apache Airflow's metastore or AWS Secrets Manager, but also then over-ride them when you trigger the workflows.&lt;/p&gt;
+
+&lt;p&gt;Assuming we have the variables we have been using (cli_test, cli_test2, etc) already setup in Apache Airflow, in the following DAG:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;from airflow import DAG
+from airflow.operators.bash_operator import BashOperator
+from airflow.utils.dates import days_ago
+
+with DAG(
+    dag_id="airflow_variables_atruntime",
+    schedule_interval=None,
+    catchup=False,
+    start_date=days_ago(1)) as dag:
+
+    get_var_filename = BashOperator(
+        task_id="get_var_filename",
+        bash_command="""echo 'You are running this DAG with the following variable file: "{{ dag_run.conf["cli_test"] if dag_run.conf else var.value.cli_test }}"'""",
+    )
+    get_var_filename = BashOperator(
+        task_id="get_var_filename2",
+        bash_command='echo "You are running this DAG with the following variable file: \'{{ dag_run.conf["cli_test2"] if dag_run.conf else var.value.cli_test2 }}\'"',
+    )
+    get_var_filename = BashOperator(
+        task_id="get_var_filename3",
+        bash_command='echo "You are running this DAG with the following variable file: \'{{ dag_run.conf["cli_test3"] if dag_run.conf else var.value.cli_test3 }}\'"',
+    )
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;When we trigger this workflow and submit this parameter/variable file:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;{
+    "cli_test": "override/",
+    "cli_test2": "007007",
+    "cli_test3": "https://bbc.co.uk"
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;When we look at the logs from the task, we can see that the values are as follows (I am just showing the log for the first task, for cli_test):&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;[2021-07-26 15:54:34,309] {{bash.py:158}} INFO - Running command: echo 'override/'
+[2021-07-26 15:54:34,374] {{bash.py:173}} INFO - override/
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;and if we re-run the task, this time not submitting anything, we get what we have stored in the Apache Airflow metastore&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;[2021-07-26 15:54:04,899] {{bash.py:158}} INFO - Running command: echo 'newvalue/'
+[2021-07-26 15:54:04,967] {{bash.py:173}} INFO - newvalue/
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We can extend this and combine all three techniques for passing in variables: runtime, Apache Airflow metastore and AWS Secrets Manager. &lt;/p&gt;
+
+&lt;p&gt;I delete all the variables in Apache Airflow metastore, but create a new one called cli_test4 with a value of "This rocks!". We update our DAG as follows:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;from airflow import DAG
+from airflow.operators.bash_operator import BashOperator
+from airflow.utils.dates import days_ago
+
+with DAG(
+    dag_id="airflow_variables_atruntime",
+    schedule_interval=None,
+    catchup=False,
+    start_date=days_ago(1)) as dag:
+
+    get_var_filename = BashOperator(
+        task_id="get_var_filename",
+        bash_command="""echo 'You are running this DAG with the following variable file: "{{ dag_run.conf["cli_test"] if dag_run.conf else var.value.cli_test }}"'""",
+    )
+    get_var_filename = BashOperator(
+        task_id="get_var_filename2",
+        bash_command='echo "You are running this DAG with the following variable file: \'{{ dag_run.conf["cli_test2"] if dag_run.conf else var.value.cli_test4 }}\'"',
+    )
+    get_var_filename = BashOperator(
+        task_id="get_var_filename3",
+        bash_command='echo "You are running this DAG with the following variable file: \'{{ dag_run.conf["cli_test3"] if dag_run.conf else var.value.cli_test3 }}\'"',
+    )
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;When we trigger the DAG, if we submit the following parameter file:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;{
+    "cli_test": "override/"
+}
+
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;When the DAG executes this is what we would expect:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;cli_test value is been obtained from when we you the DAG&lt;/li&gt;
+&lt;li&gt;cli_test3 value is been obtained from AWS Secrets Manager (this is because I deleted cli_test2 in a previous step)&lt;/li&gt;
+&lt;li&gt;cli_test4 value is been obtained from the Apache Airflow metastore&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;However, when we I run this, we get an error. What has happened? &lt;/p&gt;
+
+&lt;p&gt;When we trigger the DAG now, in effect the value of dag_run.conf becomes true, and the 2nd and 3rd Tasks expect the values to be available in dag_run.conf. To fix this, we make one more tweak to our DAG:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;from airflow import DAG
+from airflow.operators.bash_operator import BashOperator
+from airflow.utils.dates import days_ago
+
+with DAG(
+    dag_id="airflow_variables_atruntime",
+    schedule_interval=None,
+    catchup=False,
+    start_date=days_ago(1)) as dag:
+
+    get_var_filename = BashOperator(
+        task_id="get_var_filename",
+        bash_command="""echo 'You are running this DAG with the following variable file: "{{ dag_run.conf["cli_test"] if dag_run.conf.get("cli_test") else var.value.cli_test }}"'""",
+    )
+    get_var_filename = BashOperator(
+        task_id="get_var_filename2",
+        bash_command='echo "You are running this DAG with the following variable file: \'{{ dag_run.conf["cli_test2"] if dag_run.conf.get("cli_test2") else var.value.cli_test3 }}\'"',
+    )
+    get_var_filename = BashOperator(
+        task_id="get_var_filename3",
+        bash_command='echo "You are running this DAG with the following variable file: \'{{ dag_run.conf["cli_test3"] if dag_run.conf.get("cli_test3") else var.value.cli_test4 }}\'"',
+    )
+
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;And when we now run the DAG, either with or without parameters, we get the expected behaviour. Our DAG is now grabbing variables from the Apache Airflow metastore, AWS Secrets Manager and from a parameter file when triggered.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#importing-variables-without-the-ui"&gt;
+  &lt;/a&gt;
+  Importing variables without the UI
+&lt;/h3&gt;
+
+&lt;p&gt;What if you do not have access to the Apache Airflow Admin UI? Apache Airflow does provide a cli and an API that allows you to do a number of things with variables. You can use the following command&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;airflow variables {command}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;and then provide a number of different commands that allow you to set, get, import variables into the Apache Airflow metastore.&lt;/p&gt;
+
+&lt;p&gt;Some things to be aware of when working with MWAA.&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;We cannot access the Airflow cli in MWAA directly, but we can access a subset of them via a DAG&lt;/li&gt;
+&lt;li&gt;Not all the Apache Airflow commands are supported, so &lt;a href="https://docs.aws.amazon.com/mwaa/latest/userguide/airflow-cli-command-reference.html"&gt;check out the following page on the MWAA documentation&lt;/a&gt; that lets you know what does and does not work&lt;/li&gt;
+&lt;li&gt;The Apache Airflow commands are different between versions (and the same goes for what does and does not work with MWAA)&lt;/li&gt;
+&lt;li&gt;We cannot use the Airflow RESTful API&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;So this can make working with the Apache Airflow via the cli something you need to understand and may require some getting used to if you have some existing scripts and automation that relies heavily on accessing the Apache Airflow commands.&lt;/p&gt;
+
+&lt;p&gt;In the following I provide a couple of options that might work for you.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Using a DAG to import/create variables&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;Whilst we cannot access the Airflow cli in MWAA directly, we can access it via a DAG. One approach then to using the Airflow cli is to create a DAG that runs the "airflow variables" command to do with it what we want. The caveat here is that we cannot do in MWAA what the vanilla Apache Airflow provides, so lets see what we can do.&lt;/p&gt;
+
+&lt;p&gt;These are broken down here by different versions of Apache Airflow/MWAA.&lt;/p&gt;
+
+&lt;p&gt;&lt;em&gt;MWAA 1.x&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;We can import a set of variables (in this case, our variables.json file above) by creating a DAG which takes that file and then uses the Apache Airflow import command to bulk import this. This is what the DAG looks like.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;from airflow import DAG
+from airflow.operators.bash_operator import BashOperator
+from airflow.utils.dates import days_ago
+
+with DAG(
+    dag_id="import_airflow_variables",
+    schedule_interval=None,
+    catchup=False,
+    start_date=days_ago(1)) as dag:
+
+    get_var_filename = BashOperator(
+        task_id="get_var_filename",
+        bash_command='echo "You are importing the following variable file: \'{{ dag_run.conf["var_filename"] if dag_run.conf else "variables.json" }}\'"',
+    )
+    task1 = BashOperator(
+        task_id="create_variables",
+        bash_command='airflow variables --import /usr/local/airflow/dags/{{ dag_run.conf["var_filename"] if dag_run.conf else "variables.json"}}'
+   )
+
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We upload the variables.json file with our DAG file to the defined MWAA DAG S3 bucket. &lt;/p&gt;
+
+&lt;p&gt;The DAG defaults to variables.json if no parameters are provided, but it does allow you to provide a runtime parameter that overrides the filename. For example, if I wanted to use a different file called my_vars.json, I would upload that file to the DAGS folder and then trigger the DAG and submit a parameter of {"var_filename":"my_vars.json"}. &lt;/p&gt;
+
+&lt;p&gt;This is what my DAGS folder looks like&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;.
+├── import-var-dag.py
+└── variables.json
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;MWAA takes care of deploying it into the following location (/usr/local/airflow/dags) so we can then access it as a standard file. The DAG itself invokes the Apache Airflow command via a bash operator, running the "airflow variables --import" command, which is supported in MWAA 1.x&lt;/p&gt;
+
+&lt;p&gt;When we trigger the DAG, you should see that the variables now appear in the Apache Airflow metastore (you can use the UI to check this). If you delete the variables and re-run the DAG, you should see they appear back.&lt;/p&gt;
+
+&lt;p&gt;When we look at the logs, we can see that when we do not supply any parameters, the default of "variables.json" is used and imported.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;[2021-07-27 08:29:13,721] {{bash_operator.py:146}} INFO - Running command: echo "You are importing the following variable file: 'variables.json'"
+[2021-07-27 08:29:13,761] {{bash_operator.py:153}} INFO - Output:
+[2021-07-27 08:29:13,790] {{bash_operator.py:157}} INFO - You are importing the following variable file: 'variables.json'
+[2021-07-27 08:29:13,818] {{bash_operator.py:161}} INFO - Command exited with return code 0
+[2021-07-27 08:29:13,858] {{taskinstance.py:1070}} INFO - Marking task as SUCCESS.dag_id=import_airflow_variables, task_id=get_var_filename, execution_date=20210727T082909, start_date=20210727T082912, end_date=20210727T082913
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;when we supply a parameter of&lt;br&gt;
+&lt;br&gt;
+ &lt;code&gt;{"var_filename":"my_vars.json"}&lt;/code&gt;&lt;br&gt;
+&lt;br&gt;
+ and upload a file with some variables we get the following output:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;[2021-07-27 08:33:19,467] {{bash_operator.py:146}} INFO - Running command: echo "You are importing the following variable file: 'my_vars.json'"
+[2021-07-27 08:33:19,499] {{bash_operator.py:153}} INFO - Output:
+[2021-07-27 08:33:19,523] {{bash_operator.py:157}} INFO - You are importing the following variable file: 'my_vars.json'
+[2021-07-27 08:33:19,547] {{bash_operator.py:161}} INFO - Command exited with return code 0
+[2021-07-27 08:33:19,589] {{taskinstance.py:1070}} INFO - Marking task as SUCCESS.dag_id=import_airflow_variables, task_id=get_var_filename, execution_date=20210727T083312, start_date=20210727T083318, end_date=20210727T083319
+
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;em&gt;MWAA 2.x&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;We can take the same approach with MWAA 2.x, the only difference being is that the DAG is slightly different (the --import becomes just import)&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;from airflow import DAG
+from airflow.operators.bash_operator import BashOperator
+from airflow.utils.dates import days_ago
+
+with DAG(
+    dag_id="import_airflow_variables",
+    schedule_interval=None,
+    catchup=False,
+    start_date=days_ago(1)) as dag:
+
+    get_var_filename = BashOperator(
+        task_id="get_var_filename",
+        bash_command='echo "You are importing the following variable file: \'{{ dag_run.conf["var_filename"] if dag_run.conf else "variables.json" }}\'"',
+    )
+    task1 = BashOperator(
+        task_id="create_variables",
+        bash_command='airflow variables import /usr/local/airflow/dags/{{ dag_run.conf["var_filename"] if dag_run.conf else "variables.json"}}'
+   )
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;strong&gt;Using the Airflow CLI to create/import variables&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;The next way we can import variables into MWAA is via scripts. You can take a look at the MWAA documentation for the script that this is based on here, &lt;a href="https://docs.aws.amazon.com/mwaa/latest/userguide/call-mwaa-apis-cli.html"&gt;Creating an Apache Airflow CLI token&lt;/a&gt; that covers how to access MWAA via both bash and Python. As mentioned above, these vary between MWAA versions.&lt;/p&gt;
+
+&lt;p&gt;The bash scripts assume you are running on either Linux or OSX (which is what I am using) and that you have the AWS cli installed and configured as well as jq installed.&lt;/p&gt;
+
+&lt;p&gt;&lt;em&gt;MWAA 1.x&lt;/em&gt;&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;#!/bin/bash
+
+
+[ $# -eq 0 ] &amp;amp;&amp;amp; echo "Usage: $0 MWAA environment name " &amp;amp;&amp;amp; exit
+
+if [[ $2 == "" ]]; then
+    dag="variables"
+
+elif [ $2 == "--set" ] || [ $2 == "-s" ] || [ $2 == "--get" ] || [ $2 == "-g" ] || [ $2 == "-x" ] || [ $2 == "--delete" ]; then
+    dag="variables $2 $3 $4 $5"
+
+else
+    echo "Not a valid command"
+    exit 1
+fi
+
+CLI_JSON=$(aws mwaa --region $AWS_REGION create-cli-token --name $1) \
+    &amp;amp;&amp;amp; CLI_TOKEN=$(echo $CLI_JSON | jq -r '.CliToken') \
+    &amp;amp;&amp;amp; WEB_SERVER_HOSTNAME=$(echo $CLI_JSON | jq -r '.WebServerHostname') \
+    &amp;amp;&amp;amp; CLI_RESULTS=$(curl --request POST "https://$WEB_SERVER_HOSTNAME/aws_mwaa/cli" \
+    --header "Authorization: Bearer $CLI_TOKEN" \
+    --header "Content-Type: text/plain" \
+    --data-raw "$dag" ) \
+    &amp;amp;&amp;amp; echo "Output:" \
+    &amp;amp;&amp;amp; echo $CLI_RESULTS | jq -r '.stdout' | base64 --decode \
+    &amp;amp;&amp;amp; echo "Errors:" \
+    &amp;amp;&amp;amp; echo $CLI_RESULTS | jq -r '.stderr' | base64 --decode
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;With this script, we can get, set and delete variables that are stored in the Apache Airflow metastore in MWAA. We use this script providing the name of a MWAA environment we want to run against. In this example, we delete the cli_test variable, set it to a new value of "test" and then retrieve this.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;./mwaa-v1-variables.sh ricsue-dublin --delete cli_test
+./mwaa-v1-variables.sh ricsue-dublin --set cli_test "test"
+./mwaa-v1-variables.sh ricsue-dublin --get cli_test
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Those familiar with Apache Airflow may wonder why we are not using the --import option as well? This is not one of the Airflow command options that MWAA supports, and whilst we can set, delete and get variables, we cannot do use this for bulk importing of our variables. For that, we can create a script that iterates on the values within the variable file we want to import. Here is an example:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;import boto3
+import json
+import requests 
+import base64
+import getopt
+import sys
+
+argv = sys.argv[1:]
+mwaa_env=''
+aws_region=''
+var_file=''
+
+try:
+    opts, args = getopt.getopt(argv, 'e:v:r:', ['environment', 'variable-file','region'])
+    #if len(opts) == 0 and len(opts) &amp;gt; 3:
+    if len(opts) != 3:
+        print ('Usage: -e MWAA environment -v variable file location and filename -r aws region')
+    else:
+        for opt, arg in opts:
+            if opt in ("-e"):
+                mwaa_env=arg
+            elif opt in ("-r"):
+                aws_region=arg
+            elif opt in ("-v"):
+                var_file=arg
+
+        boto3.setup_default_session(region_name="{}".format(aws_region))
+        mwaa_env_name = "{}".format(mwaa_env)
+
+        client = boto3.client('mwaa')
+        mwaa_cli_token = client.create_cli_token(
+            Name=mwaa_env_name
+        )
+
+        with open ("{}".format(var_file), "r") as myfile:
+            fileconf = myfile.read().replace('\n', '')
+
+        json_dictionary = json.loads(fileconf)
+        for key in json_dictionary:
+            print(key, " ", json_dictionary[key])
+            val = (key + " " + json_dictionary[key])
+            mwaa_auth_token = 'Bearer ' + mwaa_cli_token['CliToken']
+            mwaa_webserver_hostname = 'https://{0}/aws_mwaa/cli'.format(mwaa_cli_token['WebServerHostname'])
+            raw_data = "variables -s {0}".format(val)
+            mwaa_response = requests.post(
+                mwaa_webserver_hostname,
+                headers={
+                    'Authorization': mwaa_auth_token,
+                    'Content-Type': 'text/plain'
+                    },
+                data=raw_data
+                )
+            mwaa_std_err_message = base64.b64decode(mwaa_response.json()['stderr']).decode('utf8')
+            mwaa_std_out_message = base64.b64decode(mwaa_response.json()['stdout']).decode('utf8')
+            print(mwaa_response.status_code)
+            print(mwaa_std_err_message)
+            print(mwaa_std_out_message)
+
+except:
+    print('Use this script with the following options: -e MWAA environment -v variable file location and filename -r aws region')
+    print("Unexpected error:", sys.exc_info()[0])
+    sys.exit(2)
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This Python script with three values: &lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;-e the name of the MWAA environment,&lt;/li&gt;
+&lt;li&gt;-r the AWS region&lt;/li&gt;
+&lt;li&gt;-v the local file that we want to parse and create variables from&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;The script takes each item in the file and then treats them as a single "airflow variable --set" command, iterating through all of them.&lt;/p&gt;
+
+&lt;p&gt;Using our variables.json file, we run this against my MWAA 1.x environment as follows:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;python mwaa-v1-vars.py -e ricsue-dublin -r eu-west-1 -v variables.json
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Which generates the following output&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;cli_test   newvalue/
+200
+
+
+cli_test2   12341234
+200
+
+
+cli_test3   https://grouplens.org/datasets/movielens/latest/
+200
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;So that provides you with a couple of options with MWAA 1.x, now lets look at how we can do this with MWAA 2.x&lt;/p&gt;
+
+&lt;p&gt;&lt;em&gt;MWAA 2.x&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;In MWAA 2.x the Airflow commands have changed, so we have updated the script.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;#!/bin/bash
+
+[ $# -eq 0 ] &amp;amp;&amp;amp; echo "Usage: $0 MWAA environment name " &amp;amp;&amp;amp; exit
+
+if [[ $2 == "" ]]; then
+    dag="variables list"
+
+elif  [ $2 == "get" ] ||  [ $2 == "delete" ] ||  [ $2 == "set" ]; then
+    dag="variables $2 $3 $4 $5"
+
+else
+    echo "Not a valid command"
+    exit 1
+fi
+
+CLI_JSON=$(aws mwaa --region $AWS_REGION create-cli-token --name $1) \
+    &amp;amp;&amp;amp; CLI_TOKEN=$(echo $CLI_JSON | jq -r '.CliToken') \
+    &amp;amp;&amp;amp; WEB_SERVER_HOSTNAME=$(echo $CLI_JSON | jq -r '.WebServerHostname') \
+    &amp;amp;&amp;amp; CLI_RESULTS=$(curl --request POST "https://$WEB_SERVER_HOSTNAME/aws_mwaa/cli" \
+    --header "Authorization: Bearer $CLI_TOKEN" \
+    --header "Content-Type: text/plain" \
+    --data-raw "$dag" ) \
+    &amp;amp;&amp;amp; echo "Output:" \
+    &amp;amp;&amp;amp; echo $CLI_RESULTS | jq -r '.stdout' | base64 --decode \
+    &amp;amp;&amp;amp; echo "Errors:" \
+    &amp;amp;&amp;amp; echo $CLI_RESULTS | jq -r '.stderr' | base64 --decode
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;If we run this as before, you will notice the commands have changed slightly&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;./mwaa-v2-variables.sh ricsue-dublin delete cli_test
+./mwaa-v2-variables.sh ricsue-dublin set cli_test "test"
+./mwaa-v2-variables.sh ricsue-dublin get cli_test
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Again, we cannot use the import command, so we can create a python script that will iterate for us. The script is the same as the previous one with the following difference (which is due to the different Airflow command)&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;            raw_data = "variables set {0}".format(val)
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;When we run this python script,&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;python mwaa-v2-vars.py -e ricsue-dublin -r eu-central-1 -v variables.json
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We get the following output&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;cli_test   newvalue/
+200
+
+Variable cli_test created
+
+cli_test2   12341234
+200
+
+Variable cli_test2 created
+
+cli_test3   https://bbc.co.uk
+200
+
+Variable cli_test3 created
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;strong&gt;Using the Airflow CLI to view variables&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;We might want to check what variables exist in our environment. We can display the current variables within the MWAA metastore using the following scripts. Again, the scripts are version dependant, and this time we are using bash scripts.&lt;/p&gt;
+
+&lt;p&gt;&lt;em&gt;MWAA 1.x&lt;/em&gt;&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;#!/bin/bash
+
+
+[ $# -eq 0 ] &amp;amp;&amp;amp; echo "Usage: $0 MWAA environment name " &amp;amp;&amp;amp; exit
+
+if [[ $2 == "" ]]; then
+    dag="list_dags"
+
+elif [ $2 == "list_tasks" ] &amp;amp;&amp;amp; [[ $3 != "" ]]; then
+    dag="$2 $3"
+
+elif [ $2 == "list_dags" ] || [ $2 == "version" ]; then
+    dag=$2
+
+elif [ $2 == "variables" ] ; then
+    dag="$2 $3 $4"
+
+else
+    echo "Not a valid command"
+    exit 1
+fi
+
+CLI_JSON=$(aws mwaa --region $AWS_REGION create-cli-token --name $1) \
+    &amp;amp;&amp;amp; CLI_TOKEN=$(echo $CLI_JSON | jq -r '.CliToken') \
+    &amp;amp;&amp;amp; WEB_SERVER_HOSTNAME=$(echo $CLI_JSON | jq -r '.WebServerHostname') \
+    &amp;amp;&amp;amp; CLI_RESULTS=$(curl --request POST "https://$WEB_SERVER_HOSTNAME/aws_mwaa/cli" \
+    --header "Authorization: Bearer $CLI_TOKEN" \
+    --header "Content-Type: text/plain" \
+    --data-raw "$dag" ) \
+    &amp;amp;&amp;amp; echo "Output:" \
+    &amp;amp;&amp;amp; echo $CLI_RESULTS | jq -r '.stdout' | base64 --decode \
+    &amp;amp;&amp;amp; echo "Errors:" \
+    &amp;amp;&amp;amp; echo $CLI_RESULTS | jq -r '.stderr' | base64 --decode
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;blockquote&gt;
+&lt;p&gt;Note! If you want to run this in a different region to your AWS cli's default profile, set the AWS_REGION variable to the region you want to run this in&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;If you run this script with your MWAA environment and then one of the supported options (in this case "variables")&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;./mwaa-cli-v1.sh ricsue-dublin variables
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We then get the following output, which is as I would have expected as in the previous steps we have created these variables.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;cli_test
+cli_test2
+cli_test3
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We can also retrieve the variables from a MWAA environment using the --get&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;./mwaa-cli-v1.sh ricsue-dublin variables --get cli_test
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Which returns&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;Output:
+newvalue/
+Errors:
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;em&gt;MWAA 2.x&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;The script is very similar to the 1.x script, but has some different default options to take into consideration the differences in what is supported.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;#!/bin/bash
+
+[ $# -eq 0 ] &amp;amp;&amp;amp; echo "Usage: $0 MWAA environment name " &amp;amp;&amp;amp; exit
+
+if [[ $2 == "" ]]; then
+    dag="cheat-sheet"
+
+elif [ $2 == "version" ] ; then
+    dag="version"
+
+elif [ $2 == "list_dags" ] ; then
+    dag="dags list"
+
+elif [ $2 == "variables" ] ; then
+    dag="$2 $3 $4"
+
+else
+    echo "Not a valid command"
+    exit 1
+fi
+
+CLI_JSON=$(aws mwaa --region $AWS_REGION create-cli-token --name $1) \
+    &amp;amp;&amp;amp; CLI_TOKEN=$(echo $CLI_JSON | jq -r '.CliToken') \
+    &amp;amp;&amp;amp; WEB_SERVER_HOSTNAME=$(echo $CLI_JSON | jq -r '.WebServerHostname') \
+    &amp;amp;&amp;amp; CLI_RESULTS=$(curl --request POST "https://$WEB_SERVER_HOSTNAME/aws_mwaa/cli" \
+    --header "Authorization: Bearer $CLI_TOKEN" \
+    --header "Content-Type: text/plain" \
+    --data-raw "$dag" ) \
+    &amp;amp;&amp;amp; echo "Output:" \
+    &amp;amp;&amp;amp; echo $CLI_RESULTS | jq -r '.stdout' | base64 --decode \
+    &amp;amp;&amp;amp; echo "Errors:" \
+    &amp;amp;&amp;amp; echo $CLI_RESULTS | jq -r '.stderr' | base64 --decode
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;When we run the script as before, using the "variables" options&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;./mwaa-cli-v2.sh ricsue-dublin variables
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We then get the following output, which is as I would have expected as in the previous steps we have created these variables.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;cli_test
+cli_test2
+cli_test3
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We can also retrieve the variables from a MWAA environment using the get&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;./mwaa-cli-v2.sh ricsue-dublin variables get cli_test
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Which returns&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;Output:
+newvalue/
+Errors:
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#triggering-workflows-with-parameters-via-the-command-line"&gt;
+  &lt;/a&gt;
+  Triggering workflows with parameters via the command line
+&lt;/h3&gt;
+
+&lt;p&gt;What if we wanted to trigger our workflows (DAGs) via the command line AND submit a parameter file, either to override existing values or provide inputs to it?&lt;/p&gt;
+
+&lt;p&gt;Re-using the following DAG, the DAG either takes values from the existing metastore or are overridden by a supplied parameter file when triggered.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;from airflow import DAG
+from airflow.operators.bash_operator import BashOperator
+from airflow.utils.dates import days_ago
+
+with DAG(
+    dag_id="airflow_variables_atruntime",
+    schedule_interval=None,
+    catchup=False,
+    start_date=days_ago(1)) as dag:
+
+    get_var_filename = BashOperator(
+        task_id="get_var_filename",
+        bash_command="""echo 'You are running this DAG with the following variable file: "{{ dag_run.conf["cli_test"] if dag_run.conf else var.value.cli_test }}"'""",
+    )
+    get_var_filename = BashOperator(
+        task_id="get_var_filename2",
+        bash_command='echo "You are running this DAG with the following variable file: \'{{ dag_run.conf["cli_test2"] if dag_run.conf else var.value.cli_test2 }}\'"',
+    )
+    get_var_filename = BashOperator(
+        task_id="get_var_filename3",
+        bash_command='echo "You are running this DAG with the following variable file: \'{{ dag_run.conf["cli_test3"] if dag_run.conf else var.value.cli_test3 }}\'"',
+    )
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;To trigger a DAG via the cli in MWAA is version specific, so lets take a look at how we would supply and override the variables we have been using. We are going to override cli_test3 with a new value of "&lt;a href="http://aws.amazon.com"&gt;http://aws.amazon.com&lt;/a&gt;", so will provide the parameter file '{"cli_test3":"&lt;a href="http://aws.amazon.com%22%7D"&gt;http://aws.amazon.com"}&lt;/a&gt;'&lt;/p&gt;
+
+&lt;p&gt;&lt;em&gt;MWAA 1.x&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;Using the following script, we can submit a parameter file to a specific DAG using the standard airflow trigger_dag command.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;#!/bin/bash
+
+
+[ $# -eq 0 ] &amp;amp;&amp;amp; echo "Usage: $0 MWAA environment name, name of the DAG and runtime parameters " &amp;amp;&amp;amp; exit
+
+if [[ $2 == "" ]]; then
+    dag="list_dags"
+
+elif [ $2 == "trigger_dag" ] &amp;amp;&amp;amp; [[ $3 != "" ]]; then
+    dag="$2 $3 $4 $5"
+
+elif [ $2 == "list_dags" ] || [ $2 == "version" ]; then
+    dag=$2
+
+elif [ $2 == "variables" ] ; then
+    dag="$2 $3 $4 $5"
+
+else
+    echo "Not a valid command"
+    exit 1
+fi
+
+echo $dag
+
+CLI_JSON=$(aws mwaa --region $AWS_REGION create-cli-token --name $1) \
+    &amp;amp;&amp;amp; CLI_TOKEN=$(echo $CLI_JSON | jq -r '.CliToken') \
+    &amp;amp;&amp;amp; WEB_SERVER_HOSTNAME=$(echo $CLI_JSON | jq -r '.WebServerHostname') \
+    &amp;amp;&amp;amp; CLI_RESULTS=$(curl --request POST "https://$WEB_SERVER_HOSTNAME/aws_mwaa/cli" \
+    --header "Authorization: Bearer $CLI_TOKEN" \
+    --header "Content-Type: text/plain" \
+    --data-raw "$dag" ) \
+    &amp;amp;&amp;amp; echo "Output:" \
+    &amp;amp;&amp;amp; echo $CLI_RESULTS | jq -r '.stdout' | base64 --decode \
+    &amp;amp;&amp;amp; echo "Errors:" \
+    &amp;amp;&amp;amp; echo $CLI_RESULTS | jq -r '.stderr' | base64 --decode
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We can now run this script with the following command (note how we have to escape "\" the " as this is passed into the script and will otherwise generate a decoding error):&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;./mwaa-v1-run-param.sh ricsue-dublin trigger_dag -c '{\"cli_test3\":\"http://aws.amazon.com\"}' airflow_variables_atruntime
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;And when we look at the output in the logs, we can see that we have successfully triggered the DAG and overridden the parameter&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;[2021-07-27 12:01:07,421] {{bash_operator.py:146}} INFO - Running command: echo "You are running this DAG with the following variable file: 'http://aws.amazon.com'"
+[2021-07-27 12:01:07,461] {{bash_operator.py:153}} INFO - Output:
+[2021-07-27 12:01:07,494] {{bash_operator.py:157}} INFO - You are running this DAG with the following variable file: 'http://aws.amazon.com'
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We can apply the same approach when using Python - I have not included a script, but you can modify one of the scripts in the repo.&lt;/p&gt;
+
+&lt;p&gt;&lt;em&gt;MWAA 2.x&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;What happens when we try the same approach with MWAA 2.x?&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;#!/bin/bash
+
+AWS_REGION=eu-central-1
+[ $# -eq 0 ] &amp;amp;&amp;amp; echo "Usage: $0 MWAA environment name, name of the DAG and runtime parameters " &amp;amp;&amp;amp; exit
+
+if [[ $2 == "" ]]; then
+    dag="dags list"
+
+elif [ $2 == "trigger_dag" ] &amp;amp;&amp;amp; [[ $3 != "" ]]; then
+    dag="dags trigger $3 $4 $5"
+
+elif [ $2 == "list_dags" ] || [ $2 == "version" ]; then
+    dag=$2
+
+elif [ $2 == "variables" ] ; then
+    dag="$2 $3 $4 $5"
+
+else
+    echo "Not a valid command"
+    exit 1
+fi
+
+echo $dag
+
+CLI_JSON=$(aws mwaa --region $AWS_REGION create-cli-token --name $1) \
+    &amp;amp;&amp;amp; CLI_TOKEN=$(echo $CLI_JSON | jq -r '.CliToken') \
+    &amp;amp;&amp;amp; WEB_SERVER_HOSTNAME=$(echo $CLI_JSON | jq -r '.WebServerHostname') \
+    &amp;amp;&amp;amp; CLI_RESULTS=$(curl --request POST "https://$WEB_SERVER_HOSTNAME/aws_mwaa/cli" \
+    --header "Authorization: Bearer $CLI_TOKEN" \
+    --header "Content-Type: text/plain" \
+    --data-raw "$dag" ) \
+    &amp;amp;&amp;amp; echo "Output:" \
+    &amp;amp;&amp;amp; echo $CLI_RESULTS | jq -r '.stdout' | base64 --decode \
+    &amp;amp;&amp;amp; echo "Errors:" \
+    &amp;amp;&amp;amp; echo $CLI_RESULTS | jq -r '.stderr' | base64 --decode
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This time, when we run the script&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;./mwaa-v2-run-param.sh ricsue-dublin trigger_dag -c '{\"cli_test3\":\"http://aws.amazon.com\"}' airflow_variables_atruntime
+
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We get a a slightly different response,&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;[2021-07-27 12:17:57,315] {{__init__.py:38}} INFO - Loaded API auth backend: &amp;lt;module 'airflow.api.auth.backend.deny_all' from '/usr/local/lib/python3.7/site-packages/airflow/api/auth/backend/deny_all.py'&amp;gt;
+Created &amp;lt;DagRun airflow_variables_atruntime @ 2021-07-27 12:17:57+00:00: manual__2021-07-27T12:17:57+00:00, externally triggered: True&amp;gt;
+Errors:
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;but the outcome is still the same&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;[2021-07-27 12:32:25,428] {{bash.py:158}} INFO - Running command: echo 'http://aws.amazon.com'
+[2021-07-27 12:32:25,501] {{bash.py:173}} INFO - http://aws.amazon.com
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Right, we are nearly at the end of this post now. Before finishing, let me introduce another way you can parameterise your DAGs which may be useful for some use cases.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#other-approaches"&gt;
+  &lt;/a&gt;
+  Other approaches
+&lt;/h3&gt;
+
+&lt;p&gt;Another approach that might work for you is incorporating variable changes as part of a CI/CD setup. In a &lt;a href="https://aws-oss.beachgeek.co.uk/4t"&gt;previous post&lt;/a&gt;, I walked you through creating a simple CI/CD environment for your workflow deployments. In that post, the build stage has a single build task&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;phases:
+  build:
+    commands:
+       - aws s3 sync . s3://{your airflow s3 bucket}/dags/ --delete
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;You can expand upon that and you could pass variables into the build stage in a number of different ways and run a pre-build step before the workflows are deployed. &lt;/p&gt;
+
+&lt;p&gt;In this example we take variables stored in AWS Secrets Manager. &lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Y_DWrgSW--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://github.com/094459/blog-mwaa-variables/blob/main/images/airflow-var-secrets.png%3Fraw%3Dtrue" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Y_DWrgSW--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://github.com/094459/blog-mwaa-variables/blob/main/images/airflow-var-secrets.png%3Fraw%3Dtrue" alt="secret"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Here we can see that the secret blog/airflow/variables/codebuild is storing the name of my variable which is "airflow_secret_variable" and has the value of  "airflow_secret_value".&lt;/p&gt;
+
+&lt;p&gt;I can use this in conjunction with CodeBuild to add a step that does a substitution. If I use the following in my DAG&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;demo = "{variable_placeholder}"
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;During the build stage, we can use sed to go through the DAGs (you can change the filter, in this example, I am just going through them all) and it will then substitute the placeholder in the DAG for the value in the AWS Secrets Manager. I can repeat this as many times as I need.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;version: 0.2
+
+env:
+  secrets-manager:
+    VARIABLE: "arn:aws:secretsmanager:eu-central-1:704533066374:secret:blog/airflow/variables/codebuild-iIvHYf:airflow_secret_variable"
+
+phases:
+  build:
+    commands:
+      - for file in *.py; do sed -i "s|{variable_placeholder}|${VARIABLE}|g" $file ; done
+      - aws s3 sync . s3://{your-airflow-s3}/dags/ --delete
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Within your DAG, you will have created placeholders (using {variable_placeholder} ) which will then get changed via the sed command. This is the sample DAG that I have locally, in my developer environment.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;from airflow import DAG
+from airflow.operators.bash_operator import BashOperator
+from airflow.utils.dates import days_ago
+
+demo = "{variable_placeholder}"
+
+with DAG(
+    dag_id="display_changed_variables",
+    schedule_interval=None,
+    catchup=False,
+    start_date=days_ago(1)) as dag:
+
+    get_var_filename = BashOperator(
+        task_id="disp_variable",
+        bash_command='echo "The value of the variable is: {var}"'.format(var=demo),
+    )
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;When I check this in, the pipeline deploys this to the DAGs S3 bucket after processing it. When I check within the Apache Airflow UI, I can see that the transformation has occured&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;...
+from airflow.models import Variable
+demo = "airflow_secret_value"
+with DAG(
+...
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;And we can see this in the output of the DAG&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;[2021-07-23 16:35:34,205] {{bash.py:158}} INFO - Running command: echo "The value of the variable is: airflow_secret_value"
+[2021-07-23 16:35:34,246] {{bash.py:169}} INFO - Output:
+[2021-07-23 16:35:34,276] {{bash.py:173}} INFO - The value of the variable is: airflow_secret_value
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;blockquote&gt;
+&lt;p&gt;&lt;strong&gt;Note!&lt;/strong&gt; If you get the following error when trying this approach:&lt;br&gt;
+&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;[Container] 2021/07/23 14:44:33 Phase context status code: Secrets Manager Error Message: AccessDeniedException: User: arn:aws:sts::704533066374:assumed-role/codebuild-deploy-dags-service-role/AWSCodeBuild-7a8ab216-7c74-4cc6-91d4-f48bcdb99a09 is not authorized to perform: secretsmanager:GetSecretValue on resource: arn:aws:secretsmanager:eu-central-1:704533066374:secret:blog/airflow/variables/codebuild-awsaws
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;blockquote&gt;
+&lt;p&gt;Remember to add the "secretsmanager:GetSecretValue" permission to the CodeBuild execution role. In the above example, this is what I added (yours will be similar, but with different resource names)&lt;br&gt;
+&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;        {
+            "Effect": "Allow",
+            "Resource": [
+                "arn:aws:secretsmanager:eu-central-1:704533066374:secret:blog/airflow/variables*"
+            ],
+            "Action": [
+                "secretsmanager:GetSecretValue"
+            ]
+        },
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This approach might be useful as it in effect localises the variables within the DAG, putting less of a load on the metastore. From Apache Airflow's perspective, these are "hard coded" DAGs, thanks to the build step during deployment that maps the value placeholders with what we want deployed via AWS Secrets Manager. You could of course just use Parameter store as well if you wanted to, or your own codebuild system as most of them provide a capability to do this.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#conclusion"&gt;
+  &lt;/a&gt;
+  Conclusion
+&lt;/h3&gt;
+
+&lt;p&gt;In this post I showed you how the different options you have when both defining/setting variables within your workflows (DAGs) and how these might be different to your self hosted Apache Airflow. Understanding what you can and cannot do when working in MWAA will help you plan what changes you need to make if you are considering how to run your Apache Airflow workflows.&lt;/p&gt;
+
+&lt;p&gt;This is one of the core capabilities within Apache Airflow, and you should look at leveraging these so you can create standardised, re-usable workflows (DAGs).&lt;/p&gt;
+
+&lt;p&gt;Please let me know via the comments of any additional questions or perhaps requirements that you have that cannot be met with the approach outlined above.&lt;/p&gt;
+
+</description>
+      <category>aws</category>
+      <category>opensource</category>
+    </item>
+    <item>
       <title>Become a better writer as a developer</title>
       <author>Dhaiwat Pandya</author>
       <pubDate>Tue, 27 Jul 2021 21:34:51 +0000</pubDate>
@@ -2983,64 +4740,6 @@ After, refactoring, we give &lt;em&gt;Step1&lt;/em&gt;, &lt;em&gt;Step2&lt;/em&g
       <category>todayilearned</category>
       <category>programming</category>
       <category>javascript</category>
-    </item>
-    <item>
-      <title>How to make a Flask Web App for Keras Model?</title>
-      <author>Avi Arora</author>
-      <pubDate>Tue, 27 Jul 2021 18:25:27 +0000</pubDate>
-      <link>https://dev.to/aarora4/how-to-make-a-flask-web-app-for-keras-model-5972</link>
-      <guid>https://dev.to/aarora4/how-to-make-a-flask-web-app-for-keras-model-5972</guid>
-      <description>&lt;p&gt;Read the full article here: &lt;a href="https://analyticsarora.com/how-to-make-a-flask-web-app-for-keras-model/"&gt;https://analyticsarora.com/how-to-make-a-flask-web-app-for-keras-model/&lt;/a&gt;&lt;/p&gt;
-
-&lt;h2&gt;&lt;strong&gt;Introduction&lt;/strong&gt;&lt;/h2&gt;
-
-&lt;p&gt;So, you have built some kind of machine learning model in Keras. Now, you want to add a frontend interface so people can actually interact with your model in an approachable way. Look no further. In this tutorial, I will cover how to package your Keras model into a powerful web application using Flask.&lt;/p&gt;
-
-&lt;p&gt;This is the second article in a series talking about how I made and deployed a neural network to rate songs like the popular music reviewer Anthony Fantano. You can read about the process of &lt;a href="https://analyticsarora.com/making-the-needle-bot/"&gt;researching and developing the neural network&lt;/a&gt; in the first article. The final article covers the &lt;a href="https://analyticsarora.com/how-to-fix-common-errors-deploying-keras-model-to-heroku/"&gt;issues I encountered deploying a Flask Web Application to Heroku&lt;/a&gt;.&lt;/p&gt;
-
-&lt;p&gt;&lt;em&gt;Click &lt;a href="https://github.com/aarora4/keras-flask-deploy-webapp"&gt;here&lt;/a&gt; to see all my code.&lt;/em&gt; &lt;/p&gt;
-
-&lt;h2&gt;&lt;strong&gt;Article Overview&lt;/strong&gt;&lt;/h2&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Cloning the Starter Code&lt;/li&gt;
-&lt;li&gt;Mocking Up the Design&lt;/li&gt;
-&lt;li&gt;Writing the HTML and CSS&lt;/li&gt;
-&lt;li&gt;Creating the Model Operation Functions&lt;ul&gt;
-&lt;li&gt;Saving the Best Model&lt;/li&gt;
-&lt;li&gt;Initializing the Tensorflow Session&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Data Preprocessing Function&lt;/li&gt;
-&lt;li&gt;Prediction Function&lt;/li&gt;
-&lt;/ul&gt;
-
-
-&lt;/li&gt;
-&lt;li&gt;Taking in User Input&lt;ul&gt;&lt;li&gt;Accepting File Drag Events&lt;/li&gt;&lt;/ul&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Sending Files through a Post Request&lt;/li&gt;
-&lt;li&gt;Saving Files to Temporary Directory&lt;/li&gt;
-&lt;/ul&gt;
-
-
-&lt;/li&gt;
-&lt;li&gt;Updating the Frontend with Javascript&lt;ul&gt;
-&lt;li&gt;Showing and Hiding Elements&lt;/li&gt;
-&lt;li&gt;Submit Function&lt;/li&gt;
-&lt;li&gt;Clear Function&lt;/li&gt;
-&lt;/ul&gt;
-&lt;/li&gt;
-&lt;li&gt;Demo and Conclusion&lt;/li&gt;
-&lt;/ul&gt;
-
-</description>
-      <category>machinelearning</category>
-      <category>beginners</category>
-      <category>tutorial</category>
-      <category>webdev</category>
     </item>
   </channel>
 </rss>
