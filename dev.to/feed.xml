@@ -7,6 +7,258 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>GitLab CI: Cache and Artifacts explained by example</title>
+      <author>Anton Yakutovich</author>
+      <pubDate>Wed, 04 Aug 2021 10:13:46 +0000</pubDate>
+      <link>https://dev.to/drakulavich/gitlab-ci-cache-and-artifacts-explained-by-example-2opi</link>
+      <guid>https://dev.to/drakulavich/gitlab-ci-cache-and-artifacts-explained-by-example-2opi</guid>
+      <description>&lt;p&gt;Hi, DEV Community! I've been working in the software testing field for more than eight years. Apart from web services testing, I maintain CI/CD Pipelines in our team's GitLab.&lt;/p&gt;
+
+&lt;p&gt;Let's discuss the difference between GitLab cache and artifacts. I'll show how to configure the Pipeline for the Node.js app in a pragmatic way to achieve good performance and resource utilization.&lt;/p&gt;
+
+&lt;p&gt;There are three things you can watch forever: fire burning, water falling, and the build is passing after your next commit. Nobody wants to wait for the CI completion too much, it's better to set up all the tweaks to avoid long waiting between the commit the build status. Cache and artifacts to the rescue! They help reduce the time it takes to run a Pipeline drastically.&lt;/p&gt;
+
+&lt;p&gt;People are confused when they have to choose between cache and artifacts. GitLab has bright documentation, but &lt;a href="https://docs.gitlab.com/ee/ci/caching/#cache-nodejs-dependencies"&gt;the Node.js app with cache example&lt;/a&gt; and the Pipeline &lt;a href="https://gitlab.com/gitlab-org/gitlab/-/blob/master/lib/gitlab/ci/templates/Nodejs.gitlab-ci.yml"&gt;template for Node.js&lt;/a&gt; contradict each other.&lt;/p&gt;
+
+&lt;p&gt;Let's see what the Pipeline in GitLab terms means. The &lt;a href="https://docs.gitlab.com/ee/ci/pipelines/pipeline_architectures.html"&gt;Pipeline&lt;/a&gt; is a set of stages and each stage can have one or more jobs. Jobs work on a distributed farm of runners. When we start a Pipeline, a random runner with free resources executes the needed job. The GitLab-runner is the agent that can run jobs. For simplicity, let's consider Docker as an executor for all runners.&lt;/p&gt;
+
+&lt;p&gt;Each job starts with a clean slate and doesn't know the results of the previous one. If you don't use cache and artifacts, the runner will have to go to the internet or local registry and download the necessary packages when installing project dependencies.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#what-is-cache"&gt;
+  &lt;/a&gt;
+  What is cache?
+&lt;/h3&gt;
+
+&lt;p&gt;It's a set of files that a job can download before running and upload after execution. By default, the cache is stored in the same place where GitLab Runner is installed. If the distributed cache is configured, S3 works as storage.&lt;br&gt;
+&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Et1ysp_Y--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/az3xa3hssyj8q12s6fiw.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Et1ysp_Y--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/az3xa3hssyj8q12s6fiw.png" alt="GitLab Cache"&gt;&lt;/a&gt;&lt;br&gt;
+Let's suppose you run a Pipeline for the first time with a local cache. The job will not find the cache but will upload one after the execution to runner01. The second job will execute on runner02, it won't find the cache on it either and will work without it. The result will be saved to runner02. Lint, the third job, will find the cache on runner01 and use it (pull). After execution, it will upload the cache back (push).&lt;/p&gt;
+&lt;h3&gt;
+  &lt;a href="#what-are-artifacts"&gt;
+  &lt;/a&gt;
+  What are artifacts?
+&lt;/h3&gt;
+
+&lt;p&gt;Artifacts are files stored on the GitLab server after a job is executed. Subsequent jobs will download the artifact before script execution.&lt;br&gt;
+&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s---Bx07U40--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/pappaj15pbvty5z7k38q.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s---Bx07U40--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/pappaj15pbvty5z7k38q.png" alt="GitLab artifacts"&gt;&lt;/a&gt;&lt;br&gt;
+Build job creates a DEF artifact and saves it on the server. The second job, Test, downloads the artifact from the server before running the commands. The third job, Lint, similarly downloads the artifact from the server. &lt;/p&gt;
+
+&lt;p&gt;To compare the artifact is created in the first job and is used in the following ones. The cache is created within each job.&lt;/p&gt;
+
+&lt;p&gt;Consider the CI template example for Node.js recommended by GitLab:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;image: node:latest # (1)
+
+# This folder is cached between builds
+cache:
+  paths:
+    - node_modules/ # (2)
+
+test_async:
+  script:
+    - npm install # (3)
+    - node ./specs/start.js ./specs/async.spec.js
+
+test_db:
+  script:
+    - npm install # (4)
+    - node ./specs/start.js ./specs/db-postgres.spec.js
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Line #1 specifies the docker image, which will be used in all jobs. The first problem is the &lt;code&gt;latest&lt;/code&gt; tag. This tag ruins the reproducibility of the builds. It always points to the latest release of Node.js. If the GitLab runner caches docker images, the first run will download the image, and all subsequent runs will use the locally available image. So, even if a node is upgraded from version XX to YY, our Pipeline will know nothing about it. Therefore, I suggest specifying the version of the image. And not just the release branch (&lt;code&gt;node:14&lt;/code&gt;), but the full version tag (&lt;code&gt;node:14.2.5&lt;/code&gt;).&lt;/p&gt;
+
+&lt;p&gt;Line #2 is related to lines 3 and 4. The &lt;code&gt;node_modules&lt;/code&gt; directory is specified for caching, the installation of packages (npm install) is performed for every job. The installation should be faster because packages are available inside &lt;code&gt;node_modules&lt;/code&gt;. Since no key is specified for the cache, the word &lt;code&gt;default&lt;/code&gt; will be used as a key. It means that the cache will be permanent, shared between all git branches.&lt;/p&gt;
+
+&lt;p&gt;Let me remind you, the main goal is to keep the pipeline &lt;em&gt;reproducible&lt;/em&gt;. &lt;strong&gt;The Pipeline launched today should work the same way in a year&lt;/strong&gt;.&lt;/p&gt;
+
+&lt;p&gt;NPM stores dependencies in two files — &lt;em&gt;package.json&lt;/em&gt; and &lt;em&gt;package-lock.json&lt;/em&gt;. If you use &lt;em&gt;package.json&lt;/em&gt;, the build is not reproducible. When you run &lt;code&gt;npm install&lt;/code&gt; the package manager puts the last minor release for not strict dependencies. To fix the dependency tree, we use the &lt;em&gt;package-lock.json&lt;/em&gt; file. All versions of packages are strictly specified there.&lt;/p&gt;
+
+&lt;p&gt;But there is another problem, &lt;code&gt;npm install&lt;/code&gt; rewrites package-lock.json, and this is not what we expect. Therefore, we use the special command &lt;code&gt;npm ci&lt;/code&gt; which:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;removes the node_modules directory;&lt;/li&gt;
+&lt;li&gt;installs packages from package-lock.json.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;What shall we do if &lt;code&gt;node_modules&lt;/code&gt; will be deleted every time? We can specify NPM cache using the environment variable &lt;code&gt;npm_config_cache&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;And the last thing, the config does not explicitly specify the stage where jobs are executed. By default, the job runs inside the test stage. It turns out that both jobs will run in parallel. Perfect! Let's add jobs stages and fix all the issues we found.&lt;/p&gt;
+
+&lt;p&gt;What we got after the first iteration:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;image: node: 16.3.0 # (1)
+
+stages:
+  - test
+
+variables:
+  npm_config_cache: "$CI_PROJECT_DIR/.npm" (5)
+
+# This folder is cached between builds
+cache:
+  key:
+    files:
+      - package-lock.json (6)
+  paths:
+    - .npm # (2)
+
+test_async:
+  stage: test
+  script:
+    - npm ci # (3)
+    - node ./specs/start.js ./specs/async.spec.js
+
+test_db:
+  stage: test
+  script:
+    - npm ci # (4)
+    - node ./specs/start.js ./specs/db-postgres.spec.js
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We improved Pipeline and make it reproducible. There are two drawbacks left. First, the cache is shared. Every job will pull the cache and push the new version after executing the job. It's a good practice to update cache only once inside Pipeline. Second, every job installs the package dependencies and wastes time.&lt;/p&gt;
+
+&lt;p&gt;To fix the first problem we describe the cache management explicitly. Let's add a "hidden" job and enable only pull policy (download cache without updating):&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;# Define a hidden job to be used with extends
+# Better than default to avoid activating cache for all jobs
+.dependencies_cache:
+  cache:
+    key:
+      files:
+        - package-lock.json
+    paths:
+      - .npm
+    policy: pull
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;To connect the cache you need to inherit the job via &lt;code&gt;extends&lt;/code&gt; keyword.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;...
+extends: .dependencies_cache
+...
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;To fix the second issue we use artifacts. Let's create the job that archives package dependencies and passes the artifact with &lt;code&gt;node_modules&lt;/code&gt; further. Subsequent jobs will run tests from the spot.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;setup:
+  stage: setup
+  script:
+    - npm ci
+  extends: .dependencies_cache
+  cache:
+    policy: pull-push
+  artifacts:
+    expire_in: 1h
+    paths:
+      - node_modules
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We install the npm dependencies and use the cache described in the hidden dependencies_cache job. Then we specify how to update the cache via a pull-push policy. A short lifetime (1 hour) helps to save space for the artifacts. There is no need to keep &lt;code&gt;node_modules&lt;/code&gt; artifact for a long time on the GitLab server.&lt;/p&gt;
+
+&lt;p&gt;The full config after the changes:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;image: node: 16.3.0 # (1)
+
+stages:
+  - setup
+  - test
+
+variables:
+  npm_config_cache: "$CI_PROJECT_DIR/.npm" (5)
+
+# Define a hidden job to be used with extends
+# Better than default to avoid activating cache for all jobs
+.dependencies_cache:
+  cache:
+    key:
+      files:
+        - package-lock.json
+    paths:
+      - .npm
+    policy: pull
+
+setup:
+  stage: setup
+  script:
+    - npm ci
+  extends: .dependencies_cache
+  cache:
+    policy: pull-push
+  artifacts:
+    expire_in: 1h
+    paths:
+      - node_modules
+
+test_async:
+  stage: test
+  script:
+    - node ./specs/start.js ./specs/async.spec.js
+
+test_db:
+  stage: test
+  script:
+    - node ./specs/start.js ./specs/db-postgres.spec.js
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We learned what's the difference between cache and artifacts. We built a reproducible Pipeline that works predictably and uses resources efficiently. This article shows some common mistakes and how to avoid them when you are setting up CI in GitLab.&lt;br&gt;
+I wish you green builds and fast pipelines. Would appreciate your feedback in the comments!&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#links"&gt;
+  &lt;/a&gt;
+  Links
+&lt;/h2&gt;
+
+&lt;ul&gt;
+&lt;li&gt;
+&lt;a href="https://docs.gitlab.com/ee/ci/pipelines/pipeline_architectures.html"&gt;Pipeline architecture&lt;/a&gt;;&lt;/li&gt;
+&lt;li&gt;
+&lt;a href="https://docs.gitlab.com/ee/ci/caching/"&gt;Caching in GitLab CI/CD&lt;/a&gt;.&lt;/li&gt;
+&lt;/ul&gt;
+
+</description>
+      <category>devops</category>
+      <category>node</category>
+      <category>cicd</category>
+      <category>gitlab</category>
+    </item>
+    <item>
       <title>Developing Geonotes — Animations and interactions — Ep. 3</title>
       <author>Emilio Schepis</author>
       <pubDate>Wed, 04 Aug 2021 09:13:48 +0000</pubDate>
@@ -285,7 +537,6 @@ also then we are pushing those specific div's text to statsData which we also ma
 </description>
       <category>javascript</category>
       <category>webdev</category>
-      <category>productivity</category>
       <category>node</category>
     </item>
     <item>
@@ -1694,282 +1945,6 @@ inbox.mount(document.getElementById("talkjs-container"));
       <category>career</category>
       <category>insights</category>
       <category>cloud</category>
-    </item>
-    <item>
-      <title>React in a Nutshell</title>
-      <author>Kumar Prince</author>
-      <pubDate>Wed, 04 Aug 2021 06:39:33 +0000</pubDate>
-      <link>https://dev.to/thekrprince/react-in-a-nutshell-1kb3</link>
-      <guid>https://dev.to/thekrprince/react-in-a-nutshell-1kb3</guid>
-      <description>&lt;p&gt;Hello👋 Everyone,&lt;/p&gt;
-
-&lt;p&gt;This blog is about getting started with ReactJS which is indeed a very popular library for creating UI. React is developed by Jordan Walke ex-employee of Facebook company. React allows developers to create large applications which can change the data without reloading the webpage. It is fast, scalable and simple. It's a view library and can be integrated with different applications as Angular.&lt;/p&gt;
-
-&lt;p&gt;I started learning React last year and faced lot of difficulties. TBH, coming from a Testing background I faced so many challenges while learning development but now I love it. I've really come very far from where I began. So without wasting any more minute I'll start with how anyone should get started learning React.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#jsx-javascript-xml"&gt;
-  &lt;/a&gt;
-  JSX (JavaScript XML)
-&lt;/h1&gt;
-
-&lt;p&gt;Anyone who wants to learn React should be familiar with HTML as they would be spending more time creating layouts. React uses JSX which is similar to HTML but JSX is a mixture of HTML and JavaScript which forms a component. JSX gets translated into JavaScript at runtime with the help of Babel.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;// Normal HTML
-&amp;lt;div&amp;gt;
-    &amp;lt;p&amp;gt;This is a React Blog&amp;lt;/p&amp;gt;
-&amp;lt;/div&amp;gt;
-
-// JSX
-&amp;lt;&amp;gt;
-    &amp;lt;Hello /&amp;gt;
-    &amp;lt;p&amp;gt;This is a React Blog&amp;lt;/p&amp;gt;
-&amp;lt;/&amp;gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;&lt;strong&gt;Hello&lt;/strong&gt; is a component, it would've been made you confused that when this type of HTML element have been created but trust me that's not the case here. This is a React Component which needs to be imported in &lt;strong&gt;&lt;em&gt;App.js&lt;/em&gt;&lt;/strong&gt; file to be rendered on UI. &lt;strong&gt;&amp;lt;&amp;gt;&amp;lt;/&amp;gt;&lt;/strong&gt; is a React Fragment which is used to wrap the components when we don't require an extra node in DOM tree. You can search more on this later.&lt;/p&gt;
-
-&lt;p&gt;After getting transpiled with the help of Babel, JSX gets converted as-&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;// JSX code
-&amp;lt;h1&amp;gt;This is a React Blog&amp;lt;/h1&amp;gt;
-
-// Transpiled code into JS
-React.createElement('h1', {}, 'This is a React Blog'); 
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;FYI, we can write the JavaScript code directly in our file rather than writing JSX but that would take enormous amount of time, that's why JSX code is there for our facility. So, use that kindly 👨‍💻.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#hooks-vs-class-component"&gt;
-  &lt;/a&gt;
-  Hooks vs Class Component
-&lt;/h1&gt;
-
-&lt;p&gt;I would recommend everyone to learn Hooks instead of Class Component as Facebook says😜.&lt;br&gt;
-But IMO, Hooks has made React easier to learn. When I started learning React I learned class component first and got messed up while learning so many lifecycle methods and few got deprecated till I finished and then I started learning Hooks. Hooks is just as amazing, you can get your work done just with &lt;strong&gt;useEffect&lt;/strong&gt; in the place of &lt;em&gt;componentDidMount()&lt;/em&gt;, &lt;em&gt;componentDidUpdate()&lt;/em&gt;, &lt;em&gt;componentWillUnmount()&lt;/em&gt; methods. &lt;strong&gt;useState&lt;/strong&gt; hook can be used for mutating state. No need of using &lt;strong&gt;this&lt;/strong&gt; keyword every time while mutating state or calling any functions unlike &lt;strong&gt;class components&lt;/strong&gt;.&lt;br&gt;
-Example-&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// Hooks&lt;/span&gt;
-&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="nx"&gt;React&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;useState&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;useEffect&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;react&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-
-&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;Example&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;count&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;setCount&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;useState&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-
-  &lt;span class="c1"&gt;// Similar to componentDidMount and componentDidUpdate:&lt;/span&gt;
-  &lt;span class="nx"&gt;useEffect&lt;/span&gt;&lt;span class="p"&gt;(()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="c1"&gt;// Update the document title using the browser API&lt;/span&gt;
-    &lt;span class="nb"&gt;document&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;title&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s2"&gt;`You clicked &lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;count&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt; times`&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="p"&gt;});&lt;/span&gt;
-
-  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
-    &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;div&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
-      &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;p&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="nx"&gt;You&lt;/span&gt; &lt;span class="nx"&gt;clicked&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;count&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="nx"&gt;times&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/p&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
-&lt;/span&gt;      &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;button&lt;/span&gt; &lt;span class="nx"&gt;onClick&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;setCount&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;count&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;)}&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
-        &lt;span class="nx"&gt;Click&lt;/span&gt; &lt;span class="nx"&gt;me&lt;/span&gt;
-      &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/button&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
-&lt;/span&gt;    &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/div&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
-&lt;/span&gt;  &lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;span class="c1"&gt;// Class Component&lt;/span&gt;
-&lt;span class="kd"&gt;class&lt;/span&gt; &lt;span class="nx"&gt;Example&lt;/span&gt; &lt;span class="kd"&gt;extends&lt;/span&gt; &lt;span class="nx"&gt;React&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Component&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="kd"&gt;constructor&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;props&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="k"&gt;super&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;props&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-    &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;state&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-      &lt;span class="na"&gt;count&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt;
-    &lt;span class="p"&gt;};&lt;/span&gt;
-  &lt;span class="p"&gt;}&lt;/span&gt;
-
-  &lt;span class="nx"&gt;componentDidMount&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nb"&gt;document&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;title&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s2"&gt;`You clicked &lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;state&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;count&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt; times`&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="p"&gt;}&lt;/span&gt;
-  &lt;span class="nx"&gt;componentDidUpdate&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nb"&gt;document&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;title&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s2"&gt;`You clicked &lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;state&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;count&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt; times`&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="p"&gt;}&lt;/span&gt;
-
-  &lt;span class="nx"&gt;render&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
-      &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;div&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
-        &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;p&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="nx"&gt;You&lt;/span&gt; &lt;span class="nx"&gt;clicked&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;state&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;count&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="nx"&gt;times&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/p&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
-&lt;/span&gt;        &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;button&lt;/span&gt; &lt;span class="nx"&gt;onClick&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;setState&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="na"&gt;count&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;state&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;count&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt; &lt;span class="p"&gt;})}&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
-          &lt;span class="nx"&gt;Click&lt;/span&gt; &lt;span class="nx"&gt;me&lt;/span&gt;
-        &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/button&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
-&lt;/span&gt;      &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/div&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
-&lt;/span&gt;    &lt;span class="p"&gt;);&lt;/span&gt;
-  &lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h1&gt;
-  &lt;a href="#javascript"&gt;
-  &lt;/a&gt;
-  JavaScript
-&lt;/h1&gt;
-
-&lt;p&gt;Not to mention, without knowing JavaScript learning React would be a very bad idea as React is based on JavaScript only. One has to use the same way of variable declaration and method writing. But as this is a library, certain rules needs to be followed, Camel notation is used everywhere in React when calling event listener. E.g. &lt;strong&gt;&lt;em&gt;onclick&lt;/em&gt;&lt;/strong&gt; is used in vanilla JS but in React the same event would be called as &lt;strong&gt;&lt;em&gt;onClick&lt;/em&gt;&lt;/strong&gt;. Other examples are onChange, onDrag, onDrop etc.&lt;br&gt;
-For more info related to React events you can visit &lt;a href="https://reactjs.org/docs/events.html"&gt;here&lt;/a&gt;&lt;/p&gt;
-&lt;h1&gt;
-  &lt;a href="#state-and-props"&gt;
-  &lt;/a&gt;
-  State and Props
-&lt;/h1&gt;
-
-&lt;p&gt;&lt;strong&gt;State&lt;/strong&gt; plays a very vital role in UI development. In React also it's used to handle the behavior of UI. In fact, whenever any state change happens, react only updates the changed attributes rather than rebuilding the new DOM tree which increases the efficiency. This process is called &lt;strong&gt;Reconciliation&lt;/strong&gt;.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Props&lt;/strong&gt; is an object which stores the value of attributes of a tag and work similar to the HTML attributes. It gives a way to pass data from one component to other components. It is similar to function arguments. Props are passed to the component in the same way as arguments passed in a function.&lt;/p&gt;
-
-&lt;p&gt;Eg.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// Parent Component&lt;/span&gt;
-&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="nx"&gt;React&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;useState&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;useEffect&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;react&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="nx"&gt;Child&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;./child&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-
-&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;Parent&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;count&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;setCount&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;useState&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-
-  &lt;span class="nx"&gt;useEffect&lt;/span&gt;&lt;span class="p"&gt;(()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nb"&gt;document&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;title&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s2"&gt;`You clicked &lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;count&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt; times`&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="p"&gt;});&lt;/span&gt;
-
-  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
-    &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;div&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
-      &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;p&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="nx"&gt;You&lt;/span&gt; &lt;span class="nx"&gt;clicked&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;count&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="nx"&gt;times&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/p&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
-&lt;/span&gt;      &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;button&lt;/span&gt; &lt;span class="nx"&gt;onClick&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;setCount&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;count&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;)}&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
-        &lt;span class="nx"&gt;Click&lt;/span&gt; &lt;span class="nx"&gt;me&lt;/span&gt;
-      &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/button&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
-&lt;/span&gt;      &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Child&lt;/span&gt; &lt;span class="nx"&gt;counter&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;count&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="sr"&gt;/&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
-&lt;/span&gt;    &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/div&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
-&lt;/span&gt;  &lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;span class="c1"&gt;// Child Component&lt;/span&gt;
-&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="nx"&gt;React&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;react&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-
-&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="k"&gt;default&lt;/span&gt; &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;Child&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;props&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-
-  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
-  &lt;span class="o"&gt;&amp;lt;&amp;gt;&lt;/span&gt;
-    &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;p&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;props&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;counter&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/p&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
-&lt;/span&gt;  &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
-&lt;/span&gt;  &lt;span class="p"&gt;)&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;You can see in the code, &lt;strong&gt;Parent&lt;/strong&gt; component has state called count which mutates when &lt;strong&gt;&lt;em&gt;Click Me&lt;/em&gt;&lt;/strong&gt; button gets clicked. And the &lt;strong&gt;Child&lt;/strong&gt; component is imported inside the &lt;strong&gt;Parent&lt;/strong&gt; component, &lt;strong&gt;&lt;/strong&gt; has the counter value which is accessible in &lt;strong&gt;Child&lt;/strong&gt; component via &lt;em&gt;props&lt;/em&gt;.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#css-modules"&gt;
-  &lt;/a&gt;
-  CSS Modules
-&lt;/h1&gt;
-
-&lt;p&gt;CSS Modules let you use the same CSS class name in different files without worrying about naming clashes. Normally, CSS is imported as&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;import './style.css';
-
-&amp;lt;Button className="main-btn"&amp;gt;&amp;lt;/Button&amp;gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;but when using CSS modules then&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;import styles from './style.module.css';
-
-&amp;lt;Button className={styles.mainBtn}&amp;gt;&amp;lt;/Button&amp;gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h1&gt;
-  &lt;a href="#spa"&gt;
-  &lt;/a&gt;
-  SPA
-&lt;/h1&gt;
-
-&lt;p&gt;SPA stands for &lt;strong&gt;Single Page Application&lt;/strong&gt;. You do know how our mobile application is fast, on a single click it navigates to different pages. The same way Web application also works nowadays and React is one of the widely used library to create SPA.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#libraries-and-framework-support"&gt;
-  &lt;/a&gt;
-  Libraries and Framework support
-&lt;/h1&gt;
-
-&lt;p&gt;Several libraries and frameworks are out there which can be easily integrated into React application. Few like &lt;strong&gt;&lt;em&gt;React Router, Redux, MaterialUI&lt;/em&gt;&lt;/strong&gt; you should learn. It'll make your life easier.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#1-react-router"&gt;
-  &lt;/a&gt;
-  1. React Router
-&lt;/h2&gt;
-
-&lt;p&gt;&lt;em&gt;React is well known for its declarative programming model. If you are creating an application with React, it will be great to have some components that you can compose declaratively in your app. React router is a collection of such components. Suppose you want to add some URLs which you can bookmark. Or, what if you want a composable way to navigate in React native? We have a React Router for the solution.&lt;/em&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;em&gt;React Router is one of the best component libraries that makes it effortless for the developer to handle navigation in a single-page app. Not only that, but the library also offers smooth screen-to-screen transition, server-side rendering and vivid support for nesting.&lt;/em&gt;&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#2-redux"&gt;
-  &lt;/a&gt;
-  2. Redux
-&lt;/h2&gt;
-
-&lt;p&gt;&lt;em&gt;When it comes to state management libraries, the one that comes to our mind is Redux. Redux also comes under the category of best component libraries with 20.9k GitHub stars and 3k forks. Although it is meant to be used with the library components of React UI, you can also use it with Vue, Angular, Ember, and other JS frameworks.&lt;/em&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;em&gt;Redux helps to connect React components to pieces of state by decreasing the need for props or callbacks. The library is often termed as a developer’s best friend. It helps you to write consistent codes and is environment-friendly. You can also edit the code while your app is live.&lt;/em&gt;&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#3-material-ui"&gt;
-  &lt;/a&gt;
-  3. Material UI
-&lt;/h2&gt;
-
-&lt;p&gt;&lt;em&gt;If you are not much of a designer, no issues. Material UI gives you a collection of themes that you can choose for your site. There is extensive documentation so that you can find whatever you need whenever you feel stuck.&lt;/em&gt;&lt;/p&gt;
-
-&lt;p&gt;When you're done learning these things, get ready to dirty your hands with &lt;strong&gt;Creating Custom Hooks, Unit Testing, Server Side Rendering using NextJS, etc.&lt;/strong&gt; which will help you to evolve as a great developer.&lt;/p&gt;
-
-&lt;p&gt;Last but not least, by learning React you can develop Web Applications, Mobile Applications and Desktop Applications as well. There are hell lot of demand for React developers. So, start learning it today.&lt;/p&gt;
-
-&lt;p&gt;So that was it from this article😇. Please share your thoughts/comments/feedback.&lt;/p&gt;
-
-&lt;p&gt;Connect me @ &lt;a href="https://twitter.com/TheKrPrince"&gt;Twitter&lt;/a&gt;, &lt;a href="https://www.linkedin.com/in/thekrprince/"&gt;Linkedin&lt;/a&gt;&lt;/p&gt;
-
-</description>
-      <category>react</category>
-      <category>javascript</category>
-      <category>redux</category>
     </item>
   </channel>
 </rss>
