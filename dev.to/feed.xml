@@ -7,6 +7,162 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>Considerations in Building Enclaves for Multiparty Computation (Part 2)</title>
+      <author>Jack F.</author>
+      <pubDate>Mon, 09 Aug 2021 09:21:31 +0000</pubDate>
+      <link>https://dev.to/oblivious/considerations-in-building-enclaves-for-multiparty-computation-part-2-2pcn</link>
+      <guid>https://dev.to/oblivious/considerations-in-building-enclaves-for-multiparty-computation-part-2-2pcn</guid>
+      <description>&lt;h2&gt;
+  &lt;a href="#getting-your-code-on"&gt;
+  &lt;/a&gt;
+  Getting Your Code On
+&lt;/h2&gt;
+
+&lt;p&gt;Now that you’ve pinned down the ideal functionality of the enclave, and assuming you are comfortable coding up a server to handle requests from each party, we can talk about some of the aspects you probably want to keep in mind.&lt;/p&gt;
+
+&lt;p&gt;In AWS, you can treat Nitro Enclaves as a self-contained VM with an Enclave Image File build from a Docker image running inside. The communication in and out of the enclave is via virtual sockets (vsock) only to the parent instance (that is the instance that created the enclave. The parent instance acts as an intermediary between the enclave and the outside world, with the sole exception of the KMS Proxy which speaks directly with AWS Key Management Service.&lt;/p&gt;
+
+&lt;p&gt;To start, the purpose of using a trusted execution environment is because the parties don’t trust each other. So we have to assume the users of the enclave are adversarial by nature. This means there is an onus on you, the developer, to develop a secure application which is often easier said than done. A good starting point is to create strict input and output validators. If the IO is forced to conform to a predefined JSON-schema or OpenAPI definition, at least you should be able to validate that while checking for any malicious characters and so on.&lt;/p&gt;
+
+&lt;p&gt;You should endeavor to be particularly careful when handling bytes as an input, especially in Python. The YouTuber PwnFunction has a nice introductory tutorial on a known exploit in Python’s Pickle library which you can find here.&lt;br&gt;
+There is an ever persisting battle of course between usability and security. Some would strongly argue that enclave source code should be in either C or Rust, while others feel comfortable using languages such as Python in order to take advantage of a particular tool or framework within the enclave itself. Irrespective of your decision, the code can be made more secure by performing rigorous testing, performing static analysis such as SonarCloud, and using internal firewalls to lock down any unexpected communication channels.&lt;/p&gt;
+
+&lt;p&gt;‌Once you’ve hardened the IO of the enclave you may also want to consider your authentication model for within the enclave. This can be as simple as inputting the key management services the enclave can speak to as a build argument (discusses in the next section) or using pre-shared keys with TLS-PSK for example. OAuth-based approaches may cause some additional considerations if the enclave can not directly communicate with a trusted key authority for public-key cryptographic approaches. That’s not to say it’s impossible, but one should certainly think through the challenges and potential risks which may be involved if there is a parent server acting as a man-in-the-middle.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#encoding-guarantees-build-arguments-and-environment-variables"&gt;
+  &lt;/a&gt;
+  Encoding Guarantees: Build Arguments and Environment Variables
+&lt;/h2&gt;
+
+&lt;p&gt;Previously we established that the enclave image (converted from the Docker image) running inside the Nitro Enclave is what is attested when requesting key access from one or more of the parties. Well, we can use this fact to develop reusable enclave images.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--2XRlt59R--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/h9kkfmfeymrxaynwn911.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--2XRlt59R--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/h9kkfmfeymrxaynwn911.png" alt="Enclave Build Pipeline"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;For example, assume that we have two parties, Alice and Bob. They would like to be authorised based on some hash of their respective KMS ARNs and would also like to limit the number of function calls made by Alice to 3 and Bob to 2. Now imagine another scenario where Alice and Charlie would like to run the same interaction, but this time Alice can only make 2 function calls and Charlie 4.&lt;/p&gt;
+
+&lt;p&gt;In such a scenario you do not want to be hard coding this information each time. Instead, you can leverage Docker build arguments and set them as environment variables within the enclave. This changes the Docker image and as such the attestation hashes that are used to verify the container to the key management services. It also can be highly efficient too, depending on how you create your Docker image as it can take advantage of build caching such that building the image with new arguments can be a painless process.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#persistent-storage-pci-devices-amp-resource-requirements"&gt;
+  &lt;/a&gt;
+  Persistent Storage, PCI Devices &amp;amp; Resource Requirements
+&lt;/h2&gt;
+
+&lt;p&gt;Nitro Enclaves endeavor to ensure security by locking down a virtual machine to a very limited set of functionalities. It operates purely in RAM with dedicated CPUs. As such many functionalities, you may expect may not be available.&lt;/p&gt;
+
+&lt;p&gt;For example, one would typically expect to have persistent storage on a Volume on an EC2 instance. However, this of course is outside of the enclave so you have to encrypt data using a KMS before releasing it to the parent instance. In the context of multiparty computation, this poses an interesting question, whose keys to use? To answer this you may wish to consider who manages the parent instance and how many of the parties would need to collaborate together to decrypt the data if the encrypted payload was to ever be leaked. One approach would be to encrypt the packet with each party's KMS in turn and reverse the process when decrypting the payload if returned to the enclave at a later point. There is nothing obviously wrong with this approach, but as we no every encryption and decryption will add to the latency of the enclave overall.&lt;/p&gt;
+
+&lt;p&gt;When it comes to data, we’ve found it's best to assume the enclave is transactional and to save and reload persistent data for better confidence. That is not to say you shouldn’t save anything locally but best to consider it as a cache. That way if the enclave were to halt and be restored you have the safety net of being able to reload the state of the enclave.&lt;br&gt;
+A second challenge is that no PCI devices are available to the enclave, so if you are hoping to crunch some data on a GPA or equivalent, you may want to think again. Your only obvious solution in such a scenario is to pay for an instance with more powerful CPUs and/or to allocate more of them to the enclave to facilitate threading and multiprocessing.&lt;/p&gt;
+
+&lt;p&gt;Finally, one must remember that the entire enclave lives within the permitted resources at launch time. This means the enclave must have enough ram for the enclave image, all RAM required internally, and all RAM which will store the file system and so forth. This is worth keeping in mind as you develop your enclave and taking a resource-efficient design can save you significantly on your monthly AWS bills.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#timing-attacks"&gt;
+  &lt;/a&gt;
+  Timing Attacks
+&lt;/h2&gt;
+
+&lt;p&gt;Importantly, enclaves give you a guarantee that what code you agree gets run, not that it is safe to run. This is a big difference and the onus is on the developer to make sure that side channels, such as execution time, do not leak sensitive information that was unforeseen when signing off on the ideal functionality.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--gk3doYdD--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/5o3ayolyqhzhvwlikxm4.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--gk3doYdD--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/5o3ayolyqhzhvwlikxm4.png" alt="Timing Attacs"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Let’s have a look at how the timing of execution may inadvertently change the guessing probability of a party's secret input. Suppose Alice inputs a decision tree that Bob wishes to use to classify some data. If the decision tree is not balanced, ie if there is a different number of comparisons required depending on the path taken through the branches of the decision tree, then simple timing of the execution time may reveal what the output of the classification was.&lt;/p&gt;
+
+&lt;p&gt;While not always trivial to achieve, you should endeavor to create fixed-time programs for enclaves if the timing is likely to reveal superfluous information to one or more parties involved.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#summary"&gt;
+  &lt;/a&gt;
+  Summary
+&lt;/h2&gt;
+
+&lt;p&gt;While not delving into actual code, we’ve tried to outline some pointers towards building your first few enclaves. Even the pros can make a mistake with a poorly defined ideal functionality or an insecure implementation. Take your time, give it a shot and be comfortable to make some mistakes initially. Enclave technology is still very new and there is great reward in being an early pioneer in developing and leveraging enclave applications.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#why-oblivious%E2%80%8C"&gt;
+  &lt;/a&gt;
+  Why Oblivious?‌
+&lt;/h2&gt;
+
+&lt;p&gt;At Oblivious, we’ve built the first full-service enclave management system for multiparty applications. It’s called Ignite and it allows data scientists and machine learning practitioners to take advantage of prebuilt enclaves for data exploration, analysis, training, and inference. If you are interested in the technology, reach out to us to get started today!&lt;/p&gt;
+
+</description>
+      <category>security</category>
+      <category>datascience</category>
+      <category>privacy</category>
+      <category>cloud</category>
+    </item>
+    <item>
+      <title>Top Prime reasons why to adapt SMS Drip Campaign Plugin for Business</title>
+      <author>Vijay Kumar</author>
+      <pubDate>Mon, 09 Aug 2021 09:00:14 +0000</pubDate>
+      <link>https://dev.to/outrightcrmstore/top-prime-reasons-why-to-adapt-sms-drip-campaign-plugin-for-business-1266</link>
+      <guid>https://dev.to/outrightcrmstore/top-prime-reasons-why-to-adapt-sms-drip-campaign-plugin-for-business-1266</guid>
+      <description>&lt;p&gt;Research says 9 out of 10 people like to get connected with every diverse type of industry via an SMS communication channel. SMS will always be the leading channel every year. This is why we developed a product of SuiteCRM to help you all and make your SMS communication channel better. &lt;/p&gt;
+
+&lt;p&gt;Introducing SuiteCRM SMS Drip Campaign which allows you to send SMS to plenty of your leads/prospects at a specific period of time. It means you can send at the same time or set the right time where this plugin will send your valuable SMS at the desired time period for handling your business. &lt;/p&gt;
+
+&lt;p&gt;&lt;b&gt;For example:&lt;/b&gt; Our business team worked and launched some great SuiteCRM Plugins to enhance your Sugar software functionalities. We are looking to flash our secure plugins in the market. We can choose SuiteCRM Drip Campaign for saving our precious time by setting the time interval and the message will be sent from SuiteCRM at the time of your preference. Great functionality for handling your communication and will reduce tons of burden. &lt;br&gt;
+More great reasons for adopting this vigorous extension of SuiteCRM&lt;br&gt;
+Well, the plugin functionality is not just sending SMS at predefined intervals. It has more such exceptional functions for helping you all. Have a look-&lt;br&gt;
+Businesses can use this plugin and can run it directly from their CRM software. &lt;br&gt;
+It is not just embedded for sending SMS to one person at a single time. Use it to flash your SMS to numerous customers at a single time. &lt;br&gt;
+A user can use their SMS templates in their drip campaign. One of the greatest features of this rich plugin. &lt;br&gt;
+We are allowing you to set multiple phone numbers and then choose from which number you want to send your SMS to fetch the audience quickly. &lt;br&gt;
+Getting a clear status of your activity is also required. We tried and tested this addon and you can easily check the SMS status that you shared. &lt;br&gt;
+Is this extension affordable?&lt;br&gt;
+If looking to fill your bucket with great addons like &lt;a href="https://store.outrightcrm.com/product/suitecrm-sms-drip-campaign/"&gt;SuiteCRM SMS Drip Campaign&lt;/a&gt; then you need to pay $249.00. Also, with the purchasing of the product, get the “FREE PRODUCT TOUR” for understanding the Configuration and Installation of it. &lt;/p&gt;
+
+&lt;p&gt;&lt;b&gt;About the Email Drip Campaign for SuiteCRM&lt;/b&gt; &lt;/p&gt;
+
+&lt;p&gt;Boost up your email sending practice with a great platform for your organization. No need to wait for long to get the right time of sending the right email to the right customer. We are introducing to you the “Email Drip Campaign” which is a great choice for businesses of all sizes. A person can prepare an email with the accurate information like the way he/she wanted and later on set the interval so that email will be sent automatically to that lead/prospect. Simple and outstanding! &lt;/p&gt;
+
+&lt;p&gt;&lt;b&gt;What is an Email Drip Campaign?&lt;/b&gt; &lt;/p&gt;
+
+&lt;p&gt;Earlier, this question was bouncing around your head. Let us clear you that it is a pre-written email that will be sent with a fixed interval to save your precious time. A better or you can say one of the holistic methods to nurture relationships with everyone who is involved with your business. &lt;/p&gt;
+
+&lt;p&gt;The real statistic about the Email Drip Campaign is: 80% is the open rate of this email marketing platform and this platform minus the cost at least 33% for all. One more thing to uncover and that is “How many types of drip campaigns are there to help you”. There are 6 main to know-&lt;/p&gt;
+
+
+&lt;ul&gt;
+
+&lt;li&gt;Competitive Drips&lt;/li&gt;
+
+&lt;li&gt;Training Drips&lt;/li&gt;
+
+&lt;li&gt;Educational Drips&lt;/li&gt;
+
+&lt;li&gt;Promotional Drips&lt;/li&gt;
+
+&lt;li&gt;Top-Of-Mind Drips&lt;/li&gt;
+
+&lt;li&gt;Re-engagement Drips&lt;/li&gt;
+
+
+
+&lt;p&gt;Superfine benefits of Email Drip Campaign to manage your business&lt;br&gt;
+After getting aware of “What is an email drip campaign” and the types of it, let’s find out how it can help us more in our day-to-day activities.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--73WpzHPg--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://res.cloudinary.com/jerrick/image/upload/f_jpg%2Cq_auto%2Cw_720/610cc6fae87e7a001db58350.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--73WpzHPg--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://res.cloudinary.com/jerrick/image/upload/f_jpg%2Cq_auto%2Cw_720/610cc6fae87e7a001db58350.png"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;You set the interval that doesn’t mean it shares false information to tarnish your business brand. The key role of this platform is to present the right information to the correct lead. It already focused on user interaction, stage of the sales cycle, etc. &lt;/p&gt;
+
+&lt;p&gt;A business will get maximum benefit like sending email on time, getting sales at the right time, and more importantly, everything will be done with less effort. Sending email with a set interval means customers feel like you want to get engaged with them and this is the plus point for your business. &lt;/p&gt;
+
+&lt;p&gt;With the assistance of a drip campaign for your business, a user can send segmented email to their potential leads or to a new customer who purchased something from you. It is to remind them that you still have the opportunity to explore more and get the best product to cater to your needs. &lt;/p&gt;
+
+
+&lt;/ul&gt;
+
+</description>
+      <category>smsdrip</category>
+      <category>dripcampaign</category>
+      <category>serverless</category>
+      <category>software</category>
+    </item>
+    <item>
       <title>Getting Started with SQLAlchemy for Database Operations In Python </title>
       <author>Mwenda Harun Mbaabu</author>
       <pubDate>Mon, 09 Aug 2021 08:45:32 +0000</pubDate>
@@ -1540,268 +1696,6 @@ the handler function attached to the event.&lt;/p&gt;&lt;/li&gt;
       <category>codequality</category>
       <category>cloud</category>
       <category>github</category>
-    </item>
-    <item>
-      <title>How to Create Public And Private Routes using React Router</title>
-      <author>Nilanth</author>
-      <pubDate>Mon, 09 Aug 2021 06:50:34 +0000</pubDate>
-      <link>https://dev.to/nilanth/how-to-create-public-and-private-routes-using-react-router-72m</link>
-      <guid>https://dev.to/nilanth/how-to-create-public-and-private-routes-using-react-router-72m</guid>
-      <description>&lt;p&gt;Steps for writing public and private routes in React app using &lt;a href="https://reactrouter.com/web/guides/quick-start"&gt;React Router&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;When developing a React Application with Authentication, we might require public and private routes. Let's first see what they are?&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#public-routes"&gt;
-  &lt;/a&gt;
-  Public Routes
-&lt;/h2&gt;
-
-&lt;p&gt;Public routes are Log in, SignUp, Forgot Password, Reset Password. In simple words, These routes can be accessed before login into the App.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#private-routes"&gt;
-  &lt;/a&gt;
-  Private Routes
-&lt;/h2&gt;
-
-&lt;p&gt;Private Routes vary based on the Apps, For example, Dashboard, User Profile, App Settings, Home etc. In simple words, These routes can be accessed only after login.&lt;/p&gt;
-
-&lt;p&gt;The constraints for Public and Private routes are that Public routes should not be accessed after login and Private routes should not be accessible before login.&lt;/p&gt;
-
-&lt;p&gt;In this article, we can see. How to create public and private routes using react-router for your react apps. Let's start&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#public-routes"&gt;
-  &lt;/a&gt;
-  Public Routes
-&lt;/h2&gt;
-
-&lt;p&gt;First, let us create a &lt;code&gt;PublicRoute.js&lt;/code&gt; component to handle public route conditions as below&lt;/p&gt;
-
-
-&lt;div class="ltag_gist-liquid-tag"&gt;
-  
-&lt;/div&gt;
-
-
-&lt;p&gt;As you can see in the above code, The Public route component receives 3 props like &lt;code&gt;children&lt;/code&gt;, &lt;code&gt;isAuthenticated&lt;/code&gt; and &lt;code&gt;…rest&lt;/code&gt; . &lt;/p&gt;
-
-&lt;p&gt;If the user is authenticated, He will be redirected to the Home screen and he can only access the public routes if he is not authenticated(Logged in).&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#private-routes"&gt;
-  &lt;/a&gt;
-  Private Routes
-&lt;/h2&gt;
-
-&lt;p&gt;The private route component is similar to the public route, the only change is that redirect URL and authenticate condition. &lt;/p&gt;
-
-&lt;p&gt;If the user is not authenticated he will be redirected to the login page and the user can only access the authenticated routes If he is authenticated (Logged in).&lt;/p&gt;
-
-
-&lt;div class="ltag_gist-liquid-tag"&gt;
-  
-&lt;/div&gt;
-
-
-&lt;h2&gt;
-  &lt;a href="#protected-routes"&gt;
-  &lt;/a&gt;
-  Protected Routes
-&lt;/h2&gt;
-
-&lt;p&gt;The protected Route component is used to map all the authenticated routes as below&lt;/p&gt;
-
-
-&lt;div class="ltag_gist-liquid-tag"&gt;
-  
-&lt;/div&gt;
-
-
-&lt;p&gt;Authenticated routes are defined as below in routes.js&lt;/p&gt;
-
-
-&lt;div class="ltag_gist-liquid-tag"&gt;
-  
-&lt;/div&gt;
-
-
-&lt;h2&gt;
-  &lt;a href="#integrating-routes"&gt;
-  &lt;/a&gt;
-  Integrating Routes
-&lt;/h2&gt;
-
-&lt;p&gt;Now let's integrate our route components to App.js as below&lt;/p&gt;
-
-
-&lt;div class="ltag_gist-liquid-tag"&gt;
-  
-&lt;/div&gt;
-
-
-&lt;p&gt;Here we have wrapped non authenticated routes with &lt;code&gt;&amp;lt;PublicRoute /&amp;gt;&lt;/code&gt; component and authenticated routes with &lt;code&gt;&amp;lt;PrivateRoute /&amp;gt;&lt;/code&gt; component. &lt;/p&gt;
-
-&lt;p&gt;We have used suspense to add lazy loading to components. &lt;br&gt;
-Now we have configured Private and Public Routes. If there is no match &lt;code&gt;&amp;lt;NoFoundComponent /&amp;gt;&lt;/code&gt; will be rendered.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#conclusion"&gt;
-  &lt;/a&gt;
-  Conclusion
-&lt;/h2&gt;
-
-&lt;p&gt;Public and Private routes will also restrict accessing the previously visited routes using the browser back button after logout. I hope you have found this useful. Thank you for reading.&lt;/p&gt;
-
-&lt;p&gt;Get more updates on &lt;a href="https://twitter.com/Nilanth"&gt;Twitter&lt;/a&gt;.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#more-blogs"&gt;
-  &lt;/a&gt;
-  More Blogs
-&lt;/h2&gt;
-
-&lt;ol&gt;
-&lt;li&gt;&lt;a href="https://dev.to/nilanth/redux-toolkit-the-standard-way-to-write-redux-2g32"&gt;Redux Toolkit - The Standard Way to Write Redux&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://dev.to/nilanth/5-packages-to-optimize-and-speed-up-your-react-app-during-development-4h5f"&gt;5 Packages to Optimize and Speed Up Your React App During Development&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://dev.to/nilanth/how-to-use-axios-in-an-optimized-and-scalable-way-with-react-518n"&gt;How To Use Axios in an Optimized and Scalable Way With React&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://dev.to/nilanth/15-custom-hooks-to-make-your-react-component-lightweight-17cd"&gt;15 Custom Hooks to Make your React Component Lightweight&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://dev.to/nilanth/10-ways-to-host-your-react-app-for-free-27ga"&gt;10 Ways to Host Your React App For Free&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://dev.to/nilanth/how-to-secure-jwt-in-a-single-page-application-cko"&gt;How to Secure JWT in a Single-Page Application&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://dev.to/nilanth/react-18-alpha-a-quick-overview-349n"&gt;React 18 Alpha: A Quick Overview&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://dev.to/nilanth/redux-auth-starter-a-zero-config-cra-template-9c0"&gt;Redux Auth Starter: A Zero Config CRA Template&lt;/a&gt;&lt;/li&gt;
-&lt;/ol&gt;
-
-</description>
-      <category>react</category>
-      <category>javascript</category>
-      <category>webdev</category>
-      <category>beginners</category>
-    </item>
-    <item>
-      <title>5 things I learned from writing 500 tech articles</title>
-      <author>Chris Bongers</author>
-      <pubDate>Mon, 09 Aug 2021 06:40:42 +0000</pubDate>
-      <link>https://dev.to/dailydevtips1/5-things-i-learned-from-writing-500-tech-articles-55co</link>
-      <guid>https://dev.to/dailydevtips1/5-things-i-learned-from-writing-500-tech-articles-55co</guid>
-      <description>&lt;p&gt;Wow, this is article 500!! 🎉&lt;/p&gt;
-
-&lt;p&gt;I wish I could say I did an article a day, like &lt;a href="https://seths.blog/"&gt;Seth Godin&lt;/a&gt; or &lt;a href="https://flaviocopes.com/"&gt;Flavio Copes&lt;/a&gt;. However, I did miss writing on my wedding days and had zero regrets about that 🥳.&lt;/p&gt;
-
-&lt;p&gt;I did write 500 tech-related articles already...&lt;br&gt;
-Can you believe it? That means we went into lockdown about 500 days ago (How time flies, right?).&lt;/p&gt;
-
-&lt;p&gt;This article contains the five most important things I've learned from writing 500 articles.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#1-plan-your-content-and-life"&gt;
-  &lt;/a&gt;
-  1. Plan your content and life
-&lt;/h2&gt;
-
-&lt;p&gt;It might look simple on paper, write some words every day, but the struggle is real. It can be a mental drain at times, so the best thing you can do is plan around your content and life.&lt;/p&gt;
-
-&lt;p&gt;You might get the part about content. Every time you have an idea &lt;a href="https://daily-dev-tips.com/posts/%F0%9F%A4%AB-the-secret-to-my-writing-process/"&gt;write it down in Notion&lt;/a&gt;. This way, you should never run out of ideas.&lt;/p&gt;
-
-&lt;p&gt;A second side to doing such a crazy challenge is your personal life.&lt;/p&gt;
-
-&lt;p&gt;Every single day ~ Yes, every single day, you have to write content. That means holidays, weekends, days you don't feel like it. And it can not just be hard on yourself, but on your partner, friends and family as well.&lt;/p&gt;
-
-&lt;p&gt;The main thing I learned is to keep them informed. When going on a holiday, I try to do some work in advance to enjoy some time off.&lt;br&gt;
-My wife is luckily super supportive and lets me do my blog on the weekend. However, some days we need to communicate when I'm writing and when we do something fun.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#2-you-dont-need-to-write-perfect-content"&gt;
-  &lt;/a&gt;
-  2. You don't need to write perfect content
-&lt;/h2&gt;
-
-&lt;p&gt;Before we dive into this point, let me tell you a bit about my motives for writing:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Keep up to date with tech&lt;/li&gt;
-&lt;li&gt;Imprint techniques in my brain&lt;/li&gt;
-&lt;li&gt;Improve my English writing&lt;/li&gt;
-&lt;li&gt;Improve my technical writing&lt;/li&gt;
-&lt;li&gt;Learn in public&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;As we take these points, you can see my goals are far from your other blog goals like: Get x million views, or Sell x amount of ads.&lt;/p&gt;
-
-&lt;p&gt;I write for myself to become better, and with that comes a side effect that people are intrigued by my way of learning and want to learn with me.&lt;/p&gt;
-
-&lt;p&gt;I have days where people reach out and say I made a mistake. This can be anything from typos to having the wrong Codepen linked to the article.&lt;/p&gt;
-
-&lt;p&gt;I appreciate people telling me these things. It's yet another way of learning. I always thank these people and change that part of the article.&lt;/p&gt;
-
-&lt;p&gt;If you are that person who is procrastinating putting out their first article, run it through Grammarly, read it once more yourself and GO! Put that content out there.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#3-write-for-your-best-readers"&gt;
-  &lt;/a&gt;
-  3. Write for your best readers
-&lt;/h2&gt;
-
-&lt;p&gt;As you may have seen above, I'm a big fan of writing for myself and like-minded people.&lt;br&gt;
-I know from myself that I like small bite-sized articles. I don't read super long articles as they don't get to the point quickly enough for my liking.&lt;/p&gt;
-
-&lt;p&gt;My writing style reflects my reading style in that sense. It's small, to-the-point articles that solve problems quickly.&lt;br&gt;
-And I know that's why a lot of people like reading my articles.&lt;/p&gt;
-
-&lt;p&gt;Moral of the story: Write content you would read, as you know best, to write it like that.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#4-motivate-yourself"&gt;
-  &lt;/a&gt;
-  4. Motivate yourself
-&lt;/h2&gt;
-
-&lt;p&gt;You can't write 500... let's even make that 30 articles consecutive when you're not motivated.&lt;/p&gt;
-
-&lt;p&gt;If you don't enjoy writing and it's a struggle, don't do it. For me writing down my ideas and learnings is such a liberating feeling. This, in turn, motivates me to write more.&lt;/p&gt;
-
-&lt;p&gt;There are days where my brain is overflowing with the idea after idea. I open up my Notion and write down all of those ideas.&lt;/p&gt;
-
-&lt;p&gt;When the next writing session comes, I often read the headlines I wrote down and immediately get re-motivated by my enthusiasm when coming up with the ideas.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#5-enjoy-what-youre-doing"&gt;
-  &lt;/a&gt;
-  5. Enjoy what you're doing
-&lt;/h2&gt;
-
-&lt;p&gt;With motivating comes enjoyment. Like I said before: If you don't like writing, don't do it.&lt;/p&gt;
-
-&lt;p&gt;This doesn't mean you can't put out content, but maybe you like making videos more? Or just publishing ebooks?&lt;/p&gt;
-
-&lt;p&gt;Do whatever makes you happy as a person.&lt;br&gt;
-And don't worry about sucking at it first, pretty sure we all do in the beginning.&lt;/p&gt;
-
-&lt;p&gt;Find your passion and use that to put out content people (and you) love.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#recap"&gt;
-  &lt;/a&gt;
-  Recap
-&lt;/h2&gt;
-
-&lt;p&gt;If you are keen to put out a lot of content, keep in mind it's not easy. There's a lot of planning around it, not just in content but also in your life in general.&lt;br&gt;
-Don't be afraid that you have to be perfect, nobody is!&lt;br&gt;
-Write for your best readers, which are people like-minded often. That said, it comes down to writing content you would read yourself.&lt;br&gt;
-And lastly, enjoy the process!&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#thank-you-for-reading-and-lets-connect"&gt;
-  &lt;/a&gt;
-  Thank you for reading, and let's connect!
-&lt;/h3&gt;
-
-&lt;p&gt;Thank you for reading my blog. Feel free to subscribe to my email newsletter and connect on &lt;a href="https://www.facebook.com/DailyDevTipsBlog"&gt;Facebook&lt;/a&gt; or &lt;a href="https://twitter.com/DailyDevTips1"&gt;Twitter&lt;/a&gt;&lt;/p&gt;
-
-</description>
-      <category>writing</category>
-      <category>webdev</category>
     </item>
   </channel>
 </rss>
