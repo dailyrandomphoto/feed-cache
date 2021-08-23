@@ -7,6 +7,275 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>Design to Duty: The Accounting and Reporting Systems at Adyen</title>
+      <author>Willem Pino</author>
+      <pubDate>Mon, 23 Aug 2021 13:51:43 +0000</pubDate>
+      <link>https://dev.to/adyen/design-to-duty-the-accounting-and-reporting-systems-at-adyen-3fae</link>
+      <guid>https://dev.to/adyen/design-to-duty-the-accounting-and-reporting-systems-at-adyen-3fae</guid>
+      <description>&lt;p&gt;In this blog, we will have a closer look at how we make decisions around our accounting system and how it evolved as a consequence. We will do the same for our reporting and analysis frameworks.&lt;/p&gt;
+
+&lt;p&gt;This is part two of a series. So, if you have not done so already, it might be nice to start with the &lt;a href="https://www.adyen.com/blog/design-to-duty-adyen-architecture"&gt;first blog&lt;/a&gt;. In that one, we talked about what Adyen does at a high level, how we think about choosing between home-grown and open-source software, and how this shaped our edge services.&lt;/p&gt;
+
+&lt;p&gt;The themes that were laid out in &lt;a href="https://www.adyen.com/blog/design-to-duty-adyen-architecture"&gt;part one&lt;/a&gt; will return and be referenced in this blog. If you didn’t read the first one, it might be that some context is missing.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#accounting-system"&gt;
+  &lt;/a&gt;
+  Accounting system
+&lt;/h1&gt;
+
+&lt;p&gt;Once we have processed a payment, the next step is accounting for it. This is needed because after processing transactions, we receive the money from our partners and we need to determine how much to settle to each merchant. Of course, we also need it for reporting.&lt;/p&gt;
+
+&lt;p&gt;For every payment that enters the system, we do double-entry bookkeeping. The way we ensure that we do so correctly is quite unique to Adyen. The only way to add new records to the accounting system is by means of templates. A template in this context is a recipe that takes certain amounts and accounts as input and converts them into specific journals that can be inserted into the ledger.&lt;/p&gt;
+
+&lt;p&gt;These templates are mathematically verified. To achieve this, we represent the amounts that serve as inputs by logical entities and prove that every combination of amounts will result in a net sum of 0. This verification is fully automated and runs on every change to the templates.&lt;/p&gt;
+
+&lt;p&gt;All of this means we can guarantee that if at any time, we sum up all the records in the accounting system, the result will always be 0. Combine this with the aforementioned double-entry bookkeeping, and it means for every euro that ever went through Adyen, we know exactly where it came from and where it went.&lt;/p&gt;
+
+&lt;p&gt;We leverage this same system of accounting for our banking platform.&lt;/p&gt;
+
+&lt;p&gt;It might be superfluous to mention it, but our accounting framework is also written in-house. Here the choice was evident, it is as core as can be to our business, and nothing in the open-source landscape came close to what we wanted.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#underlying-database"&gt;
+  &lt;/a&gt;
+  Underlying Database
+&lt;/h2&gt;
+
+&lt;p&gt;Having all these nice things does come with some cost. Over the lifetime of a payment transaction, about 50 rows have to be inserted into the accounting database. This means that per second, just for the accounting system, the amount of inserts is an order of magnitude higher than the hundreds of transactions we process every second. Some time ago these thousands of inserts a second started to cause issues for our PostgreSQL database. &lt;a href="https://www.adyen.com/blog/updating-a-50-terabyte-postgresql-database"&gt;This blog&lt;/a&gt; has more information on maintaining such large PostgreSQL databases.&lt;/p&gt;
+
+&lt;p&gt;We had already split a reporting database from our accounting database to minimize reads (more on this below), but at some point, even with mainly inserts and updates, the database didn’t scale anymore. This is when we decided to shard our accounting database into several accounting clusters.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--IslpLLFM--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://miro.medium.com/max/2000/0%2ArTo_S_8bcqd66hRP.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--IslpLLFM--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://miro.medium.com/max/2000/0%2ArTo_S_8bcqd66hRP.png" alt="accounting DB"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#sharding-strategy"&gt;
+  &lt;/a&gt;
+  Sharding strategy
+&lt;/h2&gt;
+
+&lt;p&gt;Now we have several accounting databases, or clusters, processing side-by-side. We considered incorporating domain knowledge into the sharding strategy, but, for several reasons, eventually decided to go for a simple round-robin strategy with some parameters we can adjust.&lt;/p&gt;
+
+&lt;p&gt;First of all, every rule we considered would bring its own problems. For example, if we would put each processing merchant in one database, you still need to go to every shard when you need aggregate data to send to our payment method partners. The same holds the other way around. If you split by payment method you still need to go to every shard when you need aggregate data on the merchant level.&lt;/p&gt;
+
+&lt;p&gt;Incorporating business logic would also complicate the routing, a round-robin strategy is very simple and robust and you do not have to think about balancing your shards. Finally, you lose a lot of flexibility. At the moment we can just add a new cluster whenever we need more capacity or remove one from the routing when we see strange behavior we want to investigate.&lt;/p&gt;
+
+&lt;p&gt;In the end, we decided the benefits domain knowledge routing would offer were not worth the loss of flexibility and increased complexity.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#migration"&gt;
+  &lt;/a&gt;
+  Migration
+&lt;/h2&gt;
+
+&lt;p&gt;The migration to a sharded accounting database was quite painful. This was due to two things. First of all, the accounting logic in the code, pretty heavily embedded in any payments processor, working on the assumption there was just one accounting database. This had to be rewritten.&lt;/p&gt;
+
+&lt;p&gt;As an example, consider a payout to a merchant. This needs to come from one account. However, because you processed these transactions on different clusters, the money needs to be transferred from one cluster to the other in order to end up in the same account. To do this without compromising on the strict correctness requirement was quite difficult. In the end, we created several jobs and processes that use back and forth messages between the clusters to keep everything aligned.&lt;/p&gt;
+
+&lt;p&gt;The second complicating factor was that, if we received reports on processed transactions from our partners, we needed to match them to transactions in different clusters. Instead of parsing a file and matching it directly to the transactions, we introduced a two-step framework that would first parse a file and then split it into the relevant parts for each cluster. The second step was to match the relevant transactions within the clusters.&lt;/p&gt;
+
+&lt;p&gt;Whereas the first problem was solvable in a generic way, the reconciliation needs to happen for a lot of different very custom integrations so this was a real team effort.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#future-challenges"&gt;
+  &lt;/a&gt;
+  Future challenges
+&lt;/h2&gt;
+
+&lt;p&gt;From a scaling perspective, the risk that this approach introduces is that any process that depends on all accounting databases being up to date or available becomes a potential liability.&lt;/p&gt;
+
+&lt;p&gt;Historically, processes such as our back office (admin area) would interface directly with the accounting databases to display data or to make corrections. If one of the accounting clusters is not reachable this cannot be done anymore.&lt;/p&gt;
+
+&lt;p&gt;This is not a problem when there are only a few clusters, but as the number of accounting clusters grows, the chance of any of them being unavailable, planned or unplanned, grows with it. This means that instead of interacting with it directly, we need to do so with an intermediate that will mitigate this risk.&lt;/p&gt;
+
+&lt;p&gt;Also, rebalancing the clusters is something that is essential for traditional sharding (inside one database) but has not been implemented yet for this setup. If we add a new cluster, it will be empty while the old clusters keep growing. How do we avoid the original clusters becoming too big?&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#connecting-the-edge-services-with-the-accounting-system"&gt;
+  &lt;/a&gt;
+  Connecting the edge services with the accounting system
+&lt;/h1&gt;
+
+&lt;p&gt;Talking so casually about the downtime of our accounting clusters hints at different priorities in this part of the system compared to our edge systems discussed earlier. Whereas for the latter the priority was uptime, for the accounting systems we don’t mind if they are down for a little bit as long as we can guarantee their reliability and consistency. For me, it was interesting to see how these systems are tied together.&lt;/p&gt;
+
+&lt;p&gt;In a very naive solution, these conflicting principles cause a conflict. The PAL would forward the payment to the accounting system to save it. If something goes wrong, do you still save the payments with a risk of inconsistent data, compromising on the consistency priority of the accounting system? Or do you stop processing, compromising on the uptime priority of the frontend? We went for a failsafe in between.&lt;/p&gt;
+
+&lt;p&gt;The Payment Processing Layer (or PAL, see part one) saves the payment in a local database and a separate process picks it up when possible. This process will run behind if we have doubt about whether we can guarantee consistency in the accounting or if an accounting database is not available but that will not impact the availability of the PAL itself. An added benefit of this setup is that if the PAL crashes, no payments are lost because the queue is stored in a database and not in memory.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--t4K1kKUe--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://miro.medium.com/max/2000/0%2A9Y9apDUCsAkJiMMt.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--t4K1kKUe--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://miro.medium.com/max/2000/0%2A9Y9apDUCsAkJiMMt.png" alt="Queue processor"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://www.adyen.com/blog/The-Adyen-way-of-engineering--we-design-for-20x"&gt;In another blog of ours&lt;/a&gt;, you can find more info on how this asynchronous queue between the different layers works.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#technology-choices"&gt;
+  &lt;/a&gt;
+  Technology choices
+&lt;/h2&gt;
+
+&lt;p&gt;The large accounting database and the short-lived queue both use a PostgreSQL database. This was again a pragmatic choice. In the beginning, the requirements on the system were not that high, so we went for a one-size-fits-all solution for databases. It might be that better solutions for queueing were available at that time or since, but we felt that it was not worth the additional complexity they would add to our system.&lt;/p&gt;
+
+&lt;p&gt;We have since been pleasantly surprised by how well PostgreSQL has performed for both use cases. At this point, we have dozens of local databases that can be instantiated dynamically at application startup and transactional databases of hundreds of terabytes running on the same technology.&lt;/p&gt;
+
+&lt;p&gt;This shows that specialized solutions that were designed to tackle specific problems that occur at very large scales might not be needed for smaller applications (or even quite large ones) while they often do add a lot of complexity. Of course, this is always a balancing act, because the solution might have nice specialized features and it is comforting to know that it will definitely scale.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#reporting"&gt;
+  &lt;/a&gt;
+  Reporting
+&lt;/h1&gt;
+
+&lt;p&gt;Creating separate accounting clusters creates a new challenge. Namely, how do you generate reports for every merchant and payment method every day from all these data sources?&lt;/p&gt;
+
+&lt;p&gt;We did have a reporting database where we saved the relevant data in a denormalized form. Initially created to minimize reads on the accounting database. However, relying on this might work for a while, but eventually, it would be just another bottleneck.&lt;/p&gt;
+
+&lt;p&gt;For this part of the system, the priority was throughput. We decided to stream the data from the clusters and to have specialized processes consume and preprocess the data for specific use cases. This way there are only a limited number of processes that have to read the stream and when the report is generated a lot of the work is already done.&lt;/p&gt;
+
+&lt;p&gt;The reporting tables can be split over as many databases as needed.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--S6IITZ2F--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://miro.medium.com/max/2000/0%2AtjrZULUnc1zNeTdU.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--S6IITZ2F--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://miro.medium.com/max/2000/0%2AtjrZULUnc1zNeTdU.png" alt="Reporting DB"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;At the time a lot of different technologies were considered for this, especially Kafka. Our current processes were under quite some pressure so time was of the essence. We needed a high throughput, low latency streaming framework that could ensure exactly-once processing, even if processes crashed.&lt;/p&gt;
+
+&lt;p&gt;We scoped a lot of open source technologies but none offered the feature set we were looking for. For example, exactly-once delivery was not yet supported by Kafka.&lt;/p&gt;
+
+&lt;p&gt;On the other hand, we had a lot of familiarity with another technology that was close at hand and had proven very reliable. At this point, you might not be surprised to learn that this was PostgreSQL. For the same reasons, we used Java to write the application code on top of it.&lt;/p&gt;
+
+&lt;p&gt;Even though we did have to do some rounds of optimizations and we are missing some features, such as topics, we are happy with our choice. The setup stood the test of time even though traffic increased by an order of magnitude.&lt;/p&gt;
+
+&lt;p&gt;Even though we initially chose to write something ourselves, this is not a definite choice. In fact, there is an ongoing discussion whether this framework will allow us to scale another 20x or whether we should swap it out for an open-source solution such as Kafka. The 20x scaling factor is a rule of thumb we often use internally when designing a solution or determining whether we are still satisfied with it.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#analysis"&gt;
+  &lt;/a&gt;
+  Analysis
+&lt;/h1&gt;
+
+&lt;p&gt;For our data analysis setup, we did not build much in-house but chose to adopt industry standards. We run a Spark Hadoop cluster combined with Airflow. Deploying it on our own servers was an effort but now it is running smoothly. There is &lt;a href="https://www.adyen.com/blog/building-our-data-science-platform-with-spark-and-jupyter"&gt;a blog about the initial shift&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;Remarkable about the setup is that we still use our custom streaming system to verify all the information is actually consumed and correct.&lt;/p&gt;
+
+&lt;p&gt;With the Spark Hadoop cluster in place, the main struggle was to feed the results back into the synchronous systems. &lt;a href="https://www.adyen.com/blog/predicting-and-monitoring-payment-volumes-with-spark-and-elasticsearch"&gt;Here&lt;/a&gt; we describe how we did this for monitoring. After this worked for that use case, we expanded it into a generic framework that can also score the machine learning models in real-time.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#conclusion"&gt;
+  &lt;/a&gt;
+  Conclusion
+&lt;/h1&gt;
+
+&lt;p&gt;The focus of this blog was on payments processing but, as mentioned before, the concepts translate almost perfectly to the other business contexts such as the bank. This is because all systems have high availability and latency requirements on the edge services and strong consistency and reliability on the accounting layer. In the reporting and analysis frameworks, we tie all of the systems together.&lt;/p&gt;
+
+&lt;p&gt;This similarity in architecture, together with our conservative tech stack, allows developers to easily switch between teams. They already know the general design and the technologies used, even if the business context is completely different.&lt;/p&gt;
+
+&lt;p&gt;We hope that this blog made both our architecture and the way we arrived at it clearer. Perhaps it will also influence how you evaluate design choices for your own company in the future.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#technical-careers-at-adyen"&gt;
+  &lt;/a&gt;
+  Technical careers at Adyen
+&lt;/h2&gt;
+
+&lt;p&gt;We are on the lookout for talented engineers and technical people to help us build the infrastructure of global commerce!&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://www.adyen.com/careers/vacancies/development"&gt;Check out developer vacancies&lt;/a&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#developer-newsletter"&gt;
+  &lt;/a&gt;
+  Developer newsletter
+&lt;/h2&gt;
+
+&lt;p&gt;Get updated on new blog posts and other developer news.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://www.adyen.com/newsletter/developers"&gt;Subscribe now&lt;/a&gt;&lt;/p&gt;
+
+</description>
+      <category>architecture</category>
+      <category>fintech</category>
+      <category>adyen</category>
+    </item>
+    <item>
+      <title>Day 10 : links to important things I learnt today</title>
+      <author>Gaurav-Shekhawat</author>
+      <pubDate>Mon, 23 Aug 2021 13:45:22 +0000</pubDate>
+      <link>https://dev.to/gauravshekhawat/day-10-links-to-important-things-i-learnt-today-3bbo</link>
+      <guid>https://dev.to/gauravshekhawat/day-10-links-to-important-things-i-learnt-today-3bbo</guid>
+      <description>&lt;p&gt;I am summarising everything that I have learnt today. If you also want to go through the same topic, I believe the article links I am providing is one of the best available on the web available for that topic.&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;DOM tree basics :- &lt;a href="https://javascript.info/dom-nodes#an-example-of-the-dom"&gt;java-script-info&lt;/a&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+
+
+
+
+&lt;ul&gt;
+&lt;li&gt;The essential guide to javascript Iterators (the for-of loop guide) :- &lt;a href="https://www.javascripttutorial.net/es6/javascript-iterator/"&gt;javascriptutorial.net&lt;/a&gt; 
+and &lt;a href="https://www.educative.io/courses/step-up-your-js-a-comprehensive-guide-to-intermediate-javascript/m27Yx11KPMG"&gt;Educative&lt;/a&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+
+
+
+
+&lt;ul&gt;
+&lt;li&gt;Walking through the DOM :- &lt;a href="https://javascript.info/dom-navigation#the-sibling-question"&gt;javascript-info&lt;/a&gt; . In this article, you may feel some problem at the last with the table properties. Just see the properties being used in the example, ignore others (we will search for them whenever needed, as we know what to search for).&lt;/li&gt;
+&lt;/ul&gt;
+
+
+
+
+&lt;ul&gt;
+&lt;li&gt;Searching element in DOM :- &lt;a href="https://javascript.info/searching-elements-dom"&gt;javascript-info&lt;/a&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+
+
+
+
+&lt;ul&gt;
+&lt;li&gt;Debugging javascript in dev tools :-  &lt;a href="https://developer.chrome.com/docs/devtools/javascript/"&gt;Google&lt;/a&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+
+
+
+
+</description>
+      <category>javascript</category>
+      <category>beginners</category>
+      <category>webdev</category>
+      <category>100daysofcode</category>
+    </item>
+    <item>
+      <title>What Programming Books are Developers Reading?</title>
+      <author>Afrah Mariam</author>
+      <pubDate>Mon, 23 Aug 2021 13:34:29 +0000</pubDate>
+      <link>https://dev.to/nexteventideas/what-programming-books-are-developers-reading-7fk</link>
+      <guid>https://dev.to/nexteventideas/what-programming-books-are-developers-reading-7fk</guid>
+      <description>&lt;p&gt;Many programmers and technology professionals continuously educate themselves as technology changes and to expand their knowledge base. Many of today’s top programming languages have been popular for the past ten years (or longer in some cases), so having an understanding of each can be valuable for a developer interested in maintaining their flexibility and employability in the industry.&lt;br&gt;
+According to the Tiobe Index, today’s most popular languages include:&lt;/p&gt;
+
+&lt;p&gt;C&lt;br&gt;
+Java&lt;br&gt;
+Python&lt;br&gt;
+C++&lt;br&gt;
+C#&lt;br&gt;
+Visual Basic&lt;br&gt;
+JavaScript&lt;br&gt;
+PHP&lt;br&gt;
+SQL&lt;br&gt;
+Assembly language&lt;/p&gt;
+
+&lt;p&gt;read more: &lt;a href="https://hitechnoloy.ca/what-programming-books-are-developers-reading/"&gt;https://hitechnoloy.ca/what-programming-books-are-developers-reading/&lt;/a&gt;&lt;/p&gt;
+
+</description>
+      <category>programming</category>
+      <category>javascript</category>
+      <category>python</category>
+      <category>php</category>
+    </item>
+    <item>
       <title>Tina - a headless CMS backed by Git</title>
       <author>Tomek Poniatowicz</author>
       <pubDate>Mon, 23 Aug 2021 13:04:14 +0000</pubDate>
@@ -1189,420 +1458,6 @@ ViewPager2</title>
       <category>android</category>
       <category>design</category>
       <category>animation</category>
-    </item>
-    <item>
-      <title>Top 10 Python Use Cases and Applications</title>
-      <author>TAFF Inc | #WeMakeITHappen</author>
-      <pubDate>Mon, 23 Aug 2021 11:32:15 +0000</pubDate>
-      <link>https://dev.to/taffinc/top-10-python-use-cases-and-applications-5fh4</link>
-      <guid>https://dev.to/taffinc/top-10-python-use-cases-and-applications-5fh4</guid>
-      <description>&lt;p&gt;Python has grown to be one of the most loved programming languages since its launch in 1991.  According to StackOverflow’s 2020 developers survey, Python ranks as one of the most widely used programming languages even above Java. &lt;/p&gt;
-
-&lt;p&gt;Every business faces a lot of  challenges when they want to choose the right and best high level programming language for their next big projects while keeping end-to-end functionality, efficient runtime, scalability, and versatility in mind.&lt;/p&gt;
-
-&lt;p&gt;However, hitting that sweet spot of efficiency, functionality, and versatility has gotten a lot easier in the previous decade(s).&lt;/p&gt;
-
-&lt;p&gt;This is probably because of the emergence of the Python programming language – the modern holy grail of data science, machine learning, web scraping, and all of the above. Python is a simple programming language that anyone can learn easily and is secure, scalable and supports a rich set of pre-built libraries.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--pWMimIOS--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/58a2ubcz5mf8g9m29ym8.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--pWMimIOS--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/58a2ubcz5mf8g9m29ym8.png" alt="Python Apps"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#top-10-use-cases-of-python-web-applications"&gt;
-  &lt;/a&gt;
-  &lt;strong&gt;Top 10 Use Cases of Python Web Applications&lt;/strong&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;Python aids in the rapid development of web applications that are both scalable and secure. This is made possible and easier with the availability of web frameworks like Django, Pyramid and Flask. These frameworks offer easy integration with various protocols like HTTPS, SSl, etc and also support JSON and XML.&lt;/p&gt;
-
-&lt;p&gt;Eg: Disqus, YouTube, Eventbrite, Dropbox&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#data-science-implementations"&gt;
-  &lt;/a&gt;
-  &lt;strong&gt;Data Science Implementations&lt;/strong&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;Data science is a relatively new field that has gained significant importance in recent years and Python is the go-to choice for developers working on Data Science. &lt;/p&gt;
-
-&lt;p&gt;Unlike Java, Python offers many libraries to handle Data science projects like Pandas, NumPy, etc. Additionally, Python also offers data libraries like Matplolib, Seaborn, etc for rich data visualizations. Data science is one of the most lucrative career prospects in the technology industry today and for anyone who wants to start with Data science should know Python first.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#artificial-intelligence"&gt;
-  &lt;/a&gt;
-  &lt;strong&gt;Artificial Intelligence&lt;/strong&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;Python is extremely popular in the field of machine learning or AI. Despite the age-old language, Python has evolved to fit into multiple new technologies. &lt;/p&gt;
-
-&lt;p&gt;Python is a stable language that can handle the huge set of computations required for building complicated machine learning modules. Sensorflow, Numpy, Keras, Scikit-learn are some of the popular libraries offered by Python to work on machine learning and artificial intelligence projects.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#game-development"&gt;
-  &lt;/a&gt;
-  &lt;strong&gt;Game Development&lt;/strong&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;Python is versatile as it supports multiple use cases. Apart from normal web development to complex AI, Python also aids in Game development. &lt;/p&gt;
-
-&lt;p&gt;Python libraries like PySoy and PyGame enable 3D game development. No matter what field you are in, Python already has a library for you to get started easily. &lt;/p&gt;
-
-&lt;p&gt;Eg: Civilization-IV, Disney’s Toontown Online, Vega Strike&lt;/p&gt;
-
-&lt;p&gt;Original Content- &lt;a href="https://www.taffinc.com/blog/top-10-python-use-cases-and-applications/"&gt;https://www.taffinc.com/blog/top-10-python-use-cases-and-applications/&lt;/a&gt;&lt;/p&gt;
-
-</description>
-      <category>python</category>
-      <category>pythondevelopment</category>
-      <category>appdevelopment</category>
-      <category>pythondevelopers</category>
-    </item>
-    <item>
-      <title>What's new in React 18 ?</title>
-      <author>Numan</author>
-      <pubDate>Mon, 23 Aug 2021 11:15:32 +0000</pubDate>
-      <link>https://dev.to/nomi9995/what-s-new-in-react-18-4a7j</link>
-      <guid>https://dev.to/nomi9995/what-s-new-in-react-18-4a7j</guid>
-      <description>&lt;p&gt;While there is still a lot more to come, I thought may be fascinating to share its top new features.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#automatic-batching"&gt;
-  &lt;/a&gt;
-  Automatic batching
-&lt;/h3&gt;
-
-&lt;p&gt;Batching in React is whenever multiple state updates are combined into a single re-render.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;App&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;count&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;setCount&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;useState&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;flag&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;setFlag&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;useState&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kc"&gt;false&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-
-  &lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;handleClick&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nx"&gt;setCount&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;c&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;c&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt; &lt;span class="c1"&gt;// Does not re-render yet&lt;/span&gt;
-    &lt;span class="nx"&gt;setFlag&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;f&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="nx"&gt;f&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt; &lt;span class="c1"&gt;// Does not re-render yet&lt;/span&gt;
-
-    &lt;span class="c1"&gt;// React will only re-render once at the end (that's batching!)&lt;/span&gt;
-
-  &lt;span class="p"&gt;}&lt;/span&gt;
-
-  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
-    &lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nt"&gt;div&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;
-      &lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nt"&gt;button&lt;/span&gt; &lt;span class="na"&gt;onClick&lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;handleClick&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;Next&lt;span class="p"&gt;&amp;lt;/&lt;/span&gt;&lt;span class="nt"&gt;button&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;
-      &lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nt"&gt;h1&lt;/span&gt; &lt;span class="na"&gt;style&lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;color&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;flag&lt;/span&gt; &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;blue&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt; &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;black&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;count&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="p"&gt;&amp;lt;/&lt;/span&gt;&lt;span class="nt"&gt;h1&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;
-    &lt;span class="p"&gt;&amp;lt;/&lt;/span&gt;&lt;span class="nt"&gt;div&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;
-  &lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;In this example, the component would only be rendered once after &lt;strong&gt;handleClick&lt;/strong&gt; is called, Although we might think &lt;strong&gt;setCount&lt;/strong&gt; and &lt;strong&gt;setClicked&lt;/strong&gt; would trigger two re-renders.&lt;/p&gt;
-
-&lt;p&gt;Now, while this works well at the moment, &lt;/p&gt;
-
-&lt;p&gt;if you’re calling multiple state updates in a different context such as &lt;strong&gt;a promise&lt;/strong&gt; or &lt;strong&gt;a callback.&lt;/strong&gt;&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="c1"&gt;// Promise&lt;/span&gt;
-&lt;span class="nx"&gt;fetchSomething&lt;/span&gt;&lt;span class="p"&gt;().&lt;/span&gt;&lt;span class="nx"&gt;then&lt;/span&gt;&lt;span class="p"&gt;(()&lt;/span&gt;&lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nx"&gt;setCount&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;count&lt;/span&gt;&lt;span class="o"&gt;+&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-    &lt;span class="nx"&gt;setFlag&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="p"&gt;})&lt;/span&gt;
-
-&lt;span class="c1"&gt;//callback or timeout&lt;/span&gt;
-&lt;span class="nx"&gt;setTimeOut&lt;/span&gt;&lt;span class="p"&gt;(()&lt;/span&gt;&lt;span class="o"&gt;=&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nx"&gt;setCount&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;count&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-    &lt;span class="nx"&gt;setFlag&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="p"&gt;})&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;&lt;strong&gt;React won’t batch these two updates into one and you’ll get two re-renders when only one would have been needed.&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;With React 18, all these use-cases will now be covered and state updates will be batched automatically no matter what’s the context.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;unstable_batchedUpdates&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;react-dom&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="nx"&gt;unstable_batchedUpdates&lt;/span&gt;&lt;span class="p"&gt;(()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nx"&gt;setCount&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;count&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-    &lt;span class="nx"&gt;setFlag&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="p"&gt;})&lt;/span&gt;
-
-&lt;span class="c1"&gt;//React 18 will do it for you by default. &lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;This might remind you of &lt;strong&gt;unstable_batchedUpdates&lt;/strong&gt; that was doing exactly this, well now, React will do it for you by default.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;How to stop batching ?&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;If you happen not to want these updates to be batched, you’ll need to use &lt;strong&gt;flushSync&lt;/strong&gt; that will re-render your component every time it’s done running the function you’re passing it to.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;flushSync&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;react-dom&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-
-&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;handleClick&lt;/span&gt;&lt;span class="p"&gt;(){&lt;/span&gt;
-    &lt;span class="nx"&gt;flushSync&lt;/span&gt;&lt;span class="p"&gt;(()&lt;/span&gt;&lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-            &lt;span class="nx"&gt;setCount&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;count&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-    &lt;span class="p"&gt;});&lt;/span&gt;
-    &lt;span class="c1"&gt;// React has re-render&lt;/span&gt;
-
-    &lt;span class="nx"&gt;flushSync&lt;/span&gt;&lt;span class="p"&gt;(()&lt;/span&gt;&lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-            &lt;span class="nx"&gt;setFlag&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-    &lt;span class="p"&gt;});&lt;/span&gt;
-    &lt;span class="c1"&gt;// React will re-render&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;So with the following, your component would render twice instead of just one time.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#transitions"&gt;
-  &lt;/a&gt;
-  Transitions
-&lt;/h3&gt;
-
-&lt;p&gt;A really big new feature, which allows you “to tell React &lt;strong&gt;which updates are urgent, and which are not&lt;/strong&gt;”.&lt;/p&gt;
-
-&lt;p&gt;A good example of that is a search input that should filter out a list of elements.&lt;/p&gt;
-
-&lt;p&gt;So if you’re updating a search input, you’d want its value to change as we type, Although the search results might appear in a second&lt;/p&gt;
-
-&lt;p&gt;phase when we’re done typing.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;startTransition&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;react&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-
-&lt;span class="c1"&gt;//Urgent : Update input value as type&lt;/span&gt;
-&lt;span class="nx"&gt;setInputValue&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;input&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-
-&lt;span class="nx"&gt;startTransition&lt;/span&gt;&lt;span class="p"&gt;(()&lt;/span&gt;&lt;span class="o"&gt;=&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="c1"&gt;//Secondary: Show the search results&lt;/span&gt;
-    &lt;span class="nx"&gt;setSearchQuery&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;input&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-&lt;span class="p"&gt;});&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;This is where we could mark the input value change as an urgent update, and the elements filtering as secondary also called now a transition.&lt;/p&gt;
-
-&lt;p&gt;Transitions can be interrupted by urgent updates and previous transitions that are no longer relevant will be dismissed.&lt;/p&gt;
-
-&lt;p&gt;This allows the user interface to only show its most up-to-date state and skip secondary updates, transitions, that might be slower&lt;/p&gt;
-
-&lt;p&gt;to compute and sometimes return intermediate states that are irrelevant.&lt;/p&gt;
-
-&lt;p&gt;As you can see here, we’re marking the input value change as urgent, and run our secondary update inside a transition as it might trigger slow computations and could freeze or slow down the whole user experience as we type.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;startTransition&lt;/strong&gt; is great for any update “you want to move to the background” such as slow and complex rendering tasks or when&lt;/p&gt;
-
-&lt;p&gt;updates rely on fetching data that might take time due to a slow network.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#suspense-and-serverside-rendering"&gt;
-  &lt;/a&gt;
-  Suspense and Server-Side Rendering
-&lt;/h3&gt;
-
-&lt;p&gt;The way SSR ( Server side rendering ) works is by rendering all the&lt;/p&gt;
-
-&lt;p&gt;components on the server first, then sending the result as HTML to the browser.&lt;/p&gt;
-
-&lt;p&gt;After that, the JavaScript is loaded as usual and the HTML magically becomes interactive by what is called hydration.&lt;/p&gt;
-
-&lt;p&gt;This turns your static HTML elements into your dynamic React components as you know them.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Problem?&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;The main problem with this approach is that as long as the JavaScript hasn’t been fetched, loaded, and your HTML hydrated, your page won’t be interactive.&lt;/p&gt;
-
-&lt;p&gt;To solve this waterfall issue, React 18 now offers two new features for SSR: &lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Streaming HTML and Selective Hydration&lt;/strong&gt;&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#streaming-html"&gt;
-  &lt;/a&gt;
-  Streaming HTML
-&lt;/h3&gt;
-
-&lt;p&gt;Streaming HTML means that the server can send pieces of your components as they get rendered.&lt;/p&gt;
-
-&lt;p&gt;This works by using Suspense, where you’d say which parts of your application will take longer to load and which ones should be rendered directly.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nc"&gt;Page&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;
-    &lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nc"&gt;Article&lt;/span&gt; &lt;span class="p"&gt;/&amp;gt;&lt;/span&gt;
-    &lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nc"&gt;Suspense&lt;/span&gt; &lt;span class="na"&gt;fallback&lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nc"&gt;Loader&lt;/span&gt; &lt;span class="p"&gt;/&amp;gt;&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;
-         &lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nc"&gt;Comments&lt;/span&gt; &lt;span class="p"&gt;/&amp;gt;&lt;/span&gt;   
-    &lt;span class="p"&gt;&amp;lt;/&lt;/span&gt;&lt;span class="nc"&gt;Suspense&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;
-&lt;span class="p"&gt;&amp;lt;/&lt;/span&gt;&lt;span class="nc"&gt;Page&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;If you think of an article with comments where the article is the critical part of the page, you could say load the article but don’t&lt;/p&gt;
-
-&lt;p&gt;wait for the comments to be ready to send HTML to the browser.&lt;/p&gt;
-
-&lt;p&gt;You could show a spinner instead using &lt;strong&gt;Suspense&lt;/strong&gt; and once the comments are ready,&lt;/p&gt;
-
-&lt;p&gt;React will send new bits of HTML that will replace the spinner in place.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#selective-hydration"&gt;
-  &lt;/a&gt;
-  Selective hydration
-&lt;/h3&gt;
-
-&lt;p&gt;Selective hydration is awesome.&lt;/p&gt;
-
-&lt;p&gt;Where before you’d have to wait for every component to be rendered to begin hydration, but now components wrapped with Suspense won’t block hydration anymore.&lt;/p&gt;
-
-&lt;p&gt;if we go back to our article page, the comments that we wrapped with Suspense won’t block the article and other components to be hydrated.&lt;/p&gt;
-
-&lt;p&gt;Every ready component will start hydrating and the comments will too, once the browser gets both its content and JavaScript code.&lt;/p&gt;
-
-&lt;p&gt;The most important feature of selective hydration&lt;/p&gt;
-
-&lt;p&gt;is that if you happen to interact with one of the components before it’s been fully hydrated, meaning you click somewhere, for example, React will prioritize this component’s hydration.&lt;/p&gt;
-
-&lt;p&gt;This ensures that the most critical interactions are to be repeated as soon as we can hydrate the related component, making sure it’s&lt;/p&gt;
-
-&lt;p&gt;hydrated before the others.&lt;/p&gt;
-
-&lt;p&gt;Thank you for reading. &lt;/p&gt;
-
-&lt;p&gt;If you really learned something new with this article, save it and share it with your colleagues.&lt;/p&gt;
-
-&lt;p&gt;You can reach me out on my website: &lt;br&gt;
-&lt;a href="//https:/numan.dev"&gt;https:/numan.dev&lt;/a&gt;&lt;/p&gt;
-
-</description>
-      <category>react</category>
-      <category>reactnative</category>
-      <category>javascript</category>
-      <category>react18</category>
-    </item>
-    <item>
-      <title>Why React Hooks Exist?</title>
-      <author>Ritesh Kumar</author>
-      <pubDate>Mon, 23 Aug 2021 11:02:48 +0000</pubDate>
-      <link>https://dev.to/wordssaysalot/why-react-hooks-exist-4gn4</link>
-      <guid>https://dev.to/wordssaysalot/why-react-hooks-exist-4gn4</guid>
-      <description>&lt;h2&gt;
-  &lt;a href="#introduction"&gt;
-  &lt;/a&gt;
-  Introduction
-&lt;/h2&gt;
-
-&lt;p&gt;React.js is the most widely used JavaScript library for front-end developers at the moment. It is utilized by developers and corporations all around the world as an open-source project.&lt;/p&gt;
-
-&lt;p&gt;Hooks are one of the most useful features of react. When interacting with the state, hooks allowed us to employ functional components instead of class-based components. Aside from built-in hooks, React also allows us to create our own custom hooks.&lt;/p&gt;
-
-&lt;p&gt;In this post, We'll look at what React Hooks are and why they're important.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#problem-"&gt;
-  &lt;/a&gt;
-  Problem :
-&lt;/h1&gt;
-
-&lt;p&gt;Before react 16.8 (16 Feb 2019) developers were limited to use class-based components if they want to maintain state in the component, and functional components were used for only those components, which don't require any state.&lt;/p&gt;
-
-&lt;p&gt;This results in inconsistency through the app and there were several issues with class-based components.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#issues-"&gt;
-  &lt;/a&gt;
-  Issues :
-&lt;/h1&gt;
-
-&lt;p&gt;The use of two different types of components created these major issues:&lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;Inconsistency through the app&lt;/li&gt;
-&lt;li&gt;If someone wants to add states in functional&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;p&gt;the component that requires the whole state to be converted into the class-based component.&lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;To use class-based components proper 'bind' has to be maintained.&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;h1&gt;
-  &lt;a href="#hooks"&gt;
-  &lt;/a&gt;
-  Hooks
-&lt;/h1&gt;
-
-&lt;p&gt;Hooks actually doesn't solve the problem related to class-based components.&lt;/p&gt;
-
-&lt;p&gt;I just give some extra power to a functional component that allows developers to do anything with a functional component that they were already doing with class-based components.&lt;/p&gt;
-
-&lt;p&gt;Hooks let you always use functional components instead of having to constantly switch between functions, classes, higher-order components, and render props.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#result"&gt;
-  &lt;/a&gt;
-  Result
-&lt;/h1&gt;
-
-&lt;p&gt;Now most developer uses functional component with hooks because:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;They can add remove states as they require.&lt;/li&gt;
-&lt;li&gt;Hooks simplifies the development process and maintains consistency through the app.&lt;/li&gt;
-&lt;li&gt;You no longer need to struggle with 'bind'&lt;/li&gt;
-&lt;li&gt;Functional components became more versatile than class-based.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h1&gt;
-  &lt;a href="#final-notes"&gt;
-  &lt;/a&gt;
-  Final Notes
-&lt;/h1&gt;
-
-&lt;p&gt;Finally, I can guarantee you that learning React Hooks is not difficult. when I first started using react, I wasn't a big fan of hooks. But now I'm completely enamored with it. &lt;br&gt;
-It may appear challenging at first, but as long as we focus on the fundamentals and learn how each component works, we will be able to incorporate this feature with ease. &lt;br&gt;
-Wait a minute, if you want to learn the basics of react hooks, go through this  &lt;a href="https://reactjs.org/docs/hooks-overview.html"&gt;documentation&lt;/a&gt; .&lt;/p&gt;
-
-&lt;p&gt;In the next article of this series, I'll go through some of my favorite instances of custom hooks and how to use them in your own apps. Until then, stay tuned.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#thanks-for-reading"&gt;
-  &lt;/a&gt;
-  Thanks for reading!
-&lt;/h1&gt;
-
-&lt;p&gt;As always, any questions or suggestions, please feel free to leave a response or  &lt;a href="https://twitter.com/dewdropxD"&gt;tweet me&lt;/a&gt;  🐦! Good luck and happy coding!!&lt;/p&gt;
-
-</description>
-      <category>react</category>
-      <category>webdev</category>
     </item>
   </channel>
 </rss>
