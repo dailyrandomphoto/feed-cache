@@ -95,6 +95,216 @@
       <category>career</category>
     </item>
     <item>
+      <title>Export Amazon Aurora to BigQuery using BigQuery Data Transfer Service</title>
+      <author>moga</author>
+      <pubDate>Sun, 29 Aug 2021 02:11:33 +0000</pubDate>
+      <link>https://dev.to/moga/export-amazon-aurora-to-bigquery-using-bigquery-data-transfer-service-86p</link>
+      <guid>https://dev.to/moga/export-amazon-aurora-to-bigquery-using-bigquery-data-transfer-service-86p</guid>
+      <description>&lt;h2&gt;
+  &lt;a href="#what-i-want-to-do"&gt;
+  &lt;/a&gt;
+  What I want to do
+&lt;/h2&gt;
+
+&lt;ul&gt;
+&lt;li&gt;I want to use BigQuery to analyze data from Google Analytics and services.&lt;/li&gt;
+&lt;li&gt;To do this, I want to transfer data from Amazon Aurora to BigQuery.&lt;/li&gt;
+&lt;li&gt;I want to transfer the data from Amazon Aurora to BigQuery less than once a day.&lt;/li&gt;
+&lt;li&gt;I don't want to add too much load to Aurora.&lt;/li&gt;
+&lt;li&gt;I want to write as little code as possible.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h2&gt;
+  &lt;a href="#policy"&gt;
+  &lt;/a&gt;
+  Policy
+&lt;/h2&gt;
+
+&lt;p&gt;In order to reduce the load on Aurora, I thought that I could use the daily snapshots that Aurora automatically takes. Lucky for us, we have this snapshot. Lucky for us, these snapshots can be exported to S3 (which seems to have become possible around January 2020). This feature will export the snapshot in PARQUET format. This feature exports snapshots in PARQUET format, which is a very efficient format in terms of data volume.&lt;br&gt;
+&lt;a href="https://docs.aws.amazon.com/ja_jp/AmazonRDS/latest/AuroraUserGuide/USER_ExportSnapshot.html"&gt;https://docs.aws.amazon.com/ja_jp/AmazonRDS/latest/AuroraUserGuide/USER_ExportSnapshot.html&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;If you have a PARQUET file in S3, you can send it to BigQuery using BigQuery Data Transfer Service. BigQuery Data Transfer Service can read PARQUET files in S3 and send them to BigQuery. Moreover, it can be executed periodically if the interval is more than 24 hours, such as daily. The service itself is free of charge, although you will have to pay for the data transfer.&lt;br&gt;
+&lt;a href="https://cloud.google.com/bigquery-transfer/docs/s3-transfer-intro"&gt;https://cloud.google.com/bigquery-transfer/docs/s3-transfer-intro&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;So, combining the two, the following is the process.&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;launch Lambda, etc. at any time on a daily basis&lt;/li&gt;
+&lt;li&gt;export the daily snapshot that Amazon Aurora is taking automatically to S3&lt;/li&gt;
+&lt;li&gt;load the file with GCP's BigQuery Data Transfer Service&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;I recommend you to try this flow from the console before implementing it, so you can see how the data is exported to S3, what you need to export, and how the Transfer Service works. Basically, just follow the documentation, but there are a few things I got stuck on.&lt;/p&gt;
+&lt;h2&gt;
+  &lt;a href="#try-it-from-the-console"&gt;
+  &lt;/a&gt;
+  Try it from the console
+&lt;/h2&gt;
+
+&lt;p&gt;I poked and prodded from the console, and it was easy to dump the Aurora snapshot to S3. But it took a lot of time, about 30 minutes. I wonder if it takes time to convert the file format. I don't know the details.&lt;/p&gt;
+
+&lt;p&gt;When I tried to read one of the PARQUET files with Transfer Service, I got an error like &lt;code&gt;PERMISSION_DENIED: [AccessDenied: Access Denied]&lt;/code&gt; and could not transfer it.&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;It should have been enough because I have &lt;code&gt;S3ReadOnlyAccess&lt;/code&gt; on it (it says so in the documentation).&lt;/li&gt;
+&lt;li&gt;AWS CloudTrail shows an error that &lt;code&gt;kms:Decrypt&lt;/code&gt; is missing.&lt;/li&gt;
+&lt;li&gt;Add &lt;code&gt;kms:Decrypt&lt;/code&gt; to the AWS user permissions for BigQuery Data Transfer Service
+
+&lt;ul&gt;
+&lt;li&gt;The target is the &lt;code&gt;KmsKeyId&lt;/code&gt; specified in the &lt;code&gt;StartExportTask&lt;/code&gt; that you will see later (👇).&lt;/li&gt;
+&lt;/ul&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;If you do this, you can transfer the data. By the way, you need to prepare the dataset and table in BigQuery beforehand. It seems that the data is always imported with &lt;code&gt;WRITE_APPEND&lt;/code&gt;, so it is better to set the partition at the import time in the table. First, I created an empty table with no schema.&lt;/p&gt;
+
+&lt;p&gt;When the data was transferred to BigQuery, the schema types were reasonably consistent and all were nullable.&lt;/p&gt;
+
+&lt;p&gt;The data transferred to BigQuery had a few schema types, but all of them were nullable. As far as I can see, the S3 URI setting for the transfer allows wildcards, but it ends up being shoved into a single table, so I decided that I need to set up one transfer per table in Aurora.&lt;/p&gt;
+
+&lt;p&gt;By the way, I tried to use wildcards to shove multiple RDB tables into one BigQuery table, but the file transfer from S3 to GCP worked, but the read did not (0 jobs succeeded).&lt;/p&gt;
+&lt;h2&gt;
+  &lt;a href="#automate"&gt;
+  &lt;/a&gt;
+  Automate
+&lt;/h2&gt;
+&lt;h3&gt;
+  &lt;a href="#aurora-snapshot-to-s3"&gt;
+  &lt;/a&gt;
+  Aurora Snapshot to S3
+&lt;/h3&gt;
+
+&lt;p&gt;To automate the part of exporting Aurora snapshot to S3, we need to write some code, which looks like this when implemented in TypeScript.&lt;/p&gt;
+
+&lt;p&gt;If you implement it in TypeScript, it will look like this:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;DescribeDBClusterSnapshotsCommand&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;RDSClient&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;StartExportTaskCommand&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;@aws-sdk/client-rds&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+
+&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;requestToExportSnapshotToS3&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;client&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;RDSClient&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="na"&gt;region&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Aurora&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="nx"&gt;s&lt;/span&gt; &lt;span class="nx"&gt;region&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt; })
+
+  // retrieve the most recent Snapshot
+
+  const describeCommand = new DescribeDBClusterSnapshotsCommand({
+    DBClusterIdentifier: &lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="nx"&gt;Aurora&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;s DB cluster ID&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="p"&gt;})&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;describeResult&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;client&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;send&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;describeCommand&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="nx"&gt;describeResult&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;DBClusterSnapshots&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="k"&gt;return&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;latestSnapshot&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;describeResult&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;DBClusterSnapshots&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;sort&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="c1"&gt;// We want to sort in descending order&lt;/span&gt;
+    &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;b&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;b&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;SnapshotCreateTime&lt;/span&gt;&lt;span class="p"&gt;?.&lt;/span&gt;&lt;span class="nx"&gt;getTime&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt; &lt;span class="o"&gt;-&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;SnapshotCreateTime&lt;/span&gt;&lt;span class="p"&gt;?.&lt;/span&gt;&lt;span class="nx"&gt;getTime&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="p"&gt;)[&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;].&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;snapshotArn&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;latestSnapshot&lt;/span&gt;&lt;span class="p"&gt;?.&lt;/span&gt;&lt;span class="nx"&gt;DBClusterSnapshotArn&lt;/span&gt;
+  &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="nx"&gt;snapshotArn&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="k"&gt;return&lt;/span&gt;
+
+  &lt;span class="c1"&gt;// Request Export&lt;/span&gt;
+  &lt;span class="c1"&gt;// more details in the 👇 documentation&lt;/span&gt;
+  &lt;span class="c1"&gt;// https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_StartExportTask.html&lt;/span&gt;
+
+  &lt;span class="c1"&gt;// taskID must be a date, because only date/time variables can be used in the Transfer Service.&lt;/span&gt;
+  &lt;span class="nx"&gt;Const&lt;/span&gt; &lt;span class="nx"&gt;taskID&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s2"&gt;`export-id-YYYYMMDD`&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;exportCommand&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;StartExportTaskCommand&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt;
+    &lt;span class="na"&gt;ExportTaskIdentifier&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;taskID&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="c1"&gt;// You can create it when you do S3 export from the 👇 console, so it's easy to use it.&lt;/span&gt;
+    &lt;span class="na"&gt;IamRoleArn&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Role for S3Export&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="c1"&gt;// You can specify database, table, etc.&lt;/span&gt;
+    &lt;span class="na"&gt;ExportOnly&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;database_name&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt;
+    &lt;span class="na"&gt;S3BucketName&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;bucket to export to&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="c1"&gt;// I could have used any custom key, but I chose the key used for DB encryption&lt;/span&gt;
+    &lt;span class="na"&gt;KmsKeyId&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;ID of the encryption key&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="na"&gt;SourceArn&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;snapshotArn&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="p"&gt;})&lt;/span&gt;
+
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;client&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;send&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;exportCommand&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;You can do this by using CloudWatch and Lambda. The important thing is the permissions of the role that executes the process.&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Add the role that executes the Export process to the KMS key user that is used for DB encryption (user/role that hits the SDK).
+
+&lt;ul&gt;
+&lt;li&gt;To get KMSKeyNotAccessibleFault.&lt;/li&gt;
+&lt;/ul&gt;
+
+
+&lt;/li&gt;
+&lt;li&gt;Allow the following to the role that executes the export process 👆.
+
+&lt;ul&gt;
+&lt;li&gt;
+&lt;code&gt;kms:DescribeKey&lt;/code&gt; (the above key is the target resource)&lt;/li&gt;
+&lt;li&gt;
+&lt;code&gt;kms:CreateGrant&lt;/code&gt; (the above key is the target resource)&lt;/li&gt;
+&lt;li&gt;
+&lt;code&gt;iam:PassRole&lt;/code&gt; (required when running StartExportTask)&lt;/li&gt;
+&lt;li&gt;
+&lt;code&gt;rds:StartExportTask&lt;/code&gt;.&lt;/li&gt;
+&lt;li&gt;
+&lt;code&gt;rds:DescribeDBClusterSnapshots&lt;/code&gt; (to get the Arn of the target Snapshot)&lt;/li&gt;
+&lt;/ul&gt;
+
+
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;If we give these, we could run.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#configure-bigquery-data-transfer-service"&gt;
+  &lt;/a&gt;
+  Configure BigQuery Data Transfer Service
+&lt;/h3&gt;
+
+&lt;p&gt;The only thing you need to think about is the S3 URI. The implementation in 👆 looks like this. The &lt;code&gt;run_time&lt;/code&gt; variable is in UTC, so you need to match it with the &lt;code&gt;YYYYMMDD&lt;/code&gt; of the taskID that you set in 👆 depending on the timing of the transfer service.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;s3://your_bucket_name/export-id-{run_time|"%Y%m%d"}/database_name/schema_name.table_name/*.parquet
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Now we can run it and the data will be in the BigQuery table we specified.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#conclusion"&gt;
+  &lt;/a&gt;
+  Conclusion
+&lt;/h2&gt;
+
+&lt;p&gt;CloudTrail has helped me a lot. CloudTrail is a great service that can be used for debugging.&lt;/p&gt;
+
+&lt;p&gt;When I looked at the export from Aurora, I wondered if it was possible to do it in DynamoDB. It may be more complicated than this case because it may require a data format conversion layer.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight json"&gt;&lt;code&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nl"&gt;"Item"&lt;/span&gt;&lt;span class="p"&gt;:{&lt;/span&gt;&lt;span class="nl"&gt;"id"&lt;/span&gt;&lt;span class="p"&gt;:{&lt;/span&gt;&lt;span class="nl"&gt;"S"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"83369704-ccef-4163-8c20-24d240c10806"&lt;/span&gt;&lt;span class="p"&gt;},&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nl"&gt;"name"&lt;/span&gt;&lt;span class="p"&gt;:{&lt;/span&gt;&lt;span class="nl"&gt;"S"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"Leopoldine Blümel-Mude"&lt;/span&gt;&lt;span class="p"&gt;}}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nl"&gt;"Item"&lt;/span&gt;&lt;span class="p"&gt;:{&lt;/span&gt;&lt;span class="nl"&gt;"id"&lt;/span&gt;&lt;span class="p"&gt;:{&lt;/span&gt;&lt;span class="nl"&gt;"S"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"1f187e30-b279-4bfa-85dc-e347092f364f"&lt;/span&gt;&lt;span class="p"&gt;},&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nl"&gt;"name"&lt;/span&gt;&lt;span class="p"&gt;:{&lt;/span&gt;&lt;span class="nl"&gt;"S"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"Theo Trommler"&lt;/span&gt;&lt;span class="p"&gt;}}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nl"&gt;"Item"&lt;/span&gt;&lt;span class="p"&gt;:{&lt;/span&gt;&lt;span class="nl"&gt;"id"&lt;/span&gt;&lt;span class="p"&gt;:{&lt;/span&gt;&lt;span class="nl"&gt;"S"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"88942fa5-e8be-4b29-8869-6abdc662eaea"&lt;/span&gt;&lt;span class="p"&gt;},&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nl"&gt;"name"&lt;/span&gt;&lt;span class="p"&gt;:{&lt;/span&gt;&lt;span class="nl"&gt;"S"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"Herr Franz-Peter Thanel B.A."&lt;/span&gt;&lt;span class="p"&gt;}}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;a href="https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_ExportTableToPointInTime.html"&gt;https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_ExportTableToPointInTime.html&lt;/a&gt;&lt;/p&gt;
+
+</description>
+      <category>aurora</category>
+      <category>bigquery</category>
+      <category>transfer</category>
+    </item>
+    <item>
       <title>Algorithm practice</title>
       <author>LATOYA FOWLER</author>
       <pubDate>Sun, 29 Aug 2021 01:21:30 +0000</pubDate>
@@ -2243,101 +2453,6 @@ rails db:migrate
       <category>productivity</category>
       <category>learning</category>
       <category>advice</category>
-    </item>
-    <item>
-      <title>HTML Features, probably you never knew existed.</title>
-      <author>Vishwa.R</author>
-      <pubDate>Sat, 28 Aug 2021 19:29:19 +0000</pubDate>
-      <link>https://dev.to/codereaper08/html-features-you-never-knew-existed-54ii</link>
-      <guid>https://dev.to/codereaper08/html-features-you-never-knew-existed-54ii</guid>
-      <description>&lt;p&gt;Hello again from codereaper08!&lt;br&gt;
-Thanks again to all my followers, who always motivate me to write blogs weekly, in spite of my tight academic schedules.&lt;/p&gt;
-
-&lt;p&gt;Back again with a good article, I hope. In this post, we are going to discuss 5 features in HTML, which probably we never knew existed. So let's get into it.&lt;/p&gt;
-&lt;h2&gt;
-  &lt;a href="#1-wbr-tag"&gt;
-  &lt;/a&gt;
-  1. WBR Tag:
-&lt;/h2&gt;
-
-&lt;p&gt;Let's start from the first one in our list, &lt;code&gt;wordbreak&lt;/code&gt; tag, abbreviated as &lt;code&gt;&amp;lt;wbr&amp;gt;&lt;/code&gt;. You may think, what's the meaning of its existence, well It's not like the handy &lt;code&gt;br&lt;/code&gt; tags we use. &lt;code&gt;&amp;lt;wbr&amp;gt;&lt;/code&gt; just doesn't force words to break unless there's a necessary situation to do so. &lt;code&gt;wbr&lt;/code&gt; tag is an empty tag (Doesn't have a closing tag).&lt;/p&gt;
-
-&lt;p&gt;We'll see a comparison between &lt;code&gt;&amp;lt;wbr&amp;gt;&lt;/code&gt; and &lt;code&gt;&amp;lt;br&amp;gt;&lt;/code&gt;, resize the browser-window to see how &lt;code&gt;wbr&lt;/code&gt; breaks itself on necessary situations.&lt;/p&gt;
-
-&lt;p&gt;&lt;iframe src="https://jsfiddle.net/VishwaR/3bsw7vq8/embedded/result,html,css//dark" width="100%" height="600"&gt;
-&lt;/iframe&gt;
-&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#2-address-tag"&gt;
-  &lt;/a&gt;
-  2. address Tag:
-&lt;/h2&gt;
-
-&lt;p&gt;Using &lt;code&gt;div&lt;/code&gt;'s for enclosing contact info?&lt;br&gt;
-HTML gives a good semantic way of doing that using &lt;code&gt;&amp;lt;address&amp;gt;&lt;/code&gt; tag. So what's different in using &lt;code&gt;&amp;lt;address&amp;gt;&lt;/code&gt; tags, well, It renders the text in &lt;em&gt;Italics&lt;/em&gt; with line-breaks above and below the &lt;code&gt;&amp;lt;address&amp;gt;&lt;/code&gt; tags. It also has a by default display property of &lt;code&gt;block&lt;/code&gt;. Take a look at the below JSFiddle.&lt;/p&gt;
-
-&lt;p&gt;&lt;iframe src="https://jsfiddle.net/VishwaR/f2Lnpuhz//embedded/result,html,css//dark" width="100%" height="600"&gt;
-&lt;/iframe&gt;
-&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#3-optgroup-tag"&gt;
-  &lt;/a&gt;
-  3. optgroup Tag:
-&lt;/h2&gt;
-
-&lt;p&gt;&lt;code&gt;&amp;lt;optgroup&amp;gt;&lt;/code&gt; tag is used when you need to group the options into categories. This makes selecting an option from a very large list of options easy!&lt;br&gt;
-User can look into the relevant category and select an option in that particular category. I've created a superhero &lt;code&gt;optgroup&lt;/code&gt; for demonstration in the below JSFiddle.&lt;/p&gt;
-
-&lt;p&gt;&lt;iframe src="https://jsfiddle.net/VishwaR/vm9jnwe4//embedded/result,html,css//dark" width="100%" height="600"&gt;
-&lt;/iframe&gt;
-&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#4-portal-tag"&gt;
-  &lt;/a&gt;
-  4. portal Tag:
-&lt;/h2&gt;
-
-&lt;p&gt;Now things get interesting! What we are going to see is a tag called &lt;code&gt;&amp;lt;portal&amp;gt;&lt;/code&gt;. This was launched by &lt;strong&gt;Google&lt;/strong&gt; in I/O 2019 DevCon, where they mentioned that, &lt;code&gt;&amp;lt;portal&amp;gt;&lt;/code&gt; will be an upgrade to &lt;code&gt;&amp;lt;iframe&amp;gt;&lt;/code&gt;. &lt;code&gt;&amp;lt;portal&amp;gt;&lt;/code&gt; allows seamless navigation inside the embedded content, too!. One sad thing, It is not supported by many browsers, including the normal &lt;strong&gt;Google Chrome&lt;/strong&gt; too. Currently, only the &lt;a href="https://www.google.com/chrome/canary/"&gt;Chrome canary&lt;/a&gt; supports the &lt;code&gt;&amp;lt;portal&amp;gt;&lt;/code&gt; tag. Check out the demo video below.&lt;/p&gt;
-
-&lt;p&gt;&lt;iframe width="710" height="399" src="https://www.youtube.com/embed/4JkipxFVE9k"&gt;
-&lt;/iframe&gt;
-&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#5-capture-attribute-for-input-element"&gt;
-  &lt;/a&gt;
-  5. capture attribute for Input element:
-&lt;/h2&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Vnwy_JyH--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://images.unsplash.com/photo-1488240339625-c4014e114224%3Fixid%3DMnwxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8%26ixlib%3Drb-1.2.1%26auto%3Dformat%26fit%3Dcrop%26w%3D1079%26q%3D80" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Vnwy_JyH--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://images.unsplash.com/photo-1488240339625-c4014e114224%3Fixid%3DMnwxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8%26ixlib%3Drb-1.2.1%26auto%3Dformat%26fit%3Dcrop%26w%3D1079%26q%3D80" alt="camera"&gt;&lt;/a&gt;&lt;/p&gt;
-
-Photo by &lt;a href="https://unsplash.com/@lucabravo?utm_source=unsplash&amp;amp;utm_medium=referral&amp;amp;utm_content=creditCopyText"&gt;Luca Bravo&lt;/a&gt; on &lt;a href="https://unsplash.com/s/photos/camera?utm_source=unsplash&amp;amp;utm_medium=referral&amp;amp;utm_content=creditCopyText"&gt;Unsplash&lt;/a&gt;
-
-  
-
-
-
-&lt;p&gt;Lastly, we are going to see about &lt;code&gt;capture&lt;/code&gt; attribute for the input elements. &lt;code&gt;capture&lt;/code&gt; added as an attribute to an input element opens the camera for taking shots of the user(front camera) or the scene(rear camera). This tag only works on mobile, and it simply falls back to a file picker in Desktop. &lt;code&gt;capture&lt;/code&gt; attribute has two values,&lt;/p&gt;
-
-&lt;p&gt;— user --&amp;gt; Opens User facing Camera (Front)&lt;br&gt;
-— environment --&amp;gt; Opens Environment (Rear)&lt;/p&gt;
-
-&lt;p&gt;Take a look at the below JSFiddle.&lt;/p&gt;
-
-&lt;p&gt;&lt;iframe src="https://jsfiddle.net/VishwaR/7r0ec9g1//embedded/result,html,css//dark" width="100%" height="600"&gt;
-&lt;/iframe&gt;
-&lt;/p&gt;
-
-&lt;p&gt;And, that's it for today, Feel I missed out something? Write down in comments, I'll be happy to include. Love it? Give a 💖 for the article. Thanks for reading and have a good time 😄&lt;/p&gt;
-
-</description>
-      <category>webdev</category>
-      <category>todayilearned</category>
-      <category>html</category>
-      <category>todayisearched</category>
     </item>
   </channel>
 </rss>
