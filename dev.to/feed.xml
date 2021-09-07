@@ -7,6 +7,493 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>How to design a rate limiter </title>
+      <author>Salah Elhossiny</author>
+      <pubDate>Tue, 07 Sep 2021 05:30:30 +0000</pubDate>
+      <link>https://dev.to/salah856/how-to-design-a-rate-limiter-27d3</link>
+      <guid>https://dev.to/salah856/how-to-design-a-rate-limiter-27d3</guid>
+      <description>&lt;p&gt;In a network system, a rate limiter is used to control the rate of traffic sent by a client or a service. In the HTTP world, a rate limiter limits the number of client requests allowed to be sent over a specified period. If the API request count exceeds the threshold defined by the rate limiter, all the excess calls are blocked. Here are a few examples:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt; A user can write no more than 2 posts per second.&lt;/li&gt;
+&lt;li&gt;You can create a maximum of 10 accounts per day from the same IP address.&lt;/li&gt;
+&lt;li&gt;You can claim rewards no more than 5 times per week from the same device.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Before starting the design, we first look at the benefits of using an API rate limiter:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;p&gt;Prevent resource starvation caused by Denial of Service (DoS) attack [1]. Almost all APIs published by large tech companies enforce some form of rate limiting. For example, Twitter limits the number of tweets to 300 per 3 hours. Google docs APIs have the following default limit: 300 per user per 60 seconds for read requests. A rate limiter prevents DoS attacks, either intentional or unintentional, by blocking the excess calls.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Reduce cost. Limiting excess requests means fewer servers and allocating more resources to high priority APIs. Rate limiting is extremely important for companies that use paid third party APIs. For example, you are charged on a per-call basis for the following external APIs: check credit, make a payment, retrieve health records, etc. Limiting the number of calls is essential to reduce costs.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Prevent servers from being overloaded. To reduce server load, a rate limiter is used to filter out excess requests caused by bots or users’ misbehavior&lt;/p&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h2&gt;
+  &lt;a href="#step-1-understand-the-problem-and-establish-design-scope"&gt;
+  &lt;/a&gt;
+  Step 1 - Understand the problem and establish design scope
+&lt;/h2&gt;
+
+&lt;p&gt;Rate limiting can be implemented using different algorithms, each with its pros and cons. The interactions between an interviewer and a candidate help to clarify the type of rate limiters we are trying to build&lt;/p&gt;
+
+&lt;p&gt;Candidate: What kind of rate limiter are we going to design? Is it a client-side rate limiter or server-side API rate limiter?&lt;/p&gt;
+
+&lt;p&gt;Interviewer: Great question. We focus on the server-side API rate limiter.&lt;/p&gt;
+
+&lt;p&gt;Candidate: Does the rate limiter throttle API requests based on IP, the user ID, or other properties?&lt;/p&gt;
+
+&lt;p&gt;Interviewer: The rate limiter should be flexible enough to support different sets of throttle rules.&lt;/p&gt;
+
+&lt;p&gt;Candidate: What is the scale of the system? Is it built for a startup or a big company with a large user base?&lt;br&gt;
+Interviewer: The system must be able to handle a large number of requests.&lt;/p&gt;
+
+&lt;p&gt;Candidate: Will the system work in a distributed environment?&lt;/p&gt;
+
+&lt;p&gt;Interviewer: Yes.&lt;/p&gt;
+
+&lt;p&gt;Candidate: Is the rate limiter a separate service or should it be implemented in application code?&lt;br&gt;
+Interviewer: It is a design decision up to you.&lt;/p&gt;
+
+&lt;p&gt;Candidate: Do we need to inform users who are throttled?&lt;br&gt;
+Interviewer: Yes.&lt;/p&gt;
+&lt;h3&gt;
+  &lt;a href="#requirements"&gt;
+  &lt;/a&gt;
+  Requirements
+&lt;/h3&gt;
+
+&lt;p&gt;Here is a summary of the requirements for the system:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Accurately limit excessive requests.&lt;/li&gt;
+&lt;li&gt;Low latency. The rate limiter should not slow down HTTP response time.&lt;/li&gt;
+&lt;li&gt;Use as little memory as possible.&lt;/li&gt;
+&lt;li&gt;Distributed rate limiting. The rate limiter can be shared across multiple servers or processes.&lt;/li&gt;
+&lt;li&gt;Exception handling. Show clear exceptions to users when their requests are throttled.&lt;/li&gt;
+&lt;li&gt;High fault tolerance. If there are any problems with the rate limiter (for example, a cache server goes offline), it does not affect the entire system.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h2&gt;
+  &lt;a href="#step-2-propose-highlevel-design-and-get-buyin"&gt;
+  &lt;/a&gt;
+  Step 2 - Propose high-level design and get buy-in
+&lt;/h2&gt;
+
+&lt;p&gt;Let us keep things simple and use a basic client and server model for communication.&lt;/p&gt;
+&lt;h4&gt;
+  &lt;a href="#where-to-put-the-rate-limiter"&gt;
+  &lt;/a&gt;
+  Where to put the rate limiter?
+&lt;/h4&gt;
+
+&lt;p&gt;Intuitively, you can implement a rate limiter at either the client or server-side.&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;p&gt;Client-side implementation. Generally speaking, client is an unreliable place to enforce rate limiting because client requests can easily be forged by malicious actors. Moreover, we might not have control over the client implementation.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Server-side implementation. Figure 4-1 shows a rate limiter that is placed on the server- side.&lt;/p&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--BaNLwIII--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/23625821/132120378-d579933f-556e-4cd3-8b63-8ef6d63b4d90.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--BaNLwIII--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/23625821/132120378-d579933f-556e-4cd3-8b63-8ef6d63b4d90.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Besides the client and server-side implementations, there is an alternative way. Instead of putting a rate limiter at the API servers, we create a rate limiter middleware, which throttles requests to your APIs. &lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--hdZwKFZR--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/23625821/132120384-74c77aff-fda1-4cd5-b0ce-c712b840e0aa.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--hdZwKFZR--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/23625821/132120384-74c77aff-fda1-4cd5-b0ce-c712b840e0aa.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Assume our API allows 2 requests per second, and a client sends 3 requests to the server within a second. The first two requests are routed to API servers. However, the rate limiter middleware throttles the third request and returns a HTTP status code 429. The HTTP 429 response status code indicates a user has sent too many requests.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--yehSI4bI--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/23625821/132120396-f3dd7e42-df2d-4c44-bf7b-3bdbfde5cbdf.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--yehSI4bI--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/23625821/132120396-f3dd7e42-df2d-4c44-bf7b-3bdbfde5cbdf.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Cloud microservices [4] have become widely popular and rate limiting is usually implemented within a component called API gateway. API gateway is a fully managed&lt;br&gt;
+service that supports rate limiting, SSL termination, authentication, IP whitelisting, servicing static content, etc. For now, we only need to know that the API gateway is a middleware that supports rate limiting.&lt;/p&gt;
+
+&lt;p&gt;While designing a rate limiter, an important question to ask ourselves is: where should the rater limiter be implemented, on the server-side or in a gateway? There is no absolute answer.&lt;/p&gt;
+
+&lt;p&gt;It depends on your company’s current technology stack, engineering resources, priorities, goals, etc. Here are a few general guidelines:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;p&gt;Evaluate your current technology stack, such as programming language, cache service, etc. Make sure your current programming language is efficient to implement rate limiting on the server-side.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Identify the rate limiting algorithm that fits your business needs. When you implement everything on the server-side, you have full control of the algorithm. However, your choice might be limited if you use a third-party gateway.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;If you have already used microservice architecture and included an API gateway in the design to perform authentication, IP whitelisting, etc., you may add a rate limiter to the API gateway.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Building your own rate limiting service takes time. If you do not have enough engineering resources to implement a rate limiter, a commercial API gateway is a better option.&lt;/p&gt;&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h2&gt;
+  &lt;a href="#algorithms-for-rate-limiting"&gt;
+  &lt;/a&gt;
+  Algorithms for rate limiting
+&lt;/h2&gt;
+
+&lt;p&gt;Rate limiting can be implemented using different algorithms, and each of them has distinct pros and cons. Even though this chapter does not focus on algorithms, understanding them at high-level helps to choose the right algorithm or combination of algorithms to fit our use cases. Here is a list of popular algorithms:&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;• Token bucket
+• Leaking bucket
+• Fixed window counter
+• Sliding window log
+• Sliding window counter
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+&lt;h4&gt;
+  &lt;a href="#token-bucket-algorithm"&gt;
+  &lt;/a&gt;
+  Token bucket algorithm
+&lt;/h4&gt;
+
+&lt;p&gt;The token bucket algorithm is widely used for rate limiting. It is simple, well understood andcommonly used by internet companies. Both Amazon and Stripe use this algorithm to throttle their API requests.&lt;/p&gt;
+
+&lt;p&gt;The token bucket algorithm work as follows:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;A token bucket is a container that has pre-defined capacity. &lt;/li&gt;
+&lt;li&gt;Tokens are put in the bucket at preset rates periodically. &lt;/li&gt;
+&lt;li&gt;Once the bucket is full, no more tokens are added. &lt;/li&gt;
+&lt;li&gt;The refiller puts 2 tokens into the bucket every second. Once the bucket is full, extra tokens will overflow&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s---GX_4o_m--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/23625821/132120508-e55a0136-e72c-448c-a84f-bff662be24d7.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s---GX_4o_m--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/23625821/132120508-e55a0136-e72c-448c-a84f-bff662be24d7.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;h4&gt;
+  &lt;a href="#leaking-bucket-algorithm"&gt;
+  &lt;/a&gt;
+  Leaking bucket algorithm
+&lt;/h4&gt;
+
+&lt;p&gt;The leaking bucket algorithm is similar to the token bucket except that requests are processed at a fixed rate. It is usually implemented with a first-in-first-out (FIFO) queue. The algorithm works as follows:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;When a request arrives, the system checks if the queue is full. If it is not full, the request is added to the queue.&lt;/li&gt;
+&lt;li&gt;Otherwise, the request is dropped.&lt;/li&gt;
+&lt;li&gt;Requests are pulled from the queue and processed at regular intervals.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--DIUYe5JI--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/23625821/132173606-16b92216-374c-4b89-9356-e807dae1618e.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--DIUYe5JI--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/23625821/132173606-16b92216-374c-4b89-9356-e807dae1618e.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Leaking bucket algorithm takes the following two parameters:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Bucket size: it is equal to the queue size. The queue holds the requests to be processed at a fixed rate.&lt;/li&gt;
+&lt;li&gt;Outflow rate: it defines how many requests can be processed at a fixed rate, usually in seconds.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Shopify, an ecommerce company, uses leaky buckets for rate-limiting&lt;/p&gt;
+
+&lt;p&gt;Pros:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Memory efficient given the limited queue size.&lt;/li&gt;
+&lt;li&gt;Requests are processed at a fixed rate therefore it is suitable for use cases that a stable outflow rate is needed.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Cons:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;A burst of traffic fills up the queue with old requests, and if they are not processed in time, recent requests will be rate limited.&lt;/li&gt;
+&lt;li&gt;There are two parameters in the algorithm. It might not be easy to tune them properly.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h4&gt;
+  &lt;a href="#fixed-window-counter-algorithm"&gt;
+  &lt;/a&gt;
+  Fixed window counter algorithm
+&lt;/h4&gt;
+
+&lt;p&gt;Fixed window counter algorithm works as follows:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;The algorithm divides the timeline into fix-sized time windows and assign a counter for each window.&lt;/li&gt;
+&lt;li&gt;Each request increments the counter by one.&lt;/li&gt;
+&lt;li&gt;Once the counter reaches the pre-defined threshold, new requests are dropped until a new time window starts.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--HPO38c-0--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/23625821/132173976-d45e74e0-b632-4508-a6e5-360126d7520b.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--HPO38c-0--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/23625821/132173976-d45e74e0-b632-4508-a6e5-360126d7520b.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;A major problem with this algorithm is that a burst of traffic at the edges of time windows could cause more requests than allowed quota to go through.&lt;/p&gt;
+
+&lt;p&gt;Pros:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Memory efficient.&lt;/li&gt;
+&lt;li&gt;Easy to understand.&lt;/li&gt;
+&lt;li&gt;Resetting available quota at the end of a unit time window fits certain use cases.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Cons:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Spike in traffic at the edges of a window could cause more requests than the allowed quota to go through.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h4&gt;
+  &lt;a href="#sliding-window-log-algorithm"&gt;
+  &lt;/a&gt;
+  Sliding window log algorithm
+&lt;/h4&gt;
+
+&lt;p&gt;The fixed window counter algorithm has a major issue: it allows more requests to go through at the edges of a window. The sliding window log algorithm fixes the issue. It works as follows:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;The algorithm keeps track of request timestamps. Timestamp data is usually kept in cache, such as sorted sets of Redis. &lt;/li&gt;
+&lt;li&gt;When a new request comes in, remove all the outdated timestamps. Outdated timestamps are defined as those older than the start of the current time window.&lt;/li&gt;
+&lt;li&gt;Add timestamp of the new request to the log.&lt;/li&gt;
+&lt;li&gt;If the log size is the same or lower than the allowed count, a request is accepted. Otherwise, it is rejected.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--BjzhgQfu--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/23625821/132174782-401a4eeb-321b-40e1-94ce-1a6e7d4989a7.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--BjzhgQfu--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/23625821/132174782-401a4eeb-321b-40e1-94ce-1a6e7d4989a7.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;In this example, the rate limiter allows 2 requests per minute. Usually, Linux timestamps are stored in the log. However, human-readable representation of time is used in our example for better readability.&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;p&gt;The log is empty when a new request arrives at 1:00:01. Thus, the request is allowed.• A new request arrives at 1:00:30, the timestamp 1:00:30 is inserted into the log. After the insertion, the log size is 2, not larger than the allowed count. Thus, the request is allowed.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;A new request arrives at 1:00:50, and the timestamp is inserted into the log. After the insertion, the log size is 3, larger than the allowed size 2. Therefore, this request is rejected even though the timestamp remains in the log.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;A new request arrives at 1:01:40. Requests in the range [1:00:40,1:01:40) are within the latest time frame, but requests sent before 1:00:40 are outdated. &lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Two outdated timestamps, 1:00:01 and 1:00:30, are removed from the log. After the remove operation, the log size becomes 2; therefore, the request is accepted.&lt;/p&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Pros:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Rate limiting implemented by this algorithm is very accurate. In any rolling window, requests will not exceed the rate limit.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Cons:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;The algorithm consumes a lot of memory because even if a request is rejected, its timestamp might still be stored in memory.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h4&gt;
+  &lt;a href="#sliding-window-counter-algorithm"&gt;
+  &lt;/a&gt;
+  Sliding window counter algorithm
+&lt;/h4&gt;
+
+&lt;p&gt;The sliding window counter algorithm is a hybrid approach that combines the fixed window counter and sliding window log. The algorithm can be implemented by two different approaches. We will explain one implementation in this section and provide reference for the other implementation at the end of the section.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Qeemt3XB--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/23625821/132175266-5fd0470d-e71a-441a-a058-81d0dd942b49.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Qeemt3XB--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/23625821/132175266-5fd0470d-e71a-441a-a058-81d0dd942b49.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Assume the rate limiter allows a maximum of 7 requests per minute, and there are 5 requests in the previous minute and 3 in the current minute. For a new request that arrives at a 30% position in the current minute, the number of requests in the rolling window is calculated using the following formula:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Requests in current window + requests in the previous window * overlap percentage of the rolling window and previous window.&lt;/li&gt;
+&lt;li&gt;Using this formula, we get 3 + 5 * 0.7% = 6.5 request. Depending on the use case, the number can either be rounded up or down. &lt;/li&gt;
+&lt;li&gt;In our example, it is rounded down to 6. &lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Since the rate limiter allows a maximum of 7 requests per minute, the current request can go through. However, the limit will be reached after receiving one more request.&lt;/p&gt;
+
+&lt;p&gt;Pros&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;It smooths out spikes in traffic because the rate is based on the average rate of the previous window.&lt;/li&gt;
+&lt;li&gt;Memory efficient.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Cons&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;It only works for not-so-strict look back window. It is an approximation of the actual rate because it assumes requests in the previous window are evenly distributed. However, this problem may not be as bad as it seems. &lt;/li&gt;
+&lt;li&gt;According to experiments done by Cloudflare, only 0.003% of requests are wrongly allowed or rate limited among 400 million requests.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3&gt;
+  &lt;a href="#highlevel-architecture"&gt;
+  &lt;/a&gt;
+  High-level architecture
+&lt;/h3&gt;
+
+&lt;p&gt;The basic idea of rate limiting algorithms is simple. At the high-level, we need a counter to keep track of how many requests are sent from the same user, IP address, etc. If the counter is larger than the limit, the request is disallowed. Where shall we store counters? Using the database is not a good idea due to slowness of disk access. In-memory cache is chosen because it is fast and supports time-based expiration strategy. For instance, Redis is a popular option to implement rate limiting. It is an in- memory store that offers two commands: INCR and EXPIRE.&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;INCR: It increases the stored counter by 1.&lt;/li&gt;
+&lt;li&gt;EXPIRE: It sets a timeout for the counter. If the timeout expires, the counter is automatically deleted.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--SNsqnMsd--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/23625821/132176124-60d39b6a-3532-452e-81f3-cd08d9d9587a.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--SNsqnMsd--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/23625821/132176124-60d39b6a-3532-452e-81f3-cd08d9d9587a.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;The client sends a request to rate limiting middleware.&lt;/li&gt;
+&lt;li&gt;Rate limiting middleware fetches the counter from the corresponding bucket in Redis andchecks if the limit is reached or not.
+
+&lt;ul&gt;
+&lt;li&gt;If the limit is reached, the request is rejected.&lt;/li&gt;
+&lt;li&gt;If the limit is not reached, the request is sent to API servers. Meanwhile, the system increments the counter and saves it back to Redis.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3&gt;
+  &lt;a href="#step-3-design-deep-dive"&gt;
+  &lt;/a&gt;
+  Step 3 - Design deep dive
+&lt;/h3&gt;
+
+&lt;p&gt;The high-level design does not answer the following questions:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;How are rate limiting rules created? Where are the rules stored?&lt;/li&gt;
+&lt;li&gt;How to handle requests that are rate limited?&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;In this section, we will first answer the questions regarding rate limiting rules and then go over the strategies to handle rate-limited requests. Finally, we will discuss rate limiting in distributed environment, a detailed design, performance optimization and monitoring.&lt;/p&gt;
+&lt;h4&gt;
+  &lt;a href="#rate-limiting-rules"&gt;
+  &lt;/a&gt;
+  Rate limiting rules
+&lt;/h4&gt;
+
+&lt;p&gt;Lyft open-sourced their rate-limiting component. We will peek inside of the component and look at some examples of rate limiting rules:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;domain&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;messaging&lt;/span&gt;
+&lt;span class="na"&gt;descriptors&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+&lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;key&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;message_type&lt;/span&gt;
+  &lt;span class="na"&gt;Value&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;marketing&lt;/span&gt;
+  &lt;span class="na"&gt;rate_limit&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;unit&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;day&lt;/span&gt;
+    &lt;span class="na"&gt;requests_per_unit&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;5&lt;/span&gt;
+
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;In the above example, the system is configured to allow a maximum of 5 marketing messages per day. Here is another example:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;domain&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;auth&lt;/span&gt;
+&lt;span class="na"&gt;descriptors&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+&lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;key&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;auth_type&lt;/span&gt;
+  &lt;span class="na"&gt;Value&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;login&lt;/span&gt;
+  &lt;span class="na"&gt;rate_limit&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;unit&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;minute&lt;/span&gt;
+    &lt;span class="na"&gt;requests_per_unit&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;5&lt;/span&gt;
+
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h4&gt;
+  &lt;a href="#exceeding-the-rate-limit"&gt;
+  &lt;/a&gt;
+  Exceeding the rate limit
+&lt;/h4&gt;
+
+&lt;p&gt;In case a request is rate limited, APIs return a HTTP response code 429 (too many requests) to the client. Depending on the use cases, we may enqueue the rate-limited requests to be processed later. For example, if some orders are rate limited due to system overload, we may keep those orders to be processed later.&lt;/p&gt;
+
+&lt;p&gt;How does a client know whether it is being throttled? And how does a client know the number of allowed remaining requests before being throttled? The answer lies in HTTP response headers. The rate limiter returns the following HTTP headers to clients:&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;X-Ratelimit-Remaining: The remaining number of allowed requests within the window.
+
+X-Ratelimit-Limit: It indicates how many calls the client can make per time window.
+
+X-Ratelimit-Retry-After: The number of seconds to wait until you can make a request again without being throttled.
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+&lt;p&gt;When a user has sent too many requests, a 429 too many requests error and X-Ratelimit-Retry-After header are returned to the client.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--imuIIDlL--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/23625821/132287806-04de0d48-0056-485e-b809-0e06ddec791d.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--imuIIDlL--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/23625821/132287806-04de0d48-0056-485e-b809-0e06ddec791d.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Rules are stored on the disk. Workers frequently pull rules from the disk and store them in the cache.&lt;/li&gt;
+&lt;li&gt;When a client sends a request to the server, the request is sent to the rate limiter middleware first.&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Rate limiter middleware loads rules from the cache. It fetches counters and last request timestamp from Redis cache. &lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;Based on the response, the rate limiter decides:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;if the request is not rate limited, it is forwarded to API servers.&lt;/li&gt;
+&lt;li&gt;if the request is rate limited, the rate limiter returns 429 too many requests error to the client. &lt;/li&gt;
+&lt;li&gt;In the meantime, the request is either dropped or forwarded to the queue.&lt;/li&gt;
+&lt;/ul&gt;
+
+
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3&gt;
+  &lt;a href="#monitoring"&gt;
+  &lt;/a&gt;
+  Monitoring
+&lt;/h3&gt;
+
+&lt;p&gt;After the rate limiter is put in place, it is important to gather analytics data to check whether the rate limiter is effective. Primarily, we want to make sure:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;The rate limiting algorithm is effective.&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;The rate limiting rules are effective.&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;For example, if rate limiting rules are too strict, many valid requests are dropped. In this case, we want to relax the rules a little bit. &lt;/li&gt;
+&lt;li&gt;In another example, we notice our rate limiter becomes ineffective when there is a sudden increase in traffic like flash sales. &lt;/li&gt;
+&lt;li&gt;In this scenario, we may replace the algorithm to support burst traffic. Token bucket is a good fit here.&lt;/li&gt;
+&lt;/ul&gt;
+
+
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3&gt;
+  &lt;a href="#conclusion"&gt;
+  &lt;/a&gt;
+  Conclusion
+&lt;/h3&gt;
+
+&lt;p&gt;Avoid being rate limited. Design your client with best practices:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Use client cache to avoid making frequent API calls.&lt;/li&gt;
+&lt;li&gt;Understand the limit and do not send too many requests in a short time frame.&lt;/li&gt;
+&lt;li&gt;Include code to catch exceptions or errors so your client can gracefully recover fromexceptions.&lt;/li&gt;
+&lt;li&gt;Add sufficient back off time to retry logic.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3&gt;
+  &lt;a href="#references"&gt;
+  &lt;/a&gt;
+  References
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;a href="https://www.amazon.com/System-Design-Interview-insiders-Second/dp/B08CMF2CQF"&gt; System Design Interview Book &lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Rate Limiting in Javascript with a Token Bucket: &lt;br&gt;
+&lt;a href="https://kendru.github.io/javascript/2018/12/28/rate-limiting-in-javascript-with-a-token-bucket/"&gt;https://kendru.github.io/javascript/2018/12/28/rate-limiting-in-javascript-with-a-token-bucket/&lt;/a&gt;&lt;br&gt;
+Rate-limiting strategies and techniques: &lt;a href="https://cloud.google.com/solutions/rate-limiting-strategies-techniques"&gt;https://cloud.google.com/solutions/rate-limiting-strategies-techniques&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Twitter rate limits: &lt;a href="https://developer.twitter.com/en/docs/basics/rate-limits"&gt;https://developer.twitter.com/en/docs/basics/rate-limits&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Google docs usage limits: &lt;a href="https://developers.google.com/docs/api/limits"&gt;https://developers.google.com/docs/api/limits&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;IBM microservices: &lt;a href="https://www.ibm.com/cloud/learn/microservices"&gt;https://www.ibm.com/cloud/learn/microservices&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Throttle API requests for better throughput: &lt;a href="https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-request-throttling.html"&gt;https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-request-throttling.html&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Stripe rate limiters: &lt;a href="https://stripe.com/blog/rate-limiters"&gt;https://stripe.com/blog/rate-limiters&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Shopify REST Admin API rate limits: &lt;a href="https://help.shopify.com/en/api/reference/rest-admin-api-rate-limits"&gt;https://help.shopify.com/en/api/reference/rest-admin-api-rate-limits&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Better Rate Limiting With Redis Sorted Sets: &lt;a href="https://engineering.classdojo.com/blog/2015/02/06/rolling-rate-limiter/"&gt;https://engineering.classdojo.com/blog/2015/02/06/rolling-rate-limiter/&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;System Design — Rate limiter and Data modelling:&lt;a href="https://medium.com/@saisandeepmopuri/system-design-rate-limiter-and-data-modelling-9304b0d18250"&gt;https://medium.com/@saisandeepmopuri/system-design-rate-limiter-and-data-modelling-9304b0d18250&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;How we built rate limiting capable of scaling to millions of domains: &lt;a href="https://blog.cloudflare.com/counting-things-a-lot-of-different-things/"&gt;https://blog.cloudflare.com/counting-things-a-lot-of-different-things/&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Redis website: &lt;a href="https://redis.io/"&gt;https://redis.io/&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Lyft rate limiting: &lt;a href="https://github.com/lyft/ratelimit"&gt;https://github.com/lyft/ratelimit&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Scaling your API with rate limiters: &lt;a href="https://gist.github.com/ptarjan/e38f45f2dfe601419ca3af937fff574d#request-rate-limiter"&gt;https://gist.github.com/ptarjan/e38f45f2dfe601419ca3af937fff574d#request-rate-limiter&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;What is edge computing: &lt;a href="https://www.cloudflare.com/learning/serverless/glossary/what-is-edge-computing/"&gt;https://www.cloudflare.com/learning/serverless/glossary/what-is-edge-computing/&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Rate Limit Requests with Iptables: &lt;a href="https://blog.programster.org/rate-limit-requests-with-iptables"&gt;https://blog.programster.org/rate-limit-requests-with-iptables&lt;/a&gt;&lt;/p&gt;
+
+</description>
+      <category>systems</category>
+      <category>architecture</category>
+      <category>design</category>
+    </item>
+    <item>
       <title>10 Free Online Resume Builders for professional career</title>
       <author>NITESH TALIYAN</author>
       <pubDate>Tue, 07 Sep 2021 05:08:14 +0000</pubDate>
@@ -108,6 +595,99 @@ To all my readers out here I have an interesting thing to share with you. There'
       <category>webdev</category>
       <category>beginners</category>
       <category>programming</category>
+    </item>
+    <item>
+      <title>Divide and Conquer! An approach to software engineering project management.</title>
+      <author>Davide de Paolis</author>
+      <pubDate>Tue, 07 Sep 2021 04:51:05 +0000</pubDate>
+      <link>https://dev.to/dvddpl/divide-and-conquer-an-approach-to-software-engineering-project-management-2e0n</link>
+      <guid>https://dev.to/dvddpl/divide-and-conquer-an-approach-to-software-engineering-project-management-2e0n</guid>
+      <description>&lt;h2&gt;
+  &lt;a href="#divide-et-impera"&gt;
+  &lt;/a&gt;
+  Divide et Impera!
+&lt;/h2&gt;
+
+&lt;p&gt;&lt;em&gt;Divide and conquer!&lt;/em&gt; : in politics and sociology, it is &lt;em&gt;a strategy of gaining and maintaining power by breaking up larger concentrations of power into pieces that individually have less power than the one implementing the strategy.&lt;/em&gt; &lt;a href="https://en.wikipedia.org/wiki/Divide_and_rule"&gt;wikipedia&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Basically, split the forces of your enemy into smaller groups or individuals, which are easier to control and defeat.&lt;/p&gt;
+
+&lt;p&gt;Wait,  what has that to do with project management in software engineering?&lt;/p&gt;
+
+&lt;p&gt;Do I mean to &lt;strong&gt;isolate and weaken the individual team members&lt;/strong&gt; so that they can be easily &lt;em&gt;ruled&lt;/em&gt;, sorry, &lt;strong&gt;managed&lt;/strong&gt;, and that the goals can be achieved without any form of dissent?&lt;/p&gt;
+
+&lt;p&gt;Of course, not!&lt;/p&gt;
+
+&lt;p&gt;But how could I achieve the goal that was assigned to the team I was working with - 20 developers, more than 1 million lines of code, more than 15 thousand errors, hundreds of features to be rewritten - if not with  Divide and Conquer!?&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;&lt;em&gt;Software development is the act of breaking a complex problem down into smaller problems and composing simple solutions to form a complete solution to the complex problem&lt;/em&gt;.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;This is actually true for any big task, it helps if you break the task down into smaller, more manageable parts. &lt;strong&gt;Little piece by little piece, the big task is less intimidating.&lt;/strong&gt;&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;“How do you eat an elephant?"&lt;/p&gt;
+
+&lt;p&gt;“Easy — One bite at a time”&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;h3&gt;
+  &lt;a href="#so-what-did-we-do-in-practice"&gt;
+  &lt;/a&gt;
+  So what did we do in practice?
+&lt;/h3&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;p&gt;we individuated 4 &lt;strong&gt;macro-areas of intervention&lt;/strong&gt; within the project/codebase.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;we split the team of 20 + people into 4 &lt;strong&gt;squads&lt;/strong&gt; who could focus on one of these 4 macro areas independently - almost.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;we run an &lt;strong&gt;analysis&lt;/strong&gt; on features and errors, aggregated them, and then split them into categories that were assigned to the different squads and individual members who were in charge of that category.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;we made iterations more frequent.  instead of monthly deadlines, we were reassessing our status weekly ( at the beginning we did not even have anything “showable” if not that the number of bugs (defects) and errors was decreasing…) and eventually, &lt;strong&gt;re-adjust course&lt;/strong&gt;.  &lt;/p&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Not everything though could be broken down in smaller bits, nor was it advisable.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#where-did-we-not-divide-instead"&gt;
+  &lt;/a&gt;
+  Where did we not divide instead?
+&lt;/h3&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;p&gt;Decision making: &lt;strong&gt;devs can be solitary animals&lt;/strong&gt;:  but we didn’t want to have a developer working on his task alone, just to realise after days or weeks the solution was wrong or did not fit the big picture.   So,  we had iterative coding design sessions to discuss solutions collectively ( within the small groups though).&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Knowledge sharing:  weekly present some interesting solutions or learnings to other team members.&lt;br&gt;
+We dismantled &lt;strong&gt;Silos&lt;/strong&gt; and &lt;strong&gt;Towers of Knowledge&lt;/strong&gt;: especially with this high churn rate - we could not afford to have someone be the only one responsible for doing things or knowing how to do certain things.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Helping each other:   &lt;strong&gt;devs are stubborn and like challenges&lt;/strong&gt; - but we could not afford people being stuck for hours, or days on a problem - so we enforced “asking for help, or seeking people in need”  30 minutes of struggle → shout it out to the team:  &lt;strong&gt;maybe someone already went through a similar problem and already has a solution&lt;/strong&gt;.&lt;/p&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;In the end, &lt;strong&gt;by combining an atomic and aggressive approach to the problem with a mutualistic approach to the people&lt;/strong&gt;, we were able to reduce the scope and increase productivity.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://dev.to/dvddpl/the-biggest-advice-i-could-give-to-another-developer-3jme"&gt;By working on a smaller scope&lt;/a&gt;, we could ignore the rest.&lt;br&gt;
+&lt;a href="https://dev.to/dvddpl/you-have-only-limited-time-and-attention-eliminate-the-noise-4f0b"&gt;By avoiding distractions&lt;/a&gt; we could improve focus &lt;br&gt;
+By having a shorter feedback loop -  &lt;em&gt;"Do something, Make sure it is ok, Rework or Move onto the next task"&lt;/em&gt; -  we improved our speed&lt;br&gt;
+By sharing the struggles, celebrating the progress, sharing knowledge, and showing help to each other, we &lt;strong&gt;fought frustration, insecurity&lt;/strong&gt; and a sense of impotence in front of a massive task.&lt;br&gt;
+And in the end, despite all my predictions, we made it.&lt;/p&gt;
+
+&lt;p&gt;As Francis of Assisi said: &lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;Start by doing what’s necessary; then do what’s possible, and suddenly you are doing the impossible.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+
+
+
+&lt;p&gt;This is the transcript of a speech I gave at my local &lt;a href="https://www.toastmasters.org/"&gt;Toastmasters Club&lt;/a&gt; (an international organization to practice public speaking and leadership skills) for Level 4 of my &lt;a href="https://www.toastmasters.org/pathways-overview/pathways-innovative-planning-path"&gt;Innovative Planning Pathways&lt;/a&gt; where I had to write and present a speech about my experience in a project. &lt;/p&gt;
+
+&lt;p&gt;You can consider it a &lt;strong&gt;fictional story&lt;/strong&gt;, although a lot of what is described there comes from my &lt;strong&gt;direct experience&lt;/strong&gt;.  &lt;/p&gt;
+
+&lt;p&gt;I hope you find it interesting and of some help.&lt;/p&gt;
+
+</description>
+      <category>career</category>
+      <category>publicspeaking</category>
+      <category>development</category>
+      <category>projectmanagement</category>
     </item>
     <item>
       <title>Linked List Questions: Detect a Cycle - Set or Hashtable Approach</title>
@@ -1220,156 +1800,6 @@ I hope this helps you if you are preparing for GRE exams.&lt;/p&gt;&lt;/li&gt;
 </description>
       <category>gre</category>
       <category>day11</category>
-    </item>
-    <item>
-      <title>Frontend Roadmap</title>
-      <author>Gabriel Rocha</author>
-      <pubDate>Mon, 06 Sep 2021 23:57:06 +0000</pubDate>
-      <link>https://dev.to/gabrielrocha/frontend-roadmap-id5</link>
-      <guid>https://dev.to/gabrielrocha/frontend-roadmap-id5</guid>
-      <description>&lt;h1&gt;
-  &lt;a href="#internet"&gt;
-  &lt;/a&gt;
-  Internet
-&lt;/h1&gt;
-
-&lt;p&gt;Learn about how Internet and browsers work, client and server and the main communication protocols between them. &lt;/p&gt;
-
-&lt;p&gt;What you should learn: &lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;What the Internet is&lt;/li&gt;
-&lt;li&gt;What is HTTP&lt;/li&gt;
-&lt;li&gt;HTTP/3&lt;/li&gt;
-&lt;li&gt;How browsers work&lt;/li&gt;
-&lt;li&gt;How DNS work &lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h1&gt;
-  &lt;a href="#learn-html"&gt;
-  &lt;/a&gt;
-  Learn HTML
-&lt;/h1&gt;
-
-&lt;p&gt;HTML serves to build the skeleton of a web page. Learn about each tag functionality, learn about semantic HTML and learn the basics of SEO. &lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#learn-css"&gt;
-  &lt;/a&gt;
-  Learn CSS
-&lt;/h1&gt;
-
-&lt;p&gt;CSS serves to style your web page. Following the human body analogy, CSS would be the page skin. &lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#learn-javascript"&gt;
-  &lt;/a&gt;
-  Learn Javascript
-&lt;/h1&gt;
-
-&lt;p&gt;Javascript is what allows you to define your page behavior. With Javascript, you can, for example, execute actions in response to events, like a click event. &lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#learn-git"&gt;
-  &lt;/a&gt;
-  Learn Git
-&lt;/h1&gt;
-
-&lt;p&gt;Git is a code version manager that serves to maintain control of changes made in your code, as well as the date and author of those changes. &lt;/p&gt;
-
-&lt;p&gt;Git is even more efficient in a situation where many people need to teamwork in the same code base. &lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#learn-package-management"&gt;
-  &lt;/a&gt;
-  Learn Package Management
-&lt;/h1&gt;
-
-&lt;p&gt;Learn to use a package managing tool like NPM is important because those packages supply ready code to repeating tasks.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#conclusion"&gt;
-  &lt;/a&gt;
-  Conclusion
-&lt;/h1&gt;
-
-&lt;p&gt;This post was inspired by the website Developer Roadmaps. See the complete Frontend roadmap &lt;a href="https://roadmap.sh/frontend"&gt;here&lt;/a&gt;. In that page, you will find the continuation of that flowchart and links to where you can learn every described concepts.&lt;/p&gt;
-
-</description>
-      <category>brazil</category>
-      <category>english</category>
-      <category>webdev</category>
-      <category>frontend</category>
-    </item>
-    <item>
-      <title>My Experience as a Career Switcher in Tech</title>
-      <author>𝕛𝕖𝕤𝕤𝕚𝕔𝕒</author>
-      <pubDate>Mon, 06 Sep 2021 23:48:43 +0000</pubDate>
-      <link>https://dev.to/jessicacregg/my-experience-as-a-career-switcher-in-tech-4p3j</link>
-      <guid>https://dev.to/jessicacregg/my-experience-as-a-career-switcher-in-tech-4p3j</guid>
-      <description>&lt;p&gt;Have you ever tried to write with your other hand? The non-dominant one? Your instincts are all off, and words that you produce look out of shape and unfamiliar. No matter how accustomed you are to an action, performing it in a different context can throw you completely off balance. I find that this is particularly true when you switch careers. &lt;/p&gt;
-
-&lt;p&gt;Let me briefly take the opportunity to introduce myself. I’m Jessica Cregg, LaunchDarkly’s newest Developer Advocate. Having recently come onboard earlier this month, I’m absolutely thrilled to be working with such an excellent team supporting a genuinely exciting product strategy. Getting into Developer Relations has been a journey particularly close to my own heart as the discipline really sits central to the intersection of my past experiences as a storyteller and my recent passion for coding and all things tech. &lt;/p&gt;
-
-&lt;p&gt;I count myself as one of the many people who found their way into tech through non-traditional means. After earning my degree in Literature and carving out a career in PR and Marketing, I found myself unable to shake the urge to venture into development. I wanted to make things. But I had no idea how. &lt;/p&gt;
-
-&lt;p&gt;I've always loved computers. The way they do precisely what you tell them to do is equal parts infuriating and inspiring. Writing code has always appealed to me in the same way that running, yoga, and playing an instrument have. Improvement is dependent on your ability to bet on your own capacity for development—a value that can vary daily depending on so many contributing factors. The idea of going into a field where you're constantly challenging your potential filled me with excitement. &lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#making-a-plan"&gt;
-  &lt;/a&gt;
-  Making a plan
-&lt;/h2&gt;
-
-&lt;p&gt;In a bid to move towards a field that I've admired for years, I decided to take a pragmatic approach. I sat down and took stock of what I'd learned to date. If you're thinking about taking your career in a different direction, here are some thought starters for making a personal skills audit:&lt;br&gt;
-Which tasks do you do regularly as part of your current role?&lt;br&gt;
-What do these tasks involve?&lt;br&gt;&lt;br&gt;
-How do these tasks track against the requirements of the position that you want to land?&lt;/p&gt;
-
-&lt;p&gt;Let's take the example of sending emails for work. Fairly fundamental in a lot of desk-based roles, right? But if you take a step back and analyze the component actions in this task, you might find that you're skilled at taking a brief, interrogating its aims, and translating that into a roadmap. &lt;/p&gt;
-
-&lt;p&gt;After conducting a thorough skills audit—taking stock of the aptitudes that I'd developed in my career to date—I then looked to the future. I identified the competencies that I wanted to build on. Next, taking both lists, I matched these against a list of different roles in tech to devise a route that might lead me to a position that suits my unique makeup. &lt;/p&gt;
-
-&lt;p&gt;Completing a series of exercises of this kind led me towards client-facing roles in tech. I was used to running weekly status calls, producing activity reports, and managing campaign activity. I decided to use the skills I'd acquired so far to my advantage, so I took up a position as a Product Solutions Engineer acting as a Product Manager within my team.&lt;/p&gt;
-
-&lt;p&gt;Establishing a foundation in Product Management was exciting. It gave me a fundamental understanding of the scientific process behind bringing a successful product to life. But it didn't satisfy my desire for building in the way that I thought it would. It quenched my curiosity in a way that only made me more curious. I found myself wanting to understand exactly what I was asking of the engineers I was working with. I couldn't just stick to my lane. Instead, I wanted to understand what the code was doing and how its execution impacted the wider ecosystem of what I was working on.  &lt;/p&gt;
-
-&lt;p&gt;After six months in the role, I realized that to become fulfilled at work I'd need to venture into the unknown and, instead of relying on the things I knew how to do, develop a whole new set of skills. The fear that I had to overcome involved removing the personal limitations I'd put on myself. I didn't think that I was smart enough to be able to code. Looking at legacy code scared the heck out of me. I let this fear build up and form an entire web of limitations that weren't actually indicative of my potential. &lt;/p&gt;
-
-&lt;p&gt;Limiting beliefs have a habit of making you think that the things you've never done before are the same as things that you could never do. These are not the same, and convincing ourselves of this is not easy. Just because you've never done something doesn't make it something you can never do. &lt;/p&gt;
-
-&lt;p&gt;Entering into a new industry with the added benefit of some professional experience can be a real advantage. You're coming to the table with a set of cutlery already in your hands. This can feel like leverage right up until the point at which you're faced with a utensil that you've never seen before. Next thing you know, you're questioning your entire ability to problem solve. &lt;/p&gt;
-
-&lt;p&gt;When you head into a new field, the instinctive actions that once felt like second nature are open to an entirely new line of questioning. Are you sure that your method is the best way to tackle the problem? Do people usually schedule meetings to discuss things like this? Are you speaking to yourself using rhetorical questions again?&lt;/p&gt;
-
-&lt;p&gt;The shock of a new environment can very easily join forces with your pre-existing fears to create a sizable opponent. &lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#set-yourself-up-for-success"&gt;
-  &lt;/a&gt;
-  Set yourself up for success
-&lt;/h2&gt;
-
-&lt;p&gt;The key to overcoming hurdles is adopting a growth mindset. First introduced by psychologist and Stanford University professor, Dr. Carol Dweck, in her book “Mindset: The New Psychology of Success,” a growth mindset is a belief that you can determine your success, not through innate talent, but via ongoing personal development. Adopting this way of thinking requires you to stop viewing your attributes like static values and instead recognize them for what they are— muscles that you've yet to develop. &lt;/p&gt;
-
-&lt;p&gt;Here are a few ways that you can bring the principles of growth mindset adoption into your daily habits:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;&lt;p&gt;Introduce the word "yet" into your vocabulary - There are two different ways to get stuck when it comes to learning to code. Something can be hard because it's new or something can be hard because it's complex. When you're starting out, the two can be almost interchangeable at every avenue. Stay the course. This unfamiliarity is very temporary, and before you know it, you'll be able to decipher between the two types of tricky. Remember that very few things are achievable on your first go. At any point where you find yourself stumped by a concept, add the word “yet” as a way of challenging your limiting beliefs and remember that your inexperience is temporary.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;Prioritize learning - It can be easy to spend much of your time worrying about the things you can't do. The biggest concept that I've had to get used to in tech is accepting that you'll never know everything. You simply can't. Every day, new frameworks are being devised, and services rolled out, and concepts that are in their infancy can become a core competency in months. Make peace with the unknown, and instead of becoming intimidated by everything you don't know, try to use the ever-changing current to power you forward.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;Establish your role models - Treading new paths can feel lonely, and it's easy to feel lost when you've got no one to guide you. Oftentimes, you'll feel overwhelmed at the insurmountable hill of knowledge that you've got to climb. To stay motivated, make sure you look for your role models. Do some research and find other people who've travelled a similar route to yours. Exposing yourself to their stories and words of wisdom will pay dividends when you find yourself hitting a hurdle. &lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;Embrace the inevitability of things going wrong - Progress is never linear. There will be some days where you doubt that you're even making any progress at all. Remember that encountering plateaus and getting things wrong is not only natural but essential to your growth. Own the failures and see them as opportunities to improve. The phrase “fake it till you make it” has had far too much air-time. Embracing a growth mindset requires transparency and, above all else, authenticity. Trying to gloss over your mistakes will only hurt you in the long run. Being honest with yourself and those around you about the things that you find difficult is a practice that will make you better at what you do. &lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;Celebrate your wins - Don't forget to note your milestones and shout about them. Acknowledging your accomplishments helps you to tap into your brain's rewards-based system. Not only is it important to take the time to take stock and acknowledge how far you have come, but celebrating your achievements helps you to associate the work you're undertaking with long-term improvement. It won't just help you feel good about yourself; it'll aid you in building up endurance for the tough times ahead. &lt;/p&gt;&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;Keep in mind that overcoming your fears and switching fields can be challenging. You're learning to be ambidextrous, and that's hard. Remember that you're capable of more than you think you are. It's ok that you're not there. Just make sure to add that all-important three-letter word. Yet.  &lt;/p&gt;
-
-&lt;p&gt;If you’d like to develop your growth mindset and work for a company voted one of the best places to work for 2020, check out &lt;a href="https://launchdarkly.com/careers/"&gt;our open opportunities&lt;/a&gt;. &lt;/p&gt;
-
-</description>
-      <category>career</category>
-      <category>programming</category>
-      <category>100daysofcode</category>
     </item>
   </channel>
 </rss>
