@@ -7,6 +7,478 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>[Rust] Tokio stack overview: Runtime</title>
+      <author>Roger Torres Paes (he/him/ele)</author>
+      <pubDate>Sun, 12 Sep 2021 13:39:39 +0000</pubDate>
+      <link>https://dev.to/rogertorres/rust-tokio-stack-overview-runtime-9fh</link>
+      <guid>https://dev.to/rogertorres/rust-tokio-stack-overview-runtime-9fh</guid>
+      <description>&lt;blockquote&gt;
+&lt;p&gt;&lt;em&gt;TL:DR: In this first installment of a series devised to give an overview of the Tokio stack, I talk about its &lt;strong&gt;runtime&lt;/strong&gt;.&lt;/em&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;Quoting its &lt;a href="https://tokio.rs/blog/2017-01-tokio-0-1"&gt;first announcement&lt;/a&gt;, "Tokio is a platform for writing fast networking code in Rust [and] is primarily intended as a foundation for other libraries". &lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://tokio.rs/#tk-lib-tokio"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Pia7Vin8--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/yuzlo4csnkfvpl6gwnq8.png" alt="Tokio Stack"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;In this series, I plan to go through all the libraries (crates) that belong to this stack, explaining the very basics of each, which means trying to answer these simple questions: what problems do them solve and how?&lt;/p&gt;
+
+&lt;p&gt;Today, I start with the first (and, I assume, the most known) of them: the &lt;strong&gt;Tokio runtime&lt;/strong&gt;.&lt;/p&gt;
+
+
+
+
+&lt;h2&gt;
+  &lt;a href="#what-is-an-asynchronous-runtime"&gt;
+  &lt;/a&gt;
+  What is an asynchronous runtime?
+&lt;/h2&gt;
+
+&lt;p&gt;Core Rust provides the types to build an asynchronous application. However, when building, say, an asynchronous &lt;em&gt;network&lt;/em&gt; application, we found ourselves in the need of a lot of boilerplate code. We can write it ourselves, &lt;strong&gt;or&lt;/strong&gt; we can use a library that gives it to us, ready-made (and probably better-made). And that is what an asynchronous runtime such as Tokio does, it provides the building blocks to construe such an application.&lt;/p&gt;
+
+
+
+
+&lt;h2&gt;
+  &lt;a href="#futures"&gt;
+  &lt;/a&gt;
+  Futures
+&lt;/h2&gt;
+
+&lt;p&gt;Let us start by taking a look at what core Rust brings to the table, so we can better understand what we would lack if we were to build an asynchronous network application all by ourselves.&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;P.S. &lt;em&gt;I already wrote an &lt;a href="https://dev.to/rogertorres/asynchronous-rust-basic-concepts-44ed"&gt;introduction to async Rust&lt;/a&gt;, so this will be a dried out explanation.&lt;/em&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;Asynchronous Rust allows us to create concurrent applications. It does so via the syntax &lt;code&gt;async/.await&lt;/code&gt;. Basically, blocks and functions declared with &lt;code&gt;async&lt;/code&gt; &lt;em&gt;desugar&lt;/em&gt; into a block or function that returns the implementation of a trait called &lt;a href="https://aturon.github.io/blog/2016/08/11/futures/"&gt;&lt;code&gt;Future&lt;/code&gt;&lt;/a&gt;. &lt;code&gt;Future&lt;/code&gt; is a state machine, so it can keep up with the progress made in a certain operation, which means it can stop processing at some point and, when executing again, continue from where it stopped. On a higher level, we might say that a future is the representation of a value that may or may not be ready, a duality that is put forward using an enum called &lt;code&gt;Poll&lt;/code&gt; that has two variants: &lt;code&gt;Pending&lt;/code&gt; and &lt;code&gt;Ready&amp;lt;T&amp;gt;&lt;/code&gt;. The &lt;code&gt;Future&lt;/code&gt; trait also has a function, called &lt;code&gt;poll()&lt;/code&gt;, that will try to make as much progress as possible within the future (thus driving the state machine forward). This function, &lt;code&gt;poll()&lt;/code&gt;, is first executed when we &lt;code&gt;.await&lt;/code&gt; the future. To &lt;code&gt;.await&lt;/code&gt; the future is to deliver it to a &lt;strong&gt;scheduler&lt;/strong&gt; (formerly known as &lt;em&gt;executor&lt;/em&gt;) that will &lt;code&gt;poll()&lt;/code&gt; it. If it is processed through completion, &lt;code&gt;Ready&amp;lt;T&amp;gt;&lt;/code&gt; is returned, otherwise &lt;code&gt;Pending&lt;/code&gt; is returned and the scheduler keeps the future aside, waiting for a request to &lt;code&gt;poll()&lt;/code&gt; it again. This request comes from the &lt;strong&gt;driver&lt;/strong&gt; (formerly known as &lt;em&gt;reactor&lt;/em&gt;), which is an I/O event loop. &lt;/p&gt;
+
+&lt;p&gt;Rust does not provide these last two. That is why we need a crate that provides them. Besides that, we also need some time-related utilities to handle all this scheduling stuff.&lt;/p&gt;
+
+&lt;p&gt;Needless to say, that this is precisely what the Tokio runtime provides. Quoting its &lt;a href="https://docs.rs/tokio/1.11.0/tokio/runtime/index.html"&gt;documentation&lt;/a&gt;:&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;Unlike other Rust programs, asynchronous applications require runtime support. In particular, the following runtime services are necessary:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;An I/O event loop, called the driver, which drives I/O resources and dispatches I/O events to tasks that depend on them.&lt;/li&gt;
+&lt;li&gt;A scheduler to execute tasks that use these I/O resources.&lt;/li&gt;
+&lt;li&gt;A timer for scheduling work to run after a set period of time.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;/blockquote&gt;
+
+
+
+
+&lt;h2&gt;
+  &lt;a href="#scheduler"&gt;
+  &lt;/a&gt;
+  Scheduler
+&lt;/h2&gt;
+
+&lt;p&gt;When you code an async function for the first time, you realize that the place from which you are calling this function also has to be async. And if you go all the way up and try to make your &lt;code&gt;main()&lt;/code&gt; function async, Rust will tell you that "&lt;code&gt;main&lt;/code&gt; function is not allowed to be &lt;code&gt;async&lt;/code&gt;". &lt;/p&gt;
+
+&lt;p&gt;Asking Rust to &lt;code&gt;explain&lt;/code&gt; this error gives us a hint:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;$ rustc --explain E0752
+
+`fn main()` or the specified start function is not allowed to be `async`. Not having a correct async runtime library setup may cause this error.
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;A quick search on the web is enough to provide the solution: we got to import &lt;code&gt;tokio&lt;/code&gt; and use this attribute macro:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight rust"&gt;&lt;code&gt;&lt;span class="nd"&gt;#[tokio::main]&lt;/span&gt;
+&lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;main&lt;/span&gt;&lt;span class="p"&gt;(){&lt;/span&gt; 
+    &lt;span class="c"&gt;// ... &lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;However, even thought it certainly works, a question remains…&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#why"&gt;
+  &lt;/a&gt;
+  Why?
+&lt;/h3&gt;
+
+&lt;p&gt;Because at some point the futures have to be dealt with, and there is nothing above the &lt;code&gt;main()&lt;/code&gt; function in a Rust program, so whoever is handling them, have to be below it. Another way to put it is to say that the &lt;code&gt;main()&lt;/code&gt; is the entry door of your program. The operating system running the binary knows nothing about futures, so they have to be managed "inside the house", that is, after we entered the program. So, &lt;code&gt;main()&lt;/code&gt; has to be synchronous. &lt;/p&gt;
+
+&lt;p&gt;If that is the case, how does Tokio manage to make &lt;code&gt;main()&lt;/code&gt; async, if the top-level function cannot be async? Well, it does not. &lt;code&gt;#[tokio::main]&lt;/code&gt; will desugar &lt;code&gt;async fn main()&lt;/code&gt; into something like this:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight rust"&gt;&lt;code&gt;&lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;main&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="nn"&gt;tokio&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;runtime&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;Builder&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;new_multi_thread&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+        &lt;span class="nf"&gt;.enable_all&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+        &lt;span class="nf"&gt;.build&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+        &lt;span class="nf"&gt;.unwrap&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+        &lt;span class="nf"&gt;.block_on&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="c"&gt;// ...&lt;/span&gt;
+        &lt;span class="p"&gt;})&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;When using the attribute macro &lt;code&gt;#[tokio::main]&lt;/code&gt;, we are building a runtime below &lt;code&gt;main()&lt;/code&gt;, a runtime that will handle the tree of futures. Why am I calling it a tree? Because a future may &lt;code&gt;.await&lt;/code&gt; other futures. I will talk more about multiple &lt;code&gt;.await&lt;/code&gt; calls later. For now, let us move on with this idea of handling a tree of futures.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#handling-the-tree-of-futures"&gt;
+  &lt;/a&gt;
+  Handling the tree of futures
+&lt;/h3&gt;
+
+&lt;p&gt;Consider the example below.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight rust"&gt;&lt;code&gt;&lt;span class="nd"&gt;#[tokio::main]&lt;/span&gt;
+&lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;main&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="k"&gt;let&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;foo&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;bar&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nn"&gt;tokio&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nd"&gt;join!&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nf"&gt;foo&lt;/span&gt;&lt;span class="p"&gt;(),&lt;/span&gt; &lt;span class="nf"&gt;bar&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;};&lt;/span&gt;
+    &lt;span class="nd"&gt;println!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"{}{}"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;foo&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;bar&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;foo&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="k"&gt;-&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="nv"&gt;'static&lt;/span&gt; &lt;span class="nb"&gt;str&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="k"&gt;let&lt;/span&gt; &lt;span class="n"&gt;listener&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nn"&gt;std&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;net&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;TcpListener&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;bind&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"0.0.0.0:8080"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="nf"&gt;.unwrap&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+    &lt;span class="k"&gt;match&lt;/span&gt; &lt;span class="n"&gt;listener&lt;/span&gt;&lt;span class="nf"&gt;.accept&lt;/span&gt;&lt;span class="p"&gt;(){&lt;/span&gt;
+        &lt;span class="nf"&gt;Ok&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;_&lt;/span&gt;&lt;span class="n"&gt;pair&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="k"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="nd"&gt;println!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"`foo()` is finished"&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+            &lt;span class="s"&gt;"foo"&lt;/span&gt;
+        &lt;span class="p"&gt;},&lt;/span&gt;
+        &lt;span class="nf"&gt;Err&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;_&lt;/span&gt;&lt;span class="n"&gt;error&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="k"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="s"&gt;"error"&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;bar&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="k"&gt;-&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="nv"&gt;'static&lt;/span&gt; &lt;span class="nb"&gt;str&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="k"&gt;let&lt;/span&gt; &lt;span class="n"&gt;listener&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nn"&gt;std&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;net&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;TcpListener&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;bind&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"0.0.0.0:8081"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="nf"&gt;.unwrap&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+    &lt;span class="k"&gt;match&lt;/span&gt; &lt;span class="n"&gt;listener&lt;/span&gt;&lt;span class="nf"&gt;.accept&lt;/span&gt;&lt;span class="p"&gt;(){&lt;/span&gt;
+        &lt;span class="nf"&gt;Ok&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;_&lt;/span&gt;&lt;span class="n"&gt;pair&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="k"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="nd"&gt;println!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"`bar()` is finished"&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+            &lt;span class="s"&gt;"bar"&lt;/span&gt;
+        &lt;span class="p"&gt;},&lt;/span&gt;
+        &lt;span class="nf"&gt;Err&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;_&lt;/span&gt;&lt;span class="n"&gt;error&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="k"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="s"&gt;"error"&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;blockquote&gt;
+&lt;p&gt;&lt;em&gt;Tip: run the code above and connect to both &lt;code&gt;0.0.0.0:8080&lt;/code&gt; and &lt;code&gt;0.0.0.0:8081&lt;/code&gt; using your browser and check the result in the terminal where you ran the program.&lt;/em&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;When we call &lt;code&gt;foo().await&lt;/code&gt;, we are handing &lt;code&gt;foo()&lt;/code&gt;'s future to the runtime scheduler, the one responsible for calling &lt;code&gt;poll()&lt;/code&gt; on it. Futures are executed by the scheduler as part of &lt;a href="https://docs.rs/tokio/1.11.0/tokio/task/index.html"&gt;&lt;em&gt;tasks&lt;/em&gt;&lt;/a&gt;. You might think of a task as a thread that is not handled by the OS scheduler, but by the runtime scheduler (they are &lt;a href="https://en.wikipedia.org/wiki/Green_threads"&gt;virtual/green threads&lt;/a&gt;). &lt;/p&gt;
+
+&lt;p&gt;This will run &lt;code&gt;foo()&lt;/code&gt; as far as possible towards completion, which means that the executor will not preemptively stop it to run something else in its stead (as the OS does with its threads). For the Tokio scheduler, as far as a task is doing relevant work, it may keep working. In a more technical jargon, tasks run until they &lt;em&gt;yield&lt;/em&gt;. In our example, &lt;code&gt;foo()&lt;/code&gt; runs until it starts listening at port &lt;code&gt;8080&lt;/code&gt;. If you're trying to understand which part of our code is explicitly yielding the task, give up. It is not there. We don't code yields, Rust manages that for us.&lt;/p&gt;
+
+&lt;p&gt;After &lt;code&gt;foo()&lt;/code&gt; yields, &lt;code&gt;join!&lt;/code&gt; will call &lt;code&gt;bar()&lt;/code&gt;, which will run until it starts listening at port &lt;code&gt;8081&lt;/code&gt;. At this point, as both functions have yielded, we have two futures waiting to be polled again, and they may be polled in any order. Now, imagine that &lt;code&gt;foo()&lt;/code&gt; and/or &lt;code&gt;bar()&lt;/code&gt; call async functions inside them, giving new tasks to the scheduler. In a scenario like this, &lt;em&gt;we have a tree of futures.&lt;/em&gt; One important thing to understand here is that we have a "root-future" (the async book calls it “top-level future”, but I will stick with “root”); in this case, it is the future returned by that async block in &lt;code&gt;main&lt;/code&gt; (you will find inside &lt;code&gt;block_on()&lt;/code&gt; in the &lt;em&gt;desugared&lt;/em&gt; example). And this is important for at least two reasons.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;First&lt;/strong&gt;, a task is responsible for a tree of futures. So, let's say we have an &lt;code&gt;async fn main()&lt;/code&gt;. As we saw, under the hood this is a normal &lt;code&gt;main()&lt;/code&gt; that will &lt;code&gt;block_on()&lt;/code&gt; an async block. If inside this future we &lt;code&gt;.await&lt;/code&gt; another future, it will be dealt by the same task, as it is part of the same tree.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Second&lt;/strong&gt;, it points to the &lt;a href="https://www.youtube.com/watch?v=ThjvMReOXYM&amp;amp;t=4757s"&gt;threshold between concurrency and parallelism&lt;/a&gt;. If you just &lt;code&gt;.await&lt;/code&gt; or &lt;code&gt;join!&lt;/code&gt; futures, you will never have two Tokio tasks running simultaneously because, at the end, our &lt;code&gt;main()&lt;/code&gt; is &lt;code&gt;.await&lt;/code&gt;ing the root-future, and its node-futures are executed one after the other as part of the same task, hence in the same OS thread. In other words, your async program will have concurrency, but not parallelism. &lt;/p&gt;
+
+&lt;p&gt;Revisiting our example, even if ports &lt;code&gt;8080&lt;/code&gt; and &lt;code&gt;8081&lt;/code&gt; are accessed at the same time, &lt;code&gt;foo()&lt;/code&gt; and &lt;code&gt;bar()&lt;/code&gt; will be executed one after the other because they are &lt;del&gt;fruits&lt;/del&gt; futures of the same tree. Sure, this is no big deal here, but if you remember that we are talking about network applications and, by doing so, extrapolate over this silly example, you will quickly see this cannot be right.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#scheduling-parallel-tasks"&gt;
+  &lt;/a&gt;
+  Scheduling parallel tasks
+&lt;/h3&gt;
+
+&lt;p&gt;As mentioned above, &lt;code&gt;main()&lt;/code&gt; is the entry point of our program, so everything we are doing is below it. And what we have below (what &lt;code&gt;#[tokio::main]&lt;/code&gt; desugars to) is a &lt;code&gt;runtime&lt;/code&gt; that was built using &lt;code&gt;new_multi_thread()&lt;/code&gt;: &lt;em&gt;a multi-threaded Tokio runtime&lt;/em&gt;. So far, we have been using only one of those threads; it is running our task spawned by &lt;code&gt;block_on()&lt;/code&gt;. If we want parallelism, we need to hand our futures to the runtime itself, so they can become a "root-future" and, as such, become new tasks. To achieve this parallelism, that is, to allow the runtime to execute our tasks with a different worker of its thread pool, we got to &lt;code&gt;spawn&lt;/code&gt; the tasks.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight rust"&gt;&lt;code&gt;&lt;span class="k"&gt;use&lt;/span&gt; &lt;span class="nn"&gt;std&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;collections&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="n"&gt;HashMap&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="k"&gt;use&lt;/span&gt; &lt;span class="nn"&gt;std&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;sync&lt;/span&gt;&lt;span class="p"&gt;::{&lt;/span&gt;&lt;span class="nb"&gt;Arc&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;Mutex&lt;/span&gt;&lt;span class="p"&gt;};&lt;/span&gt;
+
+&lt;span class="nd"&gt;#[tokio::main]&lt;/span&gt;
+&lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;main&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="k"&gt;let&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;Arc&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;Mutex&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;HashMap&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&amp;amp;&lt;/span&gt;&lt;span class="nb"&gt;str&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="nb"&gt;str&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&amp;gt;&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nn"&gt;Default&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;default&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+    &lt;span class="nn"&gt;tokio&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;spawn&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nf"&gt;foo&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="nf"&gt;.clone&lt;/span&gt;&lt;span class="p"&gt;()));&lt;/span&gt;
+    &lt;span class="nn"&gt;tokio&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;spawn&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nf"&gt;bar&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="nf"&gt;.clone&lt;/span&gt;&lt;span class="p"&gt;()));&lt;/span&gt;
+    &lt;span class="nf"&gt;handle&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="k"&gt;.await&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;foo&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;Arc&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;Mutex&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;HashMap&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&amp;amp;&lt;/span&gt;&lt;span class="nb"&gt;str&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="nb"&gt;str&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&amp;gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="k"&gt;let&lt;/span&gt; &lt;span class="n"&gt;listener&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nn"&gt;std&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;net&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;TcpListener&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;bind&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"0.0.0.0:8080"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="nf"&gt;.unwrap&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+    &lt;span class="k"&gt;match&lt;/span&gt; &lt;span class="n"&gt;listener&lt;/span&gt;&lt;span class="nf"&gt;.accept&lt;/span&gt;&lt;span class="p"&gt;(){&lt;/span&gt;
+        &lt;span class="nf"&gt;Ok&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;_&lt;/span&gt;&lt;span class="n"&gt;pair&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="k"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="k"&gt;loop&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+                &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="k"&gt;let&lt;/span&gt; &lt;span class="nf"&gt;Ok&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="k"&gt;mut&lt;/span&gt; &lt;span class="n"&gt;lock&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="nf"&gt;.try_lock&lt;/span&gt;&lt;span class="p"&gt;(){&lt;/span&gt;
+                    &lt;span class="nd"&gt;println!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"`foo()` is finished"&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+                    &lt;span class="n"&gt;lock&lt;/span&gt;&lt;span class="nf"&gt;.insert&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"f"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;"foo"&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+                    &lt;span class="k"&gt;break&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+                &lt;span class="p"&gt;}&lt;/span&gt;
+            &lt;span class="p"&gt;}&lt;/span&gt;
+        &lt;span class="p"&gt;},&lt;/span&gt;
+        &lt;span class="nf"&gt;Err&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;_&lt;/span&gt;&lt;span class="n"&gt;error&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="k"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nd"&gt;println!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"error"&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;bar&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;Arc&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;Mutex&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;HashMap&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&amp;amp;&lt;/span&gt;&lt;span class="nb"&gt;str&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="nb"&gt;str&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&amp;gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="k"&gt;let&lt;/span&gt; &lt;span class="n"&gt;listener&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nn"&gt;std&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;net&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nn"&gt;TcpListener&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="nf"&gt;bind&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"0.0.0.0:8081"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="nf"&gt;.unwrap&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+    &lt;span class="k"&gt;match&lt;/span&gt; &lt;span class="n"&gt;listener&lt;/span&gt;&lt;span class="nf"&gt;.accept&lt;/span&gt;&lt;span class="p"&gt;(){&lt;/span&gt;
+        &lt;span class="nf"&gt;Ok&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;_&lt;/span&gt;&lt;span class="n"&gt;pair&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="k"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="k"&gt;loop&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+                &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="k"&gt;let&lt;/span&gt; &lt;span class="nf"&gt;Ok&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="k"&gt;mut&lt;/span&gt; &lt;span class="n"&gt;lock&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="nf"&gt;.try_lock&lt;/span&gt;&lt;span class="p"&gt;(){&lt;/span&gt;
+                    &lt;span class="nd"&gt;println!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"`bar()` is finished"&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+                    &lt;span class="n"&gt;lock&lt;/span&gt;&lt;span class="nf"&gt;.insert&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"b"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;"bar"&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+                    &lt;span class="k"&gt;break&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+                &lt;span class="p"&gt;}&lt;/span&gt;
+            &lt;span class="p"&gt;}&lt;/span&gt;
+        &lt;span class="p"&gt;},&lt;/span&gt;
+        &lt;span class="nf"&gt;Err&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;_&lt;/span&gt;&lt;span class="n"&gt;error&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="k"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nd"&gt;println!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"error"&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;handle&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;Arc&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;Mutex&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;HashMap&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&amp;amp;&lt;/span&gt;&lt;span class="nb"&gt;str&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="nb"&gt;str&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&amp;gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="k"&gt;loop&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="k"&gt;let&lt;/span&gt; &lt;span class="nf"&gt;Ok&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;lock&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="nf"&gt;.try_lock&lt;/span&gt;&lt;span class="p"&gt;(){&lt;/span&gt;
+            &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="n"&gt;lock&lt;/span&gt;&lt;span class="nf"&gt;.len&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;==&lt;/span&gt; &lt;span class="mi"&gt;2&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+                &lt;span class="nd"&gt;println!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"{}{}"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;lock&lt;/span&gt;&lt;span class="nf"&gt;.get&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"f"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="nf"&gt;.unwrap&lt;/span&gt;&lt;span class="p"&gt;(),&lt;/span&gt; &lt;span class="n"&gt;lock&lt;/span&gt;&lt;span class="nf"&gt;.get&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"b"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="nf"&gt;.unwrap&lt;/span&gt;&lt;span class="p"&gt;());&lt;/span&gt;
+                &lt;span class="k"&gt;break&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+            &lt;span class="p"&gt;}&lt;/span&gt;
+        &lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;In the example above, &lt;code&gt;foo()&lt;/code&gt; and &lt;code&gt;bar()&lt;/code&gt; become root-futures in their own right, and as &lt;code&gt;handle()&lt;/code&gt; is the single future within the &lt;code&gt;block_on()&lt;/code&gt; future, we end up with three different trees of futures. That way, if we call all three functions at the “same” time, they &lt;strong&gt;can&lt;/strong&gt; be executed in three different threads (assuming the runtime has these threads). &lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;I might have went a little over the top by using &lt;code&gt;Arc&amp;lt;Mutex&amp;lt;HashMap&amp;gt;&amp;gt;&lt;/code&gt;, since it could be dealt with in an easier manner with &lt;a href="https://docs.rs/tokio/0.2.2/tokio/task/struct.JoinHandle.html"&gt;&lt;code&gt;JoinHandle&lt;/code&gt;&lt;/a&gt;. My reasoning was that using the smart pointers made it easier to see the parallelism, as the &lt;code&gt;JoinHandle&lt;/code&gt; &lt;em&gt;looks&lt;/em&gt; very similar to how we use &lt;code&gt;.await&lt;/code&gt;.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;h3&gt;
+  &lt;a href="#going-beyond"&gt;
+  &lt;/a&gt;
+  Going beyond
+&lt;/h3&gt;
+
+&lt;p&gt;If you want to go above and beyond, a good place to start is to understand how Tokio employs a work-stealing technique to manage its multithreaded scheduler.&lt;/p&gt;
+
+
+
+
+&lt;h2&gt;
+  &lt;a href="#driver"&gt;
+  &lt;/a&gt;
+  Driver
+&lt;/h2&gt;
+
+&lt;p&gt;Let us reconsider our previous example. After &lt;code&gt;foo()&lt;/code&gt; and &lt;code&gt;bar()&lt;/code&gt; both yield, which happens once they start listening at &lt;code&gt;0.0.0.0&lt;/code&gt;, they return &lt;code&gt;Poll::Pending&lt;/code&gt;. As there is still work to be done, the scheduler will not get rid of them, but will not &lt;code&gt;poll()&lt;/code&gt; them again autonomously; it will &lt;code&gt;poll()&lt;/code&gt; them again under request. &lt;/p&gt;
+
+&lt;p&gt;In this case, the source of the need to &lt;code&gt;poll()&lt;/code&gt; them again is the access to &lt;code&gt;0.0.0.0&lt;/code&gt;. However, if neither &lt;code&gt;foo()&lt;/code&gt; nor &lt;code&gt;bar()&lt;/code&gt; are actually running, which process will pull the trigger? Something has to be running to mediate our access to &lt;code&gt;0.0.0.0&lt;/code&gt; and the scheduler. That is the role of the &lt;strong&gt;driver&lt;/strong&gt;, which is how Tokio call its I/O event loop.&lt;/p&gt;
+
+&lt;p&gt;Before diving into the driver, though, let us talk a bit more about what make it necessary: a pending future.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#pending-future"&gt;
+  &lt;/a&gt;
+  Pending future
+&lt;/h3&gt;
+
+&lt;p&gt;Maybe this topic belongs to the scheduler, but as it is vital for an understanding of the driver, I think it also fits here.&lt;/p&gt;
+
+&lt;p&gt;When we poll a future, it receives a &lt;code&gt;Context&lt;/code&gt; as an argument. Currently, this &lt;code&gt;Context&lt;/code&gt; is just a wrapper for the &lt;code&gt;&amp;amp;Waker&lt;/code&gt;. This &lt;code&gt;&amp;amp;Waker&lt;/code&gt; is a reference to the &lt;code&gt;Waker&lt;/code&gt; found within the task that calls &lt;code&gt;poll()&lt;/code&gt;. This &lt;code&gt;&amp;amp;Waker&lt;/code&gt; has a method &lt;code&gt;wake()&lt;/code&gt; that is called by the driver, so the task (that owns &lt;code&gt;Waker&lt;/code&gt;) becomes aware that it should &lt;code&gt;poll()&lt;/code&gt; the future once again. &lt;/p&gt;
+
+&lt;p&gt;The following flow is an illustrative example of how it works:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;A future is &lt;code&gt;.await&lt;/code&gt;ed.&lt;/li&gt;
+&lt;li&gt;As such, it is handed to the scheduler task that was created by &lt;code&gt;block_on()&lt;/code&gt; (as we saw, &lt;code&gt;spawn&lt;/code&gt; also creates tasks).&lt;/li&gt;
+&lt;li&gt;This task will &lt;code&gt;poll()&lt;/code&gt; the future, which will do some work until it reaches the point where it has to yield; let's say it is listening at some address, as our &lt;code&gt;foo()&lt;/code&gt; was.&lt;/li&gt;
+&lt;li&gt;Before yielding, the future &lt;code&gt;clone()&lt;/code&gt; the &lt;code&gt;&amp;amp;Waker&lt;/code&gt; received as an argument in &lt;code&gt;poll()&lt;/code&gt;. That “binds” the future and the task.&lt;/li&gt;
+&lt;li&gt;It yields, returning &lt;code&gt;Poll::Pending&lt;/code&gt;.&lt;/li&gt;
+&lt;li&gt;When the operating system's I/O receives a connection on that certain address, it will let the driver know.&lt;/li&gt;
+&lt;li&gt;The driver will call &lt;code&gt;wake()&lt;/code&gt; on the &lt;code&gt;&amp;amp;Waker&lt;/code&gt; stored by the future, and this will wake up the task.&lt;/li&gt;
+&lt;li&gt;The awoken task will then &lt;code&gt;poll()&lt;/code&gt; the future again. If it returns &lt;code&gt;Pending&lt;/code&gt; again, the new &lt;code&gt;Waker&lt;/code&gt; the was passed by this last &lt;code&gt;poll()&lt;/code&gt; will be copied and the process restarts.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;The 6th and 7th steps describes the role of the driver as an interface between the OS and the task scheduler. This means that the driver will perform system calls to the OS, such as &lt;code&gt;kqueue&lt;/code&gt; in BSD/macOS, &lt;code&gt;IPCP&lt;/code&gt; in Windows or &lt;code&gt;epoll&lt;/code&gt; in Linux (and now we are hearing more and more about &lt;code&gt;io_uring&lt;/code&gt;, which Tokio handles as well). &lt;/p&gt;
+
+&lt;p&gt;It is worth noting that the interaction is actually between the driver and &lt;code&gt;mio&lt;/code&gt;, so it is &lt;code&gt;mio&lt;/code&gt; who interacts with the OS. That being said, I will abstract from it here, so we can depict a simplified conversation between Tokio's driver and the OS I/O, which comprises the 6th step above.&lt;/p&gt;
+
+&lt;p&gt;The driver, being an event &lt;em&gt;loop&lt;/em&gt;, will keep polling the OS using one of these system calls. Let us retrieve our &lt;code&gt;foo()&lt;/code&gt; example. If the driver polls the OS and find out that there was a connection at &lt;code&gt;0.0.0.0:8080&lt;/code&gt;, it will then &lt;code&gt;wake()&lt;/code&gt; the task for it to &lt;code&gt;poll()&lt;/code&gt; the future.&lt;/p&gt;
+
+&lt;p&gt;Sure, there is a myriad of details left out. For example, how the communication via &lt;a href="https://tokio.rs/tokio/tutorial/channels"&gt;channels&lt;/a&gt; between the scheduler and the driver actually works? Nevertheless, I will respect the &lt;code&gt;beginners&lt;/code&gt; tag with which I marked this post and stop here. (Even because, if I write posts for beginners, it is not only because I think we still miss more introductory content, but also because of my own current limitations; and here we are teetering on the edge of my knowledge gap 🙃). &lt;/p&gt;
+
+
+
+
+&lt;h2&gt;
+  &lt;a href="#timer"&gt;
+  &lt;/a&gt;
+  Timer
+&lt;/h2&gt;
+
+&lt;p&gt;The module &lt;code&gt;tokio::time&lt;/code&gt; is part of the runtime and provides utilities for tracking time. I don't have much to talk about these, but I will, for the sake of completion, quote the part of the documentation that explains what this module provides:&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;ul&gt;
+&lt;li&gt;
+&lt;strong&gt;&lt;code&gt;Sleep&lt;/code&gt;&lt;/strong&gt; is a future that does no work and completes at a specific &lt;code&gt;Instant&lt;/code&gt; in time.&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;&lt;code&gt;Interval&lt;/code&gt;&lt;/strong&gt; is a stream yielding a value at a fixed period. It is initialized with a &lt;code&gt;Duration&lt;/code&gt; and repeatedly yields each time the duration elapses.&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;&lt;code&gt;Timeout&lt;/code&gt;&lt;/strong&gt;: Wraps a future or stream, setting an upper bound to the amount of time it is allowed to execute. If the future or stream does not complete in time, then it is canceled and an error is returned.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;/blockquote&gt;
+
+
+
+
+&lt;p&gt;I will stop here for today. I feel there is a lot missing, but this post is already longer than I wanted. Hopefully, we will be able to revisit some topics as we move on to talk about the other crates.&lt;/p&gt;
+
+&lt;p&gt;As always, if you spot something &lt;/p&gt;
+
+&lt;p&gt;See you there!&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;&lt;em&gt;Cover photo by &lt;a href="https://unsplash.com/photos/4u2U8EO9OzY"&gt;Pawel Nolbert&lt;/a&gt;&lt;/em&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+
+</description>
+      <category>rust</category>
+      <category>beginners</category>
+      <category>tokio</category>
+      <category>runtime</category>
+    </item>
+    <item>
+      <title>Map, Filter and Reduce explained.</title>
+      <author>namitmalasi</author>
+      <pubDate>Sun, 12 Sep 2021 13:37:20 +0000</pubDate>
+      <link>https://dev.to/namitmalasi/map-filter-and-reduce-explained-19np</link>
+      <guid>https://dev.to/namitmalasi/map-filter-and-reduce-explained-19np</guid>
+      <description>&lt;p&gt;You probably have heard of .map(), .reduce() and .filter(). &lt;br&gt;
+Map, reduce, and filter are all array methods in JavaScript.In this article, you will learn why and how to use each one. &lt;br&gt;
+I will try and explain with examples of how each of these functions works.&lt;/p&gt;
+&lt;h3&gt;
+  &lt;a href="#map"&gt;
+  &lt;/a&gt;
+  map()
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;strong&gt;map()&lt;/strong&gt; is used to transform an array. It creates a new array populated with the results of the calling function on every element in the calling array.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;const array=[1,2,3,4,5];
+
+const output=array.map(element=&amp;gt;
+ {
+  return element*2;
+})
+
+console.log(output);  // [2,4,6,8,10]
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;In the above code,&lt;br&gt;
+array ===calling array&lt;br&gt;
+element=&amp;gt;{...} ===calling function&lt;/p&gt;
+
+&lt;p&gt;The array elements are being traversed one by one and in each iteration the current element is multiplied by 2. The new value is pushed into a new array and after the traversal is complete we get a new array of elements in the output.&lt;/p&gt;
+&lt;h3&gt;
+  &lt;a href="#filter"&gt;
+  &lt;/a&gt;
+  filter()
+&lt;/h3&gt;
+
+&lt;p&gt;Filter is used to filter the array. &lt;strong&gt;filter()&lt;/strong&gt; method creates a new array with all the elements that pass the test implemented by the provided function.&lt;br&gt;
+If the test condition returns true, the element gets pushed to the output array. If the condition returns false, the element does not get pushed to the output array.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;const array=[10,23,55,40,111];
+
+const output=array.filter(element=&amp;gt;
+                      {
+  return element%2;
+})
+
+console.log(output);
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;In the example above it is filtering out all the odd elements from the array based on the test implemented in the function and pushing them into a new array and then returning the new array.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#reduce"&gt;
+  &lt;/a&gt;
+  reduce()
+&lt;/h3&gt;
+
+&lt;p&gt;The &lt;strong&gt;reduce()&lt;/strong&gt; method executes a reducer function on each element of the array, resulting in a single output value.&lt;br&gt;
+The reducer function takes two-parameter (accumulator, current).&lt;/p&gt;
+
+&lt;p&gt;accumulator= the returned value of the previous iteration&lt;br&gt;
+current=the current item in the array&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;const array=[1,2,3,4,5,6,7,8,9];
+
+const output=array.reduce((acc,curr)=&amp;gt;
+{
+acc=acc+curr
+ return acc
+
+},0)
+
+console.log(output);
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The above code calculates the sum of the elements of the array.&lt;br&gt;
+The initial value of acc is set to 0 as mentioned in the code. On each iteration, the current element is added to acc, and hence at last the total sum is returned.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#conclusion"&gt;
+  &lt;/a&gt;
+  Conclusion
+&lt;/h3&gt;
+
+&lt;p&gt;I really hope that you enjoyed reading this article and learned something from it. If you have any doubt or you think i missed something let me know in the comments. Feel free to like and share the post. &lt;br&gt;
+You can connect with me on:&lt;br&gt;
+Twitter:&lt;a href="https://twitter.com/namitmalasi"&gt;Namit Malasi&lt;/a&gt;&lt;br&gt;
+LinkedIn:&lt;a href="https://www.linkedin.com/in/namit-malasi-a4b56310a/"&gt;Namit Malasi&lt;/a&gt;&lt;/p&gt;
+
+</description>
+      <category>javascript</category>
+      <category>beginners</category>
+      <category>functional</category>
+    </item>
+    <item>
       <title>Role of Mobile Forensics in dealing with Mobile Threats.</title>
       <author>Prasan Singh</author>
       <pubDate>Sun, 12 Sep 2021 12:57:25 +0000</pubDate>
@@ -1399,6 +1871,263 @@ Enter the number of Tasks (instances) you want to run &lt;/p&gt;
       <category>opensource</category>
     </item>
     <item>
+      <title>How to add Spring Boot and Gradle multi-project builds capabilities to your Nx workspace?</title>
+      <author>khalil la</author>
+      <pubDate>Sun, 12 Sep 2021 12:01:09 +0000</pubDate>
+      <link>https://dev.to/gridou/how-to-add-spring-boot-and-gradle-multi-project-builds-capabilities-to-your-nx-workspace-53cd</link>
+      <guid>https://dev.to/gridou/how-to-add-spring-boot-and-gradle-multi-project-builds-capabilities-to-your-nx-workspace-53cd</guid>
+      <description>&lt;p&gt;I like to use Nx workspace to manage my projects. I don't put all my projects in one workspace but I use one workspace per multi-module project.&lt;br&gt;
+It works nicely with node frameworks like angular, react, nest... But when its come to other languages and frameworks, we need to use custom plugins. &lt;/p&gt;
+
+&lt;p&gt;In this article I will use my plugin &lt;code&gt;@jnxplus/nx-boot-gradle&lt;/code&gt; to add support of spring boot and Gradle multi-project builds to Nx workspace.&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;@jnxplus/nx-boot-gradle&lt;/code&gt; add to the Spring Boot world, an opinionated way to integrate Spring Boot apps/libs inside Nx workspace using Gradle multi-project builds.&lt;/p&gt;
+
+&lt;p&gt;Let's show you how to use it.&lt;/p&gt;
+
+&lt;p&gt;We start by creating a workspace :&lt;br&gt;
+Open a terminal and run this command to create a new workspace :&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;npx create-nx-workspace@latest
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Wen asked provide my-org as name and choose a empty workspace :&lt;br&gt;
+&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--QEhZjTYh--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/18sw4apaau7yn6502omr.PNG" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--QEhZjTYh--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/18sw4apaau7yn6502omr.PNG" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Now and in the same terminal go inside my-org folder :&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nb"&gt;cd &lt;/span&gt;my-org 
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#1-install-the-plugin"&gt;
+  &lt;/a&gt;
+  1. Install the plugin
+&lt;/h3&gt;
+
+&lt;p&gt;In the workspace root run this command to install the plugin :&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;npm &lt;span class="nb"&gt;install&lt;/span&gt; &lt;span class="nt"&gt;--save-dev&lt;/span&gt; @jnxplus/nx-boot-gradle
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#2-add-spring-boot-and-gradle-wrapper-support"&gt;
+  &lt;/a&gt;
+  2. Add Spring boot and Gradle wrapper support
+&lt;/h3&gt;
+
+&lt;p&gt;The following command adds Spring boot and Gradle support (Gradle wrapper and config files) to the workspace. This only needs to be performed once per workspace.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;nx generate @jnxplus/nx-boot-gradle:init
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--PB0GDRKb--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/7uh1h43pghhl3godl6ld.PNG" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--PB0GDRKb--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/7uh1h43pghhl3godl6ld.PNG" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;As you see, the command add the following files :&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Gradle wrapper and Gradle executables for windows and Linux :
+Using Gradle Wrapper we can distribute/share a project to everybody to use the same version and Gradle's functionality(compile, build, install...) even if it has not been installed&lt;/li&gt;
+&lt;li&gt;
+&lt;code&gt;gradle.properties&lt;/code&gt; :
+This file contain Spring Boot and dependency management versions that we will use for all apps and libs inside Nx worspace.&lt;/li&gt;
+&lt;li&gt;
+&lt;code&gt;settings.gradle&lt;/code&gt; :
+Here we will add our apps and libs later so Gradle will be able to  perform its tasks.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3&gt;
+  &lt;a href="#3-usage"&gt;
+  &lt;/a&gt;
+  3. Usage
+&lt;/h3&gt;
+
+&lt;p&gt;Generate an application&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;nx generate @jnxplus/nx-boot-gradle:application my-app
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;When asked, provide answers or choose default :&lt;br&gt;
+&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--0rv14EEc--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/0ngg5uib5a9wnn1gra93.PNG" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--0rv14EEc--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/0ngg5uib5a9wnn1gra93.PNG" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Check the &lt;code&gt;settings.gradle&lt;/code&gt;, here we added a entry for my-app :&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;rootProject.name &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s1"&gt;'boot-multiproject'&lt;/span&gt;
+include&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s1"&gt;'apps:my-app'&lt;/span&gt;&lt;span class="o"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Build the app&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;nx build my-app
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Serve the app&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;nx serve my-app
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;open &lt;a href="http://localhost:8080"&gt;http://localhost:8080&lt;/a&gt; to see app working:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--uCONWssk--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/zxhxo65wmsoq3m8sjppm.PNG" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--uCONWssk--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/zxhxo65wmsoq3m8sjppm.PNG" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Test the app&lt;br&gt;
+To test the app run this command :&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;nx &lt;span class="nb"&gt;test &lt;/span&gt;my-app
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--W_eQ3uQe--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/nr1g48yrse7qqpe2z4k0.PNG" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--W_eQ3uQe--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/nr1g48yrse7qqpe2z4k0.PNG" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;What I like to do to see if test command is really working is breaking the tests, and run it again :&lt;/p&gt;
+
+&lt;p&gt;So change the test and add a comma between Hello and World :&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;@Test
+public void shouldReturnHelloWorld&lt;span class="o"&gt;()&lt;/span&gt; throws Exception &lt;span class="o"&gt;{&lt;/span&gt;
+  this.mockMvc.perform&lt;span class="o"&gt;(&lt;/span&gt;get&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;"/"&lt;/span&gt;&lt;span class="o"&gt;))&lt;/span&gt;.andDo&lt;span class="o"&gt;(&lt;/span&gt;print&lt;span class="o"&gt;())&lt;/span&gt;.andExpect&lt;span class="o"&gt;(&lt;/span&gt;status&lt;span class="o"&gt;()&lt;/span&gt;.isOk&lt;span class="o"&gt;())&lt;/span&gt;
+                .andExpect&lt;span class="o"&gt;(&lt;/span&gt;content&lt;span class="o"&gt;()&lt;/span&gt;.string&lt;span class="o"&gt;(&lt;/span&gt;containsString&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;"Hello, World"&lt;/span&gt;&lt;span class="o"&gt;)))&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="o"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Perfect, now test target is failing :&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--haUa_MUn--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/08kf1id8zzdap3sekus9.PNG" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--haUa_MUn--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/08kf1id8zzdap3sekus9.PNG" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Revert change and let's generate this time a library :&lt;br&gt;
+To generate a library use this command :&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;nx generate @jnxplus/nx-boot-gradle:library my-lib
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;When asked, provide answers or choose default :&lt;br&gt;
+&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--gG4Izu3_--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/a7xdo8dqgwn6li10zomh.PNG" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--gG4Izu3_--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/a7xdo8dqgwn6li10zomh.PNG" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Check the &lt;code&gt;settings.gradle&lt;/code&gt;, here we added a entry for my-lib :&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;rootProject.name &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s1"&gt;'boot-multiproject'&lt;/span&gt;
+include&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s1"&gt;'libs:my-lib'&lt;/span&gt;&lt;span class="o"&gt;)&lt;/span&gt;
+include&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s1"&gt;'apps:my-app'&lt;/span&gt;&lt;span class="o"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Like an app, we can build it and test it :&lt;br&gt;
+Build :&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;nx build my-lib 
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Test :&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;nx &lt;span class="nb"&gt;test &lt;/span&gt;my-lib 
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;But we can't run it with serve target :&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;PS C:&lt;span class="se"&gt;\U&lt;/span&gt;sers&lt;span class="se"&gt;\k&lt;/span&gt;hali&lt;span class="se"&gt;\d&lt;/span&gt;evs&lt;span class="se"&gt;\m&lt;/span&gt;y-org&amp;gt; nx serve my-lib
+&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;  NX   ERROR  Cannot find target &lt;span class="s1"&gt;'serve'&lt;/span&gt; &lt;span class="k"&gt;for &lt;/span&gt;project &lt;span class="s1"&gt;'my-lib'&lt;/span&gt;
+PS C:&lt;span class="se"&gt;\U&lt;/span&gt;sers&lt;span class="se"&gt;\k&lt;/span&gt;hali&lt;span class="se"&gt;\d&lt;/span&gt;evs&lt;span class="se"&gt;\m&lt;/span&gt;y-org&amp;gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Hope you like this article, and give this plugin a try :)&lt;/p&gt;
+
+&lt;p&gt;You can find the Github code here :&lt;br&gt;
+&lt;a href="https://github.com/khalilou88/my-org"&gt;https://github.com/khalilou88/my-org&lt;/a&gt;&lt;/p&gt;
+
+</description>
+      <category>nx</category>
+      <category>springboot</category>
+      <category>gradle</category>
+    </item>
+    <item>
       <title>Webpack Academy #7: More options on config file</title>
       <author>CodeOz</author>
       <pubDate>Sun, 12 Sep 2021 11:41:12 +0000</pubDate>
@@ -1726,522 +2455,6 @@ Yes We can do that, and that's not a rocket science. We can simply replace the ?
 </description>
       <category>python</category>
       <category>javascript</category>
-    </item>
-    <item>
-      <title>Ethereum Mining in simple language; How to extract the second most important cryptocurrencies in the world?</title>
-      <author>banjamin</author>
-      <pubDate>Sun, 12 Sep 2021 11:05:02 +0000</pubDate>
-      <link>https://dev.to/banjamindev/atrium-extraction-in-simple-language-how-to-extract-the-second-most-important-cryptocurrencies-in-the-world-24fk</link>
-      <guid>https://dev.to/banjamindev/atrium-extraction-in-simple-language-how-to-extract-the-second-most-important-cryptocurrencies-in-the-world-24fk</guid>
-      <description>&lt;p&gt;ethereum is the second largest currency in the world and one of the most important extractable currencies in the cryptocurrency market. Many digital currency market players consider ethereum mining to be an important and reliable source of income. If you are also interested in ethereum extraction, this article is a comprehensive but simple guide to ethereum extraction. Please stay with us until the end of the article.&lt;/p&gt;
-
-&lt;p&gt;In this article, we will assume that you know what an ethereum is and how it works by default. So we will only give a brief explanation about this.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#what-is-an-ethereum"&gt;
-  &lt;/a&gt;
-  What is an ethereum?
-&lt;/h2&gt;
-
-&lt;p&gt;ethereum extraction&lt;br&gt;
-ethereum creator Vitalik Butrin became acquainted with Bitcoin at the age of 17 and has since started writing for Bitcoin magazine and offering suggestions for improving it. But since these proposals did not materialize, he decided to build his own digital currency. In 2015, ethereum was introduced to the market.&lt;/p&gt;
-
-&lt;p&gt;ethereum is actually a blockchain and its native cryptocurrency is called ETH. ethereum has its own browser and language and payment system. This blockchain also has no single and central controller and thousands of users voluntarily control it with their computer systems around the world. These users are called nodes or node networks. Nodes perform ethereum transaction verification and smart contracts on the network.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#what-is-extraction"&gt;
-  &lt;/a&gt;
-  What is extraction?
-&lt;/h2&gt;
-
-&lt;p&gt;In simple terms, extraction is the process of solving complex mathematical equations. Miners are network nodes that use their computer's processing time and power to solve these equations. ethereum extraction algorithm is proof of work that confirms ether or ethereum transactions. In addition, miners are responsible for creating new tokens and blocks in the process. In the end, every miner will be rewarded for their successful activity.&lt;/p&gt;
-
-&lt;p&gt;Poof of work algorithm is the most popular consensus algorithm in blockchain cryptocurrencies. The consensus algorithm allows the user to use the same source of information as other users and ensures that all users on the network use the same source. The purpose of this algorithm is to prevent the entire system from being harmed when one or more users leave the network. The proof of work algorithm was first used in Bitcoin, but its concept and application is not limited to Bitcoin.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#why-is-it-necessary-to-extract-ethereum"&gt;
-  &lt;/a&gt;
-  Why is it necessary to extract ethereum?
-&lt;/h2&gt;
-
-&lt;p&gt;ethereum extraction&lt;br&gt;
-The ethereum network, as we said, has its own blockchain. Any transaction in this blockchain must be approved by the miners. That's why transactions take time. This time is spent approving ethereum miners.&lt;/p&gt;
-
-&lt;p&gt;ethereum transactions enter the ethereum blockchain after confirmation. So the blockchain needs to have enough space to store transactions. In addition to confirming transactions, miners add new blocks to the blockchain. In general, the task of a miner is to make sure that no transactions are made twice by mistake and that no errors occur in the network.&lt;/p&gt;
-
-&lt;p&gt;When a miner can solve one of the equations, he adds the corresponding block to the blockchain and receives his reward. By doing this, the three goals of the extraction work are:&lt;/p&gt;
-
-&lt;p&gt;Confirm correct transactions&lt;br&gt;
-Add new blocks and create new storage space&lt;br&gt;
-Receive rewards by miners and add new coins to the network&lt;br&gt;
-will be done.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#who-is-miner-what-is-a-miner"&gt;
-  &lt;/a&gt;
-  Who is Miner? What is a Miner?
-&lt;/h2&gt;
-
-&lt;p&gt;ethereum extraction&lt;br&gt;
-Miner is a person who provides his / her computer processing power to the network to approve transactions and record new transactions. Miner actually does this in the hope of receiving a reward from the network (new block extraction bonus, transaction registration fee).&lt;/p&gt;
-
-&lt;p&gt;But it is not possible to extract ethereum with GPUs from home computers. ethereum extraction is actually done with the help of extraction pebbles, which is a collection of powerful graphics cards. These pebbles are also called miners.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#what-is-gpu-mining"&gt;
-  &lt;/a&gt;
-  What is GPU Mining?
-&lt;/h2&gt;
-
-&lt;p&gt;GPU mining or mining with graphics cards is a popular way to extract cryptocurrencies, especially ethereum. This method was formed because bitcoin mining with CPUs (CPUs) was increasing day by day and on the other hand, it had created a kind of monopoly among ISIC manufacturers.&lt;/p&gt;
-
-&lt;p&gt;GPU (GPU) extraction tools were much cheaper, and this method was able to find its place among important cryptocurrencies such as ethereum and Monroe. These cryptographers have written their algorithms based on the presence of small extractors and their persistence in the network and want to take care of them.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#what-is-the-ethereum-extraction-algorithm"&gt;
-  &lt;/a&gt;
-  What is the ethereum Extraction Algorithm?
-&lt;/h2&gt;
-
-&lt;p&gt;Digital currencies use different consensus algorithms for their operations. Consensus algorithms help the network to tolerate error. The two most important consensus algorithms are the Proof of Work algorithm and the Proof of Stake algorithm. Bitcoin and ethereum both use proof-of-work algorithms as market leaders in digital currencies. In the proof-of-work algorithm, the user must provide the network with the processing power of his computer to participate in the network and make a profit.&lt;/p&gt;
-
-&lt;p&gt;In this algorithm, validation nodes (hereinafter referred to as miners or miners) perform the hashing of information. Hashing means creating a unique solution (function) to add information to the blockchain. A hash is a seemingly random string of letters and numbers that is created when solving a hash function. This string of letters and numbers is actually encrypted transaction information that is to be stored in the blockchain.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#12-important-points-before-choosing-an-extraction-pool"&gt;
-  &lt;/a&gt;
-  1-2. Important points before choosing an extraction pool
-&lt;/h2&gt;
-
-&lt;p&gt;Currently, several small and large extraction ponds are active in the ethereum extraction process and have very different characteristics. But each miner can only join one pool. So before you make your final decision, you can experience membership in different pools and read about them well. Important points to consider when choosing a pool:&lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;&lt;p&gt;The size of the pool&lt;br&gt;
-The more people who are members of the pool and the more devices that share their processing power with others, the better the chances of solving a block for all members. However, if the number of pool members is too large, the reward received by each member will decrease. For this reason, the size of the pool can be very effective in the profitability of its membership.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;Currency payment method in the pool&lt;br&gt;
-Another point to keep in mind when choosing a pool is the minimum withdrawal of currency from the account. If the minimum withdrawal is very high, for example 1 ethereum, you have to wait a long time for the currency you mined to reach this amount. So you will need a lot of time to make a profit or change the pool.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;Pool fee&lt;br&gt;
-Extraction pools, like any other service center, receive a fee for managing and organizing extraction and distribution of rewards among users. When you join the pool and use its services, you also have to pay some of your income to the pool as a fee. This fee is usually between 1% and 3%. It is better not to look for pools with 0% fee, because it is not right to trust them.&lt;/p&gt;&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;p&gt;Method 3: Subscribe to cloud mining services&lt;br&gt;
-Cloud extraction services are services in which a person does not need to share the processing power of a computer or extraction rig with others to subscribe, but can only extract ethereum for a fee or, in fact, rent an extraction machine.&lt;/p&gt;
-
-&lt;p&gt;These services are actually a very large mining farm where people actually pay to participate in the mining farm costs and receive ethereum in return. This method is much easier than the other two methods and does not require much time or technical knowledge. But before joining a cloud mining service, ask yourself the following questions:&lt;/p&gt;
-
-&lt;p&gt;Why should one lease one's mining machine to others when one can make a profit with it?&lt;br&gt;
-Why not buy ethereum with the same membership fee to save in your account?&lt;br&gt;
-Try to answer these questions carefully and thoroughly. Membership in these services is usually not cost-effective. In fact, cloud mining services are guaranteed to be more profitable for its operators than for its users.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#what-are-the-problems-of-ethereum-extraction"&gt;
-  &lt;/a&gt;
-  What are the problems of ethereum extraction?
-&lt;/h2&gt;
-
-&lt;p&gt;ethereum mining, like most digital currency mining, has many challenges and opportunities. Although mining is still a lucrative business given ethereum price growth, you should be aware of its problems before starting any business. ethereum and bitcoin mining is no exception. The high cost of electricity and mining equipment, exposure to hacker attacks, and decentralization are some of the problems that we will address below.&lt;/p&gt;
-
-&lt;p&gt;1- High costs of electricity and extraction equipment&lt;br&gt;
-Mining cryptocurrencies is generally costly. If you want to extract ethereum legally and at the electricity rate, you have to pay approximately 900 tomans per kilowatt hour. This cost is usually calculated during the month and of course it varies depending on the model of your device. But keep in mind that the more powerful and profitable the device you buy, the higher its electricity costs will be.&lt;/p&gt;
-
-&lt;p&gt;ethereum extraction devices are another part of your costs. Graphic ethereum extraction graphs are not cheap and are out of competition, especially with the constant advancement of technology. So if you want to upgrade your device by increasing the network hash rate, the extraction costs will also increase.&lt;/p&gt;
-
-&lt;p&gt;2- The risk of hackers attacking your property&lt;br&gt;
-Avoid ransomware&lt;br&gt;
-Hackers are always one step ahead of security technologies. If you do not take good care of your assets and computer system, you may be exposed to cryptocurrencies and your passwords may be stolen. In 2017 alone, attacks on computer browsers increased by 31%. So if you set up only one mining node and do not secure it, you are actually doing an important service to hackers.&lt;/p&gt;
-
-&lt;p&gt;3- Centralization&lt;br&gt;
-The initial idea of ​​cryptocurrencies was to decentralize and take the power of money management out of the hands of a specific source such as a bank. But as time went on and many people turned to mining, it became necessary to design more powerful and better mining machines. Of course, the technology of making these devices and pebbles was given to certain companies. This is practically the opposite of the concept of decentralization of digital currencies. Although ethereum has entered the process using fewer graphic pebbles, it is still at risk.&lt;/p&gt;
-
-&lt;p&gt;So before entering the ethereum extraction process, please know all the challenges you and the network face. Start buying and selling with full awareness to help both yourself and the network and ultimately have a healthy and secure income (source).&lt;br&gt;
-Is ethereum extraction cost effective?&lt;br&gt;
-For now, yes, as long as you follow the tips in the previous section of this article. ethereum reached $ 4,000 in 2021 and reached its highest ceiling. This shows that the approach of the people to the ethereum market is very positive and the extraction will be very profitable if the details are observed. For example, mining with the Pandaminer B5 Plus device will currently generate about 6 million Tomans per month for Miner.&lt;/p&gt;
-
-&lt;p&gt;In the future, the conditions for making money from the ethereum network will probably change. ethereum is planning to move to the ethereum 2 network. This blockchain network will continue to operate with a stock proof algorithm. If this happens, the ethereum extraction process will be obsolete. But at the time of writing, ethereum extraction is still cost-effective.&lt;/p&gt;
-
-&lt;p&gt;Know more:&lt;br&gt;
-How long does ethereum extraction last? What percentage of ethereum has been extracted so far?&lt;br&gt;
-ethereum, like Bitcoin, has no limit on the number of tokens it can offer. At the time of writing, 116,870,559 ethereums have been extracted, and will continue to be extracted until ethereum migrates to the blockchain network with the stock proof algorithm. Of course, to protect the network from inflation, only 18 million ethereums are extracted annually. This means two ethereums approximately every 14 seconds.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#how-to-extract-ethereum-20"&gt;
-  &lt;/a&gt;
-  How to extract ethereum 2.0?
-&lt;/h2&gt;
-
-&lt;p&gt;ethereum 2.0&lt;br&gt;
-ethereum 2.0 is not actually extracted. ethereum 2 uses a stock proof algorithm. In this algorithm, instead of the need for processing power, it is necessary to register participation in the network with your assets. Having 32 ethereums, for example, will qualify you to participate in the network and decide whether to make changes or approve transactions. By providing these 32 ethereums to the network for approval, you will receive a reward (source).&lt;/p&gt;
-
-&lt;p&gt;Is ethereum extraction legal in Iran?&lt;br&gt;
-According to a government decree, the extraction of bitcoins, ethereum and other cryptocurrencies is possible only with the permission of the Ministry of Industry, Mines and Trade; Of course, in free trade zones, the ministry has delegated the responsibility of issuing licenses to the Free Zones Organization. Also, in some cities, there are restrictions on the establishment of Ramzarz mining units: it includes a limit of 120 km in Tehran, 50 km in Isfahan and 30 km in the centers of other provinces.&lt;/p&gt;
-
-&lt;p&gt;Electricity supply is also possible by receiving a branch from the national grid or the construction of a power plant outside the national grid. . But according to the same law, the extraction of ciphers during peak hours is prohibited. Another important point of this decree is that the production centers of cryptocurrencies are considered as an industrial production unit and will be subject to the tax law, but if they issue their cryptocurrencies and return the resulting currency to Iran, their tax will be zero ( Source).&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#is-free-ethereum-extraction-possible"&gt;
-  &lt;/a&gt;
-  Is free ethereum extraction possible?
-&lt;/h2&gt;
-
-&lt;p&gt;We keep emphasizing on the Wallx blog that "nothing is completely free", and so does ethereum Free! The least you can ask for when extracting ethereum for free is the internet, computer or mobile processing, and of course your time. However, there are tools that you can use to get ethereum without paying directly.&lt;/p&gt;
-
-&lt;p&gt;Of course, these tools have little profitability, and in many cases the profit is so low that even its harvest is not economical. But the choice is yours anyway. The Idle-Empire website is one of the sites where you can get ethereum by subscribing and choosing from a variety of activities. For example, filling out questionnaires, watching promotional videos, and playing games are some of these methods.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#introducing-the-best-ethereum-extraction-software"&gt;
-  &lt;/a&gt;
-  Introducing the best ethereum extraction software
-&lt;/h2&gt;
-
-&lt;p&gt;ethereum extraction software, like other cryptocurrencies, covers a very wide range. In fact, there is a long list of ethereum extraction software that you can not excel at until you have used them. This makes it difficult to choose better software. But relying on the experience gained in this area and analyzing hundreds of user feedback and critiques can provide a limited but strong list of ethereum extraction software.&lt;/p&gt;
-
-&lt;p&gt;1- ETHminer software&lt;br&gt;
-The first recommended software is ETHminer software. As the name implies, this software is designed solely for ethereum Extraction and now supports Linux, Mac and Windows operating systems. When downloading this software, pay attention to select the version related to your operating system. With this software, in addition to ethereum, you can extract other cryptocurrencies that use the Ethash algorithm; Including Expansion, Elysmus, Metavars, Myosquin, Pearl, Classical ethereum, etc.&lt;/p&gt;
-
-&lt;p&gt;2- CGMiner software&lt;br&gt;
-The next software is CGMiner, which was released in 2011 and is still one of the most popular mining software. The main reason for the popularity and ubiquity of CGMiner is its excellent compatibility with three different hardware ASIC, FPGA, GPU. CG software is an open source software written in C language. The advantages of this software include measuring the desired hash rate with zero delay as well as advanced detection of new blocks. This software is also available for Linux, Mac and Windows operating systems.&lt;br&gt;
-3- BitMinter software&lt;br&gt;
-The third application is BitMinter, which offers great features to its users; These include a clear graphical interface as well as a very high connection speed to the Bitminter mining pool. This software entered the market in 2011 and it can be said that it has the most experienced mining pools in the field of cryptocurrency mining, so that it now has 450,000 registered user accounts. Another advantage of this software is that unlike CGMiner, it does not need to be installed, because it is based on the Java Network Launch Protocol (JNLP). You can easily run it on ASIC, FPGA, GPU hardware. The software is also compatible with Linux, Mac and Windows operating systems (source).&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#concluding-remarks"&gt;
-  &lt;/a&gt;
-  Concluding remarks
-&lt;/h2&gt;
-
-&lt;p&gt;ethereum mining, like bitcoin mining, is an opportunity for digital currency market enthusiasts to both contribute to and benefit from network stability and security. In this Walx article, we tried to explain what is needed for ethereum mining. From now on, start the extraction rig with you to start extracting this amazing cryptocurrency.&lt;/p&gt;
-
-&lt;p&gt;If you have questions about Bitcoin or ethereum mining, ask us in the comments section.&lt;/p&gt;
-
-</description>
-      <category>blockchain</category>
-      <category>cryptocurrency</category>
-    </item>
-    <item>
-      <title>This week in Flutter #20</title>
-      <author>Michele Volpato</author>
-      <pubDate>Sun, 12 Sep 2021 10:50:40 +0000</pubDate>
-      <link>https://dev.to/mvolpato/this-week-in-flutter-20-225j</link>
-      <guid>https://dev.to/mvolpato/this-week-in-flutter-20-225j</guid>
-      <description>&lt;p&gt;Big news this week! Google &lt;strong&gt;announced&lt;/strong&gt; &lt;a href="https://medium.com/dartlang/announcing-dart-2-14-b48b9bb2fb67"&gt;Dart 2.14&lt;/a&gt; and &lt;a href="https://medium.com/flutter/whats-new-in-flutter-2-5-6f080c3f3dc"&gt;Flutter 2.5&lt;/a&gt;: Apple Silicon support and standard lints are the prominent updates for Dart.&lt;/p&gt;
-
-&lt;p&gt;For Flutter there are &lt;strong&gt;performance&lt;/strong&gt; improvements, &lt;a href="https://material.io/blog/announcing-material-you"&gt;Material You&lt;/a&gt; support, camera and image picker updates, Widget Inspector improvements, and a &lt;strong&gt;new starter project&lt;/strong&gt;.&lt;/p&gt;
-
-&lt;p&gt;Read these recap by &lt;a href="https://dev.to/iizmotabar/flutter-2-5-what-changes-does-it-bring-c94"&gt;Motabar Javaid&lt;/a&gt;, &lt;a href="https://medium.com/@ozantaskiran?source=user_profile-------------------------------------"&gt;&lt;/a&gt;&lt;a href="https://medium.com/@ozantaskiran/flutter-2-5-update-overview-908927045568"&gt;Ozan Taskiran&lt;/a&gt;.&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Michele Volpato&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h2&gt;
-  &lt;a href="#development"&gt;
-  &lt;/a&gt;
-  Development 🧑‍💻
-&lt;/h2&gt;
-
-&lt;h3&gt;
-  &lt;a href="#flutter-performance-tips"&gt;
-  &lt;/a&gt;
-  🔗 &lt;a href="https://itnext.io/flutter-performance-tips-4580b2491da8"&gt;Flutter Performance Tips&lt;/a&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;Here is a short list of tips to &lt;strong&gt;improve&lt;/strong&gt; the &lt;strong&gt;performance&lt;/strong&gt; of your Flutter app. Each tip has a link to a longer explanation if you want more information about it. A nice list by &lt;a href="https://www.linkedin.com/in/hasan-basri-bayat-01403118a/"&gt;Hasan Basri Bayat&lt;/a&gt;.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#clean-network-layer-in-flutter-dio-freezed-jsonannotation"&gt;
-  &lt;/a&gt;
-  🔗 &lt;a href="https://ercangp.medium.com/clean-network-layer-in-flutter-dio-freezed-json-annotation-f5f2c41ac240"&gt;Clean Network Layer in Flutter [Dio + Freezed + Json_Annotation]&lt;/a&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;Create your network layer once and use it in &lt;strong&gt;all your projects&lt;/strong&gt;, with this easy-to-follow tutorial by &lt;a href="https://github.com/i-Senku"&gt;Ercan Garip&lt;/a&gt;.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#flutter-bloc-a-complete-guide"&gt;
-  &lt;/a&gt;
-  🔗 &lt;a href="https://dhruvnakum.xyz/flutter-bloc-a-complete-guide"&gt;Flutter Bloc: A Complete Guide&lt;/a&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;I stopped using the original &lt;strong&gt;BLoC&lt;/strong&gt; some time ago, I find it too complicated to understand for new developers when they join the team. But if you want to learn more about it, &lt;a href="https://hashnode.com/@Dhruv-Nakum"&gt;&lt;/a&gt;&lt;a href="https://github.com/red-star25"&gt;Dhruv Nakum&lt;/a&gt; published a nice article where he creates a simple weather app.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#using-graphql-with-flutter-a-tutorial-with-examples"&gt;
-  &lt;/a&gt;
-  🔗 &lt;a href="https://blog.logrocket.com/using-graphql-with-flutter-a-tutorial-with-examples/"&gt;Using GraphQL with Flutter: A tutorial with examples&lt;/a&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;a href="https://graphql.org"&gt;GraphQL&lt;/a&gt; is getting used more and more by API providers. There are some packages in Flutter/Dart that help you with using it in your app. I believe that &lt;em&gt;&lt;a href="https://pub.dev/packages/graphql_flutter"&gt;graphql_flutter&lt;/a&gt;&lt;/em&gt; is one of the &lt;strong&gt;best&lt;/strong&gt; and in this article, &lt;a href="https://blog.logrocket.com/author/chidumennamdi/"&gt;&lt;/a&gt;&lt;a href="https://twitter.com/ngArchangel"&gt;Chidume Nnamdi&lt;/a&gt; shows you how to use it with a tutorial.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#cubit-101-what-is-it-how-to-use-it-and-more"&gt;
-  &lt;/a&gt;
-  🔗 &lt;a href="https://medium.com/createthrive/cubit-101-what-is-it-how-to-use-it-and-more-6c16ea66ba88"&gt;Cubit 101: What is It, How to Use it and More&lt;/a&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;And after the article about BLoC above, here is an article about &lt;strong&gt;Cubit&lt;/strong&gt;, an &lt;strong&gt;evolution of BLoC&lt;/strong&gt;. I always say that I stopped using BLoC, but I can see myself starting to use Cubit in the future. This is a well-written article, I suggest you read it even if you already know Cubit. Via &lt;a href="https://www.linkedin.com/in/gianfranco-pigatto-038581b5/"&gt;Gianfranco Pigatto&lt;/a&gt;.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#exploring-the-stripe-flutter-sdk"&gt;
-  &lt;/a&gt;
-  🔗 &lt;a href="https://blog.logrocket.com/exploring-stripe-flutter-sdk/"&gt;Exploring the Stripe Flutter SDK&lt;/a&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;strong&gt;Stripe&lt;/strong&gt; is a payment service system with good APIs. &lt;a href="https://blog.logrocket.com/author/emmanueletukudo/"&gt;Emmanuel Etukudo&lt;/a&gt; shows you how you can &lt;strong&gt;integrate&lt;/strong&gt; it into a &lt;strong&gt;Flutter&lt;/strong&gt; app, with support with Apple Pay and Google Pay.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#getting-to-know-flutter-pull-to-refresh-with-online-data"&gt;
-  &lt;/a&gt;
-  🔗 &lt;a href="https://dev.to/theotherdevs/getting-to-know-flutter-pull-to-refresh-with-online-data-592i"&gt;Getting to know Flutter: Pull to refresh with online data&lt;/a&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;The &lt;strong&gt;pull to refresh&lt;/strong&gt; is a common UX feature of apps with lists. Learn how to implement it with this article by &lt;a href="https://twitter.com/TheotherdevS"&gt;TheOtherDev/s&lt;/a&gt;. This article uses an external package: &lt;a href="https://pub.dev/packages/pull_to_refresh"&gt;&lt;em&gt;pull_to_refresh&lt;/em&gt;&lt;/a&gt;, but...&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#refreshindicator-flutter-widget-of-the-week"&gt;
-  &lt;/a&gt;
-  🔗 &lt;a href="https://www.youtube.com/watch?v=ORApMlzwMdM"&gt;RefreshIndicator (Flutter Widget of the Week)&lt;/a&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;...you can also use the standard &lt;em&gt;&lt;a href="https://api.flutter.dev/flutter/material/RefreshIndicator-class.html"&gt;RefreshIndicator&lt;/a&gt;&lt;/em&gt;.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#implementing-svg-in-flutter-with-fluttersvg"&gt;
-  &lt;/a&gt;
-  🔗 &lt;a href="https://blog.logrocket.com/implement-svg-flutter-apps/"&gt;Implementing SVG in Flutter with flutter_svg&lt;/a&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;Did you know you can easily use &lt;strong&gt;SVG&lt;/strong&gt; in your &lt;strong&gt;Flutter&lt;/strong&gt; app? &lt;a href="https://github.com/mhadaily"&gt;Majid Hajian&lt;/a&gt; knows that, and he wrote an article about it.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#advance-scrolling-in-flutter-part-1"&gt;
-  &lt;/a&gt;
-  🔗 &lt;a href="https://dhruvnakum.xyz/advance-scrolling-in-flutter-part-1"&gt;Advance Scrolling in Flutter - Part (1)&lt;/a&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;An extensive article about &lt;strong&gt;scrolling&lt;/strong&gt; in Flutter, with &lt;strong&gt;examples&lt;/strong&gt; and &lt;strong&gt;GIFs&lt;/strong&gt;, so that you do not have to implement everything yourself to test it. By &lt;a href="https://hashnode.com/@Dhruv-Nakum"&gt;&lt;/a&gt;&lt;a href="https://github.com/red-star25"&gt;Dhruv Nakum&lt;/a&gt;.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#architecture-%F0%9F%8F%9B"&gt;
-  &lt;/a&gt;
-  Architecture 🏛
-&lt;/h2&gt;
-
-&lt;h3&gt;
-  &lt;a href="#flutter-mvvm-architecture-best-practice-using-provide-amp-http"&gt;
-  &lt;/a&gt;
-  🔗 &lt;strong&gt;&lt;a href="https://medium.com/@ermarajhussain/flutter-mvvm-architecture-best-practice-using-provide-http-4939bdaae171"&gt;Flutter: MVVM architecture best practice using Provide &amp;amp; HTTP&lt;/a&gt;&lt;/strong&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;[...]&lt;/p&gt;
-
-&lt;p&gt;Read the rest on &lt;a href="https://ishouldgotosleep.com/this-week-in-flutter-20/"&gt;my website&lt;/a&gt;.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://ishouldgotosleep.com/subscribe-to-the-newsletter-devto/"&gt;Join the Flutter and Dart newsletter&lt;/a&gt; and receive it weekly in your inbox.&lt;/p&gt;
-
-
-
-
-</description>
-      <category>flutter</category>
-      <category>dart</category>
-      <category>news</category>
-    </item>
-    <item>
-      <title>Introduction to java.util Package</title>
-      <author>Ritvik Dubey</author>
-      <pubDate>Sun, 12 Sep 2021 10:45:39 +0000</pubDate>
-      <link>https://dev.to/ritvikdubey27/introduction-to-java-util-package-7d5</link>
-      <guid>https://dev.to/ritvikdubey27/introduction-to-java-util-package-7d5</guid>
-      <description>&lt;p&gt;Hello all👋 I hope you are doing well. This is going to be a short introductory article about the most useful package in Java i.e., &lt;strong&gt;java.util package&lt;/strong&gt;. &lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#lets-begin"&gt;
-  &lt;/a&gt;
-  Let's begin...
-&lt;/h2&gt;
-
-&lt;h3&gt;
-  &lt;a href="#lets-first-understand-package"&gt;
-  &lt;/a&gt;
-  Let's first understand package
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;strong&gt;What is a package?&lt;/strong&gt; &lt;br&gt;
-&lt;br&gt;&lt;em&gt;In short a Java package is collection of similar type of classes.&lt;/em&gt; &lt;br&gt;
-&lt;br&gt;A Package can be defined as a collection of similar types of classes, interfaces and sub-packages in the form of directory structure. You can read more about packages in one of my article &lt;strong&gt;&lt;em&gt;&lt;a href="https://dev.to/ritvikdubey27/you-must-know-this-about-java-ii-1k21"&gt;here&lt;/a&gt;&lt;/em&gt;&lt;/strong&gt;.&lt;/p&gt;
-&lt;h3&gt;
-  &lt;a href="#javautil"&gt;
-  &lt;/a&gt;
-  java.util
-&lt;/h3&gt;
-
-&lt;p&gt;The basic utility classes required to a programmer are present in this package. &lt;em&gt;It contains the collections framework, legacy collection classes, event model, date and time facilities, internationalization, and miscellaneous utility classes (a string tokenizer, a random-number generator, and a bit array).&lt;/em&gt; &lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;To use any class you have to import java.util package at top of the program:-&lt;/strong&gt;&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight java"&gt;&lt;code&gt;&lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="nn"&gt;java.util.*&lt;/span&gt;&lt;span class="o"&gt;;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;&lt;strong&gt;or&lt;/strong&gt;&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight java"&gt;&lt;code&gt;&lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="nn"&gt;java.util.Class_name&lt;/span&gt;&lt;span class="o"&gt;;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;&lt;br&gt;To make it easy let's take an example, let's suppose you want to print date and time in your program you will need to import &lt;strong&gt;java.util&lt;/strong&gt; package.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight java"&gt;&lt;code&gt;&lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="nn"&gt;java.util.Date&lt;/span&gt;&lt;span class="o"&gt;;&lt;/span&gt;
-&lt;span class="c1"&gt;//or&lt;/span&gt;
-&lt;span class="c1"&gt;//import java.util.*;&lt;/span&gt;
-
-&lt;span class="kd"&gt;public&lt;/span&gt; &lt;span class="kd"&gt;class&lt;/span&gt; &lt;span class="nc"&gt;Demo&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
-    &lt;span class="kd"&gt;public&lt;/span&gt; &lt;span class="kd"&gt;static&lt;/span&gt; &lt;span class="kt"&gt;void&lt;/span&gt; &lt;span class="nf"&gt;main&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="nc"&gt;String&lt;/span&gt;&lt;span class="o"&gt;[]&lt;/span&gt; &lt;span class="n"&gt;args&lt;/span&gt;&lt;span class="o"&gt;)&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
-        &lt;span class="nc"&gt;Date&lt;/span&gt; &lt;span class="n"&gt;date&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nc"&gt;Date&lt;/span&gt;&lt;span class="o"&gt;();&lt;/span&gt;
-        &lt;span class="nc"&gt;System&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;out&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;println&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"The date is : "&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="n"&gt;date&lt;/span&gt;&lt;span class="o"&gt;);&lt;/span&gt;
-    &lt;span class="o"&gt;}&lt;/span&gt;
-&lt;span class="o"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;&lt;strong&gt;&lt;em&gt;You can run your code online &lt;a href="https://www.tutorialspoint.com/compile_java_online.php"&gt;here&lt;/a&gt;&lt;/em&gt;&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--RWpGvZS---/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1631432248405/oWB1aHLjb.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--RWpGvZS---/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1631432248405/oWB1aHLjb.png" alt="java.util.png"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#what-is-use-of-javautil-package"&gt;
-  &lt;/a&gt;
-  What is use of java.util package?
-&lt;/h3&gt;
-
-&lt;ul&gt;
-&lt;li&gt;For Java collections.&lt;/li&gt;
-&lt;li&gt;For random number generation.&lt;/li&gt;
-&lt;li&gt;For Calendar.&lt;/li&gt;
-&lt;li&gt;For string parsing.&lt;/li&gt;
-&lt;li&gt;For internationalization support by using the internationalization supported classes from java.util package &lt;strong&gt;(Locale)&lt;/strong&gt;.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h3&gt;
-  &lt;a href="#some-important-and-generally-used-classes"&gt;
-  &lt;/a&gt;
-  Some important and generally used classes
-&lt;/h3&gt;
-
-&lt;p&gt;Some important and generally used classes and interfaces which are present inside the java.util package are:-&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;
-&lt;strong&gt;Arrays :-&lt;/strong&gt; This class contains various methods for manipulating arrays.&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;ArrayList :-&lt;/strong&gt; This class is resizable-array implementation of the List interface.&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;Collections :-&lt;/strong&gt; This class consists exclusively of static methods that operate on or return collections.&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;Date :-&lt;/strong&gt; This class represents a specific instant in time, with millisecond precision.&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;EventObject :-&lt;/strong&gt; This class is the root class from which all event state objects shall be derived.&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;Formatter :-&lt;/strong&gt; An interpreter for printf-style format strings.&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;HashMap :-&lt;/strong&gt; The HashMap class Hash table based implementation of the Map interface.&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;HashSet :-&lt;/strong&gt; The HashSet class implements the Set interface, backed by a hash table (actually a HashMap instance).&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;HashTable :-&lt;/strong&gt; The HashTable class implements a hash table, which maps keys to values.&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;LinkedList :-&lt;/strong&gt; The LinkedList class Doubly-linked list implementation of the List and Deque interfaces.&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;Locale :-&lt;/strong&gt; A Locale object represents a specific geographical, political, or cultural region.&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;Objects :-&lt;/strong&gt; This class consists of static utility methods for operating on objects.&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;Random :-&lt;/strong&gt; An instance of this class is used to generate a stream of pseudorandom numbers.&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;Scanner :-&lt;/strong&gt; A simple text scanner which can parse primitive types and strings using regular expressions. &lt;em&gt;(&lt;a href="https://dev.to/ritvikdubey27/scanner-class-6ba"&gt;Read more&lt;/a&gt;)&lt;/em&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;StringTokenizer :-&lt;/strong&gt; The string tokenizer class allows an application to break a string into tokens.&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;Timer :-&lt;/strong&gt; A facility for threads to schedule tasks for future execution in a background thread.&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;TimerTask :-&lt;/strong&gt; A task that can be scheduled for one-time or repeated execution by a Timer.&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;TreeMap :-&lt;/strong&gt; The TreeMap class A Red-Black tree based NavigableMap implementation.&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;TreeSet :-&lt;/strong&gt; The TreeSet class A NavigableSet implementation based on a TreeMap.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h4&gt;
-  &lt;a href="#resources"&gt;
-  &lt;/a&gt;
-  Resources-
-&lt;/h4&gt;
-
-&lt;p&gt;&lt;em&gt;&lt;a href="https://docs.oracle.com/javase/8/docs/api/java/util/package-summary.html"&gt;Documentation&lt;/a&gt;&lt;/em&gt; ||&lt;br&gt;
-&lt;em&gt;&lt;a href="https://www.hudatutorials.com/java/util/"&gt;Tutorial&lt;/a&gt;&lt;/em&gt; &lt;/p&gt;
-
-&lt;h4&gt;
-  &lt;a href="#okay-so-thats-enough-for-now"&gt;
-  &lt;/a&gt;
-  Okay so that's enough for now.
-&lt;/h4&gt;
-
-&lt;h4&gt;
-  &lt;a href="#thank-you-for-reading"&gt;
-  &lt;/a&gt;
-  &lt;em&gt;Thank you for reading.&lt;/em&gt;
-&lt;/h4&gt;
-
-&lt;h4&gt;
-  &lt;a href="#please-share-your-thoughts-about-it-and-correct-me-if-im-wrong"&gt;
-  &lt;/a&gt;
-  &lt;em&gt;Please share your thoughts about it and correct me if I'm wrong.&lt;/em&gt;
-&lt;/h4&gt;
-
-&lt;h4&gt;
-  &lt;a href="#i-hope-you-liked-it-and-found-it-helpful"&gt;
-  &lt;/a&gt;
-  &lt;em&gt;I hope you liked it and found it helpful.&lt;/em&gt;
-&lt;/h4&gt;
-
-&lt;h4&gt;
-  &lt;a href="#cover-rajat-gour"&gt;
-  &lt;/a&gt;
-  &lt;strong&gt;&lt;em&gt;Cover:- &lt;a href="https://twitter.com/rajatgour20"&gt;Rajat Gour&lt;/a&gt;&lt;/em&gt;&lt;/strong&gt;
-&lt;/h4&gt;
-
-&lt;h4&gt;
-  &lt;a href="#connect-with-me-on-twitter-or-linkedin"&gt;
-  &lt;/a&gt;
-  &lt;em&gt;Connect with me on &lt;a href="https://twitter.com/ritvikdubey27?s=09"&gt;Twitter&lt;/a&gt; or &lt;a href="https://www.linkedin.com/in/ritvik-dubey-3bbb22169"&gt;LinkedIn&lt;/a&gt;&lt;/em&gt;
-&lt;/h4&gt;
-
-&lt;h4&gt;
-  &lt;a href="#my-personal-blog-blogritvikdubeycom"&gt;
-  &lt;/a&gt;
-  &lt;em&gt;My personal blog &lt;a href="https://blog.ritvikdubey.com/"&gt;blog.ritvikdubey.com&lt;/a&gt;&lt;/em&gt;
-&lt;/h4&gt;
-
-</description>
-      <category>java</category>
-      <category>beginners</category>
-      <category>codenewbie</category>
-      <category>computerscience</category>
     </item>
   </channel>
 </rss>
