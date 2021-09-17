@@ -7,6 +7,470 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>Serverless App API with Firebase Functions</title>
+      <author>Mike Talbot</author>
+      <pubDate>Fri, 17 Sep 2021 10:35:05 +0000</pubDate>
+      <link>https://dev.to/miketalbot/serverless-app-api-with-firebase-functions-52b2</link>
+      <guid>https://dev.to/miketalbot/serverless-app-api-with-firebase-functions-52b2</guid>
+      <description>&lt;h2&gt;
+  &lt;a href="#tldr"&gt;
+  &lt;/a&gt;
+  TLDR;
+&lt;/h2&gt;
+
+&lt;p&gt;I'm building a widget to provide fun quizzes, polls and much more within Blog posts on the major platforms.  In previous parts we've covered building out a router for the client side and a data model for the content and reporting.  &lt;/p&gt;
+
+&lt;p&gt;In this part we will look at the API that the widget supports and how that's put together with Firebase Functions.  To avoid this getting over long, we will first look at view tracking and recommendation and then in the next part, we will cover responses.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#motivation"&gt;
+  &lt;/a&gt;
+  Motivation
+&lt;/h2&gt;
+
+&lt;p&gt;I'm building the &lt;strong&gt;interactive&lt;/strong&gt; widget below to act as a way of making posts more interesting for all of us.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#vote-below"&gt;
+  &lt;/a&gt;
+  Vote Below!
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;iframe src="https://codesandbox.io/embed/n4dpo?initialpath=/OjEdoUYaD5l3qgus8Fhlw/embed&amp;amp;runonclick=0"&gt;
+&lt;/iframe&gt;
+&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#requirements"&gt;
+  &lt;/a&gt;
+  Requirements
+&lt;/h2&gt;
+
+&lt;p&gt;I wanted to build a straightforward API for the widget that would do a number of useful things for content creators, like recommending articles that fit with the one they are writing (so theirs will also receive recommendations), providing a mechanism to robustly respond to quizzes and polls and a way of creating some basic gamification with points and achievements.&lt;/p&gt;
+
+&lt;p&gt;&lt;em&gt;Thanks to comments on previous posts I will probably do another version of this in the future using Cloud Run so we can all see the pros and cons.&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;Here's what the API is aiming to support:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Register a view of an article&lt;/li&gt;
+&lt;li&gt;Get a list of recommended articles that match the current one and promote recent content that is popular&lt;/li&gt;
+&lt;li&gt;Flag that a recommended article was clicked&lt;/li&gt;
+&lt;li&gt;Register a response for a quiz, poll or something a plugin developer decides they want&lt;/li&gt;
+&lt;li&gt;Add points and achievements&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;The way we implement these functions will have a significant impact on the cost of running the system as the database charges for every "read" including the reads of items in lists - so it can get expensive quickly&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;h2&gt;
+  &lt;a href="#the-api"&gt;
+  &lt;/a&gt;
+  The API
+&lt;/h2&gt;
+
+&lt;p&gt;Firstly we need to create a file to contain our functions, as this file is going to use Firestore database collections then we also get and initialize that and make a global reference to the &lt;code&gt;db&lt;/code&gt; we can use in our functions:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;functions&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;require&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;firebase-functions&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;admin&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;require&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;firebase-admin&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+&lt;span class="nx"&gt;admin&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;initializeApp&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;db&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;admin&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;firestore&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#view"&gt;
+  &lt;/a&gt;
+  view
+&lt;/h3&gt;
+
+&lt;p&gt;Let's start off with the principle of &lt;code&gt;view&lt;/code&gt;.  We want to be able to record that an article has been seen, we want to ensure that we know the number of unique user views and the total number of views, and for the sake of making recommendations later we also want to record some other factors: the first time the article had a unique viewer and the last time, so we can use these to sort.&lt;/p&gt;
+
+&lt;p&gt;Let's look at that a moment: my current choice of algorithm is to use recency of publishing, recency of a new unique visitor, popularity overall and then a match of the tags in the recommendation versus the tags in the current article.&lt;/p&gt;
+
+&lt;p&gt;We'll see the algorithm in detail next, but in &lt;code&gt;view&lt;/code&gt; we need to create data that helps with this.  I decided that the first and last dates should be rounded into UTC days to provide a level of stability and fairness, so that calculation is a key part of working out view.&lt;/p&gt;
+
+&lt;p&gt;Ok so here it is:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="nx"&gt;exports&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;view&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;functions&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;https&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;onCall&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="nx"&gt;articleId&lt;/span&gt; &lt;span class="p"&gt;},&lt;/span&gt; &lt;span class="nx"&gt;context&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We declare an API function in Firebase Functions like this - exporting it with a name and saying that it is an &lt;code&gt;https.onCall&lt;/code&gt;.  We then get our parameters we pass to the call in an object and a &lt;code&gt;context&lt;/code&gt; that contains information about the caller and other things we might have set.&lt;/p&gt;
+
+&lt;p&gt;I use App Check to ensure that the calls are only coming from valid locations (the website) to avoid someone hacking and sending random data. This also runs a Recaptcha v3 (the one you can't see) and scores each call, if the call passes then the &lt;code&gt;context&lt;/code&gt; has an &lt;code&gt;app&lt;/code&gt; property.  I check that and refuse calls it has rejected.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;context&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;app&lt;/span&gt; &lt;span class="o"&gt;===&lt;/span&gt; &lt;span class="kc"&gt;undefined&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Not validated&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+        &lt;span class="k"&gt;throw&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;functions&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;https&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;HttpsError&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+            &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;failed-precondition&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+            &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;The function must be called from an App Check verified app.&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
+        &lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;I also ensure that we have a user:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="nx"&gt;context&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;auth&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;uid&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;No user&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="kc"&gt;null&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Last time I mentioned that Firestore has some serious limits on record updates (1 per second) and that this means you need to "shard" counters in case you have a bunch happening at once.  I create 20 shards and update counts in these, choosing the shard at random:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;shard&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s2"&gt;`__all__&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nb"&gt;Math&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;floor&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nb"&gt;Math&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;random&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt; &lt;span class="mi"&gt;20&lt;/span&gt;&lt;span class="p"&gt;)}&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The next job is to get the "article" (see the previous part for more information on the data model) and the "counts" record for the article.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;article&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt;
+        &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;collection&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;articles&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;doc&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;articleId&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="kd"&gt;get&lt;/span&gt;&lt;span class="p"&gt;()).&lt;/span&gt;&lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;||&lt;/span&gt; &lt;span class="p"&gt;{}&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;countRef&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;collection&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;counts&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;doc&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;articleId&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;doc&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;countRef&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="kd"&gt;get&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;data&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;doc&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;exists&lt;/span&gt; &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="nx"&gt;doc&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Now we have the existing counts or an empty object, we are going to want to track unique users so the "counts" record has a map of &lt;code&gt;user.uid&lt;/code&gt; to the date that they were new, we initialise that.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;users&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;users&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;users&lt;/span&gt; &lt;span class="o"&gt;||&lt;/span&gt; &lt;span class="p"&gt;{})&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We also work out a value for the current UTC day that we will use for tracking first and last unique user day.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;day&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nb"&gt;Math&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;floor&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nb"&gt;Date&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;now&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;/&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;1000&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt; &lt;span class="mi"&gt;60&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt; &lt;span class="mi"&gt;60&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt; &lt;span class="mi"&gt;24&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;With this in hand, we check if we've ever seen this user before and if we haven't, we start to award points - first if the visitor is not the author, we give the auth some points and a "New Unique Reader" achievement:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="nx"&gt;users&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;context&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;auth&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;uid&lt;/span&gt;&lt;span class="p"&gt;])&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;article&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;author&lt;/span&gt; &lt;span class="o"&gt;!==&lt;/span&gt; &lt;span class="nx"&gt;context&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;auth&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;uid&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;awardPoints&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;article&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;author&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;20&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;New Unique Reader&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+        &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Next we give the reader a bonus set of 50 points if this is a new article for them, and an extra 100 points if this is there first article.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;        &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;awardPoints&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+            &lt;span class="nx"&gt;context&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;auth&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;uid&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+            &lt;span class="mi"&gt;50&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+            &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Read New Article&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+            &lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="nx"&gt;achievements&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+                &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="nx"&gt;achievements&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Read New Article&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;])&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+                    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="mi"&gt;100&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Read First Article&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+                &lt;span class="p"&gt;}&lt;/span&gt;
+            &lt;span class="p"&gt;}&lt;/span&gt;
+        &lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Having awarded points, we update the unique user map so we don't do it again for this article, and then update the unique counts for both the article and the articles tags. Note how we use the "shard" we created earlier here, it's updating one of 20 possible counters we will add together when we want to report on the total number of unique visits to the widget:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;        &lt;span class="nx"&gt;users&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;context&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;auth&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;uid&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nb"&gt;Date&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;now&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+        &lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;uniqueVisits&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;uniqueVisits&lt;/span&gt; &lt;span class="o"&gt;||&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;
+        &lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;lastUniqueVisit&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nb"&gt;Date&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;now&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+        &lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;lastUniqueDay&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;day&lt;/span&gt;
+        &lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;firstUniqueDay&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;firstUniqueDay&lt;/span&gt; &lt;span class="o"&gt;||&lt;/span&gt; &lt;span class="nx"&gt;day&lt;/span&gt;
+        &lt;span class="k"&gt;for&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;tag&lt;/span&gt; &lt;span class="k"&gt;of&lt;/span&gt; &lt;span class="nx"&gt;article&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;processedTags&lt;/span&gt; &lt;span class="o"&gt;||&lt;/span&gt; &lt;span class="p"&gt;[])&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;incrementTag&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;tag&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;uniqueVisits&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+        &lt;span class="p"&gt;}&lt;/span&gt;
+        &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;incrementTag&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;shard&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;uniqueVisits&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Now we've exited the code specific to unique visits, we busy ourselves updating the other counters and award 1 point for viewing an article. Note the use of "shard" again&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;    &lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;visits&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;visits&lt;/span&gt; &lt;span class="o"&gt;||&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;
+    &lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;responses&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;responses&lt;/span&gt; &lt;span class="o"&gt;||&lt;/span&gt; &lt;span class="p"&gt;{}&lt;/span&gt;
+    &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;countRef&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="kd"&gt;set&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;// Save the counts&lt;/span&gt;
+    &lt;span class="k"&gt;for&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;tag&lt;/span&gt; &lt;span class="k"&gt;of&lt;/span&gt; &lt;span class="nx"&gt;article&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;processedTags&lt;/span&gt; &lt;span class="o"&gt;||&lt;/span&gt; &lt;span class="p"&gt;[])&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;incrementTag&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;tag&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;visits&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;incrementTag&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;shard&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;visits&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;awardPoints&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;context&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;auth&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;uid&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Viewed an article&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="kc"&gt;null&lt;/span&gt;
+&lt;span class="p"&gt;})&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#incrementtag"&gt;
+  &lt;/a&gt;
+  incrementTag
+&lt;/h3&gt;
+
+&lt;p&gt;I'm going to leave &lt;code&gt;awardPoints&lt;/code&gt; until next time as it has to deal with cheating, but let's look at the &lt;code&gt;incrementTag&lt;/code&gt; that was used frequently in the &lt;code&gt;view&lt;/code&gt; code.  The idea of this is to make a simple to increment counter with a name.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;incrementTag&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;tag&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;value&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;amount&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;options&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{})&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;tagRef&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;collection&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;tags&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;doc&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;tag&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;tagDoc&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;tagRef&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="kd"&gt;get&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;tagData&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;tagDoc&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;exists&lt;/span&gt;
+        &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="nx"&gt;tagDoc&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+        &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+              &lt;span class="p"&gt;...&lt;/span&gt;&lt;span class="nx"&gt;options&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+              &lt;span class="nx"&gt;tag&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+              &lt;span class="na"&gt;special&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;tag&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;startsWith&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;__&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+              &lt;span class="na"&gt;event&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;tag&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;startsWith&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;__event_&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+          &lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="nx"&gt;tagData&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;value&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;tagData&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;value&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt; &lt;span class="o"&gt;||&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="nx"&gt;amount&lt;/span&gt;
+    &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;tagRef&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="kd"&gt;set&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;tagData&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;It uses the "tags" collection and sets up a couple of useful booleans for &lt;code&gt;special&lt;/code&gt; and &lt;code&gt;event&lt;/code&gt; which helps with finding the right records for reporting.  Otherwise, it's pretty simple, we get a record with the tag name, and increment a named value by a specified amount.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#recommend"&gt;
+  &lt;/a&gt;
+  recommend
+&lt;/h3&gt;
+
+&lt;p&gt;The &lt;code&gt;recommend&lt;/code&gt; function produces a list of articles that should be shown in the widget.  As previously mentioned the algorithm favours newly published content, that is recently popular and matches the tags of the current article (in that order). &lt;/p&gt;
+
+&lt;p&gt;To do this we want to perform as few queries as possible to save cost.  For this reason (and as mentioned in the previous article) we copy data from the article to the "counts" collection records so we don't have to read both the "counts" and the "articles" for each recommendation to do this step.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="nx"&gt;exports&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;recommend&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;functions&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;https&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;onCall&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="nx"&gt;articleId&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;number&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="mi"&gt;10&lt;/span&gt; &lt;span class="p"&gt;},&lt;/span&gt; &lt;span class="nx"&gt;context&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;First we have our parameters, an &lt;code&gt;articleId&lt;/code&gt; for the current article and a number of recommendations to make.&lt;/p&gt;
+
+&lt;p&gt;Next we check that we should be allowing this call:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;        &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;context&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;app&lt;/span&gt; &lt;span class="o"&gt;===&lt;/span&gt; &lt;span class="kc"&gt;undefined&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="k"&gt;throw&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;functions&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;https&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;HttpsError&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+                &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;failed-precondition&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+                &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;The function must be called from an App Check verified app.&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
+            &lt;span class="p"&gt;)&lt;/span&gt;
+        &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Next we lookup the current article so we can get its current tags.  The user enters tags as a comma separated string, but there is a trigger which converts them into a unique array of strings, in lowercase, for this function. We turn the tags into a &lt;code&gt;Set&lt;/code&gt;&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;        &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;articleSnap&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;collection&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;articles&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;doc&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;articleId&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="kd"&gt;get&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+        &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;tags&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;articleSnap&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;exists&lt;/span&gt;
+            &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nb"&gt;Set&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;articleSnap&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;().&lt;/span&gt;&lt;span class="nx"&gt;processedTags&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+            &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nb"&gt;Set&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Next comes the expensive bit.  We run a compound query on the "counts" collection for &lt;code&gt;enabled&lt;/code&gt; articles that are not &lt;code&gt;comment&lt;/code&gt; type and then sort it by the unique days and the number of visits, selecting double the number we will return (so we can post process with tags).&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;        &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;rows&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[]&lt;/span&gt;
+        &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;rowSnap&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;db&lt;/span&gt;
+            &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;collection&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;counts&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+            &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;where&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;enabled&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;==&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+            &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;where&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;comment&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;!=&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+            &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;orderBy&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;comment&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;desc&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+            &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;orderBy&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;firstUniqueDay&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;desc&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+            &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;orderBy&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;lastUniqueDay&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;desc&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+            &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;orderBy&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;visits&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;desc&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+            &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;limit&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;number&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt; &lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+            &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="kd"&gt;get&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Firestore has all kinds of rules - firstly we are going to need an index for a query with a compound sort - next and &lt;strong&gt;important&lt;/strong&gt; is that if we use a &lt;code&gt;!=&lt;/code&gt; we must include that field in the index and the sort!&lt;/p&gt;
+
+&lt;p&gt;The easiest way to deploy Firebase stuff is with the CLI, that has a &lt;code&gt;firebase.json&lt;/code&gt; file that tells it where to find things, mine has a reference to a file containing my Firestore indexes.  Here is the contents of that file, which enables the above query:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight json"&gt;&lt;code&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+  &lt;/span&gt;&lt;span class="nl"&gt;"indexes"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[{&lt;/span&gt;&lt;span class="w"&gt;
+      &lt;/span&gt;&lt;span class="nl"&gt;"collectionGroup"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"counts"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+      &lt;/span&gt;&lt;span class="nl"&gt;"queryScope"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"COLLECTION"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+      &lt;/span&gt;&lt;span class="nl"&gt;"fields"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nl"&gt;"fieldPath"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"enabled"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nl"&gt;"order"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"DESCENDING"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;},&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nl"&gt;"fieldPath"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"comment"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nl"&gt;"order"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"DESCENDING"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;},&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nl"&gt;"fieldPath"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"firstUniqueDay"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nl"&gt;"order"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"DESCENDING"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;},&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nl"&gt;"fieldPath"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"lastUniqueDay"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nl"&gt;"order"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"DESCENDING"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;},&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nl"&gt;"fieldPath"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"visits"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nl"&gt;"order"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"DESCENDING"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+      &lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="p"&gt;}],&lt;/span&gt;&lt;span class="w"&gt;
+  &lt;/span&gt;&lt;span class="nl"&gt;"fieldOverrides"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[]&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This says make an index on the specified fields for the "counts" collection.&lt;/p&gt;
+
+&lt;p&gt;With that index and the query above we now have &lt;code&gt;rowSnap&lt;/code&gt; as a collection of records that matched.  We use that to add a &lt;code&gt;score&lt;/code&gt; for each matching tag in the new article, versus the one that is being viewed.  We sort by this &lt;code&gt;score&lt;/code&gt; and then return the requested number of article ids that will be rendered as recommendations in the widget.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;        &lt;span class="nx"&gt;rowSnap&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;forEach&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;row&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;record&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;row&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+            &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;row&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;id&lt;/span&gt; &lt;span class="o"&gt;===&lt;/span&gt; &lt;span class="nx"&gt;articleId&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="k"&gt;return&lt;/span&gt;
+            &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;score&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;record&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;processedTags&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;reduce&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+                &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;c&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;tags&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;has&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;c&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="nx"&gt;a&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt; &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+                &lt;span class="mi"&gt;0&lt;/span&gt;
+            &lt;span class="p"&gt;)&lt;/span&gt;
+            &lt;span class="nx"&gt;rows&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;push&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="na"&gt;id&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;row&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;id&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;score&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt;
+        &lt;span class="p"&gt;})&lt;/span&gt;
+        &lt;span class="nx"&gt;rows&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;sort&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;b&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;b&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;score&lt;/span&gt; &lt;span class="o"&gt;-&lt;/span&gt; &lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;score&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;rows&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;slice&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;number&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;map&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;r&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;r&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;id&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#wasclicked"&gt;
+  &lt;/a&gt;
+  wasClicked
+&lt;/h3&gt;
+
+&lt;p&gt;If an article is clicked in the widget we just record that fact in the "counts" collection for the article.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="nx"&gt;exports&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;wasClicked&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;functions&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;https&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;onCall&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="nx"&gt;articleId&lt;/span&gt; &lt;span class="p"&gt;},&lt;/span&gt; &lt;span class="nx"&gt;context&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;context&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;app&lt;/span&gt; &lt;span class="o"&gt;===&lt;/span&gt; &lt;span class="kc"&gt;undefined&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="k"&gt;throw&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;functions&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;https&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;HttpsError&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+            &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;failed-precondition&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+            &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;The function must be called from an App Check verified app.&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
+        &lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;countRef&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;collection&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;counts&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;doc&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;articleId&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;doc&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;countRef&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="kd"&gt;get&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;data&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;doc&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;exists&lt;/span&gt; &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="nx"&gt;doc&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{}&lt;/span&gt;
+    &lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;clicks&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;clicks&lt;/span&gt; &lt;span class="o"&gt;||&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;
+    &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;countRef&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="kd"&gt;set&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="p"&gt;})&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#deploying"&gt;
+  &lt;/a&gt;
+  Deploying
+&lt;/h2&gt;
+
+&lt;p&gt;Once we've built this file, using the Firebase CLI you just type &lt;code&gt;firebase deploy&lt;/code&gt; and it sends the whole lot to the cloud.  You can make adjustments for "where" functions will live, by default it is "us-central-1" and I've left mine there.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#conclusion"&gt;
+  &lt;/a&gt;
+  Conclusion
+&lt;/h2&gt;
+
+&lt;p&gt;In this part we've seen how to make sharded counters and API calls using Firebase functions, we've also covered the principles of article recommendations and the need for indexes in Firestore if you use more complicated queries.  Next time we'll cover scoring and achievements.&lt;/p&gt;
+
+</description>
+      <category>webdev</category>
+      <category>javascript</category>
+      <category>serverless</category>
+      <category>programming</category>
+    </item>
+    <item>
       <title>You MUST stop doing this now, really!</title>
       <author>Keff</author>
       <pubDate>Fri, 17 Sep 2021 10:19:30 +0000</pubDate>
@@ -51,6 +515,244 @@
 </description>
       <category>rant</category>
       <category>watercooler</category>
+    </item>
+    <item>
+      <title>PyTest With GitHub Actions</title>
+      <author>Dennis O'Keeffe</author>
+      <pubDate>Fri, 17 Sep 2021 10:15:11 +0000</pubDate>
+      <link>https://dev.to/okeeffed/pytest-with-github-actions-74o</link>
+      <guid>https://dev.to/okeeffed/pytest-with-github-actions-74o</guid>
+      <description>&lt;p&gt;&lt;em&gt;&lt;strong&gt;I write content for AWS, Kubernetes, Python, JavaScript and more. To view all the latest content, be sure to &lt;a href="https://blog.dennisokeeffe.com"&gt;visit my blog&lt;/a&gt; and subscribe to my newsletter. &lt;a href="https://twitter.com/dennisokeeffe92"&gt;Follow me on Twitter&lt;/a&gt;.&lt;/strong&gt;&lt;/em&gt;&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;This is Day 20 of the #100DaysOfPython challenge.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;This post will build off previous work done in the &lt;a href="https://blog.dennisokeeffe.com/blog/2021-07-26-python-unit-testing-with-pytest"&gt;Python Unit Testing With PyTest&lt;/a&gt; post to add a &lt;a href="https://docs.github.com/en/actions"&gt;GitHub Action&lt;/a&gt; for running test runner jobs on a push event to the repo.&lt;/p&gt;
+
+&lt;p&gt;The final project code can be found on my &lt;a href="https://github.com/okeeffed/hello-pytest-github-actions"&gt;GitHub repo&lt;/a&gt;.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#prerequisites"&gt;
+  &lt;/a&gt;
+  Prerequisites
+&lt;/h2&gt;
+
+&lt;ol&gt;
+&lt;li&gt;Familiarity with &lt;a href="https://pipenv.pypa.io/en/latest/"&gt;Pipenv&lt;/a&gt;. See &lt;a href="https://blog.dennisokeeffe.com/blog/2020-07-04-abcs-of-pipenv"&gt;here&lt;/a&gt; for my post on Pipenv.&lt;/li&gt;
+&lt;li&gt;Read &lt;a href="https://blog.dennisokeeffe.com/blog/2021-07-26-python-unit-testing-with-pytest"&gt;Python Unit Testing With PyTest&lt;/a&gt; if you are unfamiliar with Python.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;h2&gt;
+  &lt;a href="#getting-started"&gt;
+  &lt;/a&gt;
+  Getting started
+&lt;/h2&gt;
+
+&lt;p&gt;Let's clone the original PyTest repo in &lt;code&gt;hello-pytest-github-actions&lt;/code&gt;.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight r"&gt;&lt;code&gt;&lt;span class="o"&gt;$&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;git&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;clone&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;https&lt;/span&gt;&lt;span class="o"&gt;://&lt;/span&gt;&lt;span class="n"&gt;github.com&lt;/span&gt;&lt;span class="o"&gt;/&lt;/span&gt;&lt;span class="n"&gt;okeeffed&lt;/span&gt;&lt;span class="o"&gt;/&lt;/span&gt;&lt;span class="n"&gt;hello&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="n"&gt;pytest.git&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;hello&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="n"&gt;pytest&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="n"&gt;github&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="n"&gt;actions&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="o"&gt;$&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;cd&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;hello&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="n"&gt;pytest&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="n"&gt;github&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="n"&gt;actions&lt;/span&gt;&lt;span class="w"&gt;
+
+&lt;/span&gt;&lt;span class="c1"&gt;# Install the deps&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="o"&gt;$&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;pipenv&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;install&lt;/span&gt;&lt;span class="w"&gt;
+
+&lt;/span&gt;&lt;span class="c1"&gt;# Prepare the file for the GitHub action&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="o"&gt;$&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;mkdir&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="n"&gt;p&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;.github&lt;/span&gt;&lt;span class="o"&gt;/&lt;/span&gt;&lt;span class="n"&gt;workflows&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="o"&gt;$&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;touch&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;.github&lt;/span&gt;&lt;span class="o"&gt;/&lt;/span&gt;&lt;span class="n"&gt;workflows&lt;/span&gt;&lt;span class="o"&gt;/&lt;/span&gt;&lt;span class="n"&gt;pytest.yml&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;At this stage, we can test that our repo is working correctly with PyTest locally:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight r"&gt;&lt;code&gt;&lt;span class="o"&gt;$&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;pipenv&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;run&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;pytest&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="o"&gt;==============================&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;test&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;session&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;starts&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;==============================&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="n"&gt;platform&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;darwin&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;--&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Python&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="m"&gt;3.9.6&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;pytest&lt;/span&gt;&lt;span class="m"&gt;-6.2.4&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;py&lt;/span&gt;&lt;span class="m"&gt;-1.10.0&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;pluggy&lt;/span&gt;&lt;span class="m"&gt;-0.13.1&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="n"&gt;rootdir&lt;/span&gt;&lt;span class="o"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;/&lt;/span&gt;&lt;span class="n"&gt;path&lt;/span&gt;&lt;span class="o"&gt;/&lt;/span&gt;&lt;span class="n"&gt;to&lt;/span&gt;&lt;span class="o"&gt;/&lt;/span&gt;&lt;span class="n"&gt;code&lt;/span&gt;&lt;span class="o"&gt;/&lt;/span&gt;&lt;span class="n"&gt;blog&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="n"&gt;projects&lt;/span&gt;&lt;span class="o"&gt;/&lt;/span&gt;&lt;span class="n"&gt;hello&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="n"&gt;pytest&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="n"&gt;collected&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="m"&gt;3&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;items&lt;/span&gt;&lt;span class="w"&gt;
+
+&lt;/span&gt;&lt;span class="n"&gt;tests&lt;/span&gt;&lt;span class="o"&gt;/&lt;/span&gt;&lt;span class="n"&gt;test_math.py&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;...&lt;/span&gt;&lt;span class="w"&gt;                                                    &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="m"&gt;100&lt;/span&gt;&lt;span class="o"&gt;%&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="w"&gt;
+
+&lt;/span&gt;&lt;span class="o"&gt;===============================&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="m"&gt;3&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;passed&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;in&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="m"&gt;0.01&lt;/span&gt;&lt;span class="n"&gt;s&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;===============================&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;At this stage, we are ready to set things up for our GitHub action!&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#adding-the-test-script"&gt;
+  &lt;/a&gt;
+  Adding the test script
+&lt;/h2&gt;
+
+&lt;p&gt;In of the &lt;code&gt;Pipfile&lt;/code&gt;, we want to add a &lt;code&gt;[scripts]&lt;/code&gt; section to add a &lt;code&gt;test&lt;/code&gt; script:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight r"&gt;&lt;code&gt;&lt;span class="p"&gt;[[&lt;/span&gt;&lt;span class="n"&gt;source&lt;/span&gt;&lt;span class="p"&gt;]]&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="n"&gt;url&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"https://pypi.org/simple"&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="n"&gt;verify_ssl&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;true&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="n"&gt;name&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"pypi"&lt;/span&gt;&lt;span class="w"&gt;
+
+&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;packages&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="w"&gt;
+
+&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;dev&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="n"&gt;packages&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="n"&gt;pytest&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"*"&lt;/span&gt;&lt;span class="w"&gt;
+
+&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;requires&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="n"&gt;python_version&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"3.9"&lt;/span&gt;&lt;span class="w"&gt;
+
+&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;scripts&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="n"&gt;test&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"pytest"&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;That &lt;code&gt;test&lt;/code&gt; script will simply call &lt;code&gt;pytest&lt;/code&gt;. We will use this script within our GitHub action.&lt;/p&gt;
+
+&lt;p&gt;In order to also prepare our GitHub action to give us more vebose information, we will also be passing a &lt;code&gt;-v&lt;/code&gt; flag to our call to &lt;code&gt;pytest&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;We can test things are working as expected by running &lt;code&gt;pipenv run test -v&lt;/code&gt; from our terminal:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight r"&gt;&lt;code&gt;&lt;span class="o"&gt;$&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;pipenv&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;run&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;test&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="n"&gt;v&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="o"&gt;==========================&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;test&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;session&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;starts&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;===========================&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="n"&gt;platform&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;darwin&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;--&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Python&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="m"&gt;3.9.6&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;pytest&lt;/span&gt;&lt;span class="m"&gt;-6.2.4&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;py&lt;/span&gt;&lt;span class="m"&gt;-1.10.0&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;pluggy&lt;/span&gt;&lt;span class="m"&gt;-0.13.1&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;--&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;/&lt;/span&gt;&lt;span class="n"&gt;Users&lt;/span&gt;&lt;span class="o"&gt;/&lt;/span&gt;&lt;span class="n"&gt;dennisokeeffe&lt;/span&gt;&lt;span class="o"&gt;/&lt;/span&gt;&lt;span class="n"&gt;code&lt;/span&gt;&lt;span class="o"&gt;/&lt;/span&gt;&lt;span class="n"&gt;blog&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="n"&gt;projects&lt;/span&gt;&lt;span class="o"&gt;/&lt;/span&gt;&lt;span class="n"&gt;hello&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="n"&gt;pytest&lt;/span&gt;&lt;span class="o"&gt;/&lt;/span&gt;&lt;span class="n"&gt;.venv&lt;/span&gt;&lt;span class="o"&gt;/&lt;/span&gt;&lt;span class="n"&gt;bin&lt;/span&gt;&lt;span class="o"&gt;/&lt;/span&gt;&lt;span class="n"&gt;python&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="n"&gt;cachedir&lt;/span&gt;&lt;span class="o"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;.pytest_cache&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="n"&gt;rootdir&lt;/span&gt;&lt;span class="o"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;/&lt;/span&gt;&lt;span class="n"&gt;Users&lt;/span&gt;&lt;span class="o"&gt;/&lt;/span&gt;&lt;span class="n"&gt;dennisokeeffe&lt;/span&gt;&lt;span class="o"&gt;/&lt;/span&gt;&lt;span class="n"&gt;code&lt;/span&gt;&lt;span class="o"&gt;/&lt;/span&gt;&lt;span class="n"&gt;blog&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="n"&gt;projects&lt;/span&gt;&lt;span class="o"&gt;/&lt;/span&gt;&lt;span class="n"&gt;hello&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="n"&gt;pytest&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="n"&gt;github&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="n"&gt;actions&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="n"&gt;collected&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="m"&gt;3&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;items&lt;/span&gt;&lt;span class="w"&gt;
+
+&lt;/span&gt;&lt;span class="n"&gt;tests&lt;/span&gt;&lt;span class="o"&gt;/&lt;/span&gt;&lt;span class="n"&gt;test_math.py&lt;/span&gt;&lt;span class="o"&gt;::&lt;/span&gt;&lt;span class="n"&gt;test_add&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;PASSED&lt;/span&gt;&lt;span class="w"&gt;                                &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="m"&gt;33&lt;/span&gt;&lt;span class="o"&gt;%]
+tests/test_math.py::test_subtract PASSED                           [ 66%&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="n"&gt;tests&lt;/span&gt;&lt;span class="o"&gt;/&lt;/span&gt;&lt;span class="n"&gt;test_math.py&lt;/span&gt;&lt;span class="o"&gt;::&lt;/span&gt;&lt;span class="n"&gt;test_multiply&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;PASSED&lt;/span&gt;&lt;span class="w"&gt;                           &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="m"&gt;100&lt;/span&gt;&lt;span class="o"&gt;%&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="w"&gt;
+
+&lt;/span&gt;&lt;span class="o"&gt;===========================&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="m"&gt;3&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;passed&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;in&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="m"&gt;0.02&lt;/span&gt;&lt;span class="n"&gt;s&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;============================&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The verbose flag gives us more information about which test ran and passed. This can be helpful for debugging in CI.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#adding-the-github-action"&gt;
+  &lt;/a&gt;
+  Adding the GitHub action
+&lt;/h2&gt;
+
+&lt;p&gt;We are now ready to add the GitHub action. Within the &lt;code&gt;.github/workflows/pytest.yml&lt;/code&gt; file that we created earlier, add the following:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="c1"&gt;# .github/workflows/app.yaml&lt;/span&gt;
+&lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;PyTest&lt;/span&gt;
+&lt;span class="na"&gt;on&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;push&lt;/span&gt;
+
+&lt;span class="na"&gt;jobs&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;test&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;runs-on&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;ubuntu-latest&lt;/span&gt;
+    &lt;span class="na"&gt;timeout-minutes&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;10&lt;/span&gt;
+
+    &lt;span class="na"&gt;steps&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Check out repository code&lt;/span&gt;
+        &lt;span class="na"&gt;uses&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;actions/checkout@v2&lt;/span&gt;
+
+      &lt;span class="c1"&gt;# Setup Python (faster than using Python container)&lt;/span&gt;
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Setup Python&lt;/span&gt;
+        &lt;span class="na"&gt;uses&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;actions/setup-python@v2&lt;/span&gt;
+        &lt;span class="na"&gt;with&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+          &lt;span class="na"&gt;python-version&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;3.x"&lt;/span&gt;
+
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Install pipenv&lt;/span&gt;
+        &lt;span class="na"&gt;run&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="pi"&gt;|&lt;/span&gt;
+          &lt;span class="s"&gt;python -m pip install --upgrade pipenv wheel&lt;/span&gt;
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;id&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;cache-pipenv&lt;/span&gt;
+        &lt;span class="na"&gt;uses&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;actions/cache@v1&lt;/span&gt;
+        &lt;span class="na"&gt;with&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+          &lt;span class="na"&gt;path&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;~/.local/share/virtualenvs&lt;/span&gt;
+          &lt;span class="na"&gt;key&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ runner.os }}-pipenv-${{ hashFiles('**/Pipfile.lock') }}&lt;/span&gt;
+
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Install dependencies&lt;/span&gt;
+        &lt;span class="na"&gt;if&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;steps.cache-pipenv.outputs.cache-hit != 'true'&lt;/span&gt;
+        &lt;span class="na"&gt;run&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="pi"&gt;|&lt;/span&gt;
+          &lt;span class="s"&gt;pipenv install --deploy --dev&lt;/span&gt;
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Run test suite&lt;/span&gt;
+        &lt;span class="na"&gt;run&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="pi"&gt;|&lt;/span&gt;
+          &lt;span class="s"&gt;pipenv run test -v&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Here we are doing a couple of things:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;Creating a job call &lt;code&gt;PyTest&lt;/code&gt;.&lt;/li&gt;
+&lt;li&gt;Running this job on a &lt;code&gt;push&lt;/code&gt; event to the repository.&lt;/li&gt;
+&lt;li&gt;Running the job on &lt;code&gt;ubuntu-latest&lt;/code&gt;.&lt;/li&gt;
+&lt;li&gt;Setting a custom timeout of 10 minutes (albeit this is overkill, feel free to omit).&lt;/li&gt;
+&lt;li&gt;Setting up the Python environment for the latest in version &lt;code&gt;3.x&lt;/code&gt;.&lt;/li&gt;
+&lt;li&gt;Install &lt;code&gt;pipenv&lt;/code&gt; and &lt;code&gt;wheel&lt;/code&gt;.&lt;/li&gt;
+&lt;li&gt;Install dependencies with a cache set to be the hash of the lockfile.&lt;/li&gt;
+&lt;li&gt;Running the test suite that we setup the command and tested before.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;That is all that we need for this repo to be working!&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;Be sure at this stage that you have set up your own origin remote for the repo.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;At this stage, all we need to do is commit the code and push the repo and the job will be available under the actions tab in the GitHub UI.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--aoJZp4I4--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.dennisokeeffe.com/assets/2021-08-08-pytest-with-github-actions/1-pytest-github-action-complete.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--aoJZp4I4--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.dennisokeeffe.com/assets/2021-08-08-pytest-with-github-actions/1-pytest-github-action-complete.png" alt="Action working as expected"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#summary"&gt;
+  &lt;/a&gt;
+  Summary
+&lt;/h2&gt;
+
+&lt;p&gt;Today's post demonstrated how to use GitHub actions to test Python code on a push to the remote repository. We used the &lt;code&gt;pytest&lt;/code&gt; testing framework to test our code.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#resources-and-further-reading"&gt;
+  &lt;/a&gt;
+  Resources and further reading
+&lt;/h2&gt;
+
+&lt;ol&gt;
+&lt;li&gt;&lt;a href="https://blog.dennisokeeffe.com/blog/2020-07-04-abcs-of-pipenv"&gt;The ABCs of Pipenv&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://pipenv.pypa.io/en/latest/"&gt;Pipenv&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://docs.github.com/en/actions"&gt;GitHub Actions&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://docs.github.com/en/actions/guides/building-and-testing-python"&gt;Creating a Python GitHub Action&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://github.com/okeeffed/hello-pytest-github-actions"&gt;Final project&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://blog.dennisokeeffe.com/blog/2021-07-26-python-unit-testing-with-pytest"&gt;Python Unit Testing With PyTest&lt;/a&gt;&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;&lt;em&gt;Photo credit: &lt;a href="https://unsplash.com/@amseaman"&gt;&lt;code&gt;amseaman&lt;/code&gt;&lt;/a&gt;&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;em&gt;Originally posted on my &lt;a href="https://blog.dennisokeeffe.com/blog/2021-08-08-pytest-with-github-actions"&gt;blog&lt;/a&gt;. To see new posts without delay, read the posts there and subscribe to my newsletter.&lt;/em&gt;&lt;/p&gt;
+
+</description>
+      <category>beginners</category>
+      <category>python</category>
+      <category>100daysofpython</category>
     </item>
     <item>
       <title>SQL Select with IN clause from list with JPA</title>
@@ -137,6 +839,172 @@
       <category>jpa</category>
       <category>codever</category>
       <category>snippets</category>
+    </item>
+    <item>
+      <title>Tech-Philosophy - The day of a software developer</title>
+      <author>joaofelipefaria</author>
+      <pubDate>Fri, 17 Sep 2021 09:46:24 +0000</pubDate>
+      <link>https://dev.to/joaofelipefaria/tech-philosophy-the-day-of-a-software-developer-2hhf</link>
+      <guid>https://dev.to/joaofelipefaria/tech-philosophy-the-day-of-a-software-developer-2hhf</guid>
+      <description>&lt;p&gt;Did you ever wonder what a Software Developer does on his day? You wonder what your friend sitting in front of a computer has to do? What is this incomprehensible text they are writing? Or what will be my day by day routine in my future career? For what they pay these people?&lt;/p&gt;
+
+&lt;p&gt;I have been doing that for my last 20 years and coding a little longer than that. And will try to generically tell you my routine.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#remarks"&gt;
+  &lt;/a&gt;
+  REMARKS:
+&lt;/h1&gt;
+
+&lt;p&gt;The pandemic times in which this article is being written, and the geographical and technological differences between projects, of course have a big impact on the routine, I will try to abstract it as much as possible.&lt;/p&gt;
+
+&lt;p&gt;I am now a Java/Angular fullstack developer, in one of the biggest assurance companies in the world, based in Luxembourg/EU. And I am mostly a JAVA/SOA/BPM/FRONT-END developer, and sorry for the selfishness I am mostly talking about my routine here! That may be different if you are a tester, manager, or DB administrator, for instance.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#working-hours"&gt;
+  &lt;/a&gt;
+  Working Hours:
+&lt;/h1&gt;
+
+&lt;p&gt;8 hours by day from Monday to Friday, 40h/week. That's called full-time, some slight variations might happen, some abusive contracts might happen, some extra hours never paid might happen, but luckily 40 hours a week have been my full period. &lt;br&gt;
+Sometimes I had worked on a bunch of projects, managing my own time, that's a totally different case. And sometimes I've worked half-period (4 hours).&lt;/p&gt;
+
+&lt;p&gt;When working on projects and in big companies, I have meetings with other people. Yes, I have contact with people, directly, not through the computer, a few times a day. And yes, pandemic time changes that a lot. Those meetings require me to be in the office at specific hours. Mostly between 09 in the morning and 17 afternoon I must be in the office, or "online and available" when working from home (WFH).&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#what-do-i-do"&gt;
+  &lt;/a&gt;
+  What do I do?:
+&lt;/h1&gt;
+
+&lt;p&gt;A software developer doesn't code full time non stop, taking only a few pauses for basic human needs and a lot of pauses for coffee. NO! At least 30% of the productive time (in front of the computer, working) happens in management tasks. And I would say that the more senior I am , the less time I spend "typing code". First because I might solve the problems in a more cirurgical way and be more productive to build boilerplate code. But also because I might accumulate some other tasks that I will share with you below.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#start-the-day"&gt;
+  &lt;/a&gt;
+  Start the day:
+&lt;/h1&gt;
+
+&lt;p&gt;Waking up 3 minutes ago, being now in my notebook with a cup of coffee or Arriving in the office after two hours by bus.&lt;br&gt;
+Some offices I worked had their own ritual when arriving, like saying hello to each one (or each one of your team), or even having some breakfast available.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#update-myself"&gt;
+  &lt;/a&gt;
+  Update myself:
+&lt;/h1&gt;
+
+&lt;p&gt;I start my day updating myself about company and project information. &lt;/p&gt;
+
+&lt;p&gt;That is mostly done in your mail box first and then in your task managing tool (JIRA, for instance). In the first one you will notice, for instance, some possible contract changes, or if there will be some fire training that day, or if everything really blew up (like the alerts of the pandemic period in 2019 and beginning of 2020). Then warming up to code, you check your tasks that day, that happens mostly in your task manager tool, JIRA, it's the most used today.&lt;/p&gt;
+
+&lt;p&gt;At the end of the previous day, I made a TODO list for tomorrow. That eases a lot of planning myself in the morning. So now I am just reviewing my JIRA to check if nothing has changed. So after that, I might say I am "working on a specific ticket", that means a specific requirement that was opened in my task management tool, in JIRA case, it's a ticket.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#letz-work"&gt;
+  &lt;/a&gt;
+  Let'z Work:
+&lt;/h1&gt;
+
+&lt;p&gt;Also working on the ticket is not just about code. I always have to do some environmental work. In fact, in most companies, in the first days I was mostly installing and testing the local environment that I will work in. That will consist, in most cases, AT LEAST of an IDE. But I might also have a database (client and/or the DBMS itself), application servers, containers, VPNs, and many other utilities that might really complicate my life.&lt;br&gt;
+TIP: It's always wise to keep track if you are spending more than 20% of your productive time worrying about the environment that might affect your productivity.&lt;/p&gt;
+
+&lt;p&gt;With the environment all set we grab a cup of coffee, and code. That's where the magic happens!&lt;/p&gt;
+
+&lt;p&gt;When we copy incomprehensible code from stack-overflow and things magically work.&lt;br&gt;
+NOOO! I am just kidding here. Although some might really do that.&lt;/p&gt;
+
+&lt;p&gt;Most of the time I spend really good time analyzing the code. Looking at the IDE going through uncountable files to find where the problem, or the development to be done, really might be placed.&lt;/p&gt;
+
+&lt;p&gt;After that I also might need to debug something. That means, with a sometimes complex environment already in place and running, I execute the code where I think the problem is placed, and then, in some controlled way, I can get information about the code's execution. The debugging might happen with the help of a friendly IDE or with console outputs and log files, the easier will sometimes not be available, I am sorry to tell you that.&lt;/p&gt;
+
+&lt;p&gt;When debugging points me where to do, I might not know yet the answer for what to do. And that's where communities like stack-overflow help all programmers so much!&lt;br&gt;
+TIP: But you should always understand the code you are trying to copy and paste, and adapt it to the standards of the project you are working on. Or you will have a Senior developer angry with you.&lt;/p&gt;
+
+&lt;p&gt;Then I code a little bit! Honestly here, I have the impression that the more senior I am the less code you are writing. I had so many tasks that took 2 days to find out a couple of lines of code that solved the problem. Also it happens that the code might not work in the first try. So I will go through the cycle of analysing, debugging, researching, and coding a few times. Untill, voila: "My bug is solved." or "The new screen is created" or "I did whatever my manager told me to do and I will get a raise, or not get fired".&lt;/p&gt;
+
+&lt;p&gt;Let me get my things and go home. NOOO!!! First I have a full period to do, that's painful sometimes. Second, the work about this demand is not done.&lt;/p&gt;
+
+&lt;p&gt;Yet about this ticket I go to the delivery/release activities. That might really take some time also. And if more than 20%, also not good. &lt;/p&gt;
+
+&lt;p&gt;At this point you have to AT LEAST commit your code in some source-code control tool, the mostly used nowadays are based on GIT or SVN. But the release of your code might need more complex tasks about the GIT (or SVN) like branching, merging, creating pull requests. And that might really go crazy, taking a lot of my time.&lt;br&gt;
+And in some places there might be some code review that happens, where some of my colleagues might have to review and approve my code. Then I might have tasks associated with the delivery process (nowadays called DevOps) that might be related to creating or following deployment pipelines or even testing the code after deployment.&lt;/p&gt;
+
+&lt;p&gt;Then the technical part is done, my code is "attached" to the system. But I still have to make my manager aware that this is done. That is mostly done at scrum, and I am using JIRA today. So I go there, put some comments about what was developed and change the status of my ticket to done, to be tested, or delivered, or to be approved, or whatever the process of development requires.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#other-tasks"&gt;
+  &lt;/a&gt;
+  Other Tasks
+&lt;/h1&gt;
+
+&lt;p&gt;Some other "non official tasks" might happen during the day. And I try to always have an eye on them to participate. These tasks are not directly related to the tasks I have assigned to me in JIRA but they have 2 important points. They help the company for what I am working for, therefore giving me some visibility. They help other people to work better, it's always good to help others and sharing knowledge is a great opportunity for learning.&lt;/p&gt;
+
+&lt;p&gt;Tasks like:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;helping a colleague with a technical doubt in a subject that I master;&lt;/li&gt;
+&lt;li&gt;helping the production team to find out the reason of production problems (that, if happens, will have first priority always).&lt;/li&gt;
+&lt;li&gt;help the support areas lihe HR or marketing in technical knowledge for campaigns, product specification, or for describing technical job roles.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h1&gt;
+  &lt;a href="#socializing"&gt;
+  &lt;/a&gt;
+  Socializing
+&lt;/h1&gt;
+
+&lt;p&gt;Indeed it's not just about bits and bytes. So there are people involved also in some parts of a routine of a software developer.&lt;/p&gt;
+
+&lt;p&gt;When in the office it's common to have a few minutes socializing with other people close to the coffee machine. Nowadays I live far away from my home-land, with a lot of new languages to learn, so I always go with some conversation about the weather. :)&lt;/p&gt;
+
+&lt;p&gt;I always try to use opportunities like hall encounters or door or elevator lines to talk with others, instead of getting down to my phone or closed inside myself.&lt;/p&gt;
+
+&lt;p&gt;I believe personal sharing and friendship are a great help in the office and the team environment. I always think it is easier to work with someone I have a friendly relationship with. It's sometimes tricky to manage the professional/personal barrier, but that's a point for another talk.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#technical-terms-and-links"&gt;
+  &lt;/a&gt;
+  Technical terms and links
+&lt;/h1&gt;
+
+&lt;p&gt;If you don't know some of the technical terms or tools mentioned here you can follow the links bellow:&lt;br&gt;
+&lt;a href="https://www.atlassian.com/software/jira"&gt;JIRA&lt;/a&gt;&lt;br&gt;
+&lt;a href="https://git-scm.com/"&gt;GIT&lt;/a&gt;&lt;br&gt;
+&lt;a href="https://subversion.apache.org/"&gt;SVN&lt;/a&gt;&lt;br&gt;
+&lt;a href="https://www.scrum.org/"&gt;SCRUM&lt;/a&gt;&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#finish-the-day"&gt;
+  &lt;/a&gt;
+  Finish the day
+&lt;/h1&gt;
+
+&lt;p&gt;After a ticket or a task is done, I move to the next one, and then to the next one, and that's my day. Untill the end of my 8 hours period. &lt;/p&gt;
+
+&lt;p&gt;At the end of the day I do some closure tasks:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;TO DO list for tomorrow;&lt;/li&gt;
+&lt;li&gt;Review weekly or even monthly targets;&lt;/li&gt;
+&lt;li&gt;I might write a diary of the day or something like that, if I feel like I am working on many different projects. That was useful many times in my past experiences.&lt;/li&gt;
+&lt;li&gt;Grab a last coffee :)&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h1&gt;
+  &lt;a href="#rest-rest-representational-state-transfer"&gt;
+  &lt;/a&gt;
+  Rest, Rest? REpresentational State Transfer?
+&lt;/h1&gt;
+
+&lt;p&gt;Then, after 8 hours of all that I can finally rest.&lt;br&gt;
+I rest for one hour because I now have a half-period (4 hour) job at night, but don't do that folks! It's too much.&lt;br&gt;
+&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--IF6Aw--G--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/tgeer6vir514igzhl89u.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--IF6Aw--G--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/tgeer6vir514igzhl89u.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
+
+</description>
+      <category>techtalks</category>
+      <category>java</category>
+      <category>career</category>
     </item>
     <item>
       <title>Coding is a Craft</title>
@@ -795,433 +1663,6 @@ python&lt;br&gt;
       <category>google</category>
       <category>foobar</category>
       <category>python</category>
-    </item>
-    <item>
-      <title>Ecommerce and Next.js on the Jamstack — with Colby Fayock</title>
-      <author>Salma Alam-Naylor</author>
-      <pubDate>Fri, 17 Sep 2021 07:47:04 +0000</pubDate>
-      <link>https://dev.to/whitep4nth3r/ecommerce-and-next-js-on-the-jamstack-with-colby-fayock-5bbb</link>
-      <guid>https://dev.to/whitep4nth3r/ecommerce-and-next-js-on-the-jamstack-with-colby-fayock-5bbb</guid>
-      <description>&lt;p&gt;I sat down with &lt;a href="https://twitter.com/colbyfayock"&gt;Colby Fayock&lt;/a&gt; to talk about &lt;a href="https://nextjs.org/docs"&gt;Next.js&lt;/a&gt;, how all of its features help enable developers to build great experiences on the web, and how it can help solve the many challenges of building e-commerce sites on the Jamstack.&lt;/p&gt;
-
-&lt;p&gt;In this video, we cover:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;What is Next.js?&lt;/li&gt;
-&lt;li&gt;Is Next.js a static site generator?&lt;/li&gt;
-&lt;li&gt;What does server-side rendering mean?&lt;/li&gt;
-&lt;li&gt;What makes Next.js a strong framework?&lt;/li&gt;
-&lt;li&gt;What are some e-commerce challenges that Next.js helps to solve?&lt;/li&gt;
-&lt;li&gt;How is performance important to e-commerce?&lt;/li&gt;
-&lt;li&gt;How does Next.js help with performance?&lt;/li&gt;
-&lt;li&gt;How is SEO important to e-commerce?&lt;/li&gt;
-&lt;li&gt;How does Next.js help with SEO?&lt;/li&gt;
-&lt;li&gt;What's the most overlooked, yet oddly difficult part of e-commerce?&lt;/li&gt;
-&lt;li&gt;Accessibility, internationalisation and personalisation in e-commerce&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;Colby is a super-nice host and I can't wait to hang out with him again. Thanks for having me, Colby!&lt;/p&gt;
-
-&lt;p&gt;&lt;iframe width="710" height="399" src="https://www.youtube.com/embed/GyXyygeC2RE"&gt;
-&lt;/iframe&gt;
-&lt;/p&gt;
-
-
-&lt;div class="ltag__user ltag__user__id__186511"&gt;
-  
-    .ltag__user__id__186511 .follow-action-button {
-      background-color: #692ba8 !important;
-      color: #ffffff !important;
-      border-color: #692ba8 !important;
-    }
-  
-    &lt;a href="/colbyfayock" class="ltag__user__link profile-image-link"&gt;
-      &lt;div class="ltag__user__pic"&gt;
-        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--xlv1dTkX--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://res.cloudinary.com/practicaldev/image/fetch/s--VO7FWp_z--/c_fill%2Cf_auto%2Cfl_progressive%2Ch_150%2Cq_auto%2Cw_150/https://dev-to-uploads.s3.amazonaws.com/uploads/user/profile_image/186511/c8cb9a0a-e3bb-4f6e-a332-c45617c1455a.png" alt="colbyfayock image"&gt;
-      &lt;/div&gt;
-    &lt;/a&gt;
-  &lt;div class="ltag__user__content"&gt;
-    &lt;h2&gt;
-&lt;a class="ltag__user__link" href="/colbyfayock"&gt;Colby Fayock&lt;/a&gt;Follow
-&lt;/h2&gt;
-    &lt;div class="ltag__user__summary"&gt;
-      &lt;a class="ltag__user__link" href="/colbyfayock"&gt;I help others learn by doing through articles, videos, and courses about Javascript, React, and the static web. https://colbyfayock.com/newsletter&lt;/a&gt;
-    &lt;/div&gt;
-  &lt;/div&gt;
-&lt;/div&gt;
-
-
-</description>
-      <category>nextjs</category>
-      <category>webdev</category>
-      <category>ecommerce</category>
-      <category>javascript</category>
-    </item>
-    <item>
-      <title>Google Play Kafkaesque Experience</title>
-      <author>Shai Almog</author>
-      <pubDate>Fri, 17 Sep 2021 07:23:09 +0000</pubDate>
-      <link>https://dev.to/codenameone/google-play-kafkaesque-experience-mp3</link>
-      <guid>https://dev.to/codenameone/google-play-kafkaesque-experience-mp3</guid>
-      <description>&lt;p&gt;It seems that every other week someone else writes in &lt;a href="https://reddit.com/r/androiddev/"&gt;/r/AndroidDev&lt;/a&gt; complaining that Google unjustly removed his app. This happened to us with a few apps but usually it was because of changing policy or just stupid policy. Never anything as ludicrous as what we've experienced for the past few weeks.&lt;/p&gt;
-
-&lt;p&gt;A few weeks ago we got a threatening email from Google Play:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--n4cXW9sp--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/jb0q2zaje2ktmozdtw6u.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--n4cXW9sp--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/jb0q2zaje2ktmozdtw6u.png" alt="Letter From Google"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Those guys collecting user phone numbers sound like pretty bad people right... Only we don't collect any phone numbers. Never did and don't care about them at all. Wouldn't know what to do with them.&lt;/p&gt;
-
-&lt;p&gt;Notice the lack of any technical information in the email. How was this determined, how can this be fixed other than by saying we collect phone numbers (which again, we don't). &lt;/p&gt;
-
-&lt;p&gt;Nothing. &lt;/p&gt;
-
-&lt;p&gt;Also one week? What company can get anything done in one week? &lt;/p&gt;
-
-&lt;p&gt;That's insane.&lt;/p&gt;
-
-&lt;p&gt;So we instantly appealed the process then tried to go through all the libraries we used. Maybe something was in violation. We couldn't find anything.&lt;/p&gt;
-
-&lt;p&gt;In desperation I decompiled the APK: bingo!&lt;/p&gt;
-
-&lt;p&gt;In the &lt;code&gt;AndroidManifest.xml&lt;/code&gt; of the APK we had a &lt;code&gt;READ_PHONE_STATE&lt;/code&gt; permission. We didn't add it though...&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#it-was-googles-fault"&gt;
-  &lt;/a&gt;
-  It was Googles Fault
-&lt;/h2&gt;
-
-&lt;p&gt;Turns out &lt;a href="https://stackoverflow.com/a/49561996/2935174"&gt;Firebase had a bug&lt;/a&gt; in the version we used. Updating to a newer version removed the phone permission. Jackpot.&lt;/p&gt;
-
-&lt;p&gt;So we built a new bundle, verified the decompiled APK didn't include that permission and chugged this down to Google being stupid about phrasing their emails and packaging their own libraries. &lt;/p&gt;
-
-&lt;p&gt;But no. &lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#our-app-got-removed-anyway"&gt;
-  &lt;/a&gt;
-  Our App Got Removed Anyway
-&lt;/h2&gt;
-
-&lt;p&gt;Same reason, no further explanation or anything. The appeal I sent was returned with the response that our case was reviewed and we're still at fault. No further helpful information was provided.&lt;/p&gt;
-
-&lt;p&gt;Then it started happening to our customers: &lt;a href="https://stackoverflow.com/questions/68921544/google-play-recent-review-notification-apk-has-a-prominent-disclosure-but-the"&gt;https://stackoverflow.com/questions/68921544/google-play-recent-review-notification-apk-has-a-prominent-disclosure-but-the&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;This means there's something seriously problematic in Codename One and we can't find it. We spent weeks pouring over every single thing that might impact Googles review process. We resubmitted the app with minor changes dozens of times, to no avail. Unfortunately, every submit meant two days of waiting period until we got rejected again.&lt;/p&gt;
-
-&lt;p&gt;The rejection system didn't even indicate if there was any "improvement". Are we on the right track? Is anyone there?&lt;/p&gt;
-
-&lt;p&gt;I won't go into all the things we tried but we tried a lot of variations on the solving the problem... Nothing worked.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#google-support"&gt;
-  &lt;/a&gt;
-  Google Support
-&lt;/h2&gt;
-
-&lt;p&gt;So the obvious thing would be "write to support", surely the can help?&lt;/p&gt;
-
-&lt;p&gt;There's a support button that in my case literally leads you in a constant redirect loop back to Google play. Maybe it's because I have multiple Google Accounts and multiple play accounts. I still have no idea. But Steve was able to get an email chain going. It was 30 emails deep by the time we solved the issue.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#infuriating-solution"&gt;
-  &lt;/a&gt;
-  Infuriating Solution
-&lt;/h2&gt;
-
-&lt;p&gt;So early on I had a suspicion that this was due to one of our old beta/test tracks. They are all disabled and haven't been used since we originally created the app a few years back. So naturally I updated the version in all the beta/testing tracks and then proceeded to pause all of these tracks. &lt;/p&gt;
-
-&lt;p&gt;It turns out that this wasn't enough. We had to literally submit an alpha, go through the process. Graduate it to beta and then to production. This was the only way to "clear" the old broken version that we had.&lt;/p&gt;
-
-&lt;p&gt;Originally a few years ago a phone permission was a part of the app (which was a valid case back then to handle Android bugs, not collect phones or anything). This was in a paused unused old alpha channel... Instead of suspending the alpha channel or just writing to us that we have a problem in that old unused channel our entire app got suspended with no support!&lt;/p&gt;
-
-&lt;p&gt;Amazingly this same thing happened to our customers.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#apple-is-better"&gt;
-  &lt;/a&gt;
-  Apple is Better
-&lt;/h2&gt;
-
-&lt;p&gt;I had my share of run-ins with Apples review process. It isn't pleasant. But there's a human being on the other side. They answer, they communicate, they use technical terms to explain the problem. Hell, they even called me over the phone twice to discuss my problem.&lt;/p&gt;
-
-&lt;p&gt;Google used to be better, flawed but better. It seems that in its zeal to copy Apple they copied all the bad stuff without the good stuff. &lt;/p&gt;
-
-&lt;p&gt;This latest experience has really soured me further on Google. I used to be such a fan of the company, but things like &lt;a href="https://hackernoon.com/why-and-how-we-left-app-engine-after-it-almost-destroyed-us-40ac2fc0b1a8?1"&gt;this&lt;/a&gt; make me want to completely &lt;a href="https://github.com/tycrek/degoogle"&gt;degoogle&lt;/a&gt; my life. I'm still an Android user but with every incident like this I feel a strong urge to move back to iOS. It's a shame we have so little choice here...&lt;/p&gt;
-
-</description>
-      <category>android</category>
-      <category>java</category>
-      <category>kotlin</category>
-      <category>startup</category>
-    </item>
-    <item>
-      <title>How to deploy your Django app with PostgreSQL on AWS</title>
-      <author>Tomi Tokko</author>
-      <pubDate>Fri, 17 Sep 2021 07:19:48 +0000</pubDate>
-      <link>https://dev.to/tomitokko3/how-to-deploy-your-django-app-with-postgresql-on-aws-3012</link>
-      <guid>https://dev.to/tomitokko3/how-to-deploy-your-django-app-with-postgresql-on-aws-3012</guid>
-      <description>&lt;p&gt;If you want to deploy a Django project to AWS, then Qovery is the right platform for you. In this post, you will learn how to deploy your Django application to AWS using Qovery.&lt;/p&gt;
-
-&lt;p&gt;The first thing you need to do is to make sure that you have an &lt;a href="https://aws.com"&gt;AWS&lt;/a&gt; account and a Qovery account. To create a Qovery account, just go to &lt;a href="https://qovery.com"&gt;qovery.com&lt;/a&gt; and signup with either your Github or Gitlab account. Once you have these two ready, you can move on with the tutorial.&lt;/p&gt;
-
-&lt;p&gt;To be able to use AWS with Qovery, you need to connect these two together. The first step to connecting your AWS account to Qovery is by creating your AWS credentials with the right IAM permissions.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#create-aws-credentials"&gt;
-  &lt;/a&gt;
-  Create AWS Credentials
-&lt;/h2&gt;
-
-&lt;p&gt;We need to get two credentials from our AWS account, which are &lt;code&gt;access key id&lt;/code&gt; and &lt;code&gt;secret access key&lt;/code&gt;. To get these credentials, you need to go into your AWS console, and search for IAM. The first result that comes up is &lt;code&gt;IAM&lt;/code&gt;, and it has a subtitle of &lt;code&gt;Manage access to AWS resources&lt;/code&gt;&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--CVgriqPX--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/zupqmr42zmqprufha4sr.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--CVgriqPX--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/zupqmr42zmqprufha4sr.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Click on IAM, and it should take you to the IAM (Identity and Access Management) dashboard. In there, navigate to the left corner of the page and click on User groups&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--CIUr_MOE--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/etnrjm7vkijf84uxt8xi.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--CIUr_MOE--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/etnrjm7vkijf84uxt8xi.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;In User groups, head over to the top-right corner of the page and click on Create group. Under user group name, input Admins (NOTE: You must input &lt;b&gt;Admins&lt;/b&gt; as the name of the group. If another name is used instead, it will not work). Ignore where you see 'Add users to the group' and 'Attach permissions policies', then scroll down and click on Create group. You should get a green confirmation that the group has been successfully created, and you should also see the Admins group now listed in the list of groups. This step is visualized with the images below:&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--WWd3lsG7--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/68bklt4um3azfd2pdd3j.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--WWd3lsG7--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/68bklt4um3azfd2pdd3j.png" alt="image"&gt;&lt;/a&gt;&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--6i-mgcy1--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/5ytjd6a34ol8jek4whaw.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--6i-mgcy1--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/5ytjd6a34ol8jek4whaw.png" alt="image"&gt;&lt;/a&gt;&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--WjHuEfS---/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/u2bhz3j2zzccwy2rxqu4.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--WjHuEfS---/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/u2bhz3j2zzccwy2rxqu4.png" alt="image"&gt;&lt;/a&gt;&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--cQ7viOI8--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/8qt2c6mxx6cbn0722mb4.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--cQ7viOI8--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/8qt2c6mxx6cbn0722mb4.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;The next thing we need to do is to create a new user. To do this, head over to the left corner of the page and click on 'Users'&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--CKryPBgd--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ow4kvspyh16xs87envk5.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--CKryPBgd--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ow4kvspyh16xs87envk5.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Now, head to the top right corner and click on 'Add users'. Then input qovery as the User name, and under 'Select AWS access type', tick the option that says 'Access key - Programmatic access', then click on Next.&lt;/p&gt;
-
-&lt;p&gt;In permissions, it will automatically select the option 'Add user to group', under that, tick the Admins group we created earlier. After that, click on Next twice, and then hit Create user.&lt;/p&gt;
-
-&lt;p&gt;Once you have these done, you should now have your &lt;code&gt;Access key ID&lt;/code&gt; and &lt;code&gt;Secret access key&lt;/code&gt;. Make sure you download this information as a csv file so that you don't loose it, because, when you go away from that page or close that tab, you will not be able to access the Secret access key again.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--gUF_xHPE--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/5fe0uzp6ycpvyli30ryc.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--gUF_xHPE--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/5fe0uzp6ycpvyli30ryc.png" alt="image"&gt;&lt;/a&gt;&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--DQk0EQ7S--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/sqyq4x5xz03uj4aqdi14.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--DQk0EQ7S--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/sqyq4x5xz03uj4aqdi14.png" alt="image"&gt;&lt;/a&gt;&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--bbInnNb7--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/anxqqd43owcxc8wtzs1p.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--bbInnNb7--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/anxqqd43owcxc8wtzs1p.png" alt="image"&gt;&lt;/a&gt;&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--zXSfS2g7--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/h0jngr6nm2e068tzvk86.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--zXSfS2g7--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/h0jngr6nm2e068tzvk86.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;The next thing we need to do is to setup IAM permissions to the 'qovery' user we created earlier.&lt;/p&gt;
-
-&lt;p&gt;Under the list of users, click on qovery. When you click on it, it will take you to a page which contains the summary of that user. In there you will see a text that says 'Add inline policy', click on it, and it should take you to a page that says 'Create Policy'. In that page, switch over to the JSON section. &lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--aXS94CW7--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/2jp77y5yn10e8lo3fvyw.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--aXS94CW7--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/2jp77y5yn10e8lo3fvyw.png" alt="image"&gt;&lt;/a&gt;&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--91ZsRsoU--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/48fehjh46n1w4arzrf5t.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--91ZsRsoU--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/48fehjh46n1w4arzrf5t.png" alt="image"&gt;&lt;/a&gt;&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--5vGlbD7b--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ihh8in0970veksouh9or.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--5vGlbD7b--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ihh8in0970veksouh9or.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;In the JSON tab, you need to replace the code in there with the code below:&lt;br&gt;
-&lt;code&gt;{&lt;br&gt;
-  "Version": "2012-10-17",&lt;br&gt;
-  "Statement": [&lt;br&gt;
-    {&lt;br&gt;
-      "Effect": "Allow",&lt;br&gt;
-      "Action": [&lt;br&gt;
-        "iam:*",&lt;br&gt;
-        "s3:*",&lt;br&gt;
-        "cloudwatch:*",&lt;br&gt;
-        "autoscaling:*",&lt;br&gt;
-        "application-autoscaling:*",&lt;br&gt;
-        "elasticloadbalancing:*",&lt;br&gt;
-        "organizations:DescribeAccount",&lt;br&gt;
-        "organizations:DescribeOrganization",&lt;br&gt;
-        "organizations:DescribeOrganizationalUnit",&lt;br&gt;
-        "organizations:DescribePolicy",&lt;br&gt;
-        "organizations:ListChildren",&lt;br&gt;
-        "organizations:ListParents",&lt;br&gt;
-        "organizations:ListPoliciesForTarget",&lt;br&gt;
-        "organizations:ListRoots",&lt;br&gt;
-        "organizations:ListPolicies",&lt;br&gt;
-        "organizations:ListTargetsForPolicy",&lt;br&gt;
-        "dynamodb:*",&lt;br&gt;
-        "ecr:*",&lt;br&gt;
-        "ec2:*",&lt;br&gt;
-        "elasticache:*",&lt;br&gt;
-        "cloudtrail:LookupEvents",&lt;br&gt;
-        "kms:DescribeKey",&lt;br&gt;
-        "kms:ListAliases",&lt;br&gt;
-        "dynamodb:*",&lt;br&gt;
-        "tag:GetResources",&lt;br&gt;
-        "rds:*",&lt;br&gt;
-        "ecs:*",&lt;br&gt;
-        "eks:*",&lt;br&gt;
-        "logs:*",&lt;br&gt;
-        "events:DescribeRule",&lt;br&gt;
-        "events:DeleteRule",&lt;br&gt;
-        "events:ListRuleNamesByTarget",&lt;br&gt;
-        "events:ListTargetsByRule",&lt;br&gt;
-        "events:PutRule",&lt;br&gt;
-        "events:PutTargets",&lt;br&gt;
-        "es:AddTags",&lt;br&gt;
-        "es:RemoveTags",&lt;br&gt;
-        "es:ListTags",&lt;br&gt;
-        "es:DeleteElasticsearchDomain",&lt;br&gt;
-        "es:DescribeElasticsearchDomain",&lt;br&gt;
-        "es:CreateElasticsearchDomain",&lt;br&gt;
-        "events:RemoveTargets",&lt;br&gt;
-        "kms:*"&lt;br&gt;
-      ],&lt;br&gt;
-      "Resource": "*"&lt;br&gt;
-    }&lt;br&gt;
-  ]&lt;br&gt;
-}&lt;/code&gt;&lt;/p&gt;
-
-&lt;p&gt;Once you have that JSON code in there, click on 'Review Policy'&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--01UgAO4F--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/bhvnnb5fl6tlfihbq0g1.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--01UgAO4F--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/bhvnnb5fl6tlfihbq0g1.png" alt="image"&gt;&lt;/a&gt;&lt;br&gt;
-Then in the name field, input qovery_permissions, and now click on 'Create policy'&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--f1iiXPK9--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/wz3vdsjq6b3cjij0u1ia.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--f1iiXPK9--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/wz3vdsjq6b3cjij0u1ia.png" alt="image"&gt;&lt;/a&gt;&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--m9ccLAYm--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/4xp8j05x2ujkjgrxbjgm.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--m9ccLAYm--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/4xp8j05x2ujkjgrxbjgm.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;You have successfully created your AWS credentials. The next step is to connect it with Qovery&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#connect-aws-to-qovery"&gt;
-  &lt;/a&gt;
-  Connect AWS to Qovery
-&lt;/h2&gt;
-
-&lt;p&gt;Qovery is a platform that helps in deploying web apps. Before following along it this tutorial, make sure that you are signed up to Qovery. To do that, heaad over to &lt;a href="https://qovery.com"&gt;qovery.com&lt;/a&gt;.&lt;/p&gt;
-
-&lt;p&gt;The first thing to do here is to create a new organisation. Go to the top-right corner and click on New organization&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Sf8LBEla--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/3v6io2r9o4cem9b4pnc6.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Sf8LBEla--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/3v6io2r9o4cem9b4pnc6.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Choose your plan&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--QH49oNym--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/5psjjmnf795fd0tkozql.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--QH49oNym--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/5psjjmnf795fd0tkozql.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Then input a name for your organization, and click 'Create'&lt;br&gt;&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--YUYBjb3A--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/99rct55mhw5cwi5ygtpa.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--YUYBjb3A--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/99rct55mhw5cwi5ygtpa.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Now that your new organization is created, go into the settings of that organization by clicking the gear icon at the top-right corner of the organization page, and then click on 'Clusters' which is located in the left corner of the Settings page.&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--r7r9vfGa--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/rg32lg56b9lpmc8d3rs6.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--r7r9vfGa--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/rg32lg56b9lpmc8d3rs6.png" alt="image"&gt;&lt;/a&gt;&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--696A5laQ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/qv1u74yezyjfq5h90pg4.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--696A5laQ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/qv1u74yezyjfq5h90pg4.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;In the cluster section, click on 'Add Cluster'. Then input a name for the cluster, and under cloud provider, select 'Amazon Web Services' and also select a region the best suites you. Then click on Create. Your new cluster has now been created successfully.&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--DuMuD5sq--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/qrivsdtgfk20yg6u0uvc.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--DuMuD5sq--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/qrivsdtgfk20yg6u0uvc.png" alt="image"&gt;&lt;/a&gt;&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--mar8m4zU--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/6shhitzpkdw9lmse3tyx.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--mar8m4zU--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/6shhitzpkdw9lmse3tyx.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;The next thing to do is to input our AWS credentials into this cluster. To do this, first click on 'Edit'&lt;br&gt;&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--MU74AiUP--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/sd1vd6qxclgorygu9p82.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--MU74AiUP--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/sd1vd6qxclgorygu9p82.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Then head over to credentials and click on Add&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--LnM_Nfbi--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/5xdr4miv1ef4h2xnoa78.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--LnM_Nfbi--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/5xdr4miv1ef4h2xnoa78.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Now, you need to enter a name for the new credential, and input your AWS Access Key ID and also your Secret Access Key, then click on save.&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--p32J60lX--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/etty7gslr2jw6j586xaf.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--p32J60lX--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/etty7gslr2jw6j586xaf.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Now, on your cluster, click on install. &lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s---hvPLrQZ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/zuultcbzyd4ss5w3ci1c.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s---hvPLrQZ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/zuultcbzyd4ss5w3ci1c.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;This will go ahead and install your cluster fully. This usually takes 30 minutes, but you will be notified when this process is done. Now, you have successfully installed Qovery on AWS!&lt;/p&gt;
-
-&lt;p&gt;The next thing to do now is to deploy our Django application.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#deploy-a-django-app"&gt;
-  &lt;/a&gt;
-  Deploy A Django App
-&lt;/h2&gt;
-
-&lt;p&gt;Now that we have everything setup, the next step is to deploy our Django app.&lt;/p&gt;
-
-&lt;p&gt;Before we start deploying, make sure that you have pushed your django project to the github account that you used to sign up to Qovery. Your django project must contain a 'requirements.txt' file and also two other files which are 'Dockerfile' and 'entrypoint.sh'. These files are used by Qovery to run and manage our application. &lt;/p&gt;
-
-&lt;p&gt;For the Dockerfile, just paste the code below into it:&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;FROM python:3.8.0-alpine
-
-WORKDIR /usr/src/app
-
-ENV PYTHONDONTWRITEBYTECODE 1
-ENV PYTHONUNBUFFERED 1
-
-RUN apk update &amp;amp;&amp;amp; apk add postgresql-dev gcc python3-dev musl-dev
-
-RUN pip install --upgrade pip
-COPY ./requirements.txt /usr/src/app/requirements.txt
-RUN pip install -r requirements.txt
-
-COPY djangofollow /usr/src/app/
-COPY entrypoint.sh /usr/src/app
-
-EXPOSE 8000
-
-ENTRYPOINT ["./entrypoint.sh"]`
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-&lt;p&gt;In the 'entrypoint.sh' file, input this code in it:&lt;br&gt;
-    #!/bin/sh&lt;br&gt;
-    set -euo pipefail&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;python manage.py migrate
-
-exec python manage.py runserver 0.0.0.0:8000
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-&lt;p&gt;Now that we have these done, we are good to go.&lt;/p&gt;
-
-&lt;p&gt;In the organization page, click on 'Create Project' and a new project will be created, now click on 'Create Environment' and input the name of the environment, and a new environment will be created.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--PmoMCsK1--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/v5jddudiv4tlj4zahnk9.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--PmoMCsK1--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/v5jddudiv4tlj4zahnk9.png" alt="image"&gt;&lt;/a&gt;&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--WDb2ErJN--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/itwatj2xbavw35whxskt.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--WDb2ErJN--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/itwatj2xbavw35whxskt.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Now, let's create a new application by clicking on the 'Add my first app' button. Then input the name of the app and then choose the Github repository of the app and also the Branch. Then click on 'Create'&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--emljS2KU--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/5bwyrj25w01uei7jmd5w.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--emljS2KU--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/5bwyrj25w01uei7jmd5w.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;You should see a confirmation message that says that your app has been created&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--T4qGcLiF--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/28y3nhykkl4k0bqdbkyt.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--T4qGcLiF--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/28y3nhykkl4k0bqdbkyt.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Now, click on settings in the app and head over to the General section, in there, under Build mode, change the option from Buildpacks to Dockerfile, then click on save. Also go into port, and add a port of 8000, and click save again.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Osw7fryh--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/g7wyp74nm2knk4uns1y5.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Osw7fryh--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/g7wyp74nm2knk4uns1y5.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--KQWkctBK--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/0u9jt2gwoijcjcq624qc.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--KQWkctBK--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/0u9jt2gwoijcjcq624qc.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s---AbIiv3P--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/tzbzfuo3fq08sf9boo8r.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s---AbIiv3P--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/tzbzfuo3fq08sf9boo8r.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;The next thing to do is to create a new postgresql database. To do this, head over to the environment, and at the top-right corner, click on Add, and under it click on Database&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--INkq6-tE--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/8kafj6gchbohf8wz0yj1.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--INkq6-tE--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/8kafj6gchbohf8wz0yj1.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Now, choose a database name, and under Type, choose POSTGRESQL and version 11.&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--nFVyPAne--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/sj4qtrvzbvckultgtyh4.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--nFVyPAne--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/sj4qtrvzbvckultgtyh4.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Once you click create, it will create a new postgresql database and it will redirect you to the database page. In there, got to the top-right corner and click on settings, under settings, click Deploy&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--FPCp3-si--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/l78gbj3st02chcj68i6x.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--FPCp3-si--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/l78gbj3st02chcj68i6x.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;This will deploy your posgresql database.&lt;/p&gt;
-
-&lt;p&gt;Once your database is deployed and running, the database page should look like this&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--bCC2T01S--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/rhjbcitcocnlaqwrf4f5.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--bCC2T01S--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/rhjbcitcocnlaqwrf4f5.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Now that we have our app created and our postgresql database deployed, let's connect them together using environment and secret variables.&lt;/p&gt;
-
-&lt;p&gt;Go into the app, at the left part, head over to 'Environment Variables'. Now what you need to do is to got into the 'settings.py' file of your django project and set the database using this format: &lt;br&gt;
-&lt;code&gt;DATABASES = {&lt;br&gt;
-  'default': {&lt;br&gt;
-    'ENGINE': 'django.db.backends.postgresql_psycopg2',&lt;br&gt;
-    'NAME': os.environ.get('QOVERY_POSTGRESQL_Z5B5DF0B7_DEFAULT_DATABASE_NAME', 'postgres'),&lt;br&gt;
-    'USER': os.environ.get('QOVERY_POSTGRESQL_Z5B5DF0B7_LOGIN', 'postgres'),&lt;br&gt;
-    'PASSWORD': os.environ.get('QOVERY_POSTGRESQL_Z5B5DF0B7_PASSWORD'),&lt;br&gt;
-    'HOST': os.environ.get('QOVERY_POSTGRESQL_Z5B5DF0B7_HOST', 'z5b5df0b7-postgresql.||Q_DOMAIN||'),&lt;br&gt;
-    'PORT': os.environ.get('QOVERY_POSTGRESQL_Z5B5DF0B7_PORT', 5432),&lt;br&gt;
-  }&lt;br&gt;
-}&lt;/code&gt;&lt;/p&gt;
-
-&lt;p&gt;All you need to do is to replace all the QOVERY_POSTGRESQL_XYXYXYX with the values in your Environment Variable.&lt;/p&gt;
-
-&lt;p&gt;Once you have done this, the final thing to do is to deploy your django app. Now, go into your app and click on Actions, under Actions, click Deploy&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--1O9ylRBT--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/rxqfnn8a3j6vnz8rc7js.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--1O9ylRBT--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/rxqfnn8a3j6vnz8rc7js.png" alt="image"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Congrats! You have successfully deployed your Django app with PostgreSQL On AWS using Qovery. &lt;/p&gt;
-
-&lt;p&gt;You can also watch the video version of this tutorial &lt;a href="https://www.youtube.com/watch?v=Qlwv7FzHADM"&gt;here&lt;/a&gt;&lt;/p&gt;
-
-</description>
-      <category>django</category>
-      <category>qovery</category>
-      <category>postgres</category>
-      <category>aws</category>
     </item>
   </channel>
 </rss>
