@@ -7,6 +7,673 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>Database-driven realtime architectures: building a serverless and editable chat app - Part 1</title>
+      <author>Srushtika Neelakantam</author>
+      <pubDate>Tue, 28 Sep 2021 15:12:13 +0000</pubDate>
+      <link>https://dev.to/ablydev/database-driven-realtime-architectures-building-a-serverless-and-editable-chat-app-part-1-1ceh</link>
+      <guid>https://dev.to/ablydev/database-driven-realtime-architectures-building-a-serverless-and-editable-chat-app-part-1-1ceh</guid>
+      <description>&lt;h2&gt;
+  &lt;a href="#introduction"&gt;
+  &lt;/a&gt;
+  &lt;strong&gt;Introduction&lt;/strong&gt;
+&lt;/h2&gt;
+
+&lt;p&gt;Database-driven realtime architectures are becoming more and more common as evidenced by key backers and widespread use of software like Firebase and Supabase.&lt;/p&gt;
+
+&lt;p&gt;The two key priorities for an app following database-driven realtime messaging are long-term storage and change data capture (CDC) updates from the database.&lt;/p&gt;
+
+&lt;p&gt;In this two part article series, we'll take a detailed look at a fully serverless chat app where you can edit previously published messages. The chat app uses the Ably Postgres connector to achieve this, the details of which you'll see throughout the article. You'll find the architecture and the example app useful if you are looking for ways to build database-driven applications that work seamlessly at scale.&lt;/p&gt;
+
+&lt;p&gt;We've previously written about &lt;a href="https://ably.com/blog/realtime-and-databases-coupling-vs-modularity"&gt;decoupling databases from realtime messaging&lt;/a&gt;:&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;&lt;em&gt;The main problem is lack of modularity: each tool should do its own job.  Databases are bases of data. They should do one thing and one thing well, which is to be the one base source of truth and data. They should never be saddled with realtime concerns --- that is not their strength by design. They should do storage, and a different dedicated piece should do realtime comms. All the other problems stem from this.&lt;/em&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;While the idea of a realtime database sounds great and opens up a huge range of possible use-cases one could build with this architecture, a tight coupling of databases and realtime messaging might suffer from various issues described in the article linked above.&lt;/p&gt;
+
+&lt;p&gt;Moreover, not all event triggers constitute consequential payloads and thus don't need to go into storage. Perhaps some events are just transient to make a client aware of an event occurring, not necessarily even descriptive details about that event. For example, in a chat app, I'd be interested in storing messages, timestamps, etc. but not necessarily typing indicator events.&lt;/p&gt;
+
+&lt;p&gt;In a &lt;a href="https://ably.com/blog/ably-postgres-connector"&gt;recent article&lt;/a&gt;, I introduced the &lt;a href="https://github.com/ably-labs/ably-postgres-connector"&gt;Ably-Postgres connector&lt;/a&gt; built by one of our community experts. It uses Postgres DB's listen/notify feature to listen for changes on any DB tables and publish updates on specific Ably channels whenever a change occurs. This allows us to take advantage of database-driven architectures without worrying about the scalability of realtime messaging or the awkward relationship between the two.&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;&lt;em&gt;Check out the editable chat app:&lt;/em&gt; &lt;a href="https://serverless-scalable-chat.netlify.app/"&gt;&lt;em&gt;https://serverless-scalable-chat.netlify.app/&lt;/em&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;h2&gt;
+  &lt;a href="#the-editable-chat-app-architecture"&gt;
+  &lt;/a&gt;
+  &lt;strong&gt;The editable chat app architecture&lt;/strong&gt;
+&lt;/h2&gt;
+
+&lt;p&gt;Let me present to you a complex looking architecture which will make more sense by the time you've worked through this article.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--ADMFdg_L--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/5900152/135112937-06a6326d-45b9-4cc3-9a00-ce4d694cfa18.jpg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ADMFdg_L--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/5900152/135112937-06a6326d-45b9-4cc3-9a00-ce4d694cfa18.jpg" alt="Editable chat app architecture"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;From an end-user perspective, they will be publishing messages on the frontend app and expect to receive messages on it as well. The same goes with editing any messages: all participants will need a way to edit their own messages and also receive updates about any messages edited by others.&lt;/p&gt;
+
+&lt;p&gt;A common architectural set-up when using a &lt;a href="https://ably.com/pub-sub-messaging"&gt;pub/sub messaging&lt;/a&gt; service like Ably is to publish updates on a channel to which the client is also subscribed. Although this works perfectly well for regular chat messages or any other event triggers, it is more complex to edit previously published messages or to trigger updates about changes to previous messages because Ably messages are immutable by nature.&lt;/p&gt;
+
+&lt;p&gt;It is, however, possible to implement this functionality by using a slightly non-traditional approach. Instead of subscribing to a single chat channel to which users are publishing their messages, we can separate out the incoming and outgoing chat channels. Doing this allows us to perform various operations on the data before it comes back in a subscription callback. A common use case of this architecture is message filtering like applying a &lt;a href="https://en.wikipedia.org/wiki/Wordfilter"&gt;profanity filter&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;In the case of the current chat app, we'll make use of a database to store all the published messages directly in a table. We'll also have a listener that can&lt;/p&gt;
+
+&lt;p&gt;i) observe the &lt;code&gt;insert&lt;/code&gt;, &lt;code&gt;update&lt;/code&gt;, and &lt;code&gt;delete&lt;/code&gt; changes in the chat data table of our database, and&lt;/p&gt;
+
+&lt;p&gt;ii) publish a message on an Ably channel with the name of the operation as well as with the change data capture (CDC).&lt;/p&gt;
+
+&lt;p&gt;If we make our front-end clients subscribe to this channel into which the listener is publishing database updates, we'll not only receive new messages as a result of &lt;code&gt;insert&lt;/code&gt; operations in the database, but also updates on previous messages resulting from &lt;code&gt;update&lt;/code&gt; operations on the database. Each Ably message comes with a unique &lt;code&gt;msgId&lt;/code&gt; assigned by Ably, so we can make use of this to uniquely identify each message in the table. The database will be the single source of truth in the app and also useful if we'd like to load previous messages in the chat like in the &lt;a href="https://realtime-chat-storage.ably.dev/"&gt;Ably-Airtable starter kit&lt;/a&gt; example.&lt;/p&gt;
+
+&lt;p&gt;Before proceeding, take another look at the architecture diagram above to put all the steps in perspective and tie it all together.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#tech-stack"&gt;
+  &lt;/a&gt;
+  &lt;strong&gt;Tech stack&lt;/strong&gt;
+&lt;/h2&gt;
+
+&lt;p&gt;We have four main goals with the editable chat app:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;  Scalability&lt;/li&gt;
+&lt;li&gt;  Serverless architecture&lt;/li&gt;
+&lt;li&gt;  Editability of messages&lt;/li&gt;
+&lt;li&gt;  Storage of messages&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;In view of the above, let me explain some of the reasoning behind various tech choices in this chat app, along with some alternative options.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--0kbQk9RU--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/5900152/135114866-cf0dfbcc-9ce9-4fbb-b927-19827b9c3648.jpeg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--0kbQk9RU--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/5900152/135114866-cf0dfbcc-9ce9-4fbb-b927-19827b9c3648.jpeg" alt="Tech stack for the editable chat app"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#nuxtjs-for-frontend-web-development"&gt;
+  &lt;/a&gt;
+  NuxtJS for frontend web development
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;a href="https://nuxtjs.org/"&gt;Nuxt&lt;/a&gt; aims to provide best-practice solutions to common web development problems like routing, state-management, code splitting, etc. It allows us to make use of various NPM utility libraries in a static site that can be deployed and used directly from a CDN, without needing a server, i.e. following the &lt;a href="https://jamstack.org/what-is-jamstack/"&gt;Jamstack architecture&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;In the case of our chat app, it is useful in terms of separating out state management entirely from the visual components, so developers of all tech stacks can understand the communication and data exchange between the chat app and external services (mainly Ably in this case).&lt;/p&gt;
+
+&lt;p&gt;You can replace Nuxt with any other front-end web framework, vanilla JS or even use a native mobile programming language, depending on the needs and wants of your app.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#ably-to-enable-the-pubsub-pattern"&gt;
+  &lt;/a&gt;
+  Ably to enable the pub/sub pattern
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;a href="https://ably.com/"&gt;Ably&lt;/a&gt; is a realtime messaging infrastructure as a service. It allows you to enable &lt;a href="https://ably.com/pub-sub-messaging"&gt;publish/subscribe-based messaging&lt;/a&gt; in your application with just a few lines of code. Ably provides highly-reliable low-latency messaging, and is able to work globally on any platform or device. It completely abstracts away the complex problem of scaling realtime communications across multiple regions around the planet, so developers can focus on their app logic.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#aws-lambda-functions-to-insert-and-update-rows-in-the-database"&gt;
+  &lt;/a&gt;
+  AWS Lambda functions to insert and update rows in the database
+&lt;/h3&gt;
+
+&lt;p&gt;We use PostgresDB to store messages from the chat app. In general, any database transactions which change table data shouldn't be done directly from the front-end to avoid potential security risks. Hence, we'll make use of &lt;a href="https://aws.amazon.com/lambda/"&gt;AWS Lambda&lt;/a&gt; functions to make changes to the database on the users' behalf. Given that we are aiming to make this app fully serverless, Lambda functions fit right in with this theme.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#postgresdb-hosted-on-aws-rds-to-store-the-data"&gt;
+  &lt;/a&gt;
+  PostgresDB hosted on AWS RDS to store the data
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;a href="https://www.postgresql.org/"&gt;Postgres&lt;/a&gt; is an open-sourced SQL database. Its performance and reliability make it a good choice for complex production applications. There's another special reason to choose Postgres as you'll see in the next point.&lt;/p&gt;
+
+&lt;p&gt;Postgres doesn't come with hosting, we'll need to make use of another service to host the database. Again, in light of keeping everything serverless, I've made use of &lt;a href="https://aws.amazon.com/rds/"&gt;AWS RDS&lt;/a&gt; for Postgres. Using AWS also gives the advantage of the accessibility of the data between other AWS services, like the Lambda function in the previous point.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#ably-postgres-connector-to-watch-changes-on-the-database-tables-and-publish-messages-on-every-change"&gt;
+  &lt;/a&gt;
+  Ably Postgres connector to watch changes on the database tables and publish messages on every change
+&lt;/h3&gt;
+
+&lt;p&gt;One of the key requirements of this chat app is being able to listen to changes on the database tables and publish these changes to Ably. The &lt;a href="https://github.com/ably-labs/ably-postgres-connector"&gt;Ably Postgres connector&lt;/a&gt; is a community-built project which makes this possible. We use Postgres because the built-in &lt;a href="https://tapoueh.org/blog/2018/07/postgresql-listen-notify/"&gt;listen/notify feature&lt;/a&gt; makes this connector work. We'll take a detailed look at it later.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#aws-fargate-with-aws-ecs-and-aws-ecr-to-deploy-the-ably-postgres-connectors-dockerized-image"&gt;
+  &lt;/a&gt;
+  AWS Fargate with AWS ECS and AWS ECR to deploy the Ably Postgres connector's dockerized image
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;a href="https://aws.amazon.com/fargate/"&gt;AWS Fargate&lt;/a&gt; is a serverless compute engine that hosts containers. The Ably Postgres connector has a dockerized image that needs to be hosted somewhere. We'll use AWS Fargate to do this, because it makes it easy and secure to manage the backend deployment and hosting on a single service like AWS.&lt;/p&gt;
+
+&lt;p&gt;AWS Fargate works with &lt;a href="https://aws.amazon.com/ecs/"&gt;AWS ECS&lt;/a&gt; which enables deployment and management of containerized applications. We use &lt;a href="https://aws.amazon.com/ecr/"&gt;AWS ECR&lt;/a&gt; to upload the docker image so it can be stored in the registry to be used by ECS as needed.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#netlify-to-host-the-static-jamstack-site"&gt;
+  &lt;/a&gt;
+  Netlify to host the static Jamstack site
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;a href="https://netlify.com/"&gt;Netlify&lt;/a&gt; provides a serverless platform to deploy web applications. It also allows setting up git-based workflows to automate building and deploying new versions of a static site as changes are made to the repository. The Nuxt app is deployed using Netlify.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#netlify-functions-to-enable-a-token-auth-endpoint-to-authenticate-with-ably"&gt;
+  &lt;/a&gt;
+  Netlify functions to enable a token auth endpoint to authenticate with Ably
+&lt;/h3&gt;
+
+&lt;p&gt;Netlify's serverless platform also provides serverless functions which can be invoked to perform a piece of functionality. The Ably service requires clients to be authenticated in one of the two ways: basic authentication or token authentication. Basic authentication exposes the API Key directly in the frontend script, and thus shouldn't be used in production. You should almost always choose Token authentication. To enable this, we need to set up an authentication endpoint that can verify the credentials of the frontend client and issue Ably Token Requests. The frontend client can then use this Ably Token Request to authenticate with Ably and use its service.&lt;/p&gt;
+
+&lt;p&gt;Given that we use Netlify to host the chat app, it's only natural that we make use of &lt;a href="https://www.netlify.com/products/functions/"&gt;Netlify functions&lt;/a&gt; to host our authentication endpoint. Even though AWS Lambda is already a part of the tech stack, it would require us to set up an IAM for our users before they can access AWS Lambda. Netlify, meanwhile, makes it very easy.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#the-ably-postgres-connector-a-key-dependency"&gt;
+  &lt;/a&gt;
+  The Ably Postgres connector -- a key dependency
+&lt;/h2&gt;
+
+&lt;p&gt;Before moving on to the details of the chat app, let's first understand the working of the Ably Postgres connector that makes this architecture possible.&lt;/p&gt;
+
+&lt;p&gt;I recently wrote an &lt;a href="https://ably.com/blog/ably-postgres-connector"&gt;article explaining the Ably Postgres connector in detail&lt;/a&gt;:&lt;/p&gt;
+
+&lt;p&gt;The connector accepts a configuration file where you input the connection details for your database as well as for the tables you want to listen to for data changes. It also accepts an &lt;a href="https://knowledge.ably.com/setting-up-and-managing-api-keys"&gt;Ably API key&lt;/a&gt; to be able to instantiate and publish messages to your Ably app following any changes to the specified tables.&lt;/p&gt;
+
+&lt;p&gt;Using the config file, the connector creates in your database a special table called the "ablycontroltable". This table is used to maintain the Ably channel mapping for different changes to the tables in your database.&lt;/p&gt;
+
+&lt;p&gt;Next, the connector creates a procedure to listen to changes on the specified tables using the &lt;code&gt;pg_notify&lt;/code&gt; function. This notify function then publishes the change data capture (CDC) payload on the relevant Ably channel, as specified in the config.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--LcJZ1rkL--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://lh6.googleusercontent.com/oTXZk-FCQeiH_QLoU2wvXfR94YqzPraB7cq0PzmIflKiuRuexXbHV5fP46oxQ9hL7fBpw_LGh-9kp345F9hq9Ek_6qdVcl4_zKUg9z69Rg7nZMMLObW4__pYZkOTEgNzoOiTriJE%3Ds0" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--LcJZ1rkL--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://lh6.googleusercontent.com/oTXZk-FCQeiH_QLoU2wvXfR94YqzPraB7cq0PzmIflKiuRuexXbHV5fP46oxQ9hL7fBpw_LGh-9kp345F9hq9Ek_6qdVcl4_zKUg9z69Rg7nZMMLObW4__pYZkOTEgNzoOiTriJE%3Ds0" alt="Ably Postgres Connector"&gt;&lt;/a&gt;&lt;/p&gt;
+
+
+
+
+&lt;p&gt;With this, I hope you have a better understanding of the high-level architecture of the serverless editable chat app.&lt;/p&gt;
+
+&lt;p&gt;In the next part of this two-part series, we'll take a closer look at various components of the chat app and dive into some code to better understand how each step is implemented.&lt;/p&gt;
+
+&lt;p&gt;Here are a few things we'll see in the next part:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;  Navigating the Nuxt app (even if you are not a Nuxt developer)&lt;/li&gt;
+&lt;li&gt;  VueX state management&lt;/li&gt;
+&lt;li&gt;  Postgres DB setup&lt;/li&gt;
+&lt;li&gt;  Lambda functions setup on the Ably Integrations dashboard&lt;/li&gt;
+&lt;li&gt;  Ably Postgres connector setup&lt;/li&gt;
+&lt;li&gt;  Deployment of all the components&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Stay tuned and watch this space for the next article. In the meantime, check out the &lt;a href="https://serverless-scalable-chat.netlify.app/"&gt;demo of the editable chat app&lt;/a&gt; or &lt;a href="https://github.com/ably-labs/scalable-serverless-editable-chat-demo"&gt;dive into the GitHub repo&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;Feel free to &lt;a href="https://twitter.com/Srushtika"&gt;reach out to me&lt;/a&gt; if you have any questions.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#resources"&gt;
+  &lt;/a&gt;
+  Resources
+&lt;/h2&gt;
+
+&lt;ul&gt;
+&lt;li&gt;  &lt;a href="https://ably.com/blog/realtime-and-databases-coupling-vs-modularity"&gt;Realtime and databases --- a discussion on coupling versus modularity&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;  &lt;a href="https://ably.com/blog/myth-busting-jamstack-cant-handle-dynamic-content"&gt;Myth-busting: Jamstack can't handle dynamic content&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;  &lt;a href="https://ably.com/blog/ably-aws-web-components"&gt;Build your own live chat web component with Ably and AWS&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;  &lt;a href="https://ably.com/topic/scaling-firebase-realtime-database"&gt;Scaling the Firebase Realtime Database beyond 200k users&lt;/a&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+
+</description>
+      <category>architecture</category>
+      <category>postgres</category>
+      <category>firebase</category>
+      <category>javascript</category>
+    </item>
+    <item>
+      <title>CSS Font Face</title>
+      <author>Rezaul karim</author>
+      <pubDate>Tue, 28 Sep 2021 15:10:57 +0000</pubDate>
+      <link>https://dev.to/mrezaulkarim/css-font-face-2i7l</link>
+      <guid>https://dev.to/mrezaulkarim/css-font-face-2i7l</guid>
+      <description>&lt;p&gt;&lt;strong&gt;Note:&lt;/strong&gt; Before reading this article, you need to know about CSS Font Family. I assume you know about the CSS font family.&lt;/p&gt;
+
+&lt;p&gt;Font Face is a great feature of CSS. Think You like a font you want to use, what next? Yes, that's why Fontface.&lt;/p&gt;
+
+&lt;p&gt;Fontface is written in CSS. And you have to write as follows:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;@font-face
+{
+font-family: FontFace;
+src: url('MyFavoriteFont.ttf')
+ ,url('MyFavoriteFont.eot'); /* For IE */
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;font-family: FontFace; You can name your font family with this. You can give any name instead of FontFace. And later you can use the CSS font the way Family uses it: font-family: FontFace;&lt;/p&gt;
+
+&lt;p&gt;Add the url of your font with src: url (‘MyFavoriteFont.ttf’). IE does not support ttf [True Type Font]. For that you have to use eot (Embedded OpenType) font. For this we have added utl of eot font with a comma. If you do not have eot font, then you can get it by doing a little search on Google.&lt;/p&gt;
+
+&lt;p&gt;Our fontface is ready. Now we can use it anywhere. As much as you want.&lt;/p&gt;
+
+&lt;p&gt;To use, you have to write the font family as you write it&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;.myDiv
+{
+font-family:FontFace;
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;And the whole example:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;&amp;lt;!DOCTYPE html&amp;gt;
+&amp;lt;html&amp;gt;
+&amp;lt;head&amp;gt;
+&amp;lt;style&amp;gt;
+@font-face
+{
+font-family: FontFace;
+src: url('MyFavoriteFont.ttf')
+ ,url('MyFavoriteFont.eot'); /* For IE */
+}
+
+.myDiv
+{
+font-family:FontFace;
+}
+&amp;lt;/style&amp;gt;
+&amp;lt;/head&amp;gt;
+&amp;lt;body&amp;gt;
+
+&amp;lt;div class="myDiv"&amp;gt;
+Some text with CSS3 Font Face feature.
+&amp;lt;/div&amp;gt;
+
+&amp;lt;/body&amp;gt;
+&amp;lt;/html&amp;gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Enter the name of your font in place of ‘MyFavoriteFont.ttf’. Note: You must enter the url where you will upload the fonts. Now if you open a directory with fonts and put the fonts in it, you have to type ‘fonts / MyFavoriteFont.ttf’ etc.&lt;br&gt;
+If you don't want to bother so much, you can use it in a simpler way. There are many fonts uploaded to Google Web Fonts.  &lt;a href="http://www.google.com/fonts/"&gt;http://www.google.com/fonts/&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;You can use it by going here and selecting the font of your choice and clicking on the Quick Use button. Add the following link to the header section of your site:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;&amp;lt;link href='http://fonts.googleapis.com/css?family=Caesar+Dressing' rel='stylesheet' type='text/css'&amp;gt;
+
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Nothing more to do. Then just add the name of the font to the fontfamily: font-family: ‘Caesar Dressing’, cursive;&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;&amp;lt;!DOCTYPE html&amp;gt;
+&amp;lt;html&amp;gt;
+&amp;lt;head&amp;gt;
+&amp;lt;link href='http://fonts.googleapis.com/css?family=Sonsie+One' rel='stylesheet' type='text/css'&amp;gt;
+&amp;lt;style&amp;gt;
+.myDiv
+{
+font-family: 'Sonsie One', cursive;
+text-align:center;
+margin-top:10%;
+color:#808080;
+}
+&amp;lt;/style&amp;gt;
+&amp;lt;/head&amp;gt;
+&amp;lt;body&amp;gt;
+
+&amp;lt;div class="myDiv"&amp;gt;
+Some text with CSS3 Font Face feature.
+&amp;lt;/div&amp;gt;
+
+&amp;lt;/body&amp;gt;
+&amp;lt;/html&amp;gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;You can also read:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;p&gt;&lt;a href="https://mrezaulkarim.com/css-shorthand-useful-css-shorthand-properties/"&gt;CSS Shorthand Properties- Useful CSS Shorthand&lt;/a&gt; &lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;&lt;a href="https://mrezaulkarim.com/learn-about-css-background-properties/"&gt;Learn About CSS Background Properties&lt;/a&gt;&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;&lt;a href="https://mrezaulkarim.com/text-styling-in-css/"&gt;Learn about Text Styling in CSS&lt;/a&gt;&lt;/p&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;For more exciting tips and tricks about programming and coding please read our &lt;a href="https://mrezaulkarim.com/blog/"&gt;others articles&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Find My page on Instagram:  &lt;a href="https://instagram.com/stack.content"&gt;@stack.content&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Find Me on Twitter:   &lt;a href="https://twitter.com/mrezaulkarim_"&gt;@mrezaulkarim_&lt;/a&gt; &lt;/p&gt;
+
+</description>
+      <category>css</category>
+      <category>codenewbie</category>
+      <category>beginners</category>
+      <category>webdev</category>
+    </item>
+    <item>
+      <title>Functions Store just launched on Product Hunt and we would love your feedback!</title>
+      <author>Tahimi</author>
+      <pubDate>Tue, 28 Sep 2021 14:57:28 +0000</pubDate>
+      <link>https://dev.to/functionstore/hey-everyone-functions-store-just-launched-on-product-hunt-and-we-would-love-your-feedback-29m2</link>
+      <guid>https://dev.to/functionstore/hey-everyone-functions-store-just-launched-on-product-hunt-and-we-would-love-your-feedback-29m2</guid>
+      <description>&lt;p&gt;Hey Everyone - Functions Store just launched on Product Hunt and we would love your feedback!&lt;br&gt;
+We’ve spent that last few months building:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;A Marketplace of reusable, expert-built, and well-tested Google Cloud Functions&lt;/li&gt;
+&lt;li&gt;A Platform of tools to simplify building web apps on Google Cloud and Firebase&lt;/li&gt;
+&lt;li&gt;An opportunity for developers around the world to generate a new income stream&lt;/li&gt;
+&lt;li&gt;20x faster to implement new features for your web app
+Check Us Out Here: &lt;a href="https://www.producthunt.com/posts/function-store"&gt;https://www.producthunt.com/posts/function-store&lt;/a&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Thanks to everyone who take time out of their busy days to help support by voting and providing feedback!&lt;/p&gt;
+
+</description>
+      <category>firebase</category>
+      <category>tooling</category>
+      <category>functions</category>
+    </item>
+    <item>
+      <title>How to unit test Vuex modules defined with the vuex-module-decorators syntax in Nuxt,  using vue-test-utils and Jest?</title>
+      <author>Ivan Spoljaric</author>
+      <pubDate>Tue, 28 Sep 2021 14:48:34 +0000</pubDate>
+      <link>https://dev.to/ispoljari/how-to-unit-test-vuex-modules-defined-with-the-vuex-module-decorators-syntax-in-nuxt-using-vue-test-utils-and-jest-3n7p</link>
+      <guid>https://dev.to/ispoljari/how-to-unit-test-vuex-modules-defined-with-the-vuex-module-decorators-syntax-in-nuxt-using-vue-test-utils-and-jest-3n7p</guid>
+      <description>&lt;p&gt;Cover photo by &lt;a href="https://unsplash.com/@tienvn3012?utm_source=unsplash&amp;amp;utm_medium=referral&amp;amp;utm_content=creditCopyText"&gt;Tien Vu Ngoc&lt;/a&gt; on &lt;a href="https://unsplash.com/t/arts-culture?utm_source=unsplash&amp;amp;utm_medium=referral&amp;amp;utm_content=creditCopyText"&gt;Unsplash&lt;/a&gt;&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#the-problem"&gt;
+  &lt;/a&gt;
+  The problem
+&lt;/h1&gt;
+
+&lt;p&gt;To find the answer to my question I went through the official Nuxt documentation and through the existing Stack Overflow and Github issue discussions.&lt;/p&gt;
+
+&lt;p&gt;But with no luck. &lt;/p&gt;
+
+&lt;p&gt;It appeared as if no one before me stumbled upon this issue (which I find somewhat hard to believe). &lt;/p&gt;
+
+&lt;p&gt;My AuthModule looks something like this:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="p"&gt;@&lt;/span&gt;&lt;span class="nd"&gt;Module&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt;
+  &lt;span class="na"&gt;stateFactory&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="na"&gt;namespaced&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+&lt;span class="p"&gt;})&lt;/span&gt;
+&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="k"&gt;default&lt;/span&gt; &lt;span class="kd"&gt;class&lt;/span&gt; &lt;span class="nx"&gt;AuthModule&lt;/span&gt; &lt;span class="kd"&gt;extends&lt;/span&gt; &lt;span class="nx"&gt;VuexModule&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="nl"&gt;userData&lt;/span&gt;&lt;span class="p"&gt;?:&lt;/span&gt; &lt;span class="nx"&gt;UserData&lt;/span&gt; &lt;span class="o"&gt;|&lt;/span&gt; &lt;span class="kc"&gt;undefined&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="kc"&gt;undefined&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+  &lt;span class="nl"&gt;prevRouteList&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;Routes&lt;/span&gt;&lt;span class="p"&gt;[]&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[];&lt;/span&gt;
+  &lt;span class="nl"&gt;error&lt;/span&gt;&lt;span class="p"&gt;?:&lt;/span&gt; &lt;span class="nx"&gt;services&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;ICognitoError&lt;/span&gt; &lt;span class="o"&gt;|&lt;/span&gt; &lt;span class="kc"&gt;undefined&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="kc"&gt;undefined&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+  &lt;span class="nx"&gt;isLoading&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="kc"&gt;false&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+  &lt;span class="p"&gt;...&lt;/span&gt;
+
+  &lt;span class="p"&gt;@&lt;/span&gt;&lt;span class="nd"&gt;VuexMutation&lt;/span&gt;
+  &lt;span class="nx"&gt;setIsLoading&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;isLoading&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;boolean&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;isLoading&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;isLoading&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+  &lt;span class="p"&gt;}&lt;/span&gt;
+
+  &lt;span class="p"&gt;...&lt;/span&gt;
+
+   &lt;span class="p"&gt;@&lt;/span&gt;&lt;span class="nd"&gt;VuexAction&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="na"&gt;rawError&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kc"&gt;true&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt;
+  &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="nx"&gt;register&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;registerData&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nl"&gt;email&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;string&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; &lt;span class="nl"&gt;password&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;string&lt;/span&gt; &lt;span class="p"&gt;}):&lt;/span&gt; &lt;span class="nb"&gt;Promise&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="kr"&gt;any&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;context&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;commit&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;setIsLoading&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;context&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;commit&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;setError&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="kc"&gt;undefined&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;context&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;commit&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;setInitiateRegistration&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="kc"&gt;false&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;context&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;dispatch&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;setEmail&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;registerData&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;email&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+
+    &lt;span class="k"&gt;try&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;user&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;services&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;register&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;registerData&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;email&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;registerData&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;password&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+
+      &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;user&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;context&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;dispatch&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;pushPrevRoute&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;Routes&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;emailVerification&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+        &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;context&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;commit&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;setInitiateRegistration&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+      &lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;catch&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="na"&gt;error&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;any&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;context&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;commit&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;setError&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+      &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;context&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;commit&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;setInitiateRegistration&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="kc"&gt;false&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+
+    &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;context&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;commit&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;setIsLoading&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="kc"&gt;false&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+  &lt;span class="p"&gt;}&lt;/span&gt;
+
+  &lt;span class="p"&gt;...&lt;/span&gt;
+
+  &lt;span class="p"&gt;@&lt;/span&gt;&lt;span class="nd"&gt;MutationAction&lt;/span&gt;
+  &lt;span class="nx"&gt;setEmail&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;email&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;string&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;  &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="p"&gt;...&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;
+
+  &lt;span class="p"&gt;...&lt;/span&gt; 
+
+  &lt;span class="kd"&gt;get&lt;/span&gt; &lt;span class="nx"&gt;getEmail&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;email&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+  &lt;span class="p"&gt;}&lt;/span&gt;
+
+  &lt;span class="p"&gt;...&lt;/span&gt; 
+
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h1&gt;
+  &lt;a href="#solution"&gt;
+  &lt;/a&gt;
+  Solution
+&lt;/h1&gt;
+
+&lt;p&gt;After some trial and error I finally discovered the answer to my question. &lt;/p&gt;
+
+&lt;p&gt;The implementation looks like this:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// auth.spec.ts&lt;/span&gt;
+
+&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="nx"&gt;Vuex&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;Store&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;vuex&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;createLocalVue&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;@vue/test-utils&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="nx"&gt;AuthModule&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;IState&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;./auth&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="nx"&gt;jest&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;mock&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;@/services&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;localVue&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;createLocalVue&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+&lt;span class="nx"&gt;localVue&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;use&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;Vuex&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;storeOptions&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="na"&gt;modules&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="na"&gt;auth&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;AuthModule&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="p"&gt;},&lt;/span&gt;
+&lt;span class="p"&gt;};&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;createStore&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;storeOptions&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;any&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{}):&lt;/span&gt; &lt;span class="nx"&gt;Store&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;auth&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;IState&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;Vuex&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Store&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="p"&gt;...&lt;/span&gt;&lt;span class="nx"&gt;storeOptions&lt;/span&gt; &lt;span class="p"&gt;});&lt;/span&gt;
+
+&lt;span class="nx"&gt;describe&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;AuthModule&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="na"&gt;store&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;Store&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;auth&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;IState&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+  &lt;span class="nx"&gt;beforeEach&lt;/span&gt;&lt;span class="p"&gt;(()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="nx"&gt;store&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;createStore&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;storeOptions&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+  &lt;span class="p"&gt;});&lt;/span&gt;
+
+  &lt;span class="nx"&gt;describe&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;mutations&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="c1"&gt;// ...&lt;/span&gt;
+
+    &lt;span class="nx"&gt;it&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;auth/setIsLoading&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="nx"&gt;expect&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;store&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;state&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;auth&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;isLoading&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;toBe&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kc"&gt;false&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+      &lt;span class="nx"&gt;store&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;commit&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;auth/setIsLoading&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+      &lt;span class="nx"&gt;expect&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;store&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;state&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;auth&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;isLoading&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;toBe&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="p"&gt;});&lt;/span&gt;
+
+    &lt;span class="c1"&gt;// ...&lt;/span&gt;
+  &lt;span class="p"&gt;});&lt;/span&gt;
+
+  &lt;span class="nx"&gt;describe&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;actions&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="c1"&gt;// ...&lt;/span&gt;
+
+    &lt;span class="nx"&gt;it&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;register success&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;registerData&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="na"&gt;email&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;dummy@email.com&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+        &lt;span class="na"&gt;password&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;dummy&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+      &lt;span class="p"&gt;};&lt;/span&gt;
+
+      &lt;span class="nx"&gt;expect&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;store&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;state&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;auth&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;registrationInitiated&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;toBe&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kc"&gt;false&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+
+      &lt;span class="k"&gt;try&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;store&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;dispatch&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;auth/register&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;registerData&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+        &lt;span class="nx"&gt;expect&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;store&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;state&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;auth&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;registrationInitiated&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;toBe&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+      &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;catch&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{}&lt;/span&gt;
+    &lt;span class="p"&gt;});&lt;/span&gt;
+
+    &lt;span class="c1"&gt;// ...&lt;/span&gt;
+  &lt;span class="p"&gt;});&lt;/span&gt;
+
+  &lt;span class="nx"&gt;describe&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;mutation-actions&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="c1"&gt;// ...&lt;/span&gt;
+
+    &lt;span class="nx"&gt;it&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;setEmail&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;dummyEmail&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;dummy@email.com&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+      &lt;span class="nx"&gt;expect&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;store&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;state&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;auth&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;email&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;toBe&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;''&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+      &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;store&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;dispatch&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;auth/setEmail&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;dummyEmail&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+      &lt;span class="nx"&gt;expect&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;store&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;state&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;auth&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;email&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;toBe&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;dummyEmail&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="p"&gt;});&lt;/span&gt;
+
+    &lt;span class="c1"&gt;// ...&lt;/span&gt;
+  &lt;span class="p"&gt;});&lt;/span&gt;
+
+  &lt;span class="nx"&gt;describe&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;getters&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="c1"&gt;// ...&lt;/span&gt;
+
+    &lt;span class="nx"&gt;it&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;auth/getError&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="nx"&gt;expect&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;store&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;state&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;auth&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;toBe&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kc"&gt;undefined&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+      &lt;span class="nx"&gt;expect&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;store&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;getters&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;auth/getError&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;]).&lt;/span&gt;&lt;span class="nx"&gt;toBe&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kc"&gt;undefined&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+
+      &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;store&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;state&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;auth&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt; &lt;span class="k"&gt;as&lt;/span&gt; &lt;span class="kr"&gt;any&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Demmo error&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+      &lt;span class="nx"&gt;expect&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;store&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;getters&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;auth/getError&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;]).&lt;/span&gt;&lt;span class="nx"&gt;toBe&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Demmo error&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="p"&gt;});&lt;/span&gt;
+
+    &lt;span class="c1"&gt;// ...&lt;/span&gt;
+  &lt;span class="p"&gt;});&lt;/span&gt;
+&lt;span class="p"&gt;});&lt;/span&gt;
+
+&lt;span class="c1"&gt;// services/auth&lt;/span&gt;
+
+&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;register&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;email&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;string&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;password&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;string&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;attr&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;any&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{}):&lt;/span&gt; &lt;span class="nb"&gt;Promise&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="kr"&gt;any&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="k"&gt;try&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;Auth&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;signUp&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt;
+      &lt;span class="na"&gt;username&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;email&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+      &lt;span class="nx"&gt;password&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+      &lt;span class="na"&gt;attributes&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="p"&gt;...&lt;/span&gt;&lt;span class="nx"&gt;attr&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+      &lt;span class="p"&gt;},&lt;/span&gt;
+    &lt;span class="p"&gt;});&lt;/span&gt;
+  &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;catch&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="na"&gt;err&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;any&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nb"&gt;Promise&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;reject&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;createError&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;register&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;));&lt;/span&gt;
+  &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="c1"&gt;// createError is just a util method for formatting the error message and wiring to the correct i18n label&lt;/span&gt;
+
+&lt;span class="c1"&gt;// services/__mock__/auth&lt;/span&gt;
+
+&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;createError&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;../auth&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;register&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;registerData&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nl"&gt;email&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;string&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; &lt;span class="nl"&gt;password&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;string&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="k"&gt;try&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="nx"&gt;registerData&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="k"&gt;throw&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nb"&gt;Error&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;dummy error&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nb"&gt;Promise&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;resolve&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;resolve&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="na"&gt;response&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;user&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;registerData&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;email&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="p"&gt;}));&lt;/span&gt;
+  &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;catch&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nb"&gt;Promise&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;reject&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;createError&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;register&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;));&lt;/span&gt;
+  &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;};&lt;/span&gt;
+
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The most important thing to realise is that the &lt;a href="https://github.com/championswimmer/vuex-module-decorators"&gt;vuex-module-decorators&lt;/a&gt; class-based model behaves just like a &lt;a href="https://class-component.vuejs.org/"&gt;vue-class-component&lt;/a&gt; under the hood.&lt;/p&gt;
+
+&lt;p&gt;All of the class-based stuff is just syntactic sugar - a wrapper around the vue-class-component API.&lt;/p&gt;
+
+&lt;p&gt;To quote the &lt;a href="https://championswimmer.in/vuex-module-decorators/pages/getting-started.html#define-a-module"&gt;docs&lt;/a&gt;:&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;In your store, you use the MyModule class itself as a module...The way we use the MyModule class is different from classical object-oriented programming and similar to how vue-class-component works. We use the class itself as module, not an object constructed by the class&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;Another thing to keep in mind is to use &lt;a href="https://vue-test-utils.vuejs.org/api/createlocalvue.html"&gt;createLocalVue&lt;/a&gt;, which enables us to use Vue classes, plugins, components etc. without polluting the global Vue class.&lt;/p&gt;
+
+&lt;p&gt;Adding the Vuex plugin to &lt;code&gt;createLocalVue&lt;/code&gt;:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="nx"&gt;localVue&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;use&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;Vuex&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The AuthModule class is declared as a Vuex (namespaced) module inside the Vuex.Store constructor (as per docs).&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;storeOptions&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="na"&gt;modules&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="na"&gt;auth&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;AuthModule&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="p"&gt;},&lt;/span&gt;
+&lt;span class="p"&gt;};&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;createStore&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;storeOptions&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;any&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{}):&lt;/span&gt; &lt;span class="nx"&gt;Store&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;auth&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;IState&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;Vuex&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Store&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="p"&gt;...&lt;/span&gt;&lt;span class="nx"&gt;storeOptions&lt;/span&gt; &lt;span class="p"&gt;});&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;In the implementation above, AuthModule (incl. store, actions, mutations, getters...) is re-created inside every test case with the help of the &lt;code&gt;beforeEach&lt;/code&gt; hook (to have a clean store in every new iteration).&lt;/p&gt;
+
+&lt;p&gt;The rest is pretty straightforward. &lt;/p&gt;
+
+&lt;p&gt;You can clearly see how I tested each part of the AuthModule (actions, mutations, getters..).&lt;/p&gt;
+
+&lt;p&gt;That's it. Happy testing :) &lt;/p&gt;
+
+</description>
+      <category>vue</category>
+      <category>javascript</category>
+      <category>typescript</category>
+      <category>webdev</category>
+    </item>
+    <item>
       <title>Self-Parking Car in &lt;500 Lines of Code</title>
       <author>Oleksii Trekhleb</author>
       <pubDate>Tue, 28 Sep 2021 14:43:58 +0000</pubDate>
@@ -1225,6 +1892,194 @@ Possible kid #2: [0, 0, 1, 1]
       <category>tutorial</category>
     </item>
     <item>
+      <title>From 0 to 5.000.000 monthly views</title>
+      <author>Amer Sikira</author>
+      <pubDate>Tue, 28 Sep 2021 14:33:27 +0000</pubDate>
+      <link>https://dev.to/amersikira/from-0-to-5-000-000-monthly-views-5bj3</link>
+      <guid>https://dev.to/amersikira/from-0-to-5-000-000-monthly-views-5bj3</guid>
+      <description>&lt;p&gt;This is not an article about how to reach 5 000 000 monthly views. This is an article on how we managed to design, develop, optimize and maintain (3.5 years) such a website.&lt;/p&gt;
+
+&lt;p&gt;I have published this article on my small blog: &lt;a href="https://webinuse.com/from-0-to-5-000-000-monthly-views/"&gt;webinuse.com&lt;/a&gt;. I am trying to be more useful to society by publishing articles, based on my knowledge and my experience.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#beginning"&gt;
+  &lt;/a&gt;
+  Beginning
+&lt;/h3&gt;
+
+&lt;p&gt;My company (I was not employed there yet) was approached by a client who asked us to build a simple news/magazine portal that will employ 1-2 people and will be self-sustained (bootstrapped).&lt;/p&gt;
+
+&lt;p&gt;After initial talks they agreed to start that project and a colleague of mine was assigned to this project. The client had only one demand: it had to be done from scratch using PHP, MySQL, and “simple JavaScript.” The reason for this was that some client’s cousin knew “some of those” so he will be able to help them if they need to change anything.&lt;/p&gt;
+
+&lt;p&gt;This colleague, let’s call him John, started from scratch and finished around 60-70% of the project when I joined the team.&lt;/p&gt;
+
+&lt;p&gt;After few weeks we were able to present them (he already employed 2 people) with simple CMS and portal and after few more tweaks, we were up and running. (We had a bunch of meetings and corrections before that, but that is irrelevant to the story.)&lt;/p&gt;
+
+&lt;p&gt;This was a simple website, simple CMS for creating posts and galleries. They were able to insert images, change users and manage photos. As per the client’s request (cousin’s advice), we hosted that website on OVH and they started to publish articles and do their job.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#first-problems"&gt;
+  &lt;/a&gt;
+  First problems
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--04hGdLB7--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ta2jtjf1rbom4dhw4vi2.jpg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--04hGdLB7--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ta2jtjf1rbom4dhw4vi2.jpg" alt="Disappointed guy behind a computer, probably in some problems"&gt;&lt;/a&gt;&lt;br&gt;
+After several months they noticed that website is pretty slow so they called us again (this was out of scope for his cousin and it was becoming a really serious project), and ask us to optimize the website a little bit, regarding loading times. Due to their background, they were able to gain a pretty good audience at that time and they over-grown their server’s capacity. They were around 150-200 visitor at any time reading articles.&lt;/p&gt;
+
+&lt;p&gt;Naturally, we decided that the best way to optimize it is to scale it vertically, so we migrated to a much better server. And everything worked well for a while. They also asked us to add a bunch of new functionalities like:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;  they needed to control every position, 62 positions, on homepage (which article and how long will it stay on certain position);&lt;/li&gt;
+&lt;li&gt;  they wanted to be able to drag and drop article where they wanted it to be&lt;/li&gt;
+&lt;li&gt;  they wanted to see how many users are there at any given time in their dashboard&lt;/li&gt;
+&lt;li&gt;  they wanted to add a bunch of shortcodes for different types of content, etc.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Since my colleague was a lead dev and CEO and co-founder I was, kind of, forced to listen to him and we developed as he required. He would listen to my “advice” sometimes, but most of the time he would ask me to do as he was planning. Honestly, I needed that job so I never objected too much. Also, he was doing 90% of backend and I was doing 100% frontend and 10% backend.&lt;/p&gt;
+
+&lt;p&gt;After we have finished all those functionalities, I just felt like every functionality is made of glass and it will not hold that long. So, I was right.&lt;/p&gt;
+
+&lt;p&gt;No. 1 mistake was that for every functionality he used an infinite number of DB queries which made the application pretty slow. Instead of manipulating some data using PHP or JS he just pulled it from DB.&lt;/p&gt;
+
+&lt;p&gt;No. 2 mistake was that, due to all those positions on the homepage, we had around 30 DB queries just to load the homepage, which was awful.&lt;/p&gt;
+
+&lt;p&gt;No. 3 mistake was that he used PDO but he never actually used prepared statements, check the code below.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight php"&gt;&lt;code&gt;&lt;span class="c1"&gt;//Instead of using PDO like this&lt;/span&gt;
+
+    &lt;span class="nv"&gt;$stmt&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nv"&gt;$pdo&lt;/span&gt;&lt;span class="o"&gt;-&amp;gt;&lt;/span&gt;&lt;span class="nf"&gt;prepare&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;"SELECT * FROM post WHERE slug = ?"&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="nv"&gt;$stmt&lt;/span&gt;&lt;span class="o"&gt;-&amp;gt;&lt;/span&gt;&lt;span class="nf"&gt;execute&lt;/span&gt;&lt;span class="p"&gt;([&lt;/span&gt;&lt;span class="nv"&gt;$slugString&lt;/span&gt;&lt;span class="p"&gt;]);&lt;/span&gt;
+
+    &lt;span class="c1"&gt;//He used it like this&lt;/span&gt;
+    &lt;span class="nv"&gt;$stmt&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nv"&gt;$pdo&lt;/span&gt;&lt;span class="o"&gt;-&amp;gt;&lt;/span&gt;&lt;span class="nf"&gt;query&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;"SELECT * FROM post WHERE slug = &lt;/span&gt;&lt;span class="nv"&gt;$slugString&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Because of this last mistake, our application was prone to hackers’ attacks and we really struggled with it.&lt;/p&gt;
+
+&lt;p&gt;No. 4 mistake was that we did not really pay attention to any type of loading times, so you can imagine how satisfied the client was.&lt;/p&gt;
+
+&lt;p&gt;At this point we were homepage was loading for ~5-7secs. But the real problem emerged when this portal was reporting on a big event in the whole country and reading numbers spiked in few seconds, we went from 500-600 to 1300 in like few minutes. Everything came to a halt, literally. The client called, he was furious, but there was really nothing we could do at this point in time.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#middle-phase"&gt;
+  &lt;/a&gt;
+  Middle phase
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--IdWVaxBL--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/hg2xx4y15mrjpx89phz8.jpg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--IdWVaxBL--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/hg2xx4y15mrjpx89phz8.jpg" alt="Guy watching at white board and making plans"&gt;&lt;/a&gt;&lt;br&gt;
+Fast forward a few months later, my colleague left the company and sold it to me and my friend so we went to our client and we promised to make up for his mistakes and improve the app as much as we could, we even accepted to do a pro-bono project for a client (project value was pretty high, but we did not care that much, we just wanted to continue our relationship with this client because he was high paying, really nice guy, it was/is a pleasure to work with him).&lt;/p&gt;
+
+&lt;p&gt;So we started working. My first goal was to make the homepage load everything with only one or two queries. In order to do that I created a new table where only the homepage was stored in order of those positions that I’ve mentioned earlier. Instantly loading times were down to 2 seconds and the client was super satisfied. After that, I implemented cache for everything on the website, except for queries. So, I managed to lower loading times to 800ms-1.5secs.&lt;/p&gt;
+
+&lt;p&gt;Also, I had to implement better image compression and everything, but now front was working as expected, now I had to deal with CMS. The problem was this backend code was not commented at all, even if it was commented it was something like:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight php"&gt;&lt;code&gt;&lt;span class="c1"&gt;//Get everything from gallery table&lt;/span&gt;
+    &lt;span class="nv"&gt;$stmt&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nv"&gt;$pdo&lt;/span&gt;&lt;span class="o"&gt;-&amp;gt;&lt;/span&gt;&lt;span class="nf"&gt;query&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;"SELECT * FROM gallery);
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;As you can see it was nothing really useful, so I had to go line by line and try to figure out what was happening. I was lucky that I’ve been there from the beginning so most of the code I could figure out pretty quickly.&lt;/p&gt;
+
+&lt;p&gt;Loading times were a problem on the backend, so I had to deal with that also. At the time he said we should use AJAX for everything to load, so basically you would get skeleton then we would query for data. And most of the times data was dependent on some other data, so we had a loading queue and it was slow as hell. So instead of that, I used PHP to load everything (server-side rendering) and now the application was loading pretty fast.&lt;/p&gt;
+
+&lt;p&gt;Most of the “advanced” functionalities had to be overwritten, but everything worked, eventually.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#today"&gt;
+  &lt;/a&gt;
+  Today
+&lt;/h3&gt;
+
+&lt;p&gt;After all these improvements, we changed hosting, again, and now we have a pretty powerful server. Also, now, we have a backup server with the same specification as the main server, which can be used either as backup or we can use DB on one server and files on the other so we distribute the load better.&lt;/p&gt;
+
+&lt;p&gt;A few weeks ago we had one event that lead to 5000 concurrent users on the server for several hours. Everything worked pretty well and without serious “hiccups”, but we saw that 5000 is nearly our limit with current infrastructure, so we had a meeting and we decided to improve everything.&lt;/p&gt;
+
+&lt;p&gt;According to statistics every hour we have around 7000-8000 page views and 5 000 000 – 5 500 000 page views per month.&lt;/p&gt;
+
+&lt;p&gt;We did some calculations and we decided that we will implement Redis, first. We already did some testing with the homepage and load times are not really different on a lower number of visitors but when numbers are high we can see differences in loading times and server performance regarding CPU, I/O, and RAM usage.&lt;/p&gt;
+
+&lt;p&gt;Even though RAM is more “occupied” with Redis, CPU and I/O are performing much better, so I think we will continue with Redis. Also, we are considering re-writing everything to something more performant, maybe MERN or Laravel with MySQL and MongoDB. MongoDB would be used for articles. We would store the entire article and accompanying info for easier fetching.&lt;/p&gt;
+
+&lt;p&gt;As I said I would really like to hear your opinion on anything regarding my article. Thank you for reading.&lt;/p&gt;
+
+&lt;p&gt;If you have any questions or anything you can find me on my &lt;a href="https://twitter.com/AmerSikira"&gt;Twitter&lt;/a&gt;, or you can read some of the older articles like &lt;a href="https://webinuse.com/how-to-select-elements-using-vanilla-javascript/"&gt;console.log in JavaScript – Tips &amp;amp; Tricks&lt;/a&gt;&lt;/p&gt;
+
+</description>
+      <category>php</category>
+      <category>mysql</category>
+      <category>javascript</category>
+      <category>optimisation</category>
+    </item>
+    <item>
+      <title>Explaining lazy evaluation in C#</title>
+      <author>Talles L</author>
+      <pubDate>Tue, 28 Sep 2021 14:30:50 +0000</pubDate>
+      <link>https://dev.to/tallesl/explaining-lazy-evaluation-in-c-81m</link>
+      <guid>https://dev.to/tallesl/explaining-lazy-evaluation-in-c-81m</guid>
+      <description>&lt;p&gt;Countless were the times I've fired up Visual Studio to write the following example explaining what lazy evaluation is and why it's better to expose collections as &lt;code&gt;IEnumerable&amp;lt;T&amp;gt;&lt;/code&gt;:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight csharp"&gt;&lt;code&gt;&lt;span class="k"&gt;using&lt;/span&gt; &lt;span class="nn"&gt;System.Collections.Generic&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="k"&gt;using&lt;/span&gt; &lt;span class="nn"&gt;System.Linq&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="k"&gt;using&lt;/span&gt; &lt;span class="nn"&gt;static&lt;/span&gt; &lt;span class="n"&gt;System&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Console&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="c1"&gt;// If you replace the lazy call below with the eager one you get an out of memory error&lt;/span&gt;
+&lt;span class="kt"&gt;var&lt;/span&gt; &lt;span class="n"&gt;oneToTen&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="nf"&gt;LazyInfinity&lt;/span&gt;&lt;span class="p"&gt;().&lt;/span&gt;&lt;span class="nf"&gt;Take&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="m"&gt;10&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+
+&lt;span class="k"&gt;foreach&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kt"&gt;var&lt;/span&gt; &lt;span class="n"&gt;n&lt;/span&gt; &lt;span class="k"&gt;in&lt;/span&gt; &lt;span class="n"&gt;oneToTen&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="nf"&gt;WriteLine&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;n&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+
+&lt;span class="c1"&gt;// "In eager evaluation, the first call to the iterator will result in the entire collection being processed."&lt;/span&gt;
+&lt;span class="c1"&gt;// "A temporary copy of the source collection might also be required."&lt;/span&gt;
+&lt;span class="k"&gt;static&lt;/span&gt; &lt;span class="n"&gt;IEnumerable&lt;/span&gt;&lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="kt"&gt;int&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt; &lt;span class="nf"&gt;EagerInfinity&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+&lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kt"&gt;var&lt;/span&gt; &lt;span class="n"&gt;i&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="m"&gt;0&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+    &lt;span class="kt"&gt;var&lt;/span&gt; &lt;span class="n"&gt;infinity&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="n"&gt;List&lt;/span&gt;&lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="kt"&gt;int&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;();&lt;/span&gt;
+
+    &lt;span class="k"&gt;while&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="k"&gt;true&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+        &lt;span class="n"&gt;infinity&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;Add&lt;/span&gt;&lt;span class="p"&gt;(++&lt;/span&gt;&lt;span class="n"&gt;i&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="n"&gt;infinity&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="c1"&gt;// "In lazy evaluation, a single element of the source collection is processed during each call to the iterator."&lt;/span&gt;
+&lt;span class="k"&gt;static&lt;/span&gt; &lt;span class="n"&gt;IEnumerable&lt;/span&gt;&lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="kt"&gt;int&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;&lt;/span&gt; &lt;span class="nf"&gt;LazyInfinity&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+&lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kt"&gt;var&lt;/span&gt; &lt;span class="n"&gt;i&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="m"&gt;0&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+    &lt;span class="k"&gt;while&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="k"&gt;true&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+        &lt;span class="k"&gt;yield&lt;/span&gt; &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;++&lt;/span&gt;&lt;span class="n"&gt;i&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;More at:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="https://docs.microsoft.com/dotnet/csharp/iterators"&gt;https://docs.microsoft.com/dotnet/csharp/iterators&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://docs.microsoft.com/dotnet/standard/linq/deferred-execution-lazy-evaluation"&gt;https://docs.microsoft.com/dotnet/standard/linq/deferred-execution-lazy-evaluation&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+</description>
+      <category>csharp</category>
+      <category>dotnet</category>
+    </item>
+    <item>
       <title>[Launch] Sunflower - Rewire your brain to associate sobriety with reward 🌻</title>
       <author>kobyconrad</author>
       <pubDate>Tue, 28 Sep 2021 14:29:46 +0000</pubDate>
@@ -1806,6 +2661,10 @@ password=YOUR_MYSQL_PASSWORD
 &lt;/ul&gt;
 
 &lt;p&gt;This will allow you to connect to your database via a graphical interface rather than the &lt;code&gt;mysql&lt;/code&gt; command-line tool.&lt;/p&gt;
+
+&lt;p&gt;If you want to have a production ready MySQL database, I would recommend giving DigitalOcean a try:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://www.digitalocean.com/products/managed-databases/"&gt;Worry-free managed database hosting&lt;/a&gt;&lt;/p&gt;
 
 &lt;h1&gt;
   &lt;a href="#tables"&gt;
@@ -2495,786 +3354,6 @@ SELECT * FROM users;
       <category>cpan</category>
       <category>conferences</category>
       <category>dependencies</category>
-    </item>
-    <item>
-      <title>[PT-BR] Minhas duas features preferidas do Java 17</title>
-      <author>João Victor Martins</author>
-      <pubDate>Tue, 28 Sep 2021 13:56:06 +0000</pubDate>
-      <link>https://dev.to/j_a_o_v_c_t_r/pt-br-minhas-duas-features-preferidas-do-java-17-5aa</link>
-      <guid>https://dev.to/j_a_o_v_c_t_r/pt-br-minhas-duas-features-preferidas-do-java-17-5aa</guid>
-      <description>&lt;p&gt;No dia 14/09/2021, foi lançada a versão 17 do Java, sendo ela uma versão LTS &lt;em&gt;(Long Term Support)&lt;/em&gt;. Assim como nas últimas versões, a 17 trouxe algumas features bem divertidas. Minha ideia nesse post é mostrar as duas que mais me chamaram atenção, que são a &lt;strong&gt;409:Sealed Classes&lt;/strong&gt; e a &lt;strong&gt;406:Pattern Matching for Switch&lt;/strong&gt;. &lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#sealed-classes"&gt;
-  &lt;/a&gt;
-  Sealed Classes
-&lt;/h1&gt;
-
-&lt;p&gt;&lt;em&gt;Sealed&lt;/em&gt; classes e interfaces restringem quais outras classes ou interfaces devem estendê-las e/ou implementa-las. O objetivo é permitir que o autor da classe ou interface tenha mais controle sobre a mesma, além de prover um jeito mais declarativo de restringir o uso da super classe. Um outro objetivo é o suporte a &lt;em&gt;pattern matchings&lt;/em&gt;.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight java"&gt;&lt;code&gt;&lt;span class="kd"&gt;public&lt;/span&gt; &lt;span class="kd"&gt;abstract&lt;/span&gt; &lt;span class="n"&gt;sealed&lt;/span&gt; &lt;span class="kd"&gt;class&lt;/span&gt; &lt;span class="nc"&gt;Automovel&lt;/span&gt; 
-    &lt;span class="n"&gt;permits&lt;/span&gt; &lt;span class="n"&gt;com&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;exemplo&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;automovel&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;Carro&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt;
-            &lt;span class="n"&gt;com&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;examplo&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;automovel&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;Moto&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt; &lt;span class="o"&gt;...&lt;/span&gt; &lt;span class="o"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Uma vez que eu defino quais classes irão poder estender de Automovel, qualquer outra classe diferente de Carro e Moto não deve ser permitida. É importante ressaltar, que as classes que irão estender uma &lt;em&gt;sealed class&lt;/em&gt;, deverão estar no mesmo módulo, caso esteja usando &lt;em&gt;JPMS (Java Platform Module System)&lt;/em&gt; ou no mesmo pacote, caso não esteja usando &lt;em&gt;JPMS&lt;/em&gt;. Para a classes que estendem, existem algumas regras. São elas: &lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;&lt;p&gt;Uma subclasse deve ser declarada como final para manter a hierarquia. &lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;Uma subclasse deve ser declarada como &lt;em&gt;sealed&lt;/em&gt; e permitir a extensão de um novo conjunto de classes.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;Uma subclasse deve ser declarada como &lt;em&gt;non-sealed&lt;/em&gt; e assim permitir que qualquer classe a estenda. &lt;/p&gt;&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;h1&gt;
-  &lt;a href="#pattern-matching-for-switch"&gt;
-  &lt;/a&gt;
-  Pattern Matching for Switch
-&lt;/h1&gt;
-
-&lt;p&gt;Estender a correspondência de padrões para &lt;em&gt;switch&lt;/em&gt; permite que uma expressão seja testada em relação a vários padrões, cada um com uma ação específica, de forma que consultas complexas orientadas a dados possam ser expressas de forma concisa e segura. O objetivo é melhorar a expressividade e a aplicabilidade das extensões e instruções &lt;em&gt;switch&lt;/em&gt;, além de certificar que todas as expressões e instruções existentes continuem a compilar sem alterações.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight java"&gt;&lt;code&gt;&lt;span class="kd"&gt;static&lt;/span&gt; &lt;span class="kt"&gt;void&lt;/span&gt; &lt;span class="nf"&gt;printarTipoAutomovel&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="nc"&gt;Automovel&lt;/span&gt; &lt;span class="n"&gt;automovel&lt;/span&gt;&lt;span class="o"&gt;)&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
-   &lt;span class="k"&gt;switch&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="n"&gt;automovel&lt;/span&gt;&lt;span class="o"&gt;)&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
-     &lt;span class="k"&gt;case&lt;/span&gt; &lt;span class="nc"&gt;Carro&lt;/span&gt; &lt;span class="o"&gt;-&amp;gt;&lt;/span&gt; &lt;span class="nc"&gt;System&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;out&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;println&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"É um carro"&lt;/span&gt;&lt;span class="o"&gt;);&lt;/span&gt;
-     &lt;span class="k"&gt;case&lt;/span&gt; &lt;span class="nc"&gt;Moto&lt;/span&gt; &lt;span class="o"&gt;-&amp;gt;&lt;/span&gt; &lt;span class="nc"&gt;System&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;out&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;println&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"É uma moto"&lt;/span&gt;&lt;span class="o"&gt;);&lt;/span&gt;
-     &lt;span class="k"&gt;default&lt;/span&gt; &lt;span class="o"&gt;-&amp;gt;&lt;/span&gt; &lt;span class="nc"&gt;System&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;out&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;println&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Automóvel não identificado"&lt;/span&gt;&lt;span class="o"&gt;);&lt;/span&gt;
-   &lt;span class="o"&gt;}&lt;/span&gt;
-&lt;span class="o"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;É importante ressaltar que a &lt;strong&gt;JEP 406: Pattern Matching for switch&lt;/strong&gt; está como preview, o que significa que ela pode ser retirada e não fazer parte das próximas versões do Java. &lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#concluindo"&gt;
-  &lt;/a&gt;
-  Concluindo
-&lt;/h1&gt;
-
-&lt;p&gt;O objetivo do post era trazer as features que mais me interessaram no Java 17, sendo essa uma escolha totalmente pessoal. Existem muitas outras features legais, que podem ser vistas em: &lt;a href="https://openjdk.java.net/projects/jdk/17/"&gt;https://openjdk.java.net/projects/jdk/17/&lt;/a&gt;. Espero que gostem da leitura. Dúvidas, sugestões e/ou críticas, estou à disposição. &lt;/p&gt;
-
-&lt;p&gt;Referências&lt;br&gt;
-&lt;a href="https://openjdk.java.net/jeps/409"&gt;https://openjdk.java.net/jeps/409&lt;/a&gt;&lt;br&gt;
-&lt;a href="https://openjdk.java.net/jeps/406"&gt;https://openjdk.java.net/jeps/406&lt;/a&gt;&lt;/p&gt;
-
-</description>
-      <category>java</category>
-      <category>jdk17</category>
-    </item>
-    <item>
-      <title>Do you know all the popular NPM commands?</title>
-      <author>Ankit Kumar</author>
-      <pubDate>Tue, 28 Sep 2021 13:47:45 +0000</pubDate>
-      <link>https://dev.to/knowankit/do-you-know-all-the-popular-npm-commands-22ac</link>
-      <guid>https://dev.to/knowankit/do-you-know-all-the-popular-npm-commands-22ac</guid>
-      <description>&lt;p&gt;We all have setup our node package manager application at least once. We hardly give importance to the &lt;code&gt;npm&lt;/code&gt; because it is not a core part of our development. We perceive &lt;code&gt;npm&lt;/code&gt; as a file which is just a dependency holder. But npm is much more than that, it is not difficult to have an average grip on npm.&lt;/p&gt;
-
-
-
-
-&lt;p&gt;Let's begin with all the popular commands 🛣&lt;/p&gt;
-&lt;h2&gt;
-  &lt;a href="#-raw-npm-init-endraw-"&gt;
-  &lt;/a&gt;
-  &lt;code&gt;npm init&lt;/code&gt;
-&lt;/h2&gt;
-
-&lt;p&gt;This is the first command which you will use when you are setting up your project.&lt;/p&gt;
-
-&lt;p&gt;This command asks for general information about the project name, description, version, author, github-link, homepage etc. It will generate a &lt;code&gt;package.json&lt;/code&gt; file in your root folder.&lt;br&gt;
-You can edit the information anytime.&lt;/p&gt;
-
-&lt;p&gt;If you don't want to enter the information and want to go for defaults then run this &lt;code&gt;npm init --yes&lt;/code&gt;&lt;/p&gt;
-
-&lt;p&gt;This will pick the data from your config setup. &lt;/p&gt;
-&lt;h2&gt;
-  &lt;a href="#-raw-npm-config-endraw-"&gt;
-  &lt;/a&gt;
-  &lt;code&gt;npm config&lt;/code&gt;
-&lt;/h2&gt;
-
-&lt;p&gt;You can update your config with this.&lt;/p&gt;
-
-&lt;p&gt;For example:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;npm config set init-author-name "Ankit Kumar"
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Fetch the value&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;npm config get init-author-name
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#-raw-npm-install-endraw-"&gt;
-  &lt;/a&gt;
-  &lt;code&gt;npm install&lt;/code&gt;
-&lt;/h2&gt;
-
-&lt;p&gt;Install the dependencies present in the package.json. Shorthand&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;npm i
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;To install a package use:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;npm i package-name
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;To save in dependencies:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;npm i package-name --save
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;To save in dev dependencies:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;npm i package-name --save-dev or npm i package-name -D
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Install a package globally:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;npm i package-name --global
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;or&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;npm i package-name -g
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#-raw-npm-uninstall-endraw-"&gt;
-  &lt;/a&gt;
-  &lt;code&gt;npm uninstall&lt;/code&gt;
-&lt;/h2&gt;
-
-&lt;p&gt;Shorthand&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;npm un
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;To uninstall a package do:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;npm un package-name -g or -D or --save
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;&lt;strong&gt;-g&lt;/strong&gt; - remove package from global list&lt;br&gt;
-&lt;strong&gt;--save&lt;/strong&gt; - remove package from dependency list&lt;br&gt;
-&lt;strong&gt;-D&lt;/strong&gt; - remove package from dev dependency list&lt;/p&gt;
-&lt;h2&gt;
-  &lt;a href="#-raw-npm-ci-endraw-"&gt;
-  &lt;/a&gt;
-  &lt;code&gt;npm ci&lt;/code&gt;
-&lt;/h2&gt;
-
-&lt;p&gt;This command is similar to &lt;code&gt;npm install&lt;/code&gt; except it is used in automated environment like test platforms, continuous integration and deployments.&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;To run &lt;code&gt;npm ci&lt;/code&gt;, &lt;code&gt;package-lock.json&lt;/code&gt; must be present&lt;/li&gt;
-&lt;li&gt;If there is any version mismatch between &lt;code&gt;package.json&lt;/code&gt; and &lt;code&gt;package-lock.json&lt;/code&gt; then it will exit with errors.&lt;/li&gt;
-&lt;li&gt;It is used to install entire projects and not individual package&lt;/li&gt;
-&lt;li&gt;It will never write to &lt;code&gt;package.json&lt;/code&gt; or any of the &lt;code&gt;package-locks&lt;/code&gt;: installs are essentially frozen.&lt;/li&gt;
-&lt;li&gt;If a node_modules is already present, it will be automatically removed before &lt;code&gt;npm ci&lt;/code&gt; begins its install.&lt;/li&gt;
-&lt;/ul&gt;
-&lt;h2&gt;
-  &lt;a href="#-raw-npm-audit-endraw-"&gt;
-  &lt;/a&gt;
-  &lt;code&gt;npm audit&lt;/code&gt;
-&lt;/h2&gt;
-
-&lt;p&gt;Scan your project for vulnerabilities and automatically install any compatible updates to vulnerable dependencies:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;npm audit fix
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#-raw-npm-cache-endraw-"&gt;
-  &lt;/a&gt;
-  &lt;code&gt;npm cache&lt;/code&gt;
-&lt;/h2&gt;
-
-&lt;p&gt;Add the specified package to the local cache. This command is primarily intended to be used internally by NPM, but it can provide a way to add data to the local installation cache explicitly.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;npm cache add &amp;lt;tarball file&amp;gt;
-npm cache add &amp;lt;folder&amp;gt;
-npm cache add &amp;lt;tarball url&amp;gt;
-npm cache add &amp;lt;name&amp;gt;@&amp;lt;version&amp;gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Whenever we install any package it does not caches so to make it available offline, we can use this command.&lt;/p&gt;
-
-&lt;p&gt;Fortunately, &lt;code&gt;yarn&lt;/code&gt; caches all the packages you install and is available offline.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#-raw-npm-ls-endraw-"&gt;
-  &lt;/a&gt;
-  &lt;code&gt;npm ls&lt;/code&gt;
-&lt;/h2&gt;
-
-&lt;p&gt;This command will print to stdout all the versions of packages that are installed, as well as their dependencies, in a tree-structure.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#-raw-npm-link-endraw-"&gt;
-  &lt;/a&gt;
-  &lt;code&gt;npm link&lt;/code&gt;
-&lt;/h2&gt;
-
-&lt;p&gt;This is very common for dev who wants to test their component  locally before publishing it on the &lt;code&gt;npm&lt;/code&gt; registry. It will create a symbolic link in the global folder. &lt;code&gt;{prefix}/lib/node_modules/&amp;lt;package&amp;gt;&lt;/code&gt; that links to the package where the &lt;code&gt;npm&lt;/code&gt; link command was executed.&lt;/p&gt;
-
-&lt;p&gt;Next, in some other location, &lt;code&gt;npm link package-name&lt;/code&gt; will create a symbolic link from globally-installed package-name to node_modules/ of the current folder. Now you can import your created component and it should be present in the &lt;code&gt;node_modules&lt;/code&gt;&lt;/p&gt;
-
-&lt;p&gt;Note that package-name is taken from package.json, not from directory name.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#-raw-npm-publish-endraw-"&gt;
-  &lt;/a&gt;
-  &lt;code&gt;npm publish&lt;/code&gt;
-&lt;/h2&gt;
-
-&lt;p&gt;Publishes a package to the registry so that it can be installed by name. All files in the package directory are included if no local .gitignore or .npmignore file exists.&lt;/p&gt;
-
-&lt;p&gt;By default npm will publish to the public registry. This can be overridden by specifying a different default registry or using a scope in the name (see package.json).&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#-raw-npm-pack-endraw-"&gt;
-  &lt;/a&gt;
-  &lt;code&gt;npm pack&lt;/code&gt;
-&lt;/h2&gt;
-
-&lt;p&gt;It creates a installable file with &lt;code&gt;.tgz&lt;/code&gt; extension called tarball. This is a package file which can be install in any app. &lt;/p&gt;
-
-&lt;p&gt;For example :&lt;br&gt;
-&lt;code&gt;example-component.tgz&lt;/code&gt; is tarball file. I will copy this in any node app. I will add this in my package.json like below&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;"dependency": {
- "example-component: "file: ./example-component.tgz"
-}
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;and run&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;npm i/install
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#-raw-npm-help-endraw-"&gt;
-  &lt;/a&gt;
-  &lt;code&gt;npm help&lt;/code&gt;
-&lt;/h2&gt;
-
-&lt;p&gt;If supplied a topic, then show the appropriate documentation page.&lt;/p&gt;
-
-&lt;p&gt;If the topic does not exist, or if multiple terms are provided, then run the help-search command to find a match.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#-raw-npm-whoami-endraw-"&gt;
-  &lt;/a&gt;
-  &lt;code&gt;npm whoami&lt;/code&gt;
-&lt;/h2&gt;
-
-&lt;p&gt;Print the username config to standard output.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#-raw-npm-loginlogout-endraw-"&gt;
-  &lt;/a&gt;
-  &lt;code&gt;npm login/logout&lt;/code&gt;
-&lt;/h2&gt;
-
-&lt;p&gt;It just logins and logout &lt;/p&gt;
-
-&lt;p&gt;Please go through the full &lt;a href="https://docs.npmjs.com/cli/v6/commands"&gt;NPM docs&lt;/a&gt; as I have mentioned only those commands which I have seen others and used myself commonly.&lt;/p&gt;
-
-
-
-
-&lt;p&gt;Thanks for dropping by 🌟&lt;br&gt;
-Add a ❤️ if you liked it. Checkout my &lt;a href="https://github.com/knowankit"&gt;GitHub&lt;/a&gt; profile for cool projects. I have published many NPM packages.&lt;br&gt;
-Support me by following me on &lt;a href="https://twitter.com/knowankit"&gt;twitter&lt;/a&gt;&lt;/p&gt;
-
-</description>
-      <category>beginners</category>
-      <category>webdev</category>
-      <category>javascript</category>
-    </item>
-    <item>
-      <title>HTTP Prompt for Performance Engineers</title>
-      <author>NaveenKumar Namachivayam ⚡</author>
-      <pubDate>Tue, 28 Sep 2021 13:37:54 +0000</pubDate>
-      <link>https://dev.to/qainsights/http-prompt-for-performance-engineers-33jg</link>
-      <guid>https://dev.to/qainsights/http-prompt-for-performance-engineers-33jg</guid>
-      <description>&lt;p&gt;In this blog post, we are going to see how you can get started with HTTP Prompt - an interactive command-line HTTP client for testing and debugging purpose. In the last couple of posts, I have covered &lt;a href="https://qainsights.com/httpie-for-performance-engineers/" rel="noreferrer noopener"&gt;HTTPie &lt;/a&gt;and &lt;a href="https://qainsights.com/http-toolkit-for-performance-engineers/" rel="noreferrer noopener"&gt;HTTP Toolkit&lt;/a&gt; utilities for performance testers and engineers. Let us get started by installing it.&lt;/p&gt;
-
-&lt;h2&gt;How to install HTTP Prompt?&lt;/h2&gt;
-
-&lt;p&gt;The prerequisite is to have the latest version of Python and the PIP package. To install HTTP Prompt, I am going to use Windows Subsystem for Linux (WSL) and by issuing the below command. Alternatively, you can install it on the native OS as well.&lt;/p&gt;
-
-&lt;pre&gt;&lt;code&gt;pip install http-prompt&lt;/code&gt;&lt;/pre&gt;
-
-&lt;p&gt;P.S: using the &lt;code&gt;sudo&lt;/code&gt; on &lt;code&gt;pip&lt;/code&gt; is not recommended.&lt;/p&gt;
-
-&lt;p&gt;If you would like to upgrade, issue the below command.&lt;/p&gt;
-
-&lt;pre&gt;&lt;code&gt;pip install -U http-prompt&lt;/code&gt;&lt;/pre&gt;
-
-&lt;p&gt;To validate the installation, issue the below command.&lt;/p&gt;
-
-&lt;pre&gt;&lt;code&gt;http-prompt --version&lt;/code&gt;&lt;/pre&gt;
-
-&lt;h2&gt;HTTP Prompt Features&lt;/h2&gt;
-
-&lt;p&gt;HTTP Prompt has all the essential features for testing HTTP requests. But what is unique in HTTP Prompt is the following features: &lt;strong&gt;interactive, auto-complete and syntax highlighting&lt;/strong&gt;.&lt;/p&gt;
-
-&lt;p&gt;Other features are:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Auto Cookies&lt;/li&gt;
-&lt;li&gt;OpenAPI/Swagger Integration&lt;/li&gt;
-&lt;li&gt;Unix-like Pipelines&lt;/li&gt;
-&lt;li&gt;
-&lt;a href="https://qainsights.com/httpie-for-performance-engineers/"&gt;HTTPie&lt;/a&gt; compatible&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h2&gt;Hello World&lt;/h2&gt;
-
-&lt;p&gt;To start HTTP Prompt, open the command line prompt and issue the below command to start a session targetting https://example.com&lt;/p&gt;
-
-&lt;pre&gt;&lt;code&gt;http-prompt https://example.com&lt;/code&gt;&lt;/pre&gt;
-
-&lt;p&gt;The above command creates a session where you can interact with it, e.g. issuing the below command displays the HTTP response. While typing the command, HTTP Prompt will autofill it for you.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://qainsights.com/wp-content/uploads/2021/09/supershot.png"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--f5TMbW-K--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://qainsights.com/wp-content/uploads/2021/09/supershot.png" alt=""&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;The below screenshot is how the response will show up.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://qainsights.com/wp-content/uploads/2021/09/supershot-1.png"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--atynGNDY--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://qainsights.com/wp-content/uploads/2021/09/supershot-1.png" alt=""&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;To exit the session, type &lt;code&gt;exit&lt;/code&gt;.&lt;/p&gt;
-
-&lt;h2&gt;Let us order a pizza.&lt;/h2&gt;
-
-&lt;p&gt;By leveraging the httpbin.org sample demo app, let us use the HTTP Prompt to send a POST request. HTTP Prompt provides an easy way to interact with the session, just like how you interact with the computer to navigate between folders. &lt;/p&gt;
-
-&lt;p&gt;E.g. &lt;code&gt;cd&lt;/code&gt; for change directory, &lt;code&gt;ls&lt;/code&gt; or &lt;code&gt;dir&lt;/code&gt; to list contents in the current directory etc.&lt;/p&gt;
-
-&lt;p&gt;To order a pizza on httpbin.org, below is the POST request that needs to be sent from an HTTP client.&lt;/p&gt;
-
-&lt;pre&gt;&lt;code&gt;https://httpbin.org/post
-
-POST data:
-custname=Lilly&amp;amp;custtel=9876543210&amp;amp;custemail=lilly%40example.com&amp;amp;size=medium&amp;amp;topping=cheese&amp;amp;topping=onion&amp;amp;delivery=21%3A00&amp;amp;comments=please+knock+the+door&lt;/code&gt;&lt;/pre&gt;
-
-&lt;p&gt;But in HTTP Prompt, you can do this in an interactive way. First, you need to navigate to the URL  https://httpbin.org by issuing the below command. This will create a new session for httpbin.org&lt;/p&gt;
-
-&lt;pre&gt;&lt;code&gt;http-prompt http://httpbin.org&lt;/code&gt;&lt;/pre&gt;
-
-&lt;p&gt;To navigate into /post URL, issue the below command.&lt;/p&gt;
-
-&lt;pre&gt;&lt;code&gt;cd post&lt;/code&gt;&lt;/pre&gt;
-
-&lt;p&gt;This will navigate into the  http://httpbin.org/post URL.&lt;/p&gt;
-
-&lt;p&gt;To order a pizza, you can send the key value pair one by one as shown below.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://qainsights.com/wp-content/uploads/2021/09/supershot-2.png"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--x86lMPUL--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://qainsights.com/wp-content/uploads/2021/09/supershot-2.png" alt=""&gt;&lt;/a&gt;The HTTP Prompt keeps adding the above key value pairs to the request. Once all the payload is added, to send the POST request, just issue the command &lt;code&gt;post&lt;/code&gt; inside the session. &lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://qainsights.com/wp-content/uploads/2021/09/supershot-4.png"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--BNVyuZxi--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://qainsights.com/wp-content/uploads/2021/09/supershot-4.png" alt=""&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;To send other methods, you can use the below commands.&lt;/p&gt;
-
-&lt;pre&gt;&lt;code&gt;&amp;gt; get
-&amp;gt; post
-&amp;gt; put
-&amp;gt; patch
-&amp;gt; delete
-&amp;gt; head&lt;/code&gt;&lt;/pre&gt;
-
-&lt;p&gt;All the HTTPie commands are valid in HTTP Prompt.&lt;/p&gt;
-
-&lt;p&gt;To view all the current session details, issue the &lt;code&gt;env&lt;/code&gt; command.&lt;/p&gt;
-
-&lt;p&gt;To save the current session, use &lt;code&gt;env &amp;gt; filepath_to_save&lt;/code&gt;, e.g. &lt;code&gt;env &amp;gt; ./mysession&lt;/code&gt;, this will save the session info to the current location.&lt;/p&gt;
-
-&lt;p&gt;To load the current session, use &lt;code&gt;exec ./mysession&lt;/code&gt;.&lt;/p&gt;
-
-&lt;p&gt;To save the response, use &lt;code&gt;post &amp;gt; myresponse&lt;/code&gt;&lt;/p&gt;
-
-&lt;p&gt;To leverage piping, &lt;code&gt;post | grep "data"&lt;/code&gt; or &lt;code&gt;post | jq '.data'&lt;/code&gt;.&lt;/p&gt;
-
-&lt;p&gt;To remove all the options and parameters, &lt;code&gt;rm *&lt;/code&gt;&lt;/p&gt;
-
-&lt;p&gt;To add a header, e.g. &lt;code&gt;Content-Type:application/json&lt;/code&gt;, auto-fill will assist you find the right syntax.&lt;/p&gt;
-
-&lt;p&gt;To send a secret payload, store the content in a file and create a variable that needs to be sent using the below code.&lt;/p&gt;
-
-&lt;pre&gt;&lt;code&gt;secret==`cat my_secret_post_payload`&lt;/code&gt;&lt;/pre&gt;
-
-&lt;p&gt;The backticks load it from the shell. Send the request using the &lt;code&gt;post&lt;/code&gt;.&lt;/p&gt;
-
-&lt;pre&gt;&lt;code&gt;https://httpbin.org/response-headers&amp;gt; env
-cd https://httpbin.org/response-headers
-'secret=={"name":"morpheus","job":"leader"}'&lt;/code&gt;&lt;/pre&gt;
-
-&lt;p&gt;&lt;a href="https://qainsights.com/wp-content/uploads/2021/09/supershot-5.png"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ECAfNADb--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://qainsights.com/wp-content/uploads/2021/09/supershot-5.png" alt=""&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;h2&gt;Configuration Location&lt;/h2&gt;
-
-&lt;p&gt;In Windows, the first user config file will be created at, &lt;code&gt;%LOCALAPPDATA%/http-prompt/config.py&lt;/code&gt;. Default location is &lt;code&gt;~/.config/http-prompt/config.py&lt;/code&gt;&lt;/p&gt;
-
-&lt;h2&gt;Next Steps&lt;/h2&gt;
-
-&lt;p&gt;HTTP Prompt supports OpenAPI specs using &lt;code&gt;--spec&lt;/code&gt;. You can refer to the other important commands from the HTTP Prompt documents. &lt;/p&gt;
-
-&lt;h2&gt;Conclusion&lt;/h2&gt;
-
-&lt;p&gt;Like HTTP Pie and HTTP Toolkit, HTTP Prompt helps to test and debug HTTP requests in an interactive way with syntax highlighting and color coding. Command-line in nature helps to automate and is easy to incorporate in CI/CD as well.&lt;/p&gt;
-
-</description>
-      <category>testing</category>
-      <category>tools</category>
-      <category>webperf</category>
-      <category>performance</category>
-    </item>
-    <item>
-      <title>Splunk - Rex command</title>
-      <author>Maxime Guilbert</author>
-      <pubDate>Tue, 28 Sep 2021 13:27:47 +0000</pubDate>
-      <link>https://dev.to/adaendra/splunk-rex-command-2c02</link>
-      <guid>https://dev.to/adaendra/splunk-rex-command-2c02</guid>
-      <description>&lt;p&gt;When you are debugging an application, you may need to extract some data from logs &lt;em&gt;(like an id in an URI...)&lt;/em&gt;.&lt;/p&gt;
-
-&lt;p&gt;To help you to do that, Splunk has the &lt;strong&gt;rex&lt;/strong&gt; command.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#how-does-it-work"&gt;
-  &lt;/a&gt;
-  How does it work?
-&lt;/h1&gt;
-
-&lt;h2&gt;
-  &lt;a href="#command"&gt;
-  &lt;/a&gt;
-  Command
-&lt;/h2&gt;
-
-&lt;p&gt;The simpliest way to use it is &lt;/p&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;| rex &lt;em&gt;regex&lt;/em&gt;&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;With this command, you will search for an element in the whole log.&lt;/p&gt;
-
-&lt;p&gt;If you want to search in a specific field, add &lt;strong&gt;field=&lt;/strong&gt; and the name of your field.&lt;/p&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;| rex field=&lt;em&gt;&lt;/em&gt; &lt;em&gt;regex&lt;/em&gt;&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;&lt;em&gt;example&lt;/em&gt;&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;| rex field=uri *regex*
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-
-
-&lt;h2&gt;
-  &lt;a href="#regex"&gt;
-  &lt;/a&gt;
-  Regex
-&lt;/h2&gt;
-
-&lt;p&gt;About how to write the regex, you have to follow the next pattern&lt;/p&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;[Regex about the text before the desired value][Regex about the desired value][Regex about the text after the desired value]&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;The first and the last part are really look like a classic regex.&lt;br&gt;
-But the middle part is a little bit particular.&lt;/p&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;(?\w+)&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;Wrote like this, you will declare the field where you want insert your new data and you have the regex corresponding to your value.&lt;/p&gt;
-
-&lt;p&gt;Also you can retrieve multiple datas from a single rex command.&lt;/p&gt;
-
-
-&lt;h2&gt;
-  &lt;a href="#examples"&gt;
-  &lt;/a&gt;
-  Examples
-&lt;/h2&gt;
-
-&lt;p&gt;Retrieve a username&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;| rex "user\s(?&amp;lt;username&amp;gt;\w+)\s"
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Retrieve the email sender and the destination of a mail&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;| rex field=_raw "From: &amp;lt;(?&amp;lt;from&amp;gt;.*)&amp;gt; To: &amp;lt;(?&amp;lt;to&amp;gt;.*)&amp;gt;"
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-
-
-&lt;h1&gt;
-  &lt;a href="#links"&gt;
-  &lt;/a&gt;
-  Links
-&lt;/h1&gt;
-
-&lt;ul&gt;
-&lt;li&gt;&lt;a href="https://docs.splunk.com/Documentation/SplunkCloud/8.2.2106/SearchReference/Rex"&gt;Splunk - Rex command&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://docs.splunk.com/Documentation/SCS/current/SearchReference/RexCommandExamples"&gt;Splunk - Rex examples&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="http://karunsubramanian.com/splunk/how-to-use-rex-command-to-extract-fields-in-splunk/"&gt;Karunsubramanian.com - Post about Splunk rex command&lt;/a&gt;&lt;/li&gt;
-&lt;/ul&gt;
-
-
-
-
-&lt;p&gt;I hope it will help you! 🍺&lt;/p&gt;
-
-</description>
-      <category>devops</category>
-      <category>sre</category>
-      <category>splunk</category>
-      <category>productivity</category>
-    </item>
-    <item>
-      <title>Lessons from a student hackathon</title>
-      <author>Jelle Smeets</author>
-      <pubDate>Tue, 28 Sep 2021 13:25:27 +0000</pubDate>
-      <link>https://dev.to/smeetsmeister/lessons-from-a-student-hackathon-1kdb</link>
-      <guid>https://dev.to/smeetsmeister/lessons-from-a-student-hackathon-1kdb</guid>
-      <description>&lt;p&gt;I'd like to take you back to the second year of my degree in Computer science. All the way back to 2014 to be precise. A hackathon was organized where we could travel to Belgium and do a 2-day hackathon for a company, win a cash prize and stay the night in a hostel.&lt;/p&gt;
-
-&lt;p&gt;This sounded like an exciting adventure! Getting to code with some of my classmates in a more competitive setting sounded like a nice change from the usual school projects. And having the evening to explore a nice town (and beers) in Belgium, sign me up!&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#the-hackathon"&gt;
-  &lt;/a&gt;
-  The Hackathon
-&lt;/h2&gt;
-
-&lt;p&gt;In hindsight, the hackathon project was nothing special. It was for a company that thought it invented a new social media that could get big. The goal was to build a Chrome extension where users could share the page they were on. Calling their APIs and scraping the page you were on.&lt;/p&gt;
-
-&lt;p&gt;Our group consisted of a few students who already had some experience outside of the course. Some had some summer jobs or internships as web developers. By the end of day 1, our group was miles ahead of the other groups.&lt;/p&gt;
-
-&lt;p&gt;The evening was spent on nice food, awesome Belgian beers, and we had a long and fun night exploring the local bars. Which is honestly why we were a bit tired and hungover for day 2. Halfway through the day, we saw that the other groups were never going to catch up with us, and we decided to take it easy for the rest of the day.&lt;/p&gt;
-
-&lt;p&gt;When the final demos were done we thought this one is in the pocket! No other team was near as far as we were. But when the results came out, they announced we had the nicest solution but they did not like the fact we took such a slow pace on the second day. Instead, they gave the prize to the runner-ups, who did not have such a nice product but instead worked their asses off.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--XEt_Jd8---/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/pvannlfbcppj3qqka1j4.jpg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--XEt_Jd8---/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/pvannlfbcppj3qqka1j4.jpg" alt="loser"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;While I respect the decision made, we felt screwed. Instead of a €400 cash prize, we got a bottle of beer. We quickly thanked them for organizing and had a long and grumpy ride home to The Netherlands.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#the-aftermath"&gt;
-  &lt;/a&gt;
-  The aftermath
-&lt;/h2&gt;
-
-&lt;p&gt;A few weeks later we got an email from the company that organized the hackathon. They were still interested in our solution and asked if we could mail the source code. We felt used, apparently, it was not good enough to win, but they still wanted to use it.&lt;/p&gt;
-
-&lt;p&gt;After some discussions in our group, we decided to make a bold statement. We emailed them back, that for €300 we could send them the source code. Feeling almost as scared as taking your driver's license exam we sent the email.&lt;/p&gt;
-
-&lt;p&gt;Honestly, we did not expect to get it. As we sort of guessed, we got a very angry email telling us we were entitled students that still had a lot to learn in the "grown-up world".&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#lessons-learned"&gt;
-  &lt;/a&gt;
-  Lessons learned
-&lt;/h2&gt;
-
-&lt;p&gt;Our group talked to some teachers. Expecting to get in trouble. After all, they made the arrangements for the hackathon. Some agreed some did not really care, but one reaction really stood out and stuck with me.&lt;/p&gt;
-
-&lt;p&gt;A teacher told us, you guys know what you were worth, they were probably pissed off you caught them in their game. Companies often take advantage of students/interns and I think it's a really good thing you stood up for yourselves. They probably just wanted to use what you coded and thought they could get away with getting it for (almost) free.&lt;/p&gt;
-
-&lt;p&gt;The lesson this incident thought me is to always know your worth. Don't be afraid to stand your ground, but that can also mean you don't get what you want. But at least you won't feel taken advantage of.&lt;/p&gt;
-
-&lt;p&gt;If you are interested in other lessons I learned, check the &lt;a href="https://blog.jellesmeets.nl/lists/4-lessons-i-learned-as-a-starting-scrum-master/"&gt;4 lessons I learned as a&lt;/a&gt; starting scrum master.&lt;/p&gt;
-
-</description>
-      <category>beginners</category>
-      <category>webdev</category>
-      <category>career</category>
-      <category>lessons</category>
-    </item>
-    <item>
-      <title>Clean REACT Solutions</title>
-      <author>Rupak Dey</author>
-      <pubDate>Tue, 28 Sep 2021 13:19:45 +0000</pubDate>
-      <link>https://dev.to/deyrupak/clean-react-solutions-10lg</link>
-      <guid>https://dev.to/deyrupak/clean-react-solutions-10lg</guid>
-      <description>&lt;p&gt;&lt;em&gt;Save for later.&lt;/em&gt;&lt;br&gt;
-&lt;br&gt;&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#1-selfinvoking-functions"&gt;
-  &lt;/a&gt;
-  1. Self-invoking functions
-&lt;/h3&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;Fetch data async when the page loads&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--q1Yk545b--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/8faw8pn9l6njly3s02as.jpg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--q1Yk545b--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/8faw8pn9l6njly3s02as.jpg" alt="Fetch data async"&gt;&lt;/a&gt;&lt;br&gt;
-&lt;br&gt;&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#2-long-shadows"&gt;
-  &lt;/a&gt;
-  2. Long Shadows
-&lt;/h3&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;Create artistic effects easily with CSS in JS&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--vkLK9_8X--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/tb4azuwy6q5h2qhu3jz9.jpg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--vkLK9_8X--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/tb4azuwy6q5h2qhu3jz9.jpg" alt="Long Shadows"&gt;&lt;/a&gt;&lt;br&gt;
-&lt;br&gt;&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#3-building-timers"&gt;
-  &lt;/a&gt;
-  3. Building Timers
-&lt;/h3&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;Make super simple timer with useRef hook&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--SUFatf5m--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/lykrtid2ctcexgrdvmd2.jpg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--SUFatf5m--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/lykrtid2ctcexgrdvmd2.jpg" alt="Timer"&gt;&lt;/a&gt;&lt;br&gt;
-&lt;br&gt;&lt;/p&gt;
-
-&lt;p&gt;P.S. Want the next post to be something specific? Do let me know in the comments.&lt;/p&gt;
-
-&lt;p&gt;🤘🏻&lt;br&gt;
-&lt;br&gt;&lt;br&gt;
-Connect with me : &lt;a href="https://github.com/deyRupak"&gt;Github&lt;/a&gt; | &lt;a href="https://www.fiverr.com/share/V763ld"&gt;Tutoring&lt;/a&gt; | &lt;a href="https://www.fiverr.com/share/Rld9Y8"&gt;Freelance Web Dev&lt;/a&gt;&lt;/p&gt;
-
-</description>
-      <category>react</category>
-      <category>webdev</category>
-      <category>productivity</category>
-      <category>javascript</category>
     </item>
   </channel>
 </rss>
