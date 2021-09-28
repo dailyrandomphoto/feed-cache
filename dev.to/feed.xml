@@ -7,6 +7,398 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>Serverless file storage with AWS Lambda</title>
+      <author>Sergei Sumarokov</author>
+      <pubDate>Tue, 28 Sep 2021 21:30:57 +0000</pubDate>
+      <link>https://dev.to/kompotkot/serverless-file-storage-with-aws-lambda-1ghi</link>
+      <guid>https://dev.to/kompotkot/serverless-file-storage-with-aws-lambda-1ghi</guid>
+      <description>&lt;p&gt;Hello! Today we will deploy a serverless infrastructure based on AWS Lambda for uploading images (or any other files) with private storage in an AWS S3 bucket. We will be using terraform scripts that are uploaded and available at my &lt;a href="https://github.com/kompotkot/hatchery/tree/main/files_distributor"&gt;kompotkot/hatchery&lt;/a&gt; GitHub repository.&lt;/p&gt;
+
+&lt;p&gt;This approach has the following advantages:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;lambda is called on request and therefore allows to save on server maintenance costs if this functionality is not key for your application&lt;/li&gt;
+&lt;li&gt;lambda functions have an isolated runtime environment, which is ideal for processing uploaded files. Should malicious code be uploaded, the attacker will not be able to leave the sandbox, and the sandbox session will be forcibly terminated after some time&lt;/li&gt;
+&lt;li&gt;storing files in an S3 bucket is very cheap&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h2&gt;
+  &lt;a href="#project-structure"&gt;
+  &lt;/a&gt;
+  Project structure
+&lt;/h2&gt;
+
+&lt;p&gt;As an example, we'll be using an abstract app for journal entries with an API.&lt;br&gt;
+We can upload an image in each entry, and the structure is similar to a file directory:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;- journal_1
+  - entry_1
+    - image_1
+  - entry_2
+    - image_1
+    - image_n
+  - entry_n
+- journal_n
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Our hypothetical API has an endpoint for receiving an entry in a journal:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;curl \
+  --request GET \
+  --url 'https://api.example.com/journals/{journal_id}/entries/{entries_id}'
+  --header 'Authorization: {token_id}'
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;If in response to this endpoint &lt;code&gt;status_code&lt;/code&gt; is equal to 200, it means the user is authorized and has access to the journal. Accordingly, we will let them store images for this entry.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#registering-the-app-on-bugoutdev"&gt;
+  &lt;/a&gt;
+  Registering the app on Bugout.dev
+&lt;/h2&gt;
+
+&lt;p&gt;To avoid adding an extra table to the database, which we would need for storing which image belongs to which entry, we will use &lt;code&gt;resources&lt;/code&gt; from &lt;a href="https://bugout.dev/"&gt;Bugout.dev&lt;/a&gt;. This approach is used to simplify our infrastructure, but, if required, this step can be substituted for creating a new table in your database and writing an API for creating, modifying, and deleting data about the stored images. Bugout.dev is open source and you can review the API documentation at the GitHub &lt;a href="https://github.com/bugout-dev"&gt;repository&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;We will need an account and a team called &lt;code&gt;myapp&lt;/code&gt; (you can use any name in relation to your project) at the &lt;a href="https://bugout.dev/account/teams"&gt;Bugout.dev Teams&lt;/a&gt; page, you should save this team’s ID for the next step (in our case it’s &lt;code&gt;e6006d97-0551-4ec9-aabd-da51ee437909&lt;/code&gt;):&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--PBQN_pLB--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://miro.medium.com/max/700/1%2A5Lk9gSuzQguv5XdXjvYOnw.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--PBQN_pLB--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://miro.medium.com/max/700/1%2A5Lk9gSuzQguv5XdXjvYOnw.png" alt="2"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Next, let’s create a Bugout.dev Application for our team myapp through a curl request (the token can be generated at the &lt;a href="https://bugout.dev/account/tokens"&gt;Bugout.dev Tokens&lt;/a&gt; page) and save it in the &lt;code&gt;BUGOUT_ACCESS_TOKEN&lt;/code&gt; variable:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;curl \
+  --request POST \
+  --url 'https://auth.bugout.dev/applications' \
+  --header "Authorization: Bearer $BUGOUT_ACCESS_TOKEN" \
+  --form 'group_id=e6006d97-0551-4ec9-aabd-da51ee437909' \
+  --form 'name=myapp-images' \
+  --form 'description=Image uploader for myapp notes' \
+  | jq .
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;In response we will get confirmation of a successfully created application:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight json"&gt;&lt;code&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"id"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"f0a1672d-4659-49f6-bc51-8a0aad17e979"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"group_id"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"e6006d97-0551-4ec9-aabd-da51ee437909"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"name"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"myapp-images"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"description"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"Image uploader for myapp notes"&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The ID &lt;code&gt;f0a1672d-4659-49f6-bc51-8a0aad17e979&lt;/code&gt; will be used for storing &lt;code&gt;resources&lt;/code&gt;, where every resource is the uploaded image’s metadata. The structure is set in any form depending on the required keys, in our case, it will look as follows:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight json"&gt;&lt;code&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"id"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"a6423cd1-317b-4f71-a756-dc92eead185c"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"application_id"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"f0a1672d-4659-49f6-bc51-8a0aad17e979"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"resource_data"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="nl"&gt;"id"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"d573fab2-beb1-4915-91ce-c356236768a4"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="nl"&gt;"name"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"random-image-name"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="nl"&gt;"entry_id"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"51113e7d-39eb-4f68-bf99-54de5892314b"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="nl"&gt;"extension"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"png"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="nl"&gt;"created_at"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"2021-09-19 15:15:00.437163"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="nl"&gt;"journal_id"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"2821951d-70a4-419b-a968-14e056b49b71"&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="p"&gt;},&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"created_at"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"2021-09-19T15:15:00.957809+00:00"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"updated_at"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"2021-09-19T15:15:00.957809+00:00"&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;As a result, we have a remote database, where every time we upload an image to an S3 bucket, we’ll be writing which journal(&lt;code&gt;journal_id&lt;/code&gt;) and which entry(&lt;code&gt;entry_id&lt;/code&gt;) the image was added to under which ID, name, and extension.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#preparing-the-aws-project-environment"&gt;
+  &lt;/a&gt;
+  Preparing the AWS project environment
+&lt;/h2&gt;
+
+&lt;p&gt;AWS will store images in an S3 bucket and function as a server on Lambda for image manipulation. We will need an AWS account and a configured IAM user for terraform. It is an account with &lt;code&gt;Programmatic access&lt;/code&gt; to all resources without having access to the web console:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--T-Zu-bhN--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://miro.medium.com/max/700/1%2AzvEBy6syc1LRM2_jOMk2bw.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--T-Zu-bhN--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://miro.medium.com/max/700/1%2AzvEBy6syc1LRM2_jOMk2bw.png" alt="3"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Get the access keys and add these variables to your environment:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;export AWS_ACCESS_KEY_ID=&amp;lt;your_aws_terraform_account_access_key&amp;gt;
+export AWS_SECRET_ACCESS_KEY=&amp;lt;your_aws_terraform_account_secret_key&amp;gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Let’s also deploy a VPC with the subnets:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;2 subnets with private access&lt;/li&gt;
+&lt;li&gt;2 subnets with public access&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;They will be useful for configuring the AWS Load Balancer. The code for this module can be found under &lt;a href="https://github.com/kompotkot/hatchery/tree/main/files_distributor/network"&gt;files_distributor/network&lt;/a&gt;. Let’s edit the variables in the &lt;code&gt;variables.tf&lt;/code&gt; file and launch the script:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;terraform apply
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;From the output, add environment variables with values &lt;code&gt;AWS_HATCHERY_VPC_ID&lt;/code&gt;, &lt;code&gt;AWS_HATCHERY_SUBNET_PUBLIC_A_ID&lt;/code&gt; and &lt;code&gt;AWS_HATCHERY_SUBNET_PUBLIC_B_ID&lt;/code&gt;.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#server-code"&gt;
+  &lt;/a&gt;
+  Server code
+&lt;/h2&gt;
+
+&lt;p&gt;In our project, we’ll be using a simple AWS Lambda function. In my experience, I’ve noticed that as the packet with code surpasses 10MB, the upload speed to AWS drops dramatically. Even if we upload it to the S3 bucket in advance and then make a lambda from it, AWS can freeze for a long time. Therefore, if you are using third-party libraries it can make sense to use lambda layers, whereas if you aren’t planning to use any libraries with lightweight code on CloudFront, consider looking into lambda@edge.&lt;/p&gt;
+
+&lt;p&gt;The full code can be found in the &lt;a href="https://github.com/kompotkot/hatchery/blob/main/files_distributor/bucket/modules/s3_bucket/files/lambda_function.py"&gt;lambda_function.py&lt;/a&gt; file in the repository. In my opinion, it’s more effective to work with nodejs, but to facilitate in-depth file processing we’ll use python. The code consists of main blocks:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;MY_APP_JOURNALS_URL = "https://api.example.com"     # API endpoint for accessing out journal entries app
+BUGOUT_AUTH_URL = "https://auth.bugout.dev"         # Bugout.dev endpoint for writing resources (image metadata)
+FILES_S3_BUCKET_NAME = "hatchery-files"      # S3 bucket name, where we’ll store the images
+FILES_S3_BUCKET_PREFIX = "dev"               # S3 bucket prefix, where we’ll store the images
+BUGOUT_APPLICATION_ID = os.environ.get("BUGOUT_FILES_APPLICATION_ID")   # Bugout.dev application ID that we created prior
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Let’s expand the default exception to proxy the response from Bugout.dev Resources. E.g., if the image does not exist, when we request the resource, we’ll receive error 404, which we’ll in turn return to the client as a reply to the request for the missing image.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="k"&gt;class&lt;/span&gt; &lt;span class="nc"&gt;BugoutResponseException&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nb"&gt;Exception&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;
+    &lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;__init__&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;message&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;status_code&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;detail&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="bp"&gt;None&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;-&amp;gt;&lt;/span&gt; &lt;span class="bp"&gt;None&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+        &lt;span class="nb"&gt;super&lt;/span&gt;&lt;span class="p"&gt;().&lt;/span&gt;&lt;span class="n"&gt;__init__&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;message&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+        &lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;status_code&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;status_code&lt;/span&gt;
+        &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="n"&gt;detail&lt;/span&gt; &lt;span class="ow"&gt;is&lt;/span&gt; &lt;span class="ow"&gt;not&lt;/span&gt; &lt;span class="bp"&gt;None&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+            &lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;detail&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;detail&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;To save an image in an S3 bucket we’ll use the &lt;code&gt;cgi&lt;/code&gt; standard library that’ll let us parse the request’s body that was sent in &lt;code&gt;multipart/&amp;lt;image_type&amp;gt;&lt;/code&gt; format. We’ll save images under the path &lt;code&gt;{journal_id}/entries/{entry_id}/images/{image_id}&lt;/code&gt; without specifying the file’s name and extension.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;put_image_to_bucket&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="n"&gt;journal_id&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;str&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="n"&gt;entry_id&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;str&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="n"&gt;image_id&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;UUID&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="n"&gt;content_type&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;str&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="n"&gt;content_length&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;int&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="n"&gt;decoded_body&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;bytes&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;-&amp;gt;&lt;/span&gt; &lt;span class="bp"&gt;None&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+    &lt;span class="n"&gt;_&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;c_data&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;parse_header&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;content_type&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="n"&gt;c_data&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s"&gt;"boundary"&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nb"&gt;bytes&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;c_data&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s"&gt;"boundary"&lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt; &lt;span class="s"&gt;"utf-8"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="n"&gt;c_data&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s"&gt;"CONTENT-LENGTH"&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;content_length&lt;/span&gt;
+
+    &lt;span class="n"&gt;form_data&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;parse_multipart&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;BytesIO&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;decoded_body&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt; &lt;span class="n"&gt;c_data&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+    &lt;span class="k"&gt;for&lt;/span&gt; &lt;span class="n"&gt;image_str&lt;/span&gt; &lt;span class="ow"&gt;in&lt;/span&gt; &lt;span class="n"&gt;form_data&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s"&gt;"file"&lt;/span&gt;&lt;span class="p"&gt;]:&lt;/span&gt;
+        &lt;span class="n"&gt;image_path&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="sa"&gt;f&lt;/span&gt;&lt;span class="s"&gt;"&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="n"&gt;FILES_S3_BUCKET_PREFIX&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="s"&gt;/&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="n"&gt;journal_id&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="s"&gt;/entries/&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="n"&gt;entry_id&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="s"&gt;/images/&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="nb"&gt;str&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;image_id&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="s"&gt;"&lt;/span&gt;
+        &lt;span class="n"&gt;s3&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;put_object&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+            &lt;span class="n"&gt;Body&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="n"&gt;image_str&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;Bucket&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="n"&gt;FILES_S3_BUCKET_NAME&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;Key&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="n"&gt;image_path&lt;/span&gt;
+        &lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;When we extract an image from the S3 bucket we’ll need to encode it into base64 for correct transmission.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;get_image_from_bucket&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;journal_id&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;str&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;entry_id&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;str&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;image_id&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;str&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;-&amp;gt;&lt;/span&gt; &lt;span class="nb"&gt;bytes&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+    &lt;span class="n"&gt;image_path&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="sa"&gt;f&lt;/span&gt;&lt;span class="s"&gt;"&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="n"&gt;FILES_S3_BUCKET_PREFIX&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="s"&gt;/&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="n"&gt;journal_id&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="s"&gt;/entries/&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="n"&gt;entry_id&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="s"&gt;/images/&lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="n"&gt;image_id&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="s"&gt;"&lt;/span&gt;
+    &lt;span class="n"&gt;response&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;s3&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;get_object&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Bucket&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="n"&gt;FILES_S3_BUCKET_NAME&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;Key&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="n"&gt;image_path&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="n"&gt;image&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;response&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s"&gt;"Body"&lt;/span&gt;&lt;span class="p"&gt;].&lt;/span&gt;&lt;span class="n"&gt;read&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+    &lt;span class="n"&gt;encoded_image&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;base64&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;b64encode&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;image&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="n"&gt;encoded_image&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The &lt;code&gt;lambda_handler(event,context)&lt;/code&gt; function’s implementation is available at this GitHub &lt;a href="https://github.com/kompotkot/hatchery/blob/main/files_distributor/bucket/modules/s3_bucket/files/lambda_function.py"&gt;link&lt;/a&gt;, to sum up:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Firstly, we assert that the request is formatted correctly and contains &lt;code&gt;journal_id&lt;/code&gt; and &lt;code&gt;entry_id&lt;/code&gt;
+&lt;/li&gt;
+&lt;li&gt;Then we call our hypothetical app’s API &lt;code&gt;https://api.example.com/journals/{journal_id}/entries/{entry_id}&lt;/code&gt; &lt;/li&gt;
+&lt;li&gt;Depending on the request method: &lt;code&gt;GET&lt;/code&gt;, &lt;code&gt;POST&lt;/code&gt; or &lt;code&gt;DELETE&lt;/code&gt; we read, upload or delete an image from the journal’s entry&lt;/li&gt;
+&lt;li&gt;When we’re uploading to the S3 bucket, we check the extension and the file’s size. This can be expanded into hash verification to avoid uploading the same file, etc.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Next, we’ll need to package &lt;code&gt;requests&lt;/code&gt; into the Lambda library. Luckily, &lt;code&gt;boto3&lt;/code&gt;  for work with AWS functionality is ready out of the box. Let’s create an empty python environment, install the library and package the contents of &lt;code&gt;site-packages&lt;/code&gt;:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;python3 &lt;span class="nt"&gt;-m&lt;/span&gt; venv .venv
+&lt;span class="nb"&gt;source&lt;/span&gt; .venv/bin/activate
+pip &lt;span class="nb"&gt;install &lt;/span&gt;requests
+&lt;span class="nb"&gt;cd&lt;/span&gt; .venv/lib/python3.8/site-packages
+zip &lt;span class="nt"&gt;-r9&lt;/span&gt; &lt;span class="s2"&gt;"lambda_function.zip"&lt;/span&gt; &lt;span class="nb"&gt;.&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Place the created archive &lt;code&gt;lambda_function.zip&lt;/code&gt;  into the &lt;code&gt;files_distributor/bucket/modules/s3_bucket/files&lt;/code&gt; directory and add the Lambda function itself:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;zip &lt;span class="nt"&gt;-g&lt;/span&gt; lambda_function.zip &lt;span class="nt"&gt;-r&lt;/span&gt; lambda_function.py
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Our server is ready, now we can upload code to AWS and deploy Lambda server, to do so use the script in &lt;code&gt;files_distributor/bucket&lt;/code&gt;:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;terraform apply
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We’re left with:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;A private AWS S3 bucket &lt;code&gt;hatchery-sources&lt;/code&gt; that stores the Lambda function code&lt;/li&gt;
+&lt;li&gt;A private AWS S3 bucket &lt;code&gt;hatchery-files&lt;/code&gt; that we’ll store our images into with the prefix &lt;code&gt;dev&lt;/code&gt;
+&lt;/li&gt;
+&lt;li&gt;AWS Lambda function with working server code&lt;/li&gt;
+&lt;li&gt;An IAM role for the Lambda that allows writing into a specific S3 bucket and logs&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;The IAM role rules are in &lt;code&gt;files_distributor/bucket/modules/iam/files/iam_role_lambda_inline_policy.json&lt;/code&gt;. The other file &lt;code&gt;iam_role_lambda_policy.json&lt;/code&gt;  is needed for the Lambda to function works correctly.&lt;/p&gt;
+
+&lt;p&gt;To debug Lambda you can just &lt;code&gt;print&lt;/code&gt; the required values or use the standard &lt;code&gt;logging&lt;/code&gt; module for python. The output for every Lambda function call is available at AWS CloudWatch:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Kba3EzA8--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://miro.medium.com/max/700/1%2ASkrr3o73JHKmTStJ2SFJgA.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Kba3EzA8--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://miro.medium.com/max/700/1%2ASkrr3o73JHKmTStJ2SFJgA.png" alt="4"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;After creating the function, add a variable &lt;code&gt;BUGOUT_FILES_APPLICATION_ID&lt;/code&gt; from our code to the Lambda environment, which you can do in the tab &lt;code&gt;Configuration/Environment variables&lt;/code&gt;. &lt;/p&gt;
+
+&lt;p&gt;As the last step, save the AWS Lambda arn into the environment variable &lt;code&gt;AWS_HATCHERY_LAMBDA_ARN&lt;/code&gt;.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#configuring-the-aws-load-balancer-and-open-ports"&gt;
+  &lt;/a&gt;
+  Configuring the AWS Load Balancer and open ports
+&lt;/h2&gt;
+
+&lt;p&gt;The only step left now is to create AWS Security Group where we’ll set a port the AWS Load Balancer will listen to for subsequent data transmit into the Lambda function (in our case it’s 80 and 443).&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;terraform apply &lt;span class="se"&gt;\&lt;/span&gt;
+    &lt;span class="nt"&gt;-var&lt;/span&gt; &lt;span class="nv"&gt;hatchery_vpc_id&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="nv"&gt;$AWS_HATCHERY_VPC_ID&lt;/span&gt; &lt;span class="se"&gt;\&lt;/span&gt;
+    &lt;span class="nt"&gt;-var&lt;/span&gt; &lt;span class="nv"&gt;hatchery_sbn_public_a_id&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="nv"&gt;$AWS_HATCHERY_SUBNET_PUBLIC_A_ID&lt;/span&gt; &lt;span class="se"&gt;\&lt;/span&gt;
+    &lt;span class="nt"&gt;-var&lt;/span&gt; &lt;span class="nv"&gt;hatchery_sbn_public_b_id&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="nv"&gt;$AWS_HATCHERY_SUBNET_PUBLIC_B_ID&lt;/span&gt; &lt;span class="se"&gt;\&lt;/span&gt;
+    &lt;span class="nt"&gt;-var&lt;/span&gt; &lt;span class="nv"&gt;hatchery_lambda_arn&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="nv"&gt;$AWS_HATCHERY_LAMBDA_ARN&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Congratulations, our AWS Lambda function is open to the world and ready to upload and return images for our journal entries app!&lt;/p&gt;
+
+</description>
+      <category>serverless</category>
+      <category>lambda</category>
+      <category>bugout</category>
+      <category>devops</category>
+    </item>
+    <item>
+      <title>Open Source: As explained to a five-year-old</title>
+      <author>Glowreeyah </author>
+      <pubDate>Tue, 28 Sep 2021 21:29:57 +0000</pubDate>
+      <link>https://dev.to/glowreeyah/open-source-as-explained-to-a-five-year-old-45ld</link>
+      <guid>https://dev.to/glowreeyah/open-source-as-explained-to-a-five-year-old-45ld</guid>
+      <description>&lt;p&gt;&lt;em&gt;It is Christmas, and Daddy brings home a Christmas tree, and the tree needs to be decorated. You have lots of decoration ideas, same as your sister, but you cannot decorate the tree till you receive permission from your Dad. Until permission to decorate the tree is granted, you cannot decorate the tree. This is similar to the way open source works.&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;So what could Open Source mean?&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;Open source is the source code of computer software that is accessible to the public to change, redo, remake only when permission is granted.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;How does that work?&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;In the development process of that software, publicly making it accessible is considered so that when the software is released, anyone can have access to it through a means of permission. Github is where open source projects are mostly uploaded so they can be made available to the public. From Github, there are repositories where you can get the project to use the code or contribute changes to the software.&lt;/p&gt;
+
+&lt;p&gt;The permission given to open source is called License . This License contains conditions where the actual owners of the software state how exactly they want you to use, change or modify their software. Some of these licenses could include MIT license(MIT), Apache License 2.0, GNU General Public License etc.&lt;/p&gt;
+
+&lt;p&gt;Open Source Software are most preferred because they are interested in having more control over these kinds of software. Examples of Open Source Projects include; Linux, Mozilla Firefox, Apache, WordPress, VLC Media Player etc.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Why the need for Open Source?&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;Contributing to Open Source has lots of benefits, and they are&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;Open Source Software tends to have fewer bugs than regular software.&lt;/li&gt;
+&lt;li&gt;Open source helps owners do a global software product for little to free cost.&lt;/li&gt;
+&lt;li&gt;It encourages collaboration amongst the Open Source Communities.&lt;/li&gt;
+&lt;li&gt;The source code is made available to the public to understand its purpose or how it works and how it works.&lt;/li&gt;
+&lt;li&gt;It promotes the exchange of knowledge, allowing for more people to become skilled software developers.&lt;/li&gt;
+&lt;li&gt;Since it is made public for modification, it meets all the criteria of the public.&lt;/li&gt;
+&lt;li&gt;It is free.&lt;/li&gt;
+&lt;li&gt;Open Source Software is highly secured because developers constantly review the code, thereby ensuring security and accountability.&lt;/li&gt;
+&lt;/ol&gt;
+
+</description>
+      <category>github</category>
+      <category>techtalks</category>
+      <category>opensource</category>
+      <category>dev</category>
+    </item>
+    <item>
       <title>Create a backend in Javascript: Introduction to Node.js</title>
       <author>Eric The Coder</author>
       <pubDate>Tue, 28 Sep 2021 20:59:49 +0000</pubDate>
@@ -1831,7 +2223,7 @@ you can name it what you want if you export it with the &lt;strong&gt;default&lt
 
 &lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--ov6OPN_j--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/arjssd40yki0qz07i80v.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ov6OPN_j--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/arjssd40yki0qz07i80v.png" alt="protectedRoute3"&gt;&lt;/a&gt;&lt;/p&gt;
 
-&lt;p&gt;So here we need to changed The &lt;br&gt;&lt;br&gt;
+&lt;p&gt;So here we need to change The &lt;br&gt;&lt;br&gt;
 &lt;code&gt;&amp;lt;Route exact path="/admin" component={Admin}  /&amp;gt;&lt;/code&gt; &lt;/p&gt;
 
 &lt;p&gt;with&lt;/p&gt;
@@ -2151,301 +2543,6 @@ Sentry.OptionsConfiguration&amp;lt;SentryOptions&amp;gt; sentryOptionsConfigurat
       <category>javascript</category>
       <category>electron</category>
       <category>svelte</category>
-    </item>
-    <item>
-      <title>AutoMapper in C#</title>
-      <author>manoj</author>
-      <pubDate>Tue, 28 Sep 2021 17:14:35 +0000</pubDate>
-      <link>https://dev.to/jsdevelopermano/automapper-in-c-2ifn</link>
-      <guid>https://dev.to/jsdevelopermano/automapper-in-c-2ifn</guid>
-      <description>&lt;p&gt;AutoMapper in C# is a mapper between two objects. That is AutoMapper is an object-object mapper. It maps the properties of two different objects by transforming the input object of one type to the output object of another type.&lt;/p&gt;
-
-&lt;p&gt;It also provides some interesting facts to take the dirty work out of figuring out how to map an object of type A with an object of type B as long as the object of type B follows AutoMapper’s established convention.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Let’s discuss the step-by-step procedure to use AutoMapper in C#.&lt;/strong&gt;&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#1-installing-the-automapper-library"&gt;
-  &lt;/a&gt;
-  1: Installing the AutoMapper library
-&lt;/h3&gt;
-
-&lt;p&gt;The AutoMapper is an open-source library present in &lt;a href="https://github.com/AutoMapper"&gt;GitHub&lt;/a&gt;. To install this library, open the Package Manager Console window and then type the following command and press enter key to install the AutoMapper library in your project:&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;&amp;gt; Install-Package AutoMapper&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;Once you installed the AutoMapper library, then it will add a reference to the AutoMapper dll which you can find in the project references section as shown in the below image.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--2IYxdA-y--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/2zhwtgwy9r6s4dk2punm.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--2IYxdA-y--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/2zhwtgwy9r6s4dk2punm.png" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#2-initializing-or-configuring-the-automapper"&gt;
-  &lt;/a&gt;
-  2: Initializing or Configuring the AutoMapper
-&lt;/h3&gt;
-
-&lt;p&gt;Once you have defines your types (i.e. classes) then you can create a mapper for the two types using the constructor of MapperConfiguration class. You can create only one MapperConfiguration instance per AppDomain and should be instantiated during the application start-up. The syntax to create the MapperConfiguration instance is given below.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;//Initialize the mapper
-  var config = new MapperConfiguration(cfg =&amp;gt;
-               cfg.CreateMap&amp;lt;Employee, EmployeeDTO&amp;gt;()
-            );
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;The type on the left is the source type i.e. TSource, in our example, it will be going to Employee object, and the type on the right is the destination type i.e. TDestination, in our example, it will be going to EmployeeDTO object. So, two maps the Employee with EmployeeDTO, you need to create the mapper configuration.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;using System;
-using AutoMapper;
-namespace AutoMapperDemo
-{
-    class Program
-    {
-        static void Main(string[] args)
-        {
-            //Initialize the mapper
-            var config = new MapperConfiguration(cfg =&amp;gt;
-                    cfg.CreateMap&amp;lt;Employee, EmployeeDTO&amp;gt;()
-                );
-
-            //Creating the source object
-            Employee emp = new Employee
-            {
-                Name = "James",
-                Salary = 20000,
-                Address = "London",
-                Department = "IT"
-            };
-
-            //Using automapper
-            var mapper = new Mapper(config);
-            var empDTO = mapper.Map&amp;lt;EmployeeDTO&amp;gt;(emp);
-            //OR
-            //var empDTO2 = mapper.Map&amp;lt;Employee, EmployeeDTO&amp;gt;(emp);
-
-            Console.WriteLine("Name:" + empDTO.Name + ", Salary:" + empDTO.Salary + ", Address:" + empDTO.Address + ", Department:" + empDTO.Department);
-            Console.ReadLine();
-        }
-    }
-
-    public class Employee
-    {
-        public string Name { get; set; }
-        public int Salary { get; set; }
-        public string Address { get; set; }
-        public string Department { get; set; }
-    }
-
-    public class EmployeeDTO
-    {
-        public string Name { get; set; }
-        public int Salary { get; set; }
-        public string Address { get; set; }
-        public string Department { get; set; }
-    }
-}
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Ref: &lt;a href="https://dotnettutorials.net/lesson/automapper-in-c-sharp/"&gt;https://dotnettutorials.net/lesson/automapper-in-c-sharp/&lt;/a&gt;&lt;/p&gt;
-
-</description>
-    </item>
-    <item>
-      <title>Working with ZIP files in LuaRT</title>
-      <author>Sam</author>
-      <pubDate>Tue, 28 Sep 2021 17:09:06 +0000</pubDate>
-      <link>https://dev.to/samyeyo/working-with-zip-files-in-luart-2lm0</link>
-      <guid>https://dev.to/samyeyo/working-with-zip-files-in-luart-2lm0</guid>
-      <description>&lt;p&gt;&lt;a href="https://www.luart.org"&gt;LuaRT&lt;/a&gt; provides a builtin zip module to work with compressed files in ZIP format, without any additional dependencies.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#zip-archive-files"&gt;
-  &lt;/a&gt;
-  ZIP archive files
-&lt;/h2&gt;
-
-&lt;p&gt;ZIP is a file format that supports lossless compression. A lossless compression algorithm allows the original data to be perfectly reconstructed from the compressed data. A ZIP file contains one or more compressed files, making it an ideal way to reduce the size of large files and keep related files together.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#the-zip-object"&gt;
-  &lt;/a&gt;
-  The Zip Object
-&lt;/h2&gt;
-
-&lt;p&gt;The LuaRT 'zip' module provides an abstraction of zip files represented as a Zip Object. Only INFLATE/DEFLATE algorithms are supported.&lt;br&gt;
-This module facilitates the creation of ZIP archive files and provides methods and properties for adding and extracting compressed files.&lt;/p&gt;
-
-&lt;p&gt;To use the &lt;strong&gt;Zip&lt;/strong&gt; Object, you must first require for the 'zip' module :&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight lua"&gt;&lt;code&gt;&lt;span class="c1"&gt;-- require the builtin 'zip' module for the Zip object&lt;/span&gt;
-&lt;span class="kd"&gt;local&lt;/span&gt; &lt;span class="n"&gt;Zip&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nb"&gt;require&lt;/span&gt; &lt;span class="s2"&gt;"zip"&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#extract-files-from-a-zip-archive"&gt;
-  &lt;/a&gt;
-  Extract files from a ZIP archive
-&lt;/h2&gt;
-
-&lt;p&gt;To extract files from an existing ZIP archive, you can use the &lt;strong&gt;Zip:extractall()&lt;/strong&gt; method :&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight lua"&gt;&lt;code&gt;&lt;span class="kd"&gt;local&lt;/span&gt; &lt;span class="n"&gt;Zip&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nb"&gt;require&lt;/span&gt; &lt;span class="s2"&gt;"zip"&lt;/span&gt;
-
-&lt;span class="c1"&gt;-- Create a Zip value to represent the ZIP file 'archive.zip'&lt;/span&gt;
-&lt;span class="kd"&gt;local&lt;/span&gt; &lt;span class="n"&gt;archive&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;Zip&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;"archive.zip"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-
-&lt;span class="c1"&gt;-- open the ZIP archive for reading&lt;/span&gt;
-&lt;span class="n"&gt;archive&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="n"&gt;open&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;"read"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-
-&lt;span class="c1"&gt;-- extract and uncompress all the files in the current directory&lt;/span&gt;
-&lt;span class="n"&gt;archive&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="n"&gt;extractall&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;You can extract a specific entry with the &lt;strong&gt;Zip:extract()&lt;/strong&gt; method :&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight lua"&gt;&lt;code&gt;&lt;span class="c1"&gt;-- extract the ZIP entry "extractme.bin" in the current directory &lt;/span&gt;
-&lt;span class="n"&gt;archive&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="n"&gt;extract&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;"extractme.bin"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;A destination path can optionaly be provided :&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight lua"&gt;&lt;code&gt;&lt;span class="c1"&gt;-- extract the ZIP entry "data.bin" in the specified directory &lt;/span&gt;
-&lt;span class="n"&gt;archive&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="n"&gt;extract&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;"data.bin"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s2"&gt;"C:\\Extract\\Me\\Here"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#creating-a-zip-archive"&gt;
-  &lt;/a&gt;
-  Creating a ZIP archive
-&lt;/h2&gt;
-
-&lt;p&gt;&lt;strong&gt;Zip:open()&lt;/strong&gt; can be used to create an empty ZIP archive. Files can be added to the archive with the &lt;strong&gt;Zip:write()&lt;/strong&gt; method:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight lua"&gt;&lt;code&gt;&lt;span class="kd"&gt;local&lt;/span&gt; &lt;span class="n"&gt;Zip&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nb"&gt;require&lt;/span&gt; &lt;span class="s2"&gt;"zip"&lt;/span&gt;
-
-&lt;span class="c1"&gt;-- Create a Zip value to represent the  ZIP file 'new.zip'&lt;/span&gt;
-&lt;span class="kd"&gt;local&lt;/span&gt; &lt;span class="n"&gt;archive&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;Zip&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;"new.zip"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-
-&lt;span class="c1"&gt;-- open the ZIP archive for writing&lt;/span&gt;
-&lt;span class="n"&gt;archive&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="n"&gt;open&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;"write"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-
-&lt;span class="c1"&gt;-- add a file to this archive&lt;/span&gt;
-&lt;span class="n"&gt;archive&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="n"&gt;write&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;"C:\\addme.txt"&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;You can recursively add entire directories too :&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight lua"&gt;&lt;code&gt;&lt;span class="n"&gt;archive&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="n"&gt;write&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;"C:\\I_am_a_directory_addme\\"&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#iterating-over-files-in-a-zip-archive"&gt;
-  &lt;/a&gt;
-  Iterating over files in a ZIP archive
-&lt;/h2&gt;
-
-&lt;p&gt;&lt;strong&gt;Zip&lt;/strong&gt; object is iterable with the &lt;strong&gt;each()&lt;/strong&gt; function, returning at every iteration the next entry name in the ZIP archive previously opened in "read" mode:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight lua"&gt;&lt;code&gt;&lt;span class="kd"&gt;local&lt;/span&gt; &lt;span class="n"&gt;Zip&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nb"&gt;require&lt;/span&gt; &lt;span class="s2"&gt;"zip"&lt;/span&gt;
-
-&lt;span class="c1"&gt;-- Create a Zip value to represent the ZIP file 'archive.zip'&lt;/span&gt;
-&lt;span class="kd"&gt;local&lt;/span&gt; &lt;span class="n"&gt;archive&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;Zip&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;"archive.zip"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-
-&lt;span class="c1"&gt;-- open the ZIP archive for reading&lt;/span&gt;
-&lt;span class="n"&gt;archive&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="n"&gt;open&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;"read"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-
-&lt;span class="c1"&gt;-- Iterate over each ZIP archive entries and extract it&lt;/span&gt;
-&lt;span class="k"&gt;for&lt;/span&gt; &lt;span class="n"&gt;entry&lt;/span&gt; &lt;span class="k"&gt;in&lt;/span&gt; &lt;span class="n"&gt;each&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;archive&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
-   &lt;span class="nb"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;"Extracting '"&lt;/span&gt;&lt;span class="o"&gt;..&lt;/span&gt;&lt;span class="n"&gt;entry&lt;/span&gt;&lt;span class="o"&gt;..&lt;/span&gt;&lt;span class="s2"&gt;"'"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-   &lt;span class="n"&gt;archive&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="n"&gt;extract&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;entry&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-&lt;span class="k"&gt;end&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#reading-zip-archive-entries-in-memory"&gt;
-  &lt;/a&gt;
-  Reading ZIP archive entries in memory
-&lt;/h2&gt;
-
-&lt;p&gt;ZIP archive entries can also be extracted in-memory using the &lt;strong&gt;Zip:read()&lt;/strong&gt; method :&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight lua"&gt;&lt;code&gt;&lt;span class="kd"&gt;local&lt;/span&gt; &lt;span class="n"&gt;Zip&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nb"&gt;require&lt;/span&gt; &lt;span class="s2"&gt;"zip"&lt;/span&gt;
-
-&lt;span class="c1"&gt;-- Create a Zip value to represent the ZIP file 'archive.zip'&lt;/span&gt;
-&lt;span class="kd"&gt;local&lt;/span&gt; &lt;span class="n"&gt;archive&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;Zip&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;"archive.zip"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-
-&lt;span class="c1"&gt;-- open the ZIP archive for reading&lt;/span&gt;
-&lt;span class="n"&gt;archive&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="n"&gt;open&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;"read"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-
-&lt;span class="c1"&gt;-- print the content of the ZIP archive entry 'README.TXT'&lt;/span&gt;
-&lt;span class="nb"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;archive&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="n"&gt;read&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;"README.TXT"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;As you can see, LuaRT's 'zip' module provides an easy way to manage ZIP archives. Additionally, you can read the complete Zip object specification &lt;a href="http://www.luart.org/doc/zip/zip.html"&gt;Zip Object&lt;/a&gt;&lt;/p&gt;
-
-</description>
-      <category>lua</category>
-      <category>windows</category>
-      <category>tutorial</category>
     </item>
   </channel>
 </rss>
