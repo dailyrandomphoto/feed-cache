@@ -7,6 +7,975 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>User authentication in Fauna (an opinionated guide)</title>
+      <author>Shadid Haque</author>
+      <pubDate>Wed, 06 Oct 2021 03:47:18 +0000</pubDate>
+      <link>https://dev.to/fauna/user-authentication-in-fauna-an-opinionated-guide-51bb</link>
+      <guid>https://dev.to/fauna/user-authentication-in-fauna-an-opinionated-guide-51bb</guid>
+      <description>&lt;p&gt;In this blog post, you learn the fundamentals of authenticating users in Fauna. You ship your client applications with a secret token from Fauna that has limited privileges. Ideally, this token can only register and login users in Fauna. Authenticated users then receive a temporary access token that they can use to access the Fauna resources securely.  &lt;a href="https://docs.fauna.com/fauna/current/tutorials/basics/functions"&gt;User-defined functions (UDFs)&lt;/a&gt;  are the key to this implementation.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#prerequisites"&gt;
+  &lt;/a&gt;
+  Pre-requisites
+&lt;/h3&gt;
+
+&lt;p&gt;Some familiarity with FQL will be helpful. You can still follow along without any prior knowledge of FQL. To learn more about FQL visit this  &lt;a href="https://docs.fauna.com/fauna/current/tutorials/basics/functions"&gt;series of articles&lt;/a&gt; .&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#solution-overview"&gt;
+  &lt;/a&gt;
+  Solution overview
+&lt;/h2&gt;
+
+&lt;p&gt;In this post, you:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;&lt;p&gt;Create a new /secret key/in Fauna.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Configure a role for the /secret key/so that your client application can only invoke the &lt;em&gt;User Registration&lt;/em&gt; and &lt;em&gt;Login&lt;/em&gt; UDFs using this key.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Ship the secret key as an environment variable with your client application.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Run the &lt;em&gt;User Registration&lt;/em&gt; UDF from the client application using the /secret key/ to create a new user.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Run the &lt;em&gt;Login&lt;/em&gt; UDF from the client application to acquire a /user access token/.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Use the /user/ /access token/ in the client application to interact with Fauna resources. &lt;/p&gt;&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;The following diagram demonstrates the overall authentication flow. &lt;/p&gt;
+
+&lt;p&gt;&lt;a href="//images.contentful.com/po4qc9xpmpuh/6BfopBQzhYDSAmaYjUtSvo/e062bf11d0286bd13e6296eae194b6b0/b53e8416-77f6-441a-af9e-d7ef728ce753.png" class="article-body-image-wrapper"&gt;&lt;img src="//images.contentful.com/po4qc9xpmpuh/6BfopBQzhYDSAmaYjUtSvo/e062bf11d0286bd13e6296eae194b6b0/b53e8416-77f6-441a-af9e-d7ef728ce753.png" alt="authentication flow diagram"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#user-registration"&gt;
+  &lt;/a&gt;
+  User registration
+&lt;/h2&gt;
+
+&lt;p&gt;Head over to the  &lt;a href="https://dashboard.fauna.com/"&gt;Fauna dashboard&lt;/a&gt;  and create a new database.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="//images.contentful.com/po4qc9xpmpuh/7sM6mMqueWxf6rqk4RDoT0/bf8b2c7913c359ff36e807bd011832f0/2.png" class="article-body-image-wrapper"&gt;&lt;img src="//images.contentful.com/po4qc9xpmpuh/7sM6mMqueWxf6rqk4RDoT0/bf8b2c7913c359ff36e807bd011832f0/2.png" alt="Creating a new database"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Select &lt;em&gt;Collections&lt;/em&gt; and create a new collection called &lt;code&gt;Account&lt;/code&gt;&lt;br&gt;
+&lt;a href="//images.contentful.com/po4qc9xpmpuh/5ASnIWuQ3YbSt6321zn2QD/eb4a897449a792510675104eaca24e6c/3.png" class="article-body-image-wrapper"&gt;&lt;img src="//images.contentful.com/po4qc9xpmpuh/5ASnIWuQ3YbSt6321zn2QD/eb4a897449a792510675104eaca24e6c/3.png" alt="Creating a new collection"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;The &lt;code&gt;Account&lt;/code&gt; collection contains all user data. Navigate to &lt;em&gt;Indexes&lt;/em&gt; and select &lt;em&gt;New Index&lt;/em&gt;. Select &lt;code&gt;Account&lt;/code&gt; as the source collection. Name the index &lt;code&gt;account_by_email&lt;/code&gt;. You use this index to query users by their email address. In the Terms field, input &lt;code&gt;email&lt;/code&gt;. Make sure to select the Unique option and the &lt;em&gt;Serialized&lt;/em&gt; option to ensure that each user has a unique email address. Select &lt;em&gt;Save&lt;/em&gt; to create the new index. &lt;/p&gt;
+
+&lt;p&gt;&lt;a href="//images.contentful.com/po4qc9xpmpuh/1HB5PYc19y7RBitG28zeiR/95b656f61c1dce5245bf90030e74f097/4.png" class="article-body-image-wrapper"&gt;&lt;img src="//images.contentful.com/po4qc9xpmpuh/1HB5PYc19y7RBitG28zeiR/95b656f61c1dce5245bf90030e74f097/4.png" alt="Creating a new index"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Next, create a function to register new users. Select &lt;em&gt;Functions&lt;/em&gt; from the dashboard menu and select &lt;em&gt;NEW FUNCTION&lt;/em&gt; to create a new user-defined function (UDF).&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="//images.contentful.com/po4qc9xpmpuh/64QNb6AulZJyApupAlVt3M/22ac27cc567c5bf5d562205652b87e00/5.png" class="article-body-image-wrapper"&gt;&lt;img src="//images.contentful.com/po4qc9xpmpuh/64QNb6AulZJyApupAlVt3M/22ac27cc567c5bf5d562205652b87e00/5.png" alt="Creating a UDF"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Name your function &lt;code&gt;UserRegistration&lt;/code&gt; and enter the following code in the &lt;em&gt;Function Body&lt;/em&gt;. You can leave the role as &lt;em&gt;None&lt;/em&gt; for now. Select &lt;em&gt;Save&lt;/em&gt; to create your function.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="nx"&gt;Query&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="nx"&gt;Lambda&lt;/span&gt;&lt;span class="p"&gt;([&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;email&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;password&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt;
+        &lt;span class="nx"&gt;Create&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;Collection&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Account&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="na"&gt;credentials&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;password&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;Var&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;password&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;},&lt;/span&gt;
+            &lt;span class="na"&gt;data&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+                &lt;span class="na"&gt;email&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;Var&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;email&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+            &lt;span class="p"&gt;}&lt;/span&gt;
+        &lt;span class="p"&gt;})&lt;/span&gt;
+    &lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;a href="//images.contentful.com/po4qc9xpmpuh/1ssWfJlkYYWlsxMODiIJGm/6eb57c613de0df139e8960a08a1304ff/6.png" class="article-body-image-wrapper"&gt;&lt;img src="//images.contentful.com/po4qc9xpmpuh/1ssWfJlkYYWlsxMODiIJGm/6eb57c613de0df139e8960a08a1304ff/6.png" alt="Creating a new user-defined function"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Navigate to the &lt;em&gt;Shell&lt;/em&gt; and register a new user by calling the &lt;code&gt;UserRegistration&lt;/code&gt; UDF. Enter the following code in the shell and select &lt;em&gt;Run Query&lt;/em&gt;.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="nx"&gt;Call&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;UserRegistration&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;shadid@test.com&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;pass123456&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;a href="//images.contentful.com/po4qc9xpmpuh/1TY3AIZaHL4QInQeAIFtni/eff1eba02545187f148439d5c8b4e979/7.png" class="article-body-image-wrapper"&gt;&lt;img src="//images.contentful.com/po4qc9xpmpuh/1TY3AIZaHL4QInQeAIFtni/eff1eba02545187f148439d5c8b4e979/7.png" alt="Calling a UDF from the dashboard shell"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Navigate back to &lt;em&gt;Collections &amp;gt; Account&lt;/em&gt; and confirm that a new user is created.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#user-login"&gt;
+  &lt;/a&gt;
+  User login
+&lt;/h2&gt;
+
+&lt;p&gt;Return to the Functions tab, create a new function, and name it &lt;code&gt;UserLogin&lt;/code&gt;. Add the following code snippet to your function body and select Save. Notice there is a &lt;code&gt;ttl&lt;/code&gt; argument in the &lt;code&gt;Login&lt;/code&gt; function. This ensures that the generated token expires after the specified time.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="nx"&gt;Query&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="nx"&gt;Lambda&lt;/span&gt;&lt;span class="p"&gt;([&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;email&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;password&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt;
+        &lt;span class="nx"&gt;Login&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+            &lt;span class="nx"&gt;Match&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;Index&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;account_by_email&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt; &lt;span class="nx"&gt;Var&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;email&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)),&lt;/span&gt;
+            &lt;span class="p"&gt;{&lt;/span&gt; 
+                &lt;span class="na"&gt;password&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;Var&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;password&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+                &lt;span class="na"&gt;ttl&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;TimeAdd&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;Now&lt;/span&gt;&lt;span class="p"&gt;(),&lt;/span&gt; &lt;span class="mi"&gt;3600&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;seconds&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+            &lt;span class="p"&gt;},&lt;/span&gt;
+
+        &lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Navigate back to the shell and call the function with the user's credentials.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="nx"&gt;Call&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;UserLogin&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;shadid@test.com&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;pass123456&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The output of this function gives you a secret token. Following is a sample response from the UDF. Take a note of the secret.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="na"&gt;ref&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;Ref&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;Ref&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;tokens&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;310382039289299523&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+  &lt;span class="na"&gt;ts&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="mi"&gt;1632262229150000&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="na"&gt;ttl&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;Time&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;2021-09-21T22:20:29.019666Z&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+  &lt;span class="na"&gt;instance&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;Ref&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;Collection&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Account&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;310358409884992069&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+  &lt;span class="na"&gt;secret&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;fnEE.....&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;You can now use this secret token to access your Fauna resources from a client application. Verify the validity of the token by running the following &lt;code&gt;CURL&lt;/code&gt; command in your terminal, replacing &lt;code&gt;&amp;lt;YOUR_TOKEN&amp;gt;&lt;/code&gt; with the value of the secret your function returns.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;curl https://db.fauna.com/tokens/self  &lt;span class="nt"&gt;-u&lt;/span&gt; &amp;lt;YOUR_TOKEN&amp;gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="o"&gt;{&lt;/span&gt;
+  &lt;span class="s2"&gt;"resource"&lt;/span&gt;: &lt;span class="o"&gt;{&lt;/span&gt;
+    &lt;span class="s2"&gt;"ref"&lt;/span&gt;: &lt;span class="o"&gt;{&lt;/span&gt;
+      &lt;span class="s2"&gt;"@ref"&lt;/span&gt;: &lt;span class="o"&gt;{&lt;/span&gt;
+        &lt;span class="s2"&gt;"id"&lt;/span&gt;: &lt;span class="s2"&gt;"310382039289299523"&lt;/span&gt;,
+        &lt;span class="s2"&gt;"class"&lt;/span&gt;: &lt;span class="o"&gt;{&lt;/span&gt; &lt;span class="s2"&gt;"@ref"&lt;/span&gt;: &lt;span class="o"&gt;{&lt;/span&gt; &lt;span class="s2"&gt;"id"&lt;/span&gt;: &lt;span class="s2"&gt;"tokens"&lt;/span&gt; &lt;span class="o"&gt;}&lt;/span&gt; &lt;span class="o"&gt;}&lt;/span&gt;
+      &lt;span class="o"&gt;}&lt;/span&gt;
+    &lt;span class="o"&gt;}&lt;/span&gt;,
+    &lt;span class="s2"&gt;"ts"&lt;/span&gt;: 1632262229150000,
+    &lt;span class="s2"&gt;"ttl"&lt;/span&gt;: &lt;span class="o"&gt;{&lt;/span&gt; &lt;span class="s2"&gt;"@ts"&lt;/span&gt;: &lt;span class="s2"&gt;"2021-09-21T22:20:29.019666Z"&lt;/span&gt; &lt;span class="o"&gt;}&lt;/span&gt;,
+    &lt;span class="s2"&gt;"instance"&lt;/span&gt;: &lt;span class="o"&gt;{&lt;/span&gt;
+      &lt;span class="s2"&gt;"@ref"&lt;/span&gt;: &lt;span class="o"&gt;{&lt;/span&gt;
+        &lt;span class="s2"&gt;"id"&lt;/span&gt;: &lt;span class="s2"&gt;"310358409884992069"&lt;/span&gt;,
+        &lt;span class="s2"&gt;"class"&lt;/span&gt;: &lt;span class="o"&gt;{&lt;/span&gt;
+          &lt;span class="s2"&gt;"@ref"&lt;/span&gt;: &lt;span class="o"&gt;{&lt;/span&gt;
+            &lt;span class="s2"&gt;"id"&lt;/span&gt;: &lt;span class="s2"&gt;"Account"&lt;/span&gt;,
+            &lt;span class="s2"&gt;"class"&lt;/span&gt;: &lt;span class="o"&gt;{&lt;/span&gt; &lt;span class="s2"&gt;"@ref"&lt;/span&gt;: &lt;span class="o"&gt;{&lt;/span&gt; &lt;span class="s2"&gt;"id"&lt;/span&gt;: &lt;span class="s2"&gt;"classes"&lt;/span&gt; &lt;span class="o"&gt;}&lt;/span&gt; &lt;span class="o"&gt;}&lt;/span&gt;
+          &lt;span class="o"&gt;}&lt;/span&gt;
+        &lt;span class="o"&gt;}&lt;/span&gt;
+      &lt;span class="o"&gt;}&lt;/span&gt;
+    &lt;span class="o"&gt;}&lt;/span&gt;,
+    &lt;span class="s2"&gt;"hashed_secret"&lt;/span&gt;: &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$2a$05$Ta2ScWEQhV39VTKLmmXXXOxnpQlXvloLSd3g9nP2Gsb&lt;/span&gt;&lt;span class="s2"&gt;.zJMP6QK6y"&lt;/span&gt;
+  &lt;span class="o"&gt;}&lt;/span&gt;
+&lt;span class="o"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Next, navigate to Collections and create a new collection called &lt;code&gt;Movie&lt;/code&gt;. Populate your collection with the following sample data.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight json"&gt;&lt;code&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"title"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"Reservoir Dogs"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"director"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"Quentin Tarantino"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"release"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"Jan 21, 1992"&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+
+&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"title"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"The Hateful Eight"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"director"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"Quentin Tarantino"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"release"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"December 25, 2015"&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+
+&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"title"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"Once Upon a Time in Hollywood"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"director"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"Quentin Tarantino"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"release"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"July 26, 2019"&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;You will query this collection with the authenticated user's token in the next section.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#connecting-fauna-with-the-client-application"&gt;
+  &lt;/a&gt;
+  Connecting Fauna with the client application
+&lt;/h2&gt;
+
+&lt;p&gt;Your client application should have limited access to your Fauna backend. An unauthenticated user should only be able to call &lt;code&gt;UserLogin&lt;/code&gt; and &lt;code&gt;UserRegistration&lt;/code&gt; functions from your client application. It is best practice to follow the  &lt;a href="https://en.wikipedia.org/wiki/Principle_of_least_privilege"&gt;principle of least privilege&lt;/a&gt; .&lt;/p&gt;
+
+&lt;p&gt;Create a new role for your unauthenticated users. Navigate to &lt;em&gt;Security &amp;gt; Roles&lt;/em&gt; and select &lt;em&gt;New Custom Role&lt;/em&gt;.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="//images.contentful.com/po4qc9xpmpuh/5HPhikpMKCYih4t6D750Q7/70e4401fd59c7c280e8d8929ce18ede8/8.png" class="article-body-image-wrapper"&gt;&lt;img src="//images.contentful.com/po4qc9xpmpuh/5HPhikpMKCYih4t6D750Q7/70e4401fd59c7c280e8d8929ce18ede8/8.png" alt="Creating a custom role"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Name your role &lt;code&gt;UnAuthRole&lt;/code&gt;. Give the privilege to execute &lt;code&gt;UserLogin&lt;/code&gt; and &lt;code&gt;UserRegistration&lt;/code&gt;. As your functions are using the &lt;code&gt;account_by_email&lt;/code&gt; index, provide read access to &lt;code&gt;account_by_email&lt;/code&gt; as well. Also, provide read and create access to Account collection because &lt;code&gt;UserLogin&lt;/code&gt; and &lt;code&gt;UserRegistration&lt;/code&gt; UDFs need to read and create permission to this collection.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="//images.contentful.com/po4qc9xpmpuh/2CSOLFqlLs9lmNjQaWMA0a/f861a11a6e210b0b3a8345ce323ade77/9.png" class="article-body-image-wrapper"&gt;&lt;img src="//images.contentful.com/po4qc9xpmpuh/2CSOLFqlLs9lmNjQaWMA0a/f861a11a6e210b0b3a8345ce323ade77/9.png" alt="Collection permission"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="//images.contentful.com/po4qc9xpmpuh/1tBaLa1bgmhGiFfTztifIW/12aada0ee30cc6912610775ab5738e18/10.png" class="article-body-image-wrapper"&gt;&lt;img src="//images.contentful.com/po4qc9xpmpuh/1tBaLa1bgmhGiFfTztifIW/12aada0ee30cc6912610775ab5738e18/10.png" alt="Function permission"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Next, generate a security key for your &lt;code&gt;UnAuthRole&lt;/code&gt;. Navigate to *Security &amp;gt; Keys &amp;gt; New Ke*y.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="//images.contentful.com/po4qc9xpmpuh/1AOVVnnni9X0YkHb1MVkGn/41e0261da1e31b0b421e8ae70822f522/11.png" class="article-body-image-wrapper"&gt;&lt;img src="//images.contentful.com/po4qc9xpmpuh/1AOVVnnni9X0YkHb1MVkGn/41e0261da1e31b0b421e8ae70822f522/11.png" alt="Creating a new key"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Make sure to select &lt;code&gt;UnAuthRole&lt;/code&gt; from the role options for your new key.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="//images.contentful.com/po4qc9xpmpuh/50D0q8J9OQZZkesd4LI2rl/f61454175bedf073f8ad376e014a775d/12.png" class="article-body-image-wrapper"&gt;&lt;img src="//images.contentful.com/po4qc9xpmpuh/50D0q8J9OQZZkesd4LI2rl/f61454175bedf073f8ad376e014a775d/12.png" alt="New key name and role configuration"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="//images.contentful.com/po4qc9xpmpuh/3l0kEu3kLfqCqw1o0cRoda/4e49b65ab69e8782c80ec6822ff89b96/13.png" class="article-body-image-wrapper"&gt;&lt;img src="//images.contentful.com/po4qc9xpmpuh/3l0kEu3kLfqCqw1o0cRoda/4e49b65ab69e8782c80ec6822ff89b96/13.png" alt="Key Secret"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;You ship this key as an environment variable in your client application. Your client application can use this key to call only the &lt;code&gt;UserRegistration&lt;/code&gt; and &lt;code&gt;UserLogin&lt;/code&gt; function. You can not access any other resources in Fauna with this key.&lt;/p&gt;
+
+&lt;p&gt;To test this navigate to the &lt;em&gt;Shell&lt;/em&gt; from the Fauna dashboard and select Run &lt;em&gt;Query As &amp;gt; Specify a Secret&lt;/em&gt; Option. In the secret field input your key.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="//images.contentful.com/po4qc9xpmpuh/6xrAt9c9vxl2FqEW4TvWrL/deb4fed7fcd05825b1cd29d5acfcda68/14.png" class="article-body-image-wrapper"&gt;&lt;img src="//images.contentful.com/po4qc9xpmpuh/6xrAt9c9vxl2FqEW4TvWrL/deb4fed7fcd05825b1cd29d5acfcda68/14.png" alt="Running a query with a specified key"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Run the following command in the shell.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="nx"&gt;Call&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;UserRegistration&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;john@gmail.com&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;pass12345&lt;/span&gt;&lt;span class="dl"&gt;""&lt;/span&gt;&lt;span class="s2"&gt;)
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="nx"&gt;Call&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;UserRegistration&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;john@gmail.com&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;pass12345&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+&lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="nl"&gt;ref&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;Ref&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;Collection&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Account&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;311012249060770373&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+  &lt;span class="nx"&gt;ts&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="mi"&gt;1632863244095000&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="nl"&gt;email&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;john@gmail.com&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
+  &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Notice, that this will register a new user. Try accessing any other resources (i.e. Movie collection) using the same key. Run the following command in the shell.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="nx"&gt;Get&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;Documents&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;Collection&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Movie&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)))&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="c1"&gt;// Output&lt;/span&gt;
+&lt;span class="nb"&gt;Error&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;
+  &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;position&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;[],&lt;/span&gt;
+    &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;code&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;permission denied&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;description&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Insufficient privileges to perform the action.&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
+  &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;]&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Review the output in the shell. You get an &lt;code&gt;"Insufficient privileges to perform the action."&lt;/code&gt; error. It throws this error because the specified key doesn’t have the privilege to access the &lt;code&gt;Movie&lt;/code&gt; collection. This means the key is working as intended.&lt;/p&gt;
+
+&lt;p&gt;Next, run the &lt;code&gt;UserLogin&lt;/code&gt; function in the shell.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="nx"&gt;Call&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;UserLogin&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;john@gmail.com&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;pass12345&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Review the output. The function returned a secret.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="na"&gt;ref&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;Ref&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;Ref&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;tokens&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;311013644284461635&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+  &lt;span class="na"&gt;ts&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="mi"&gt;1632864574726000&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="na"&gt;ttl&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;Time&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;2021-09-28T21:39:34.245802Z&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+  &lt;span class="na"&gt;instance&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;Ref&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;Collection&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Account&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;311012249060770373&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+  &lt;span class="na"&gt;secret&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;fnEEUPFC--ACQwROmU7CwAZDlUcF9R3liL1iaNf9y80UQgc_qLI&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This secret is your temporary &lt;em&gt;access token&lt;/em&gt; that can access other resources in Fauna. However, when you try to use it now to access the &lt;code&gt;Movie&lt;/code&gt; collection you get the same error. This is because you have not yet defined what resources does this &lt;em&gt;token&lt;/em&gt; has access to*.* In the next section, you learn how to give your user access tokens permission to certain resources.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#authenticated-user-role"&gt;
+  &lt;/a&gt;
+  Authenticated user role
+&lt;/h3&gt;
+
+&lt;p&gt;Navigate to &lt;em&gt;Security &amp;gt; Roles &amp;gt; New Role&lt;/em&gt; to Create a new user role. Name your role &lt;code&gt;AuthRole&lt;/code&gt; and provide &lt;code&gt;read&lt;/code&gt;, &lt;code&gt;write&lt;/code&gt;, and &lt;code&gt;create&lt;/code&gt; privileges on the &lt;code&gt;Movie&lt;/code&gt; collection.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="//images.contentful.com/po4qc9xpmpuh/JLo36rpIsNEyZybdljDGv/bbc6ee51526498d4dd4f0d4faa27c2ef/15.png" class="article-body-image-wrapper"&gt;&lt;img src="//images.contentful.com/po4qc9xpmpuh/JLo36rpIsNEyZybdljDGv/bbc6ee51526498d4dd4f0d4faa27c2ef/15.png" alt="Configuring role privileges"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Select the Membership tab and add the Account collection as a member.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="//images.contentful.com/po4qc9xpmpuh/7kzD3eNE9PaHjWO10Pc6m8/5ba5392ffa81a8a36a4a0114d2ee2384/16.png" class="article-body-image-wrapper"&gt;&lt;img src="//images.contentful.com/po4qc9xpmpuh/7kzD3eNE9PaHjWO10Pc6m8/5ba5392ffa81a8a36a4a0114d2ee2384/16.png" alt="Role membership"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Run the &lt;code&gt;UserLogin&lt;/code&gt; function again with the same credentials. Input the generated &lt;em&gt;secret&lt;/em&gt; (user &lt;em&gt;access token&lt;/em&gt;) next to the Specify a secret field in the shell.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="//images.contentful.com/po4qc9xpmpuh/4CkHRBxZgZcRxFpX4NADWV/26d3c855bc35346309026b1650962e88/17.png" class="article-body-image-wrapper"&gt;&lt;img src="//images.contentful.com/po4qc9xpmpuh/4CkHRBxZgZcRxFpX4NADWV/26d3c855bc35346309026b1650962e88/17.png" alt="specify secret"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Run the following command to query &lt;code&gt;Movie&lt;/code&gt; collection. Notice this time it returns a successful response.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="nx"&gt;Get&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;Documents&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;Collection&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Movie&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)))&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="c1"&gt;// Output&lt;/span&gt;
+&lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="na"&gt;ref&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;Ref&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;Collection&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Movie&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;310384575062737476&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+  &lt;span class="na"&gt;ts&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="mi"&gt;1632264647455000&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="na"&gt;data&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="na"&gt;title&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;The Hateful Eight&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="na"&gt;director&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Quentin Tarantino&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="na"&gt;release&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;December 25, 2015&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
+  &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#user-logout"&gt;
+  &lt;/a&gt;
+  User logout
+&lt;/h2&gt;
+
+&lt;p&gt;Navigate to the function section of your Fauna dashboard. Define a new UDF called &lt;code&gt;UserLogout&lt;/code&gt; and add the following code snippet in the function body.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="nx"&gt;Query&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="nx"&gt;Lambda&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;x&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;Logout&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;
+&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Make sure to assign AuthRole to UserLogout UDF.&lt;/p&gt;
+
+&lt;p&gt;Navigate to &lt;em&gt;Security &amp;gt; Roles &amp;gt; AuthRole&lt;/em&gt; and assign call privilege to UserLogout UDF.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="//images.contentful.com/po4qc9xpmpuh/5CbfN8EH3XzHUJFPdcsrS5/179429b0e7cbffcd85fb22921b9b7319/18.png" class="article-body-image-wrapper"&gt;&lt;img src="//images.contentful.com/po4qc9xpmpuh/5CbfN8EH3XzHUJFPdcsrS5/179429b0e7cbffcd85fb22921b9b7319/18.png" alt="Assigning the privilege to run a UDF"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Calling this UDF invalidates your secret token. You call this function with the following command.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="nx"&gt;Call&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;UserLogout&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#conclusion"&gt;
+  &lt;/a&gt;
+  Conclusion
+&lt;/h2&gt;
+
+&lt;p&gt;In this post, you learn how to use UDF to do user authentication in Fauna. For more about advanced Authentication strategies (i.e., Token refresh) in Fauna, review &lt;a href="https://fauna.com/blog/refreshing-authentication-tokens-in-fql"&gt;this post&lt;/a&gt;. If you are interested in using third-party identity providers with Fauna, take a look at the &lt;a href="https://auth0.com/blog/what-is-fauna-and-how-does-it-work-with-auth0/"&gt;Fauna and Auth0&lt;/a&gt; integration post. Want to use AWS Cognito as an auth provider with Fauna? Take a look at the &lt;a href="https://fauna.com/blog/authenticating-users-with-aws-cognito-in-fauna"&gt;AWS Cognito and Fauna&lt;/a&gt; article.&lt;/p&gt;
+
+&lt;p&gt;If you enjoyed this article and want to see more articles like this one, let us know in the &lt;a href="https://forums.fauna.com/"&gt;community forum&lt;/a&gt;.&lt;/p&gt;
+
+</description>
+      <category>serverless</category>
+      <category>database</category>
+      <category>fauna</category>
+      <category>tutorial</category>
+    </item>
+    <item>
+      <title>Self-Introduction</title>
+      <author>Qzhang125</author>
+      <pubDate>Wed, 06 Oct 2021 03:41:12 +0000</pubDate>
+      <link>https://dev.to/qzhang125/self-introduction-1el1</link>
+      <guid>https://dev.to/qzhang125/self-introduction-1el1</guid>
+      <description>&lt;p&gt;Hello my friend, I'm Qiuyu. Currently I'm an international student of Seneca College and this is almost my fifth semester as a CPA student. In the 5 semesters of learning computer programming, I am able to create a few projects by using C, C++, and JAVA. I could also establish a server based on Node.js and create an API for user request. Using React, Bootstrap to create user interface is also a part of my studies. Now, Let's start my new section of software optimization learning for SPO600!&lt;/p&gt;
+
+</description>
+    </item>
+    <item>
+      <title>Understanding Array Methods: filter(), map(), forEach() 
+</title>
+      <author>Holajuwon</author>
+      <pubDate>Wed, 06 Oct 2021 03:21:11 +0000</pubDate>
+      <link>https://dev.to/holajuwon/understanding-array-methods-filter-map-foreach-3367</link>
+      <guid>https://dev.to/holajuwon/understanding-array-methods-filter-map-foreach-3367</guid>
+      <description>&lt;p&gt;Arrays are one of the most popular data types used in javascript as they have variety of methods that makes it easy to use. &lt;/p&gt;
+
+&lt;p&gt;In this article, I will be talking about three popular array methods; the &lt;code&gt;filter()&lt;/code&gt; method, the &lt;code&gt;map()&lt;/code&gt; method and the &lt;code&gt;forEach()&lt;/code&gt; method,and I will be showing how they are used.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#filter"&gt;
+  &lt;/a&gt;
+  filter()
+&lt;/h2&gt;
+
+&lt;p&gt;The &lt;code&gt;filter()&lt;/code&gt; method is mostly used for returning a subset of an array that meets a certain condition. &lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#how-its-used"&gt;
+  &lt;/a&gt;
+  How its used
+&lt;/h3&gt;
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="nx"&gt;array&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;filter&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;currentValue&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;index&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;arr&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="c1"&gt;// condition&lt;/span&gt;
+&lt;span class="p"&gt;})&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;ul&gt;
+&lt;li&gt;The &lt;code&gt;filter()&lt;/code&gt; method accepts a callback function.&lt;/li&gt;
+&lt;li&gt;The callback takes in three positional arguments.
+
+&lt;ul&gt;
+&lt;li&gt;The first is the &lt;code&gt;currentValue&lt;/code&gt;: which specifies the current element in the array being looped over. The &lt;code&gt;currentvalue&lt;/code&gt; argument is required, i.e the value must be passed into the callback function.&lt;/li&gt;
+&lt;li&gt;The second is the &lt;code&gt;index&lt;/code&gt;: which specifies the index of the current element in the array, this is an optional argument.&lt;/li&gt;
+&lt;li&gt;The third is the present &lt;code&gt;array&lt;/code&gt; which the &lt;code&gt;filter()&lt;/code&gt; method is applied on, this is an optional argument.&lt;/li&gt;
+&lt;/ul&gt;
+
+
+&lt;/li&gt;
+&lt;li&gt;The callback takes in a condition to test all the elements in the array and return values based on the condition.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3&gt;
+  &lt;a href="#example"&gt;
+  &lt;/a&gt;
+  Example
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;strong&gt;Return even numbers from an array of numbers&lt;/strong&gt;&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;arr&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;3&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;4&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;5&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;6&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;7&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;8&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;9&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;10&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+&lt;span class="nx"&gt;arr&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;filter&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;item&lt;/span&gt;&lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;item&lt;/span&gt; &lt;span class="o"&gt;%&lt;/span&gt; &lt;span class="mi"&gt;2&lt;/span&gt; &lt;span class="o"&gt;==&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="c1"&gt;// result =&amp;gt; [2, 4, 6, 8, 10]&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#how-it-works"&gt;
+  &lt;/a&gt;
+  How it works
+&lt;/h3&gt;
+
+&lt;ul&gt;
+&lt;li&gt;The &lt;code&gt;filter()&lt;/code&gt; method loops over every element in the array.&lt;/li&gt;
+&lt;li&gt;It checks if the element pass the set condition; if it has a remainder after dividing two in this case.&lt;/li&gt;
+&lt;li&gt;It passes it to a new array.&lt;/li&gt;
+&lt;li&gt;When it has checked all the elements, it returns a new array that contains elements that pass the set condition.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3&gt;
+  &lt;a href="#note"&gt;
+  &lt;/a&gt;
+  Note:
+&lt;/h3&gt;
+
+&lt;ul&gt;
+&lt;li&gt;The &lt;code&gt;filter()&lt;/code&gt; method does not mutate the array.&lt;/li&gt;
+&lt;li&gt;The method returns a new array with all the elements that passed the condition set.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h2&gt;
+  &lt;a href="#map"&gt;
+  &lt;/a&gt;
+  map()
+&lt;/h2&gt;
+
+&lt;p&gt;The &lt;code&gt;map()&lt;/code&gt; method enables us to loop over every element of an array and perform various operations on them.&lt;br&gt;
+It returns a new array with the new values of the elements after the operations have been carried out on them.&lt;/p&gt;
+&lt;h3&gt;
+  &lt;a href="#how-its-used"&gt;
+  &lt;/a&gt;
+  How its used
+&lt;/h3&gt;
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="nx"&gt;array&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;map&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;currentValue&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;index&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;arr&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="c1"&gt;// operation&lt;/span&gt;
+&lt;span class="p"&gt;})&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;ul&gt;
+&lt;li&gt;The &lt;code&gt;map()&lt;/code&gt; method accepts a callback function.&lt;/li&gt;
+&lt;li&gt;The callback takes in three positional arguments.
+
+&lt;ul&gt;
+&lt;li&gt;The first is the &lt;code&gt;currentValue&lt;/code&gt;: which specifies the current element in the array being looped over. The &lt;code&gt;currentvalue&lt;/code&gt; argument is required, i.e the value must be passed into the callback function.&lt;/li&gt;
+&lt;li&gt;The second is the &lt;code&gt;index&lt;/code&gt;: which specifies the index of the current element in the array, this is an optional argument.&lt;/li&gt;
+&lt;li&gt;The third is the present &lt;code&gt;array&lt;/code&gt; which the &lt;code&gt;map()&lt;/code&gt; method is applied on, this is an optional argument.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;/li&gt;
+&lt;li&gt;The callback function allow us to perform various operations on the elements in the array.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3&gt;
+  &lt;a href="#example"&gt;
+  &lt;/a&gt;
+  Example
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;strong&gt;Return all texts in an array in uppercase&lt;/strong&gt;&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;arr&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Dog&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Cat&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;HORSE&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;elEPHANT&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+&lt;span class="nx"&gt;arr&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;map&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;item&lt;/span&gt;&lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;item&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;toUpperCase&lt;/span&gt;&lt;span class="p"&gt;())&lt;/span&gt;
+&lt;span class="c1"&gt;// result =&amp;gt; ['DOG', 'CAT', 'HORSE', 'ELEPHANT']&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#how-it-works"&gt;
+  &lt;/a&gt;
+  How it works
+&lt;/h3&gt;
+
+&lt;ul&gt;
+&lt;li&gt;The &lt;code&gt;map()&lt;/code&gt; method loops over every element in the array.&lt;/li&gt;
+&lt;li&gt;It picks each element and performs the stated operation on it; in this case it converts each element to uppercase.&lt;/li&gt;
+&lt;li&gt;It passes it to a new array.&lt;/li&gt;
+&lt;li&gt;When it has worked on all elements, it returns a new array that contains all elements in uppercase.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3&gt;
+  &lt;a href="#note"&gt;
+  &lt;/a&gt;
+  Note:
+&lt;/h3&gt;
+
+&lt;ul&gt;
+&lt;li&gt;The &lt;code&gt;map()&lt;/code&gt; method does not mutate the array.&lt;/li&gt;
+&lt;li&gt;The method returns a new array the results of the callback function.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h2&gt;
+  &lt;a href="#foreach"&gt;
+  &lt;/a&gt;
+  forEach()
+&lt;/h2&gt;
+
+&lt;p&gt;The &lt;code&gt;forEach()&lt;/code&gt; method is mostly used to loop over each of the items in an array. It executes a provided function once for each array element. The &lt;code&gt;forEach()&lt;/code&gt; does not have a return value, it returns &lt;code&gt;undefined&lt;/code&gt;.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#how-its-used"&gt;
+  &lt;/a&gt;
+  How its used
+&lt;/h3&gt;
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="nx"&gt;array&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;forEach&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;currentValue&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;index&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;arr&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;currentValue&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="p"&gt;})&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;ul&gt;
+&lt;li&gt;The &lt;code&gt;forEach()&lt;/code&gt; method accepts a callback function.&lt;/li&gt;
+&lt;li&gt;The callback takes in three positional arguments.
+
+&lt;ul&gt;
+&lt;li&gt;The first is the &lt;code&gt;currentValue&lt;/code&gt;: which specifies the current element in the array being looped over. The &lt;code&gt;currentvalue&lt;/code&gt; argument is required, i.e the value must be passed into the callback function.&lt;/li&gt;
+&lt;li&gt;The second is the &lt;code&gt;index&lt;/code&gt;: which specifies the index of the current element in the array, this is an optional argument.&lt;/li&gt;
+&lt;li&gt;The third is the present &lt;code&gt;array&lt;/code&gt; which the &lt;code&gt;forEach()&lt;/code&gt; method is applied on, this is an optional argument.&lt;/li&gt;
+&lt;/ul&gt;
+
+
+&lt;/li&gt;
+&lt;li&gt;The callback function allow us to perform various operations on the elements in the array.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3&gt;
+  &lt;a href="#example"&gt;
+  &lt;/a&gt;
+  Example
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;strong&gt;As an alternative for the &lt;code&gt;for of&lt;/code&gt; loop&lt;/strong&gt;&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;animals&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Dog&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Cat&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;HORSE&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;elEPHANT&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+
+&lt;span class="c1"&gt;// for of&lt;/span&gt;
+&lt;span class="k"&gt;for&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;animal&lt;/span&gt; &lt;span class="k"&gt;in&lt;/span&gt; &lt;span class="nx"&gt;animals&lt;/span&gt;&lt;span class="p"&gt;){&lt;/span&gt;
+    &lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;animal&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="c1"&gt;// forEach&lt;/span&gt;
+&lt;span class="nx"&gt;animals&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;forEach&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;animal&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="o"&gt;=&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;animal&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="p"&gt;})&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#how-it-works"&gt;
+  &lt;/a&gt;
+  How it works
+&lt;/h3&gt;
+
+&lt;ul&gt;
+&lt;li&gt;The &lt;code&gt;forEach()&lt;/code&gt; method loops over every element in the array.&lt;/li&gt;
+&lt;li&gt;It picks each element in the array and logs it to the console.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3&gt;
+  &lt;a href="#note"&gt;
+  &lt;/a&gt;
+  Note:
+&lt;/h3&gt;
+
+&lt;ul&gt;
+&lt;li&gt;The &lt;code&gt;forEach()&lt;/code&gt; method does not mutate the array.&lt;/li&gt;
+&lt;li&gt;The method returns &lt;code&gt;undefined&lt;/code&gt;.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h2&gt;
+  &lt;a href="#conclusion"&gt;
+  &lt;/a&gt;
+  Conclusion
+&lt;/h2&gt;
+
+&lt;p&gt;I hope you have been able to learn something new about the &lt;code&gt;map()&lt;/code&gt;, &lt;code&gt;filter()&lt;/code&gt; and &lt;code&gt;forEach()&lt;/code&gt; method.&lt;/p&gt;
+
+&lt;p&gt;If you have any questions, and or more insights into the topic, please drop a message for me in the comment section below. &lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#resources-and-further-reading"&gt;
+  &lt;/a&gt;
+  Resources and further reading
+&lt;/h2&gt;
+
+&lt;ul&gt;
+&lt;li&gt;
+&lt;a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/filter"&gt;Array.prototype.filter()&lt;/a&gt;, MDN&lt;/li&gt;
+&lt;li&gt;
+&lt;a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/map"&gt;Array.prototype.map()&lt;/a&gt;, MDN&lt;/li&gt;
+&lt;li&gt;
+&lt;a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/forEach"&gt;Array.prototype.forEach()&lt;/a&gt;, MDN&lt;/li&gt;
+&lt;/ul&gt;
+
+</description>
+      <category>javascript</category>
+      <category>beginners</category>
+      <category>webdev</category>
+      <category>tutorial</category>
+    </item>
+    <item>
+      <title>How to Add Custom Rally Login into an Ethereum Wallet Modal</title>
+      <author>jennifertrin</author>
+      <pubDate>Wed, 06 Oct 2021 02:46:09 +0000</pubDate>
+      <link>https://dev.to/jkim_tran/how-to-add-custom-rally-login-into-an-ethereum-wallet-modal-keh</link>
+      <guid>https://dev.to/jkim_tran/how-to-add-custom-rally-login-into-an-ethereum-wallet-modal-keh</guid>
+      <description>&lt;p&gt;This article outlines how to add &lt;a href="https://rally.io/"&gt;Rally.io&lt;/a&gt; login to Onboard.js, a modal integration that allows users to login into decentralized apps using various Ethereum wallets.&lt;/p&gt;
+
+&lt;p&gt;Since Rally is not an Ethereum Virtual Machine (EVM) compatible blockchain, developers must separate the Rally and Ethereum wallet authentications on their dapps. &lt;/p&gt;
+
+&lt;p&gt;However, &lt;a href="https://docs.blocknative.com/onboard"&gt;Onboard.js&lt;/a&gt; simplifies the UI and allows dapps to easily add new Ethereum wallets and custom logins as user login options. &lt;/p&gt;
+
+&lt;p&gt;To learn more about the key differences between Rally and Ethereum, check out this article &lt;a href="https://dev.to/jkim_tran/how-is-rally-different-from-ethereum-mainnet-248a"&gt;here&lt;/a&gt;. &lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#getting-started"&gt;
+  &lt;/a&gt;
+  Getting Started
+&lt;/h2&gt;
+
+&lt;h3&gt;
+  &lt;a href="#step-1-set-up-onboardjs-if-you-have-not-already"&gt;
+  &lt;/a&gt;
+  Step 1: Set up Onboard.js (if you have not already)
+&lt;/h3&gt;
+
+&lt;p&gt;You will need to add the Onboard.js as a package and initialize the library in your Javascript project.&lt;/p&gt;
+
+&lt;p&gt;You can follow the documentation to add Onboard.js to your project &lt;a href="https://docs.blocknative.com/onboard"&gt;here&lt;/a&gt;. &lt;/p&gt;
+
+&lt;p&gt;As noted in the docs, to initialize the built-in wallet modules, you must pass an array of wallet initialization objects to the walletSelect.wallets parameter of the Onboard initialization object.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#step-2-create-a-rallyio-login-module"&gt;
+  &lt;/a&gt;
+  Step 2: Create a Rally.io login module
+&lt;/h3&gt;
+
+&lt;p&gt;Create a new Javascript module. In the module, you will need to add the following:&lt;/p&gt;
+
+&lt;p&gt;An constant variable that stores the Rally starlight logo SVG:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;const rallySVG = `&amp;lt;svg version="1.1" id="Layer_1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" x="0px" y="0px"
+viewBox="0 0 100 100" style="enable-background:new 0 0 100 100;" xml:space="preserve"&amp;gt;
+&amp;lt;style type="text/css"&amp;gt;
+.st0{fill:#FFFFFF;}
+.st1{clip-path:url(#SVGID_2_);}
+&amp;lt;/style&amp;gt;
+&amp;lt;g&amp;gt;
+&amp;lt;path class="st0" d="M57.52,63.66"/&amp;gt;
+&amp;lt;path class="st0" d="M72.92,35.95c0.33,0,0.6,0.27,0.6,0.6c0,14.02,8.64,24.87,25.39,25.22c0.33,0,0.6,0.27,0.6,0.6
+ s-0.27,0.6-0.6,0.6C82.15,63.3,73.51,74.15,73.51,88.17c0,0.33-0.27,0.6-0.6,0.6c-0.33,0-0.6-0.27-0.6-0.6
+ c0-14.02-8.64-24.87-25.39-25.22c-0.33,0-0.6-0.27-0.6-0.6s0.27-0.6,0.6-0.6c16.75-0.34,25.39-11.19,25.39-25.22
+ C72.32,36.22,72.59,35.95,72.92,35.95z"/&amp;gt;
+&amp;lt;g&amp;gt;
+ &amp;lt;g&amp;gt;
+   &amp;lt;defs&amp;gt;
+     &amp;lt;path id="SVGID_1_" d="M46.93,62.96c16.75,0.34,25.39,11.19,25.39,25.22c0,0.33-0.27,0.6-0.6,0.6H1.1c-0.33,0-0.6-0.27-0.6-0.6
+       V11.83c0-0.33,0.27-0.6,0.6-0.6h45.78c13.96,0.29,25.44,11.29,25.44,25.32s-8.64,24.87-25.39,25.22c-0.33,0-0.6,0.27-0.6,0.6
+       S46.6,62.96,46.93,62.96z"/&amp;gt;
+   &amp;lt;/defs&amp;gt;
+   &amp;lt;clipPath id="SVGID_2_"&amp;gt;
+     &amp;lt;use xlink:href="#SVGID_1_"  style="overflow:visible;"/&amp;gt;
+   &amp;lt;/clipPath&amp;gt;
+   &amp;lt;g class="st1"&amp;gt;
+     &amp;lt;g&amp;gt;
+       &amp;lt;defs&amp;gt;
+         &amp;lt;rect id="SVGID_3_" x="-4.5" y="6.23" width="81.82" height="87.54"/&amp;gt;
+       &amp;lt;/defs&amp;gt;
+       &amp;lt;clipPath id="SVGID_4_"&amp;gt;
+         &amp;lt;use xlink:href="#SVGID_3_"  style="overflow:visible;"/&amp;gt;
+       &amp;lt;/clipPath&amp;gt;
+       &amp;lt;g style="clip-path:url(#SVGID_4_);"&amp;gt;
+
+           &amp;lt;image style="overflow:visible;" width="172" height="184" xlink:href="data:image/jpeg;base64,/9j/4AAQSkZJRgABAgEAlgCWAAD/7AARRHVja3kAAQAEAAAAHgAA/+4AIUFkb2JlAGTAAAAAAQMA
+EAMCAwYAAAVcAAAHngAAC6L/2wCEABALCwsMCxAMDBAXDw0PFxsUEBAUGx8XFxcXFx8eFxoaGhoX
+Hh4jJSclIx4vLzMzLy9AQEBAQEBAQEBAQEBAQEABEQ8PERMRFRISFRQRFBEUGhQWFhQaJhoaHBoa
+JjAjHh4eHiMwKy4nJycuKzU1MDA1NUBAP0BAQEBAQEBAQEBAQP/CABEIALwArQMBIgACEQEDEQH/
+xADPAAACAwEBAQAAAAAAAAAAAAACAwABBQYEBwEBAAIDAQAAAAAAAAAAAAAAAwECAAQFBhAAAwAB
+AwMDAgYDAQAAAAAAAAECAxEEBRATBhI1JiAzMEAhIjIUIxUWJBEAAQEDBwgIBAQHAQAAAAAAAQIA
+EQNAobESQ3MEECExQVEy0hNhcYGRwSKSM0JiIxQg0XLT8FKCorLCJAUSAAIBAQILBgQGAwAAAAAA
+AAECAAMwESExYbESMpLSM3M0EEFxkdFyUSJSBKHB4fGyI0KiE//aAAwDAQACEQMRAAAA7Hl/JlaP
+pd1vPEW10N8+cU3zwGUPdPDYZ7ZY7DLXPJZQtb04h4XSM5rQ3tTVgH09WSSc+b+D35/M9qViVEM1
+nSjGKZQ2sU0hY1TTFjFsIWGDDIjEqG3YxHbmvtQS9Ho/N8/35/O9qVjdEMwOtGMUwyaxTDJzFNIW
+sU0hYxbDEzAzMiEq09mjia/Y1fnWdo5216yyG6KZrOtGMWdCa1TDJrUtIWtS0haxTCFprMyMhKlL
+9XlZsFx2do53a9PLoqqRgUVYxTKk1imGTWpYYualhE5iWCLjUwSYSyoZsU1T4/P0c7velly4WyEo
+qZgcGximUJrEsoTmJMiexDCJ5oYBOJREbff4N7d1vnOfoZ/V9NLkhbKrypkB5UzWcG01HU2sSdCc
+aTM3mgyN5o9xD79Kr7XJ+cZ2jnx7CXV4t3V5UiEpqRrLKMNZTRhqKKNNJZRxIuK7fQ8p1LcVkkvo
+/Oc7Rzy9pJLxZdXMFY3aDsbtUyC7VMllerLXdqsi5eD92dTV+jFzfSannPnOfo54erq5JWXJMXdX
+eLurvFkFpU4NrBWFrBWFphVUSHd/866ANDFz9DP5XRkklrklouSJF3VpF2NrF3UbLkixd1Fi5JbJ
+7PH6qBpc19UxeAHC32ktt8XO0lo4ydnd84ydnEjjb7G0jjb7GLnH319rHHzsIkchOvls5Ho9bS19
+T//aAAgBAgABBQDLnt13sg8+Ue4zD3Oce7zj3m4J5HcyYOWimmmi/wCbGMZQxjNjvqwV659N/wAm
+MYyihjGbLcO9lf8AIY0NFIpFIYzaU5q/5aDQ0NFSVJUlIaNvOt2v3aGg5HI5KgqCoHJscOuOl+7Q
+9J6T0jgeMeMrEdirqNtMbdr9dD0npPQeg7Z2jsamPDONDX66HpFIpFAsYsROIWJNVic5NDQSEhSK
+SYFAsYoNxi/cJCQkSiUSiZFIkZl+3omJsVMmqJuhZLFkyHcyGfJnb//aAAgBAwABBQDY8ZgWF7Da
+Mew2g9jtStntitpgHtsJe1wsybRoa06bf7DGUUUUUMzYla0eu2+wxlFFFFDGZY0y7b7DGUUUUUMZ
+kWq232GMoopFIpFIaL/Rbb7AxlFIpFIaGjM9K232BjGNDQ5HJkaiayusu2+wMYxoaHI5N/GdWbf7
+HRjGho0NC8U5IybVxudv9j6dDQ0NDfYk8m3+x+DuV+zY5d3ODv5jv5jv5jv5jv5jvZjvZjvZjvZj
+dZd06//aAAgBAQABBQDluX23FYM3mfJ3UeYcvNf9nygvMuTF5hyYvLuSYvLORYvKeQYvJt+xeSb5
+i8h3rFz+8Yuc3bI5vMYuYwUYs+HMvp8n3OTPzIhCEIkkkkkkkQiHUvb8lkl48kZJ68/7yIQhCJJJ
+JJJJJEIRgzZMF4M8Z46eQe8iEIRJJJJJJJJIhCEYMtYcmO5yQeQe8iEIRJJJJJJJJIhCF04/N6bP
+IPeuiEIRJJJJJJJJIhCES3L7q7PkHvXRCEIkkkkkkkkkQhC6dx/0fIPeuiEIkkkkklkkkkiEIXRP
+/B5B710QhCJJJJJZLJZLJZLExMT6LXteQe9dEIQiSSSWSyWSyWSyWJiYmaiX/m8g966IQhCESSyW
+SyWSyWJiYmJmp2X/AK3yD3nohCEIQiWSyWSxMliYqExMxQ8uT0T6PIPeeqEIQhMTExMTExUKhUKh
+M4rb/oc/7z1QhCEJiYmJiYmKhUKiaOP2d7rJMqUc/wC89UIQhCYmJiYmJioVCs47is25IiMcdOf9
+5+hCEITExMTExMVCo9Rx3O59m8GfFuMXTn/efpQhCExMTExM1PUeobOJ5XJx+eLm4Of95+pCEJiY
+mampqampqani3IuunP8AvH4Wpqampqampqam23F7bcf2cX9Xn/ePxNTU1NTU16/33/yvPe8flIyN
+8Rz3vH5TH7b5ZxGWM/5OZqqXju5XCvTTcf8AJ9z4efDz4efDz4gfED4gfET4ifET4kfEj4mfEz4m
+fEz4ofFDj/8AR9w//9oACAECAgY/ACFOiAbsE1jNczXaa7TiNOI019LIwEC1l/5n6hhX9ICDeDiI
+7G9xsQrfNSY4R9OUTTvGjdpaXdd8Y3uNl9xRY4aVJyvtIOaN7jZVB9f29ZTsE/lG9xsmyUqp/wBD
+G8TZfc1TiWg6DxIh8TYhVF5MNBTrIwJysMcPjY3gYTjPYbG4iCme8gX5DZ0n+FRVPgTZjmU/5Dtx
+TFNU/hNQ+YnDbzX1nCbzX1nCfaX1nBfaX1if1FUFRCfmUk4cAxz/2gAIAQMCBj8AR6qCo9RQx0sI
+F/ddODT8pwUnCScJZw1mos1bvAy9DpZDjlx7KXKTNY3jWEu78UpcpM1kjD/Jh5ylykzWQyOueUuU
+mayHuXPKXKTNZU1+LgylykzWJZsAEFQ9zA3ZBKXKTNY31NS/5NHF+/ZS5SZrEo4vVscFBjrOqhsj
+HHKXKTNZfbVRjWuinwJlLlJmslyVqP8ANYivQaouiNB1dQSvdeCROmqbdPenTVNunvTpqm3T3p01
+Tbp706apt096dPU2k3p09TaTenT1NpN6dPU2k3pS/pZKYq0y3zKWY6QuGA4MM//aAAgBAQEGPwAR
+I3miKzQ4Q3lHwA2t9FEKEnUHFR7SS6ZnnlLGxSC7+0hvagelf7je1A9K/wBxvagelfG3tQPSvjb2
+4PpVxt7cH0q429uF6Vcbe3C7lcbbkLuVxNuQ+5XE25D7lcTeeGk9TxS9nREqh9O8GfCWFdA0934o
+4WfLBdDhp2ADP3l5kAUkkEaCMxYJjedO34gwWghSTrH4MXeGgSKsg9Y1FqydOtOsHLi7w0CRhae0
+bQwWndVoyYu8NAkhhE+VWdPXkxl4aBJAoaQXhudqq1nNjLw0CS1Pnq9m82MvDQJKoaq6aFNjLw0C
+SqOqsnN2KbGXhoElUratI7gr82xl4aBJXuzvr+FDYu8NAkiYadKi5uW7yuqu6NDYu8NAkhxChpzI
+8Tkxd4aBIw8EQU76vAMEpDgA4AbBkxd4aBIhEivhwdOfeV1fmwQgVUpDgBlxd4aBIhDivi4f+X4k
+/pPgyY0FQXDWHgjLi7w0CRh5KsOs/VRp/qT0slaCFIUAUqGgg5wcmLvDQJIrARVPcK8F+z4k+Pfk
+xd4aBJIeIh70NQUOl2rtb7t/0uXzX/K6tQ2LvDQJLUf5uZ9u93TzHen+Hti7w0CSxYepOIhKf+pE
+Uf6ti7w0CSx7+B/hHZX/AKUFNaDEdzgBuKAq1uo0yQJSCpSi4AZySWUgD/sWtMUw3jQgKSEP2uUS
+xraNb9Dm+r9rX11HO06+Xme1hO1hO1hO1hO1hO1hO1hO1hO1hO1hO1hO1hO1hO1hO1hO1hO1hO1h
+Ox+w5PN+V1d2tz87sn//2Q==" transform="matrix(0.48 0 0 0.48 -4.8 5.76)"&amp;gt;
+         &amp;lt;/image&amp;gt;
+       &amp;lt;/g&amp;gt;
+     &amp;lt;/g&amp;gt;
+   &amp;lt;/g&amp;gt;
+ &amp;lt;/g&amp;gt;
+&amp;lt;/g&amp;gt;
+&amp;lt;/g&amp;gt;
+&amp;lt;/svg&amp;gt;`
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Create an export module that will direct the user to the callback that you stored the Rally.io login logic to. &lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Note&lt;/strong&gt;: You will still need to add backend logic that will handle the Rally.io login. To learn more about how to set up Rally.io login, review the docs &lt;a href="https://api-docs.rally.io/"&gt;here&lt;/a&gt; or subscribe to my account for upcoming articles!&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;export const customRallyLogin = {
+  name: 'Rally', //display name of the wallet
+  preferred: true, //lists Rally login as a top login option
+  svg: rallySVG,
+  wallet: async helpers =&amp;gt; {
+    window.location.href = 'yourcallback';
+    await new Promise(resolve =&amp;gt; setTimeout(resolve, 10000));
+    return null;
+  },
+  desktop: true,
+  mobile: true
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#step-3-import-the-rally-login-module-to-onboardjs"&gt;
+  &lt;/a&gt;
+  Step 3: Import the Rally Login module to Onboard.js
+&lt;/h3&gt;
+
+&lt;p&gt;Import the Rally Login module into the Onboard initialization.&lt;/p&gt;
+
+&lt;p&gt;For example:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;import { customRallyLogin } from "../../utils/logins/Rally";
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Add the module name under the walletSelect.wallets parameter of the Onboard initialization object, alongside the other wallet integrations.&lt;/p&gt;
+
+&lt;p&gt;For example:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;    { walletName: "metamask", preferred: true },
+    { walletName: "torus", preferred: true },
+    { walletName: "coinbase", preferred: true }, 
+    customRallyLogin
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#step-4-end-result"&gt;
+  &lt;/a&gt;
+  Step 4: End Result
+&lt;/h3&gt;
+
+&lt;p&gt;Once you add the wallet model to an onClick method to a Login button, the Onboard.js module will popup and Rally is listed as a login option.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--yL4c_1Fk--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/wxa7dj9z4syut8kg7yys.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--yL4c_1Fk--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/wxa7dj9z4syut8kg7yys.png" alt="Rally Login on Onboard.js module"&gt;&lt;/a&gt;&lt;/p&gt;
+
+</description>
+      <category>blockchain</category>
+      <category>javascript</category>
+    </item>
+    <item>
       <title>Divtober Day 5: Tired</title>
       <author>Alvaro Montoro</author>
       <pubDate>Wed, 06 Oct 2021 02:27:41 +0000</pubDate>
@@ -947,392 +1916,6 @@ You can follow me on &lt;a href="https://twitter.com/kritikasri27"&gt;Twitter&lt
       <category>webdev</category>
       <category>codenewbie</category>
       <category>javascript</category>
-    </item>
-    <item>
-      <title>Introducing Bookshop: component-driven workflow for static websites</title>
-      <author>David Large</author>
-      <pubDate>Tue, 05 Oct 2021 23:09:03 +0000</pubDate>
-      <link>https://dev.to/cloudcannon/introducing-bookshop-component-driven-workflow-for-static-websites-1fb4</link>
-      <guid>https://dev.to/cloudcannon/introducing-bookshop-component-driven-workflow-for-static-websites-1fb4</guid>
-      <description>&lt;p&gt;We're delighted to launch &lt;a href="https://github.com/CloudCannon/bookshop"&gt;Bookshop&lt;/a&gt;: an open-source framework to speed up development and reduce maintenance on static websites by developing components in isolation.&lt;/p&gt;
-
-&lt;p&gt;Building and maintaining high-performing informational websites have their own set of challenges. It's almost impossible to know all the requirements for a website upfront, so there's often an endless amount of iteration and tweaking involved in these projects. Requirements change, new components are necessary, buttons need 'more pizzazz', the data team wants to add a series of graphs to their latest blog post, and it's on you to get everything to work together while being prepared for the next wave of changes. This constant chopping and changing often leads to an unmaintainable jungle of CSS and JavaScript where a complete rebuild becomes the only option. We've all been there; it's usually just a matter of time.&lt;/p&gt;
-
-&lt;p&gt;The key to avoiding this jungle is a component-driven workflow. Ideally, you isolate each component's template and CSS. Doing this makes the website far easier to maintain and gives you a framework for adding as many components as you'd like, without your codebase getting out of control.&lt;/p&gt;
-
-&lt;p&gt;In a traditional React application, you might reach for &lt;a href="https://storybook.js.org/"&gt;Storybook&lt;/a&gt; to solve this problem. Storybook provides the tooling needed to build components in isolation, and we're big fans of the workflow that it brings to our React projects.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#the-problem"&gt;
-  &lt;/a&gt;
-  The problem &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--S59nsWJ1--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/77939evwna7jhy6bjona.png" alt="A tangled bird's nest of wires."&gt;
-&lt;/h2&gt;
-
-&lt;p&gt;When we started tackling static websites with a component-driven methodology, however, we hit some limitations working with Storybook outside of the JS framework world.&lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;&lt;p&gt;&lt;strong&gt;Complicated configuration&lt;/strong&gt; — Storybook doesn't have built-in support for templating languages like Liquid, Handlebars, or Go templates. We experimented with adding templating support to one of the existing Storybook frameworks, and building Javascript definition files for each component, giving us the rich Storybook controls. Another option was to use Storybook as an HTML reference guide, copying snippets out whenever we needed a component.Neither workflow provided the benefits we were used to in our application Storybooks, and our component reference would eventually fall out of sync with the implementation.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;&lt;strong&gt;Schema duplication&lt;/strong&gt; — There was no source of truth for the data passed to each component. We had to manually keep parity between our Storybook configuration, component includes, and include tags across each website.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;&lt;strong&gt;No SSG integration&lt;/strong&gt; — The SSG doesn't know anything about components, so we had no prescribed workflow for structuring our files at a component level. Eventually, a given site would become a bird's nest of include files and sass modules, and it was no longer clear what was actually a component.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;&lt;strong&gt;Development speed&lt;/strong&gt; — Once we weren't receiving the full benefits of Storybook, the extra tooling and build time became a damper on an otherwise lightweight static website development environment.&lt;/p&gt;&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;h2&gt;
-  &lt;a href="#our-solution-bookshop"&gt;
-  &lt;/a&gt;
-  Our solution? Bookshop.&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--go9Mwi-A--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/9cx1n6qdttabawptsf3w.png" alt="Organized cables between servers"&gt;
-&lt;/h2&gt;
-
-&lt;p&gt;Bookshop is a component browser and playground, which addresses these limitations and brings component-driven development to static site generators (SSGs).&lt;/p&gt;
-
-&lt;p&gt;&lt;iframe src="https://player.vimeo.com/video/622834137" width="710" height="399"&gt;
-&lt;/iframe&gt;
-&lt;/p&gt;
-
-&lt;p&gt;The benefits include:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;&lt;p&gt;&lt;strong&gt;SSG templating language support&lt;/strong&gt; — Bookshop is built for templating and can render the exact same includes you use to build your production website.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;&lt;strong&gt;Easy configuration&lt;/strong&gt; — Configure components with TOML, which functions as a schema for the front matter data structure you'll use in your SSG.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;&lt;strong&gt;Easy integration&lt;/strong&gt; — Bookshop includes plugins for popular SSGs, allowing them to use components with a distinct template tag that enforces a separation of concerns. Using this, Bookshop can seamlessly pass data from front matter to your component. There's no need to manually pass data to an include one variable at a time.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;&lt;strong&gt;Isolated component structure&lt;/strong&gt; — Bookshop has strong opinions on how templates and CSS are structured to ensure they're isolated, easy to find, and simple to maintain.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;&lt;strong&gt;Fast build times&lt;/strong&gt; — Bookshop is lightweight. Rather than a standalone application, bookshop builds a component browser that can embed anywhere on your website. This means you get to use your website styles and assets, and esbuild under the hood brings fast build times and quieter laptop fans.&lt;/p&gt;&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;Finally, Bookshop integrates tightly with CloudCannon for your content management needs. Editors can see the full catalog of components available and use them to build pages visually, all powered by your custom-built component library. No extra steps are necessary.&lt;/p&gt;
-
-&lt;p&gt;And did we mention that Bookshop adds a local component browser to your static webdev process? With a hot-reloading live-preview UI explorer for static template components, your workflow will thank you.&lt;/p&gt;
-
-&lt;p&gt;&lt;iframe src="https://player.vimeo.com/video/623857314" width="710" height="399"&gt;
-&lt;/iframe&gt;
-&lt;/p&gt;
-
-&lt;p&gt;HTML-based SSGs such as &lt;a href="https://www.11ty.dev/"&gt;11ty&lt;/a&gt;, &lt;a href="https://jekyllrb.com/"&gt;Jekyll&lt;/a&gt;, and &lt;a href="https://gohugo.io/"&gt;Hugo&lt;/a&gt; (support coming soon) benefit the most for Bookshop, as existing tooling doesn't support their native templating languages. However, there will still be benefits to using Bookshop with React or Vue-based SSGs, particularly if you want content editors to manage content visually on CloudCannon. Support for a Bookshop workflow with these SSGs will be coming later this year.&lt;/p&gt;
-
-&lt;p&gt;To help get you started with Bookshop, we've created a starter theme (&lt;a href="https://github.com/CloudCannon/jekyll-bookshop-starter"&gt;Jekyll&lt;/a&gt;, &lt;a href="https://github.com/CloudCannon/eleventy-bookshop-starter"&gt;11ty&lt;/a&gt;) to give you a boilerplate to build the rest of you site on. We're also launching a &lt;a href="https://github.com/CloudCannon?q=bookshop+template"&gt;collection of free, high quality templates&lt;/a&gt;. These production-ready templates make full use of Bookshop, are optimized for CloudCannon and can be used for free for any project, commercial or not.&lt;/p&gt;
-
-&lt;p&gt;We can't wait to see how you start using Bookshop on your web projects and reach new productivity levels. To get started, check out the readme for Bookshop in the &lt;a href="https://github.com/CloudCannon/bookshop"&gt;GitHub repository&lt;/a&gt;. We're always open to any feedback. If you hit a problem or have an idea to improve Bookshop, open an issue on the repository, and we'll be there to help.&lt;/p&gt;
-
-</description>
-      <category>webdev</category>
-      <category>jamstack</category>
-      <category>opensource</category>
-      <category>cms</category>
-    </item>
-    <item>
-      <title>My 1st Hacktoberfest!</title>
-      <author>Geesilu</author>
-      <pubDate>Tue, 05 Oct 2021 22:13:33 +0000</pubDate>
-      <link>https://dev.to/geesilu/my-1st-hacktoberfest-lih</link>
-      <guid>https://dev.to/geesilu/my-1st-hacktoberfest-lih</guid>
-      <description>&lt;p&gt;Hello everyone! I'm Geesilu. I'm new to here. This is my first time of participating Hacktoberfest.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#contributions"&gt;
-  &lt;/a&gt;
-  Contributions
-&lt;/h2&gt;
-
-&lt;p&gt;During Hacktoberfest I often look for easy repos.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--fVTdvdAt--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/0tok9t9pyk4fhuwhpdz4.jpg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--fVTdvdAt--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/0tok9t9pyk4fhuwhpdz4.jpg" alt="Alt Text"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#happy-coding"&gt;
-  &lt;/a&gt;
-  Happy Coding! 👨‍💻
-&lt;/h2&gt;
-
-</description>
-      <category>hacktoberfest</category>
-    </item>
-    <item>
-      <title>How Android Wallpaper Images Can Threaten Your Privacy</title>
-      <author>Savannah Copland 👋</author>
-      <pubDate>Tue, 05 Oct 2021 21:33:47 +0000</pubDate>
-      <link>https://dev.to/savannahjs/how-android-wallpaper-images-can-threaten-your-privacy-n83</link>
-      <guid>https://dev.to/savannahjs/how-android-wallpaper-images-can-threaten-your-privacy-n83</guid>
-      <description>&lt;p&gt;Android 12’s highly anticipated Material You design system features wallpaper-based color theming and advanced customizations powered by color extraction. These UI enhancements allow users to select a wallpaper (i.e., a personal background image) from which an optimal palette of colors is automatically generated and applied to the device’s look and feel globally.&lt;/p&gt;
-
-&lt;p&gt;Unfortunately, such personalization can carry a high price in compromised privacy. In this article, we’ll demonstrate how Android wallpapers can be used to track users and explore ways to prevent your device from being exploited.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#android-wallpaper-images-vs-user-privacy"&gt;
-  &lt;/a&gt;
-  Android wallpaper images vs. user privacy
-&lt;/h2&gt;
-
-&lt;p&gt;The WallpaperManager class was introduced in 2009 as part of the release of Android 2, API version 5. The class provides methods for interacting with wallpapers, including &lt;a href="https://developer.android.com/reference/android/app/WallpaperManager#getDrawable()"&gt;getDrawable()&lt;/a&gt; for retrieving the current system wallpaper as a drawable resource.&lt;/p&gt;
-
-&lt;p&gt;Using the following code, a drawable resource can be represented as a byte array:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;private fun calculateWallpaperBytes(): ByteArray {
-   val imageBitmap = wallpaperManager.drawable.toBitmap()
-   val stream = ByteArrayOutputStream()
-   imageBitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)
-   return stream.toByteArray()
-}
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Byte arrays can be used to restore original images from Android wallpapers, which are highly likely to contain personal information or details uniquely important to the user. Every app on your device can view and download photos of your family, pets, favorite bands or movies, and anything else you may have set as a wallpaper. Moreover, you couldn’t prevent them from doing so before Android 8.1.&lt;/p&gt;
-
-&lt;p&gt;As it stands, a large percentage of devices are running Android 8.1 or earlier (almost 44.6% at the time of this writing, per Google Analytics) and still vulnerable to this exploit.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#a-new-color-extraction-method"&gt;
-  &lt;/a&gt;
-  A new color extraction method
-&lt;/h3&gt;
-
-&lt;p&gt;Starting with Android 8.1, the &lt;a href="https://developer.android.com/reference/android/app/WallpaperManager#getDrawable()"&gt;getDrawable()&lt;/a&gt; method requires the use of &lt;a href="https://developer.android.com/reference/android/Manifest.permission#READ_EXTERNAL_STORAGE"&gt;READ_EXTERNAL_STORAGE&lt;/a&gt;, a less insecure but nonetheless risky permission as it enables access to all media on a device (and more privileged data). To compensate for the limited functionality, an easier way to extract colors was also introduced in Android 8.1: &lt;a href="https://developer.android.com/reference/android/app/WallpaperManager#getWallpaperColors(int)"&gt;getWallpaperColors(int which)&lt;/a&gt;,  which returns 3 main colors from a wallpaper image.&lt;/p&gt;
-
-&lt;p&gt;Like iOS, Android allows users to determine which specific screens to use wallpaper images, and the integer argument “which” sets which exact wallpaper image to use for color extraction. There are two options: the constant values &lt;code&gt;WallpaperManager.FLAG_SYSTEM&lt;/code&gt; or &lt;code&gt;WallpaperManager.FLAG_LOCK&lt;/code&gt;.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--PSX97cvN--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/otwuy03uwxyjr6h431cu.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--PSX97cvN--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/otwuy03uwxyjr6h431cu.png" alt="Wallpaper settings"&gt;&lt;/a&gt;&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;// WallpaperManager.FLAG_LOCK for the the lock screen
-
-val colors = WallpaperManager
-
-.getInstance(context).getWallpaperColors(WallpaperManager.FLAG_SYSTEM) 
-
-val primaryColor: Int = colors.primaryColor.toArgb()
-
-val secondaryColor: Int = colors.secondaryColor.toArgb()
-
-val tertiaryColor: Int = colors.tertiaryColor.toArgb()
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;The above code illustrates how to extract colors using a &lt;a href="https://developer.android.com/reference/android/content/Context"&gt;context&lt;/a&gt; object with primary, secondary and tertiary colors corresponding to the most popular colors in the picture (primary being the most popular). Note that no special permissions are required to use this new method.&lt;/p&gt;
-
-&lt;p&gt;The following is an example of color extraction using the new method with a real picture:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--D3AOVTb5--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/k1d7ukoeva75gmwlezsh.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--D3AOVTb5--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/k1d7ukoeva75gmwlezsh.png" alt="Koala color extraction"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;The methods may return null in some scenarios (e.g., when custom launchers redefine wallpaper management logic without using the &lt;code&gt;WallpaperManager&lt;/code&gt; class). However, if a wallpaper was set once by &lt;code&gt;WallpaperManager&lt;/code&gt;, the method will return a not-null value.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#the-science-of-color-extraction"&gt;
-  &lt;/a&gt;
-  The science of color extraction
-&lt;/h3&gt;
-
-&lt;p&gt;Since Android is open source, we can readily determine how the method actually works. According to the &lt;a href="https://cs.android.com/android/platform/superproject/+/master:frameworks/base/core/java/com/android/internal/graphics/palette/VariationalKMeansQuantizer.java;l=31?q=KMeansQua&amp;amp;sq=&amp;amp;ss=android%2Fplatform%2Fsuperproject"&gt;code&lt;/a&gt;, colors are the result of work of Variational &lt;a href="https://en.wikipedia.org/wiki/K-means_clustering"&gt;K-means&lt;/a&gt; quantizer. Every image pixel is represented by a color and every color is a &lt;a href="https://en.wikipedia.org/wiki/Three-dimensional_space"&gt;3-dimensional&lt;/a&gt; point in space (e.g., RGB color space). All pixels form a set in space, and the algorithm performs clustering of the set on K parts with finding K points, which are equidistant from others in the set.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--svm0p30d--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/hywo70avr8i7ojxe8ie9.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--svm0p30d--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/hywo70avr8i7ojxe8ie9.png" alt="How K-means method works"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Above is a visualization of how the K-means method works, courtesy of &lt;a href="https://vas3k.com/blog/machine_learning/"&gt;vas3k&lt;/a&gt;. This particular case is 3-means in a 2-dimensional space.&lt;/p&gt;
-
-&lt;p&gt;In the case of Android, colors are represented in the &lt;a href="https://en.wikipedia.org/wiki/HSL_and_HSV"&gt;HSL&lt;/a&gt; color space and distance is calculated using classical measures of &lt;a href="https://en.wikipedia.org/wiki/Euclidean_distance"&gt;euclidean distance&lt;/a&gt;. The results are three shades of an image  that are  equidistant (in the color space) from every pixel of the image. &lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#a-universe-of-combinations"&gt;
-  &lt;/a&gt;
-  A universe of combinations
-&lt;/h3&gt;
-
-&lt;p&gt;This color extraction algorithm is basically a map from the set of all possible images to the RGB color space. The set is infinite and the RGB color space is limited by 2²⁴ combinations. Theoretically, this means every RGB combination is possible. Every color is represented by 32 bits, but only 24 matter. Alpha channels will always be equal to 1 (according to sources), while every component of the colors R, G and B have 256 possible combinations, or 2⁸. &lt;/p&gt;
-
-&lt;p&gt;Since each component is independent, we can directly multiply the number of combinations together. This comes out to: 2⁸ * 2⁸ * 2⁸ = 2²⁴ combinations for every color. We have 3 colors for a image, and 2²⁴ * 2²⁴ * 2²⁴ = 2⁷² combinations per image.&lt;/p&gt;
-
-&lt;p&gt;The same logic applies to the second wallpaper image, and they can be set up independently of each other. From one wallpaper image we have 72 bits and 144 bits using system wallpaper and lock screen wallpaper — 144 bits and 2¹⁴⁴ combinations. The more combinations possible, the higher probability of generating a unique value suitable for use as an ID. And hence, it’s likely you can easily be tracked. &lt;/p&gt;
-
-&lt;p&gt;2¹⁴⁴ = 22,300,745,198,530,623,141,535,718,272,648,361,505,980,416&lt;/p&gt;
-
-&lt;p&gt;How large is this number, exactly? For context, the universe is made up of around 10⁸⁰ atoms. And 2¹⁴⁴ is approximately equal to 10⁴³. So the squared value of combinations is larger than the number of atoms in the universe! It’s safe to say that this outnumbers all devices on the Earth, for the foreseeable future. &lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#the-identification-algorithm"&gt;
-  &lt;/a&gt;
-  The identification algorithm
-&lt;/h3&gt;
-
-&lt;p&gt;As you may recall, developers can use byte arrays to restore wallpaper images prior to Android 8.1. After version 8.1, 144 bits can be extracted from wallpaper colors. Both can be used as an ID, but let’s use them instead as inputs for the SHA-256 hash function (for unification).&lt;/p&gt;
-
-&lt;p&gt;We have an ID that contains 256 bits, is unique across all applications, and only changes when the device wallpaper changes. The code for getting the ID is:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;val id = hasher.hash(
-
-   if (Build.VERSION.SDK_INT &amp;lt; Build.VERSION_CODES.O_MR1) {
-
-       extractWallpaperBytes()
-
-   } else extractColorsBytes())
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;The ID remains the same even after reinstalling the application and only changes when the wallpaper changes.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#try-it-yourself"&gt;
-  &lt;/a&gt;
-  Try it yourself
-&lt;/h3&gt;
-
-&lt;p&gt;For demonstration purposes, we’ve created an open source application that calculates the ID and checks its uniqueness. You can download the app on &lt;a href="https://play.google.com/store/apps/details?id=com.fingerprintjs.android.wallpaperid&amp;amp;hl=en_US&amp;amp;gl=US"&gt;Google Play&lt;/a&gt; (for Android 5.0 and above, no permissions are required); the source code is &lt;a href="https://github.com/fingerprintjs/android-wallpaper-id"&gt;available on GitHub&lt;/a&gt;. &lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Note:&lt;/strong&gt; the method does not work on custom launchers that redefine logic of wallpaper management without using &lt;code&gt;WallpaperManager&lt;/code&gt; class.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--g8EKvA1V--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/khnf286weh7wksfrp625.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--g8EKvA1V--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/khnf286weh7wksfrp625.png" alt="Open source wallpaper image application"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#how-to-prevent-wallpaper-tracking-on-your-android-device"&gt;
-  &lt;/a&gt;
-  How to prevent wallpaper tracking on your Android device
-&lt;/h2&gt;
-
-&lt;p&gt;The following measures can help prevent wallpaper tracking on your Android device:&lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;Never use private or personal images for wallpapers, especially on devices running Android 8.1 and earlier. &lt;/li&gt;
-&lt;li&gt;Use a default wallpaper and don’t change it. By using a custom image, you inadvertently add entropy and uniqueness for distinguishing your device from others.&lt;/li&gt;
-&lt;li&gt;Check if your launcher has redefined the logic of the device’s wallpaper management (you can do this with our demo application).&lt;/li&gt;
-&lt;li&gt;Don’t install suspicious applications. &lt;/li&gt;
-&lt;li&gt;Be sure to keep your device operating system continuously updated.&lt;/li&gt;
-&lt;li&gt;Use anti-malware software to ensure your installed applications are behaving as expected.&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;h2&gt;
-  &lt;a href="#conclusion"&gt;
-  &lt;/a&gt;
-  Conclusion
-&lt;/h2&gt;
-
-&lt;p&gt;As you can see, signals generated from wallpaper color extraction can be used to create a single identifier available to all applications, no additional permissions required. That said, extracting colors from device wallpapers is just one way mobile developers can uniquely profile Android devices, and it’s not the most dependable at that.&lt;/p&gt;
-
-&lt;p&gt;For some examples of more stable and reliable methods, please view our  &lt;a href="https://github.com/fingerprintjs/fingerprint-android"&gt;fingerprint-android&lt;/a&gt; library source code. Google has not restricted these for a number of years now, and it is unlikely that it ever will. At the end of the day, doing so would impact Android’s efficacy as an advertising platform — and for the world’s largest tech firm, it’s a constant juggle between balancing these interests with protecting user privacy.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#get-in-touch"&gt;
-  &lt;/a&gt;
-  Get in touch
-&lt;/h2&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Star, follow, or fork our &lt;a href="https://github.com/fingerprintjs/fingerprint-android"&gt;production-grade library&lt;/a&gt; for Android device fingerprinting&lt;/li&gt;
-&lt;li&gt;Email any questions you have to &lt;a href="//mailto:oss@fingerprintJS.com"&gt;oss@fingerprintJS.com&lt;/a&gt;
-&lt;/li&gt;
-&lt;li&gt;Join our team and work on exciting research in device security: &lt;a href="//mailto:work@fingerprintjs.com"&gt;work@fingerprintjs.com&lt;/a&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-
-</description>
-      <category>android</category>
-      <category>security</category>
-      <category>programming</category>
-      <category>tutorial</category>
-    </item>
-    <item>
-      <title>Cool Projects to Help You Learn React JS - Part 1</title>
-      <author>Gerald</author>
-      <pubDate>Tue, 05 Oct 2021 21:18:15 +0000</pubDate>
-      <link>https://dev.to/geraldmuvengei06/cool-projects-to-help-you-learn-react-js-part-1-g19</link>
-      <guid>https://dev.to/geraldmuvengei06/cool-projects-to-help-you-learn-react-js-part-1-g19</guid>
-      <description>&lt;h2&gt;
-  &lt;a href="#introduction"&gt;
-  &lt;/a&gt;
-  Introduction
-&lt;/h2&gt;
-
-&lt;h3&gt;
-  &lt;a href="#what-is-react"&gt;
-  &lt;/a&gt;
-  What is React
-&lt;/h3&gt;
-
-&lt;p&gt;React is a declarative and component-based Javascript Library for building web interfaces. Its developed and maintained by  &lt;a href="https://facebook.com"&gt;Facebook&lt;/a&gt;. Although it's grouped with other "Frameworks" like VueJS and Angular, its termed much as a Library and not a framework. &lt;a href="https://reactjs.org/"&gt;Find out more about React on this link&lt;/a&gt;.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#why-this-article"&gt;
-  &lt;/a&gt;
-  Why this article?
-&lt;/h3&gt;
-
-&lt;p&gt;Personally, when I want to learn a new Framework, I go through the documentation to grasp the basic and core 'Hows and Whys', then I start basic applications to practice the concepts I've learned. This has always worked like magic for me. It goes without saying that learning by doing does a lot when it comes to grasping new concepts. I choose this approach since writing code is like a science, its a creative, intuitive and involving, like Math. Hence, learning by doing does it!&lt;/p&gt;
-
-&lt;p&gt;Let's skip the poetry and head first into Interesting Part of this article.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#interesting-react-projects"&gt;
-  &lt;/a&gt;
-  Interesting React Projects
-&lt;/h2&gt;
-
-&lt;h3&gt;
-  &lt;a href="#1-reactclockfaces-aka-reactcf-a-simple-reactjs-clock-with-many-faces"&gt;
-  &lt;/a&gt;
-  1. ReactClockFaces A.K.A. ReactCF - A Simple React.Js Clock With Many Faces
-&lt;/h3&gt;
-
-&lt;p&gt;For this projects you'll learn these skills. The purpose of the project can be to display a Digital Clock that updates itself after every second, just like an actual digital watch. You can have different styles, or rather faces for displaying your digital clock. &lt;code&gt;Hint: Use Javascript's builtin function: setTimeout()&lt;/code&gt;&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;React Components&lt;/li&gt;
-&lt;li&gt;Reusability&lt;/li&gt;
-&lt;li&gt;React DOM and Reactivity&lt;/li&gt;
-&lt;li&gt;React Hooks: useEffect, useState&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h3&gt;
-  &lt;a href="#2-stockfoto"&gt;
-  &lt;/a&gt;
-  2. Stockfoto
-&lt;/h3&gt;
-
-&lt;p&gt;However you may call it, the main aim of this project is to consume Unsplash Photos API, which is open source and have fun while doing it. &lt;em&gt;Note: Read through &lt;a href="https://unsplash.com/documentation"&gt;Unsplash API Guildlines&lt;/a&gt; to make sure you're not breaking any rules.&lt;/em&gt; This will be a very interesting project!&lt;br&gt;
-The api and interesting endpoints&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Random Picture&lt;/li&gt;
-&lt;li&gt;Latest pictures&lt;/li&gt;
-&lt;li&gt;Search Pictures&lt;/li&gt;
-&lt;li&gt;Get One Picture and download picture
-#### What you will learn&lt;/li&gt;
-&lt;li&gt;React Components&lt;/li&gt;
-&lt;li&gt;Reusability&lt;/li&gt;
-&lt;li&gt;React DOM and Reactivity&lt;/li&gt;
-&lt;li&gt;React Hooks: useEffect, useState&lt;/li&gt;
-&lt;li&gt;React fetchAPI&lt;/li&gt;
-&lt;li&gt;ES6&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h4&gt;
-  &lt;a href="#cool-features-you-could-implement"&gt;
-  &lt;/a&gt;
-  Cool Features you could implement.
-&lt;/h4&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Lazy loading Images&lt;/li&gt;
-&lt;li&gt;Lazy Loading Pagination - Load more images when a user scrolls to the bottom&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;I'll be happy to see what you create!&lt;/p&gt;
-
-&lt;p&gt;As you wait for Part 2.&lt;br&gt;
-Regards&lt;/p&gt;
-
-</description>
-      <category>react</category>
-      <category>javascript</category>
-      <category>unsplash</category>
     </item>
   </channel>
 </rss>
