@@ -7,6 +7,162 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>How Partytown's Sync Communication Works</title>
+      <author>Adam Bradley</author>
+      <pubDate>Mon, 11 Oct 2021 17:26:35 +0000</pubDate>
+      <link>https://dev.to/adamdbradley/how-partytown-s-sync-communication-works-4244</link>
+      <guid>https://dev.to/adamdbradley/how-partytown-s-sync-communication-works-4244</guid>
+      <description>&lt;p&gt;Recently we announced the alpha version of Partytown, which is a library that helps relocate third-party scripts into a web worker so that the main thread can be dedicated to just running &lt;em&gt;your&lt;/em&gt; code. For more information on why a website would benefit from this I’d encourage you to also read: &lt;a href="https://dev.to/adamdbradley/introducing-partytown-run-third-party-scripts-from-a-web-worker-2cnp"&gt;Introducing Partytown 🎉: Run Third-Party Scripts From a Web Worker&lt;/a&gt;. This post is more for the curious and talking through “how” Partytown works.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#asynchronous-postmessage"&gt;
+  &lt;/a&gt;
+  Asynchronous postMessage()
+&lt;/h2&gt;
+
+&lt;p&gt;Moving long-running and resource intensive tasks into a &lt;a href="https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API"&gt;web worker&lt;/a&gt; has been encouraged for many years now. However, the significant constraint is that the communication between the &lt;a href="https://developer.mozilla.org/en-US/docs/Glossary/Main_thread"&gt;main thread&lt;/a&gt;, and web worker, &lt;em&gt;must&lt;/em&gt; be asynchronous. Meaning a message sent by one thread does not wait on the other thread to receive it, nor wait on it to return a value. &lt;/p&gt;
+
+&lt;p&gt;At the core, &lt;a href="https://developer.mozilla.org/en-US/docs/Web/API/Worker/postMessage"&gt;postMessage()&lt;/a&gt; is basically a fire-and-forget method. This is perfectly fine, and a communication layer can be built around &lt;code&gt;postMessage()&lt;/code&gt; so your code can instead use promises, async/await or even callbacks (all of which are asynchronous). &lt;/p&gt;
+
+&lt;p&gt;An awesome project that can help you easily use Web Workers is &lt;a href="https://github.com/GoogleChromeLabs/comlink"&gt;Comlink&lt;/a&gt;, which &lt;em&gt;“...removes the mental barrier of thinking about postMessage and hides the fact that you are working with workers.”&lt;/em&gt; Comlink is great, but at the time of writing this, you still hit the barrier that the calls between the main thread and web worker must be async.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#why-thirdparty-scripts-cant-use-postmessage"&gt;
+  &lt;/a&gt;
+  Why Third-Party Scripts Can’t Use postMessage()
+&lt;/h2&gt;
+
+&lt;p&gt;As I laid out in the &lt;a href="https://dev.to/adamdbradley/introducing-partytown-run-third-party-scripts-from-a-web-worker-2cnp#running-thirdparty-scripts-within-a-web-worker"&gt;first post&lt;/a&gt;, in reality you can’t just refactor third-party scripts. They’re hosted from another domain, controlled by another service, and built to handle countless scenarios so they can be executed by billions of different devices worldwide.&lt;/p&gt;
+
+&lt;p&gt;However, many scripts like Google Analytics, are just collecting information and posting that data to their servers using  &lt;a href="https://developer.mozilla.org/en-US/docs/Web/API/Navigator/sendBeacon"&gt;navigator.sendBeacon()&lt;/a&gt;. This is the best case scenario because Google Analytics is really just a background task. It can happily run on its own schedule and lazily collect and post data in another thread. &lt;/p&gt;
+
+&lt;p&gt;The problem, however, is there are still calls to blocking APIs that are not available in the web worker. For example &lt;code&gt;document.title&lt;/code&gt; and &lt;code&gt;window.screen.width&lt;/code&gt; are commonly used in scripts, but reading that information is blocking. So while Google Analytics itself is a great candidate to run in the background on another thread, it still requires synchronous communication in order to read values from &lt;code&gt;document&lt;/code&gt; and &lt;code&gt;window&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;Since the third-party scripts &lt;em&gt;must&lt;/em&gt; stay as-is, and because web workers &lt;em&gt;must&lt;/em&gt; have an asynchronous communication, we’ve been in this stand-still where the bulk of our performance issues cannot be offloaded into another thread.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#with-this-one-weird-synchronous-trick"&gt;
+  &lt;/a&gt;
+  With this One Weird Synchronous Trick
+&lt;/h2&gt;
+
+&lt;p&gt;This is the fun stuff! 🧑‍🔬 Enter the obscure API: &lt;a href="https://developer.mozilla.org/en-US/docs/Web/API/XMLHttpRequest/Synchronous_and_Asynchronous_Requests#synchronous_request"&gt;Synchronous XMLHttpRequest&lt;/a&gt;. In today’s web development it’s a lesser known API for good reason. Basically in the olden days, when we were rocking Adobe Flash, Java applets, and Dreamweaver’ing DHTML, this was pretty common:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;var&lt;/span&gt; &lt;span class="nx"&gt;request&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;XMLHttpRequest&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+&lt;span class="nx"&gt;request&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;open&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;GET&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;/data.xml&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="kc"&gt;false&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;  &lt;span class="c1"&gt;// `false` makes the request synchronous&lt;/span&gt;
+&lt;span class="nx"&gt;request&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;send&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kc"&gt;null&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The problem was that in the main thread, this blocking call would lock up the webpage until the response came back. According to &lt;a href="https://developer.mozilla.org/en-US/docs/Web/API/XMLHttpRequest/Synchronous_and_Asynchronous_Requests#synchronous_request"&gt;MDN&lt;/a&gt;:&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;Synchronous XHR is now in deprecation state. The recommendation is that developers move away from the synchronous API and instead use asynchronous requests.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;And in today’s web dev landscape, it’s best to instead use the more modern &lt;a href="https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API"&gt;fetch()&lt;/a&gt; API. &lt;/p&gt;
+
+&lt;p&gt;However, the &lt;em&gt;web worker’s&lt;/em&gt; ability to execute synchronously is at the core of many tools. Mainly &lt;a href="https://developer.mozilla.org/en-US/docs/Web/API/WorkerGlobalScope/importScripts"&gt;importScripts()&lt;/a&gt;, but Synchronous XHR falls in this category too. These synchronous APIs have &lt;em&gt;not&lt;/em&gt; been marked as deprecated from within a &lt;em&gt;web worker&lt;/em&gt;. A quick &lt;a href="https://github.com/search?q=importscripts&amp;amp;type=code"&gt;Github search for importScripts()&lt;/a&gt; shows just how widely used they are. But again, it’s &lt;em&gt;only&lt;/em&gt; available in a web worker!&lt;/p&gt;
+
+&lt;p&gt;So, as it turns out...I guess we &lt;em&gt;can&lt;/em&gt; make the web worker blocking...🧐&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#intercepting-synchronous-requests"&gt;
+  &lt;/a&gt;
+  Intercepting Synchronous Requests
+&lt;/h2&gt;
+
+&lt;p&gt;When code is executed from within a worker, and only a worker, we can make synchronous HTTP requests, which effectively block the web worker thread’s execution until the HTTP response comes back. With that power (and with our mad scientist wig on), we have the ability to execute the web worker code as blocking, and then use the HTTP request to asynchronously call &lt;code&gt;postMessage()&lt;/code&gt;. Remember, an HTTP request and response is asynchronous. So while the web worker thread may “think” it’s sync, we can intercept the actual HTTP request and have an asynchronous response.&lt;/p&gt;
+
+&lt;p&gt;This is where the other weird trick comes in. &lt;em&gt;Doctors hate it!&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;Service workers are able to intercept requests with &lt;a href="https://developer.mozilla.org/en-US/docs/Web/API/ServiceWorkerGlobalScope/onfetch"&gt;onfetch&lt;/a&gt;. This means that the request the web worker makes can also be intercepted and handled by our own code. The requests are not external and do not hit the actual network, but instead are handled locally within the service worker. From within &lt;code&gt;onfetch&lt;/code&gt;, we can then use &lt;code&gt;postMessage()&lt;/code&gt; to do the real async communication. &lt;/p&gt;
+
+&lt;p&gt;A service worker still doesn’t have direct access to the main thread yet. But because we’re now communicating asynchronously, from within the service worker we can then use its &lt;code&gt;postMessage()&lt;/code&gt; to talk to the the main thread, and have the main thread send messages back to the service worker. Then the service worker completes the HTTP response which it already intercepted.&lt;/p&gt;
+
+&lt;p&gt;So we still have the same asynchronous constraint, but with the combination of synchronous XHR, and intercepting requests, we can effectively convert an async call into a blocking one. Next, we make it a bit easier to use by wrapping up all the main thread’s access with &lt;a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Proxy"&gt;Javascript Proxies&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;Additionally, Partytown should still work for legacy browsers. Part of its initialization is that if the browser doesn’t support service workers, then it basically just runs the third-party scripts the traditional way (what we’re all doing today).&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#what-about-atomics"&gt;
+  &lt;/a&gt;
+  What About Atomics?
+&lt;/h2&gt;
+
+&lt;p&gt;Awesome, glad you asked. Personally, I’m hopeful to see &lt;a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Atomics"&gt;Atomics&lt;/a&gt; as the solution in the long run. Because the awesome OSS community has stepped up with some great ideas, we’ve already broken ground on having two builds available: atomics and service workers. When the library runs, it’ll decide which to use depending on the browser’s support.&lt;/p&gt;
+
+&lt;p&gt;Currently, the plan is that the service worker trick will ultimately become the fallback, but there’s much more Atomics research to do. Good news for the future of Atomics is that Safari Tech Preview just enabled SharedArrayBuffer!&lt;/p&gt;
+
+
+&lt;blockquote class="ltag__twitter-tweet"&gt;
+
+  &lt;div class="ltag__twitter-tweet__main"&gt;
+    &lt;div class="ltag__twitter-tweet__header"&gt;
+      &lt;img class="ltag__twitter-tweet__profile-image" src="https://res.cloudinary.com/practicaldev/image/fetch/s--55_tdoqA--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://pbs.twimg.com/profile_images/1214648242404761600/OoYVL2Tp_normal.jpg" alt="James Long profile image"&gt;
+      &lt;div class="ltag__twitter-tweet__full-name"&gt;
+        James Long
+      &lt;/div&gt;
+      &lt;div class="ltag__twitter-tweet__username"&gt;
+        @jlongster
+      &lt;/div&gt;
+      &lt;div class="ltag__twitter-tweet__twitter-logo"&gt;
+        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ir1kO05j--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/twitter-f95605061196010f91e64806688390eb1a4dbc9e913682e043eb8b1e06ca484f.svg" alt="twitter logo"&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+    &lt;div class="ltag__twitter-tweet__body"&gt;
+      Safari Tech Preview enables SharedArrayBuffer without any flags!!! 🎉😭🎉😍&lt;br&gt;&lt;br&gt;&lt;a href="https://t.co/vXrrJmxl9Z"&gt;webkit.org/blog/11975/rel…&lt;/a&gt;&lt;br&gt;&lt;br&gt;(cc &lt;a href="https://twitter.com/adamdbradley"&gt;@adamdbradley&lt;/a&gt;)
+    &lt;/div&gt;
+    &lt;div class="ltag__twitter-tweet__date"&gt;
+      18:53 PM - 30 Sep 2021
+    &lt;/div&gt;
+
+
+    &lt;div class="ltag__twitter-tweet__actions"&gt;
+      &lt;a href="https://twitter.com/intent/tweet?in_reply_to=1443650219770617857" class="ltag__twitter-tweet__actions__button"&gt;
+        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--fFnoeFxk--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/twitter-reply-action-238fe0a37991706a6880ed13941c3efd6b371e4aefe288fe8e0db85250708bc4.svg" alt="Twitter reply action"&gt;
+      &lt;/a&gt;
+      &lt;a href="https://twitter.com/intent/retweet?tweet_id=1443650219770617857" class="ltag__twitter-tweet__actions__button"&gt;
+        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--k6dcrOn8--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/twitter-retweet-action-632c83532a4e7de573c5c08dbb090ee18b348b13e2793175fea914827bc42046.svg" alt="Twitter retweet action"&gt;
+      &lt;/a&gt;
+      &lt;a href="https://twitter.com/intent/like?tweet_id=1443650219770617857" class="ltag__twitter-tweet__actions__button"&gt;
+        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--SRQc9lOp--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/twitter-like-action-1ea89f4b87c7d37465b0eb78d51fcb7fe6c03a089805d7ea014ba71365be5171.svg" alt="Twitter like action"&gt;
+      &lt;/a&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+&lt;/blockquote&gt;
+ 
+
+&lt;h2&gt;
+  &lt;a href="#whats-next"&gt;
+  &lt;/a&gt;
+  What’s Next
+&lt;/h2&gt;
+
+&lt;p&gt;Partytown is still in alpha and undergoing many changes on each commit 😬. But we're already actively running it on a few pages within &lt;a href="https://www.builder.io/"&gt;Builder.io&lt;/a&gt; so we can collect more production data. &lt;/p&gt;
+
+&lt;p&gt;Additionally, we’re working with a few ecommerce sites who have significant third-party script usage, and see if we can help improve their performance and usability. We’d love to have you hop in our &lt;a href="https://discord.gg/hbuEtxdEZ3"&gt;Discord channel&lt;/a&gt; and chat ideas, or even help test and file issues in our &lt;a href="https://github.com/Builderio/partytown"&gt;Github repo&lt;/a&gt;!&lt;/p&gt;
+
+&lt;p&gt;So please stay tuned as we continue this experiment. In follow up posts we’ll continue to dig deeper into other parts of the library, and as we gather more data we’re hoping to present some good hard numbers showing Partytown’s benefits.&lt;/p&gt;
+
+&lt;p&gt;Party on, Garth!&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="https://github.com/Builderio/partytown"&gt;Partytown Repo&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://discord.gg/hbuEtxdEZ3"&gt;Discord channel&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://dev.to/adamdbradley/introducing-partytown-run-third-party-scripts-from-a-web-worker-2cnp"&gt;Introducing Partytown 🎉: Run Third-Party Scripts From a Web Worker&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://dev.to/mhevery/series/13467"&gt;Qwik&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://www.builder.io/"&gt;Builder.io&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+</description>
+    </item>
+    <item>
       <title>Free Privacy Illustration Vector Art</title>
       <author>Hussain Ahmed</author>
       <pubDate>Mon, 11 Oct 2021 16:33:53 +0000</pubDate>
@@ -39,6 +195,279 @@
       <category>bestfreeillustration</category>
       <category>freeprivacyvector</category>
       <category>freevectorillustration</category>
+    </item>
+    <item>
+      <title>Reduce in 5 Minutes</title>
+      <author>Kirk Shillingford</author>
+      <pubDate>Mon, 11 Oct 2021 16:30:52 +0000</pubDate>
+      <link>https://dev.to/kirkcodes/reduce-in-5-minutes-462i</link>
+      <guid>https://dev.to/kirkcodes/reduce-in-5-minutes-462i</guid>
+      <description>&lt;p&gt;Here's a quick intro to the &lt;code&gt;reduce()&lt;/code&gt; method in Javascript/Typescript arrays, which is frequently perplexing when encountered in working code.&lt;/p&gt;
+
+&lt;p&gt;The code here is written in Typescript but I've tried to keep it friendly for JS readers, and I'll post a link to the equivalent JS at the end. &lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#whats-the-point-of-reduce"&gt;
+  &lt;/a&gt;
+  What's the point of reduce?
+&lt;/h2&gt;
+
+&lt;p&gt;&lt;code&gt;Reduce&lt;/code&gt; allows us to take a container of data (like an array) and fold it into another data structure.&lt;/p&gt;
+
+&lt;p&gt;The &lt;code&gt;reduce()&lt;/code&gt; method involves three parts:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;A &lt;strong&gt;container of values&lt;/strong&gt;, like an array, with which we need to update another structure (in sequence)&lt;/li&gt;
+&lt;li&gt;A &lt;strong&gt;function&lt;/strong&gt; that lets us update a value (typically called the &lt;em&gt;accumulator&lt;/em&gt;) based on an element from our array
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;updater&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;accumulator&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="nx"&gt;SomeType&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;nextValueFromArray&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt; &lt;span class="nx"&gt;SomeType&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="p"&gt;...&lt;/span&gt; &lt;span class="c1"&gt;// whatever operations we want&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;updatedAccumulator&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Frequently this updater is written inline, directly inside the reduce function.&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;The last thing the reducer needs is an &lt;strong&gt;initial value&lt;/strong&gt; for our accumulator, for the first iteration of the function.
+&lt;code&gt;Reduce&lt;/code&gt; is smart enough to realize that if we don't provide an initial value, it should use the first element of the array as the initial value.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;&lt;strong&gt;NOTE&lt;/strong&gt;: Omitting the initial value only works if &lt;em&gt;the accumulator is the same type as elements&lt;/em&gt;. An example to show this will be provided below.&lt;/p&gt;
+
+&lt;p&gt;So, to recap, any reduce operation can be thought of as&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="nx"&gt;someArrayOfValues&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;reduce&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;updater&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;initialValueOfTheAccumulator&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#examples"&gt;
+  &lt;/a&gt;
+  Examples
+&lt;/h2&gt;
+
+&lt;p&gt;Let's look at some examples!&lt;/p&gt;
+
+&lt;p&gt;First, let's see how we could do string concatenation using reduce. This involves 'folding' an array of strings into a single string.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// our array of characters to fold&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;boSpelling&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;B&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;o&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt; &lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;B&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;u&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;r&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;n&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;h&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;a&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;m&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+
+
+&lt;span class="c1"&gt;// our initial value for us to reduce into is an empty string &lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;initialName&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;''&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Here you see, we write a function that understands how to add a letter to a value and return a new value. &lt;code&gt;Reduce&lt;/code&gt; takes that function, and our new value, and will pass each letter of our array to that function, bringing the result forward to serve as the accumulated value for the next iteration.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;bosName&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;boSpelling&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;reduce&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;nameSoFar&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;letter&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;updatedName&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;nameSoFar&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="nx"&gt;letter&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;updatedName&lt;/span&gt;
+&lt;span class="p"&gt;},&lt;/span&gt; &lt;span class="nx"&gt;initialName&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We could also inline the initial value.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;bosName&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;boSpelling&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;reduce&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;nameSoFar&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;letter&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;updatedName&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;nameSoFar&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="nx"&gt;letter&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;updatedName&lt;/span&gt;
+&lt;span class="p"&gt;},&lt;/span&gt; &lt;span class="dl"&gt;''&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+&lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;bosName&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;// "Bo Burnham" &lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Just to provide context, here is the &lt;code&gt;for&lt;/code&gt; loop version. This does the same as the code above, but here we update a mutable variable and use a &lt;code&gt;for&lt;/code&gt; block instead of a function expression.&lt;/p&gt;
+
+&lt;p&gt;Some people find this preferable but it does require object mutation, unlike &lt;code&gt;reduce&lt;/code&gt;.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;concatenate&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;lst&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="nx"&gt;string&lt;/span&gt;&lt;span class="p"&gt;[])&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;name&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;""&lt;/span&gt;
+    &lt;span class="k"&gt;for&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;letter&lt;/span&gt; &lt;span class="k"&gt;of&lt;/span&gt; &lt;span class="nx"&gt;lst&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="nx"&gt;name&lt;/span&gt; &lt;span class="o"&gt;+=&lt;/span&gt; &lt;span class="nx"&gt;letter&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;name&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;bosName&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;concatenate&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;boSpelling&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+&lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;bosName&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="err"&gt;\\&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Bo Burnham&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Now, let's make a custom &lt;strong&gt;sum&lt;/strong&gt; function using &lt;code&gt;reduce&lt;/code&gt;. Combining with es6 syntax allows for some very concise expressions.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;numbers&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt; &lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;3&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;4&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;5&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;6&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;7&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;8&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;9&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;10&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;sum&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;lst&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="nx"&gt;number&lt;/span&gt;&lt;span class="p"&gt;[])&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; 
+    &lt;span class="nx"&gt;lst&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;reduce&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;count&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;nextNum&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;count&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="nx"&gt;nextNum&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Note that since the accumulator &lt;code&gt;count&lt;/code&gt;, and the array elements are both numbers, we can omit the initial value and just let &lt;code&gt;reduce&lt;/code&gt; use the first value as the initial.&lt;/p&gt;
+
+&lt;p&gt;In situations where they're not the same data type, doing this would cause an error.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;sum&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;lst&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="nx"&gt;number&lt;/span&gt;&lt;span class="p"&gt;[])&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; 
+    &lt;span class="nx"&gt;lst&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;reduce&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;count&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;nextNum&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;count&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="nx"&gt;nextNum&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+&lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;sum&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;numbers&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt; &lt;span class="c1"&gt;// "54"&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#advanced-examples"&gt;
+  &lt;/a&gt;
+  Advanced Examples
+&lt;/h2&gt;
+
+&lt;p&gt;We've hit the end of the main things I wanted to demonstrate with reduce (I told you this would be quick). But we can have a bit more fun and show how powerful and flexible it really is. These next examples are beyond the standard use cases of reduce and if you're still new to the concept, feel free to skip them. &lt;/p&gt;
+
+&lt;p&gt;The &lt;code&gt;reduce()&lt;/code&gt; method can fold a sequence of values into &lt;strong&gt;any&lt;/strong&gt; data structure you'd like, including another sequences.&lt;/p&gt;
+
+&lt;p&gt;This makes it more powerful than its sibling methods, &lt;code&gt;map()&lt;/code&gt; and &lt;code&gt;filter()&lt;/code&gt;, which can only transform an array into another array. But that doesn't mean it can't do what they do as well.&lt;/p&gt;
+
+&lt;p&gt;Here we make &lt;code&gt;map()&lt;/code&gt; from reduce. For each item in the original array, we apply the function to it and add to an accumulator, a new array.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;map&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;b&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;func&lt;/span&gt;&lt;span class="p"&gt;:(&lt;/span&gt;&lt;span class="nx"&gt;arg&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;b&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;lst&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="p"&gt;[])&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; 
+    &lt;span class="nx"&gt;lst&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;reduce&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;acc&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="nx"&gt;b&lt;/span&gt;&lt;span class="p"&gt;[],&lt;/span&gt; &lt;span class="nx"&gt;item&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;[...&lt;/span&gt;&lt;span class="nx"&gt;acc&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;func&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;item&lt;/span&gt;&lt;span class="p"&gt;)],&lt;/span&gt; &lt;span class="p"&gt;[])&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;and we can use it similarly to the &lt;code&gt;map()&lt;/code&gt; method we know&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;numbers&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;3&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;4&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;5&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;6&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;7&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;8&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;9&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;10&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;multiplyByThree&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;x&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="nx"&gt;number&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;x&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt; &lt;span class="mi"&gt;3&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;mapResults&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;map&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;multiplyByThree&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;numbers&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+&lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;mapResults&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="err"&gt;\\&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;3,6,9,12,15,18,21,24,27,30&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
+
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The &lt;code&gt;filter&lt;/code&gt; function is similar. Here, the function we pass in is a &lt;strong&gt;condition&lt;/strong&gt;, which is a function that accepts a variable of the same type as the ones in the array and returns a boolean).&lt;/p&gt;
+
+&lt;p&gt;If the array item satisfies the condition (returns true), we add it to the new array, otherwise we pass along the new array as is.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;filter&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;condition&lt;/span&gt;&lt;span class="p"&gt;:(&lt;/span&gt;&lt;span class="nx"&gt;arg&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;boolean&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;lst&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="p"&gt;[])&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; 
+    &lt;span class="nx"&gt;lst&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;reduce&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;newLst&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="p"&gt;[],&lt;/span&gt; &lt;span class="nx"&gt;item&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt;
+        &lt;span class="nx"&gt;condition&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;item&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="p"&gt;[...&lt;/span&gt;&lt;span class="nx"&gt;newLst&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;item&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt; &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;newLst&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;[])&lt;/span&gt;
+
+&lt;span class="c1"&gt;// our condition&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;isEven&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;x&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="nx"&gt;number&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;x&lt;/span&gt; &lt;span class="o"&gt;%&lt;/span&gt; &lt;span class="mi"&gt;2&lt;/span&gt; &lt;span class="o"&gt;===&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt; &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="kc"&gt;true&lt;/span&gt; &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kc"&gt;false&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;filterResults&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;filter&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;isEven&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;numbers&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+&lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;filterResults&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="err"&gt;\\&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;2,4,6,8,10&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#a-brief-aside-on-types"&gt;
+  &lt;/a&gt;
+  A &lt;em&gt;brief&lt;/em&gt; aside on types
+&lt;/h3&gt;
+
+&lt;p&gt;Another way we can compare the three methods in in terms of the &lt;code&gt;types&lt;/code&gt; they accept, and return. In pseudocode, the types of the three functions can be described as&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;map : (a -&amp;gt; b), Array a -&amp;gt; Array b&lt;/code&gt;&lt;br&gt;
+Given a function that takes an &lt;code&gt;a&lt;/code&gt; and returns a &lt;code&gt;b&lt;/code&gt;, and an array of &lt;code&gt;a&lt;/code&gt;, &lt;code&gt;map&lt;/code&gt; will return an array of &lt;code&gt;b&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;filter : (a -&amp;gt; Bool) -&amp;gt; Array a -&amp;gt; Array a&lt;/code&gt;&lt;br&gt;
+Given a function that takes an &lt;code&gt;a&lt;/code&gt; and returns a &lt;code&gt;boolean&lt;/code&gt;, and an array of &lt;code&gt;a&lt;/code&gt;, filter returns an array of &lt;code&gt;a&lt;/code&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;reduce : (b -&amp;gt; a -&amp;gt; b) -&amp;gt; b -&amp;gt; Array a -&amp;gt; b&lt;/code&gt;&lt;br&gt;
+Given a function that takes a &lt;code&gt;b&lt;/code&gt; and an &lt;code&gt;a&lt;/code&gt; and returns a &lt;code&gt;b&lt;/code&gt;, an initial accumulator value &lt;code&gt;b&lt;/code&gt;, and an array of &lt;code&gt;a&lt;/code&gt;, &lt;code&gt;reduce&lt;/code&gt; returns a &lt;code&gt;b&lt;/code&gt;.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#final-thoughts"&gt;
+  &lt;/a&gt;
+  Final Thoughts
+&lt;/h2&gt;
+
+&lt;p&gt;I hope this provided some clarity and demystified one of the more powerful tools in the JS toolbelt.&lt;/p&gt;
+
+&lt;p&gt;Let me know if this helped, or what other methods you want five minutes on!&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#resources"&gt;
+  &lt;/a&gt;
+  Resources
+&lt;/h2&gt;
+
+&lt;ul&gt;
+&lt;li&gt;See &lt;a href="https://www.typescriptlang.org/play?#code/PTAEEFQZwWwQwDYNAFzlFBTUB7AZqAE6YAmArgMaYBQ1IoA6gBZwqgCWUqT2ADjuwB2bfEVKUadMACVxVUIgQ4A7lzJcUOVHADW2KDhjYKOYXCGZCuAiVZxQACgTs9CwQsKE4ATwCUbklApUAAxHARAlB4YDmEtAyNcKMtQWzRoFEJKFDJiWnpQWXJ5IQA3cNLMDSZiPjhCFChguH8E41M0CytRUsQyKoAaUGdXOHd6r28h5XYo0GUmdgomeexBTFJULTJeNP1DbBxkqwwsihziRyFoTABHfsEqXylggCN-SDwyR5R2U25WMNMI1QOpQbtWPtEr0EP1HBRFJtkgoKBQyDAyAhWDhCP5XuhNv8xqBMAhMEZhKA8IRDLhcsNOGwXvQvj8-u4dntCA44Kj0ZjsYQAFwAZQOABVvLxMEN1gAPFAANT6mBCNJgABlGb4haAxUZJdLQABvYKgc2gAB01rNFuIFw5EKwJHAfIxWM0hGCAF9gsFqXcHigEN5uJxwVyOFxlIRZlh3EJnOtYtxsMRithWed2al2MRziHmWAKP5kViMGHBABzVNiDNWdakLjh4lCWbsRCgGFwvA4ulWXlo92Coa9qzIvB5iuzSysHOiZL+77Z0yW4IACRUmEqhCG6YkUeg8AaJMEODIVZWmjEiE42CigPYBGU2BIHVAvBppXYJGwrcE7adt2MocGwUBMOeESglA948FSU5sKS5KYJSwQLnBEw+Ao1TYG2vxASqa70AAcgA8uKACiAJsFE4amCG8w4jozYEMig78h6fbhsiUBwIkKBSn+XBIRSjSWhA7iYHKfG8GSWzQBByhhtG7BIKArzYMEn44N+v6BBpSjKGu+RgGKQzXvmcC8EMYyhvu8g4NKXi-P8CLuBp3DnpebDoEEwRtOAng+KReDKrCVSWvZmAOJykK7rEgEIGF-QheKPCukOAqes8JlAiCSg4DoChgQcJLSTAslVLlk6EBgQxkiCMHYIpqygCYmKBG+GSxtWbWmAi8Zzv86hCDWUVEWAaXhmUFRVKAADkvYRKN81uB4kzWN1o3NnECjQKNcmnKNxn0OeA5BaGojLPUvJYLV8lLSQ1AmIIFavDgIrSkgo2gAAvKAADa80AELzUM804GDC0LeDoPg2QUPzYQiOCIjTCI3AiMwPNAC6uVnQl+HIMBVJ9mCFlyLhu0tpJFUCVtvXPaY04AUTxF8dg-3zfNuXrpY2DeOeNwgS+8yxlge1Zi57gPmw3y-rVaCCCQXAtdecAkIE9gNXd8n2CTYyBPauTjKA6xKcBE11geaB6NUgJS+yNnK-2ZuYBbKrO4EMxqbw6DCbyKw6ykogE5hobXrLVLLtLQxvD1VY-cixBQJibBjso9SRPEliVNhtaCBz0BaHg9Sk+OcHymwM7OeyxkvW9OBQOziT-e9n2kkmVaRZTDgOIXRhiiE9T1cCd3+L9AB8JrUBafWvXLTqkC3nNmxzQ9lwA1Hld2z3awImxGkIkCv1DekMeEdggK85fQovtVBiAGLESawVTiVdiqtAN2w73NxzAAmP66kPpfS7j3DMfcB6YA3vFYOuI-rT1NHPH+R9nQr2AdA2BoBt7wL3uaY2hBHR7BPhzM+4N5o5QbuETAlolBVgcAAAyOr1F6A0UJDQ5FAH6UVdQAB1BAACIhgABJjR-xXgA70jDb5gAAFLqBolobSul2jCCkigIYPBLjcTgmOYYOBHJdksNw1coAppcDfHNHiRdfLIhML+BQ7086vDICgYI2jsCi1ihLewGI0CvDkr0WMcBAl-hduoP85d1JKAoEVIQGBMAa02vYR2-wpKfiqKYwQVt9R8EwI5OSk4Xa0S4JkvAs4wnqTcaBVIOA5rEHuHmQ4rwABWmBzigH8ZwoY3wRhpkpt-ZmbA2GQkLhLf6TgMBChYVWAGOMJ5IPwXlNerdQCCMEcs-RThgQ7xDgQBAGB-DILnhaaBOD-p4Lnr6OehD3DQLPkMheID-5GAAMzANGYNLADh25gNGlQ5mNC6E4AYcwzIP0vkcOltBH6+iCq8CFAIsREiOZvOkbIs2Kg8pcHgKMNqijaSpxiGkrhPDBn0BGr1KKH5YTCSgAANmgN4MwcoFBIBUFwfRbRjGEFDGwu8ZVMlQGyU0JmzzBDog0vdf6ANQAAKGG8oYAAWIYABWIYDKhgAHYhgAA4hgAE4hgAEYAAMeNxUVmJcAqZmg8DESlSYoUkqYDSvmYsoIc9Dn2sdW6kxECJB9zRJ4FCKAADC55hCyg0X6z1IbiDCEjd8Ng28q5+qGGazFZ4aIsDAkIeQbE3RZT7A4BNYbk3CF8F7Ws4cSRklElweo2B3pzFddKqAAxgj32JIYWYtZL4EXCgEUArTFErJpZE2sNUKwGxwoTK+VsACS7huE5E4dGTxqZvBIzWEcWsvFEhpHsAJaUQw3xJ0WNGSCgQERTuJJYGkhB67DOgOiIBkyfX4D9R2l1TrCAesQV6i0X6HX-qgIGqgwbciJojVGzRbsFRxqA+WpN8GcGIZQHGp5BgyQgrBTa0lsLqWUyRYIMRxKAH93A74DFuVwAABFFTgGIuGiiDHdQ9skpUdweK35dKsiOycCBdakq5eqa2VBxLBAcCEDYyAAz3i0OwKsZ5LilI4AQQWZA6mUhYHnewuGfygCrF4KAvBNpsWcbQ0AABNIWPtkDBHWDuUA+mlN1OLkYWivV+nKVAEu6QGpxLwAs4beCImUiIGIBrUMUltR+XoFu0WfGBMWepLSca0SknLFAuSFMbELrTD-LwWSEc9ExxzNeft4Xmiaz1uMYtnF4r2HNutLC1AiOhYADxwCGK8SeDgvgUGEOycUOBwClZDLqPufsvAwCFC0ID7whgBQuotj1upXjzJnrcg+RCvOYECpMSD0Uy0wbDcRd2x2fBCm2zjC+WAYArpu94RbnqTmnLEA6QG1pLSoaw9dor0cRvS3G5NsrDgZzPcEK93weNrlDA9Y84IaVMyqVE5V-44ZuEwFUvUcS+icsrGhwVjCwOny1N4r8KAk5rFwReiQdspgu13z-PV-tkdK7u3a1MJI2iZgwVan7EV7LTA1mRG1utvlOBriI8Ju6vXBuM+Z4Icb4aeBxKFA4ObfF3vLcMWSMYq2DivY2ws3UcAdufe+4fNbJ2ooOGWXPc7obhAhAx-zF062rcPbyzDs3S2p7Aa+y7lXYOcAa46ToKHT2XsXX8M70PAB+X71oAce8i+mV7j3yTx8mDjEPofzS6gz577PCfllI4WY8+gZ4lINQ0FUXN5IcNsHdL8MrwNvDimUFoSZco-3+oQcHtlAAqUAby29RlIvVgfQ-pWerZQAUnlX9X6-0zWgFT5kOEupS6HMkKg0LshU4ia4P9ULDgO-sC7z3vvsoaPT4V5YU-acL8RbulDqAs+SCP+H1AICq9MCvQkwqFsRmNKRsisaCflUO-nRtQnhqAYwi-lYFSpARmGRmIqgW-ufnRhuI5JgF8EgOVuGDwAgLwFwNpmgcrCYkrEztWMZOaEAA"&gt;here&lt;/a&gt; for the full code in a sandboxed environment, in both TS and JS versions.&lt;/li&gt;
+&lt;li&gt;See &lt;a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/Reduce"&gt;here&lt;/a&gt; for some more official docs on the method, it's overloads, etc.&lt;/li&gt;
+&lt;li&gt;Note there's a small error in the live example where the &lt;code&gt;isOdd&lt;/code&gt; function actually checks for evenness, and I am being too lazy to fix it and get a new URL.&lt;/li&gt;
+&lt;/ul&gt;
+
+</description>
+      <category>typescript</category>
+      <category>javascript</category>
+      <category>functional</category>
+      <category>beginners</category>
     </item>
     <item>
       <title>Las [5 eses] japonesas de un programador 🇯🇵👩🏻‍💻🧑🏻‍💻</title>
@@ -1090,7 +1519,7 @@ Thanks for reading!&lt;/p&gt;
       <guid>https://dev.to/bernardo/desenvolvimento-arquitetura-e-boas-praticas-11o4</guid>
       <description>&lt;p&gt;Eu sempre fui fã de desenvolvimento de boas arquiteturas, talvez por já ter sofrido muito na vida na sustentação de sistemas ruins.&lt;/p&gt;
 
-&lt;p&gt;Alguns decisões ruins poderiam ter sido evitadas se tivesses simplesmente "parado para planejar". &lt;/p&gt;
+&lt;p&gt;Alguns decisões ruins poderiam ter sido evitadas se tivessem simplesmente "parado para planejar". &lt;/p&gt;
 
 &lt;p&gt;Normalmente esse profissional quando questionado começa com o checklist do &lt;a href="https://gohorseprocess.com.br/extreme-go-horse-xgh/"&gt;GoHorse&lt;/a&gt;:&lt;/p&gt;
 
@@ -1719,6 +2148,243 @@ The more you’ll be able to effectively harness the true power of the language.
       <category>webdev</category>
       <category>programming</category>
       <category>career</category>
+    </item>
+    <item>
+      <title>Angular SSR with Angular Universal and Deploy with Docker</title>
+      <author>Pavan K Jadda</author>
+      <pubDate>Mon, 11 Oct 2021 14:53:35 +0000</pubDate>
+      <link>https://dev.to/this-is-angular/angular-ssr-with-angular-universal-and-deploy-with-docker-13i</link>
+      <guid>https://dev.to/this-is-angular/angular-ssr-with-angular-universal-and-deploy-with-docker-13i</guid>
+      <description>&lt;p&gt;This blog post explains the process to enable Angular Server Side Rendering(SSR) with Angular Universal and the process to deploy it in Docker container&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#setup-angular-application"&gt;
+  &lt;/a&gt;
+  Setup Angular Application
+&lt;/h2&gt;
+
+&lt;p&gt;If you already have an existing Angular application, you can skip this step&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Create new application
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;   ng new angular-ssr-docker
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;ul&gt;
+&lt;li&gt;Add Angular material and
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;ng add @angular/material
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;ul&gt;
+&lt;li&gt;Import indigo-pink theme to application. Add following line to styles.scss
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;@import "~@angular/material/prebuilt-themes/indigo-pink.css";
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;ul&gt;
+&lt;li&gt;Create two components, Login and Home. When user logs in, it redirects him to home page&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h1&gt;
+  &lt;a href="#add-angular-universal"&gt;
+  &lt;/a&gt;
+  Add Angular Universal
+&lt;/h1&gt;
+
+&lt;p&gt;Based on instructions from Angular docs,&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Add Angular Universal to the project
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;ng add @nguniversal/express-engine
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;and it will create the following folder structure&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;src/
+  index.html                 app web page
+  main.ts                    bootstrapper for client app
+  main.server.ts             * bootstrapper for server app
+  style.css                  styles for the app
+  app/ ...                   application code
+    app.server.module.ts     * server-side application module
+server.ts                    * express web server
+tsconfig.json                TypeScript base configuration
+tsconfig.app.json            TypeScript browser application configuration
+tsconfig.server.json         TypeScript server application configuration
+tsconfig.spec.json           TypeScript tests configuration
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;ul&gt;
+&lt;li&gt;&lt;p&gt;By default when you add Angular Universal to project Angular CLI creates &lt;strong&gt;projects/angular-ssr-docker/architect/serve-ssr&lt;/strong&gt; section in &lt;strong&gt;angular.json&lt;/strong&gt; with 2 configurations &lt;code&gt;development&lt;/code&gt; and &lt;code&gt;production&lt;/code&gt;&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;The &lt;code&gt;development&lt;/code&gt; configuration will be used when run &lt;code&gt;npm run dev:ssr&lt;/code&gt; and &lt;code&gt;production&lt;/code&gt; configuration will be when you build application in production mode&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;See below snapshot of typical configuration. For some reason, if you can not start an application make change development section as below&lt;br&gt;
+&lt;/p&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;"configurations": {
+  "development": {
+    "browserTarget": "pdts:build",
+    "serverTarget": "pdts:server",
+    "proxyConfig": "src/proxy.conf.json"
+  },
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--3ckWKfjc--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/scsjhmib5onk4exhrvu6.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--3ckWKfjc--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/scsjhmib5onk4exhrvu6.png" alt="Screen Shot 2021-10-11 at 10.13.45 AM"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;If you are like me, you can define additional configurations like dev, test as shown above&lt;/li&gt;
+&lt;li&gt;Now, open terminal in the project and start JSON server (mocks backend)
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;json-server - watch db.json
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;ul&gt;
+&lt;li&gt;Open another terminal in same project and run the application
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;npm run dev:ssr
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;ul&gt;
+&lt;li&gt;Go to &lt;a href="http://localhost:4200"&gt;http://localhost:4200&lt;/a&gt; to see the application in action&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h1&gt;
+  &lt;a href="#build-docker%C2%A0image"&gt;
+  &lt;/a&gt;
+  Build Docker image
+&lt;/h1&gt;
+
+&lt;p&gt;Before building docker image, you need to build the application&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;Build the application with following command. Make sure to replace -- configuration=dev with appropriate profile name like test or production when you build an application for different environment
+&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;sudo ng build --configuration=dev &amp;amp;&amp;amp; sudo ng run pdts:server
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;ol&gt;
+&lt;li&gt;Add following Dockerfile to build the docker image
+&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;## Use Node Slim image
+FROM node:14-slim
+
+## Copy source code
+COPY . .
+
+## Start the application
+CMD ["node", "dist/angular-ssr-docker/server/main.js"]
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;ol&gt;
+&lt;li&gt;Build Docker image with following command
+&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;docker build -t angular_ssr_docker .
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;ol&gt;
+&lt;li&gt;Run the image on port 4000. You can change to different by changing port flag -p 5001:4000
+&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;docker run -p 4000:4000 angular_ssr_docker
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;ol&gt;
+&lt;li&gt;Go to &lt;a href="http://localhost:4000"&gt;http://localhost:4000&lt;/a&gt; to see the application in action&lt;/li&gt;
+&lt;/ol&gt;
+
+
+
+
+&lt;p&gt;The source code of the application can be found in Github. Happy Coding :)&lt;/p&gt;
+
+</description>
+      <category>angular</category>
+      <category>javascript</category>
+      <category>typescript</category>
+      <category>docker</category>
     </item>
     <item>
       <title>Performance checklist for Vue and Nuxt</title>
@@ -2598,408 +3264,6 @@ The &lt;code&gt;build.publicPath&lt;/code&gt; option allows you to configure a C
       <category>mentalhealth</category>
       <category>workplace</category>
       <category>burnout</category>
-    </item>
-    <item>
-      <title>Getting started with GitHub pages</title>
-      <author>Ramesh chandra pola</author>
-      <pubDate>Mon, 11 Oct 2021 14:34:05 +0000</pubDate>
-      <link>https://dev.to/byteslash/getting-started-with-github-pages-4jpf</link>
-      <guid>https://dev.to/byteslash/getting-started-with-github-pages-4jpf</guid>
-      <description>&lt;h2&gt;
-  &lt;a href="#hello-everyone"&gt;
-  &lt;/a&gt;
-  Hello everyone! 🧡
-&lt;/h2&gt;
-
-&lt;p&gt;In this article, we look into &lt;strong&gt;How to get started with GitHub pages.🤩&lt;/strong&gt;&lt;br&gt;
-Probably you already know how to use Git and GitHub. Suppose you built a complete project for your website and upload it on Github. Now you want others to see what you built, but you don’t know how to use GitHub pages, now I am here to help you all how to get started with GitHub pages.🙂&lt;br&gt;
-GitHub Pages is a static site hosting service that takes HTML, CSS, and JavaScript files straight from your repository on GitHub, optionally runs the files through a build process and publishes a website, that are freely hosted on GitHub’s &lt;code&gt;github.io&lt;/code&gt; domain.&lt;br&gt;
-Project sites whether owned by an organization or a user account, are unlimited.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#lets-get-started"&gt;
-  &lt;/a&gt;
-  Let's get started🤩
-&lt;/h2&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--LBdHsyFN--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://64.media.tumblr.com/tumblr_ljkn5yjPkO1qixleeo1_400.gifv" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--LBdHsyFN--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://64.media.tumblr.com/tumblr_ljkn5yjPkO1qixleeo1_400.gifv" alt="waiting_gif"&gt;&lt;/a&gt;&lt;br&gt;
-Now let's create a new repository and name it with your project name.&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--_JMk8In2--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1633940111035/4KqlRhhkl.jpeg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--_JMk8In2--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1633940111035/4KqlRhhkl.jpeg" alt="new repo.jpg"&gt;&lt;/a&gt;&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--4CSeK4B4--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1633940124653/LlC4y9h6m.jpeg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--4CSeK4B4--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1633940124653/LlC4y9h6m.jpeg" alt="create repo.jpg"&gt;&lt;/a&gt;&lt;br&gt;
-Now upload your files to this repository. You can store any code you like in your Github repository, but to use the GitHub Pages feature to full effect, your code should be structured as a typical website, e.g. with the primary entry point being an HTML file called &lt;code&gt;index.html&lt;/code&gt;.&lt;br&gt;
-Now you need to turn on the GitHub pages feature for your repository. &lt;br&gt;
-To do this, Go to your GitHub repository and click&lt;code&gt;“Settings"&lt;/code&gt;.&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--cfhF1SN5--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1633940783111/_7_hJX1Vx.jpeg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--cfhF1SN5--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1633940783111/_7_hJX1Vx.jpeg" alt="settings.jpg"&gt;&lt;/a&gt;&lt;br&gt;
-Then select &lt;code&gt;Pages&lt;/code&gt; from the sidebar on the left.&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--z3RotXaN--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1633940824260/qVnuA-vd1C.jpeg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--z3RotXaN--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1633940824260/qVnuA-vd1C.jpeg" alt="pages tab.jpg"&gt;&lt;/a&gt;&lt;br&gt;
-Now underneath &lt;strong&gt;Source&lt;/strong&gt;, choose the &lt;code&gt;"main"&lt;/code&gt; branch, and click &lt;strong&gt;save&lt;/strong&gt;&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--INUjsbc1--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1633942116822/RxImNrFw-.jpeg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--INUjsbc1--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1633942116822/RxImNrFw-.jpeg" alt="to main.jpg"&gt;&lt;/a&gt;&lt;br&gt;
-Again go to the GitHub Pages section, and you should see a line of the form "Your site is ready to be published at &lt;code&gt;https://username.github.io/projectname/&lt;/code&gt;."&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--s9TUMQI---/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1633941146983/jkDG1XNn_N.jpeg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--s9TUMQI---/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1633941146983/jkDG1XNn_N.jpeg" alt="link.jpg"&gt;&lt;/a&gt;&lt;br&gt;
-If you click on this URL, you should go to your Project-site, provided the home page is called index.html — it goes to this entry point by default. &lt;br&gt;
-Though this looks empty but it’s just an example to give you an idea. Now you can deploy your own project.&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--YiRMKMST--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1633942159332/WeBkpaNYg.jpeg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--YiRMKMST--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1633942159332/WeBkpaNYg.jpeg" alt="final page.jpg"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;h4&gt;
-  &lt;a href="#my-work-here-is-done-now-its-your-work-to-build-creative-projects-and-host-it-using-github-pages"&gt;
-  &lt;/a&gt;
-  My work here is done, Now it's your work to build creative projects and host it using GitHub pages🥳🧡
-&lt;/h4&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--X-BBrZea--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1633942609398/vlajJkQse.gif" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--X-BBrZea--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1633942609398/vlajJkQse.gif" alt="done.gif"&gt;&lt;/a&gt;&lt;br&gt;
-That's all for today! 😁 You reached the end of the article 😍&lt;br&gt;
-If you found this article helpful, please like and share it 🧡. &lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--2lVH3-LT--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1633942604495/S0lY7iu8N.gif" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--2lVH3-LT--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1633942604495/S0lY7iu8N.gif" alt="wow.gif"&gt;&lt;/a&gt;&lt;br&gt;
-Don’t forget to share this article with your friends or colleagues. I'm Rameshchandra pola who loves to build projects and share valuable tips in my Blogs. Feel free to connect with me on any of the platforms below!🧡&lt;br&gt;&lt;br&gt;
- &lt;a href="https://github.com/Rameshchandrapola"&gt;GitHub&lt;/a&gt;⭐&lt;a href="https://www.linkedin.com/in/pola-ramesh-chandra-b78347202/"&gt;LinkedIn&lt;/a&gt;⭐&lt;a href="https://twitter.com/POLARAMESHCHAN2"&gt;Twitter&lt;/a&gt;&lt;/p&gt;
-
-</description>
-      <category>github</category>
-      <category>webdev</category>
-      <category>beginners</category>
-      <category>tutorial</category>
-    </item>
-    <item>
-      <title>JavaScript equivalent of C# 'out' keyword</title>
-      <author>Eugene</author>
-      <pubDate>Mon, 11 Oct 2021 14:27:51 +0000</pubDate>
-      <link>https://dev.to/sincovschi/javascript-equivalent-of-c-out-keyword-2l2b</link>
-      <guid>https://dev.to/sincovschi/javascript-equivalent-of-c-out-keyword-2l2b</guid>
-      <description>&lt;p&gt;Since I met the 'out' keyword in C#, I'm trying to find an equivalent in JS.&lt;/p&gt;
-
-&lt;p&gt;So, please take a look at the code and leave your opinions and/or suggestions about this.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#c-example"&gt;
-  &lt;/a&gt;
-  C# example:
-&lt;/h2&gt;
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight csharp"&gt;&lt;code&gt;&lt;span class="kt"&gt;string&lt;/span&gt; &lt;span class="n"&gt;numberAsString&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="s"&gt;"1640"&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-
-&lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Int32&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;TryParse&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;numberAsString&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="k"&gt;out&lt;/span&gt; &lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="n"&gt;number&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="n"&gt;Console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;WriteLine&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;$"Converted '&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="n"&gt;numberAsString&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s"&gt;' to &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="n"&gt;number&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s"&gt;"&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#js-example-1-direct-approach"&gt;
-  &lt;/a&gt;
-  JS Example #1: Direct approach:
-&lt;/h2&gt;
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;numberAsString&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;1640&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;number&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;tryParse&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;numberAsString&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-
-&lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="k"&gt;typeof&lt;/span&gt; &lt;span class="nx"&gt;number&lt;/span&gt; &lt;span class="o"&gt;===&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;number&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`Converted '&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;numberAsString&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;' to &lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;number&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;To break it down - we are not only getting one value instead of 2 (c# returns boolean and creates int). But we also have to double-check the output. &lt;a href="https://stackoverflow.com/questions/18082/validate-decimal-numbers-in-javascript-isnumeric"&gt;https://stackoverflow.com/questions/18082/validate-decimal-numbers-in-javascript-isnumeric&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;And we got one extra line of code, which is very important for me.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#js-example-2-kvp-response-approach"&gt;
-  &lt;/a&gt;
-  JS Example #2: KVP response approach:
-&lt;/h2&gt;
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;numberAsString&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;1640&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;isNumber&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;number&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;tryParse&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;numberAsString&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-
-&lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;isNumber&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`Converted '&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;numberAsString&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;' to &lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;number&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;This is much better IMHO, at the cost of the small complexity of working with objects.&lt;/p&gt;
-
-&lt;p&gt;Aaand... It's still one line more!&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#js-example-3-pass-by-refference-approach"&gt;
-  &lt;/a&gt;
-  JS Example #3: Pass by refference approach:
-&lt;/h2&gt;
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;numberAsString&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;1640&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;refNumber&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;value&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt; &lt;span class="p"&gt;};&lt;/span&gt;
-
-&lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;tryParse&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;numberAsString&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;refNumber&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`Converted '&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;numberAsString&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;' to &lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;refNumber&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;value&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;It's much better and very close to C#. But you have to know a little about JS. And to know that everything in it is an Object and an Object is always passed by reference.&lt;/p&gt;
-
-&lt;p&gt;OMG! That line is driving me crazy!!&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#js-example-4-exploit-conditional-expression"&gt;
-  &lt;/a&gt;
-  JS Example #4: Exploit conditional expression:
-&lt;/h2&gt;
-
-&lt;p&gt;It's time to play dirty!&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;numberAsString&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;1640&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-
-&lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="k"&gt;typeof&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;number&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;tryParse&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;numberAsString&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt; &lt;span class="o"&gt;===&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;number&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`Converted '&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;numberAsString&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;' to &lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;number&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Aahhh... finally THE line is gone. But at what cost?.. Double-checking of the result is back. And the worst part (as per the community's opinion) is variable assignment inside conditional's expression.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#js-example-5-exploit-iife-and-short-circuits"&gt;
-  &lt;/a&gt;
-  JS Example #5: Exploit IIFE and Short circuits:
-&lt;/h2&gt;
-
-&lt;p&gt;As we are already down and dirty, let's keep on.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;numberAsString&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;1640&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-
-&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;number&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;tryParse&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;numberAsString&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;??&lt;/span&gt; &lt;span class="p"&gt;(()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Fail&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;))();&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Well, this version I like a lot. Because you can fall back elegantly with fewer lines. And it even removes one indentation level. The downside is that it involves a not popular pattern and is applicable only for &lt;code&gt;null&lt;/code&gt; or &lt;code&gt;falsy&lt;/code&gt; cases. 0 is &lt;code&gt;falsy&lt;/code&gt;, thus I used here the &lt;code&gt;??&lt;/code&gt; instead of &lt;code&gt;||&lt;/code&gt;..&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#js-example-6-the-mad-professor-approach"&gt;
-  &lt;/a&gt;
-  JS Example #6: The mad professor approach:
-&lt;/h2&gt;
-
-&lt;h4&gt;
-  &lt;a href="#warning-the-next-lines-may-irreversible-twist-your-mind"&gt;
-  &lt;/a&gt;
-  WARNING! The next lines may irreversible twist your mind.
-&lt;/h4&gt;
-
-&lt;p&gt;
-  Open at your own risk.
-  &lt;br&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;numberAsString&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;1640&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-
-&lt;span class="k"&gt;for&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kd"&gt;var&lt;/span&gt; &lt;span class="nx"&gt;i&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;number&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;tryParse&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;numberAsString&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt; &lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="nx"&gt;i&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; &lt;span class="kc"&gt;null&lt;/span&gt; &lt;span class="o"&gt;!==&lt;/span&gt; &lt;span class="nx"&gt;number&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; &lt;span class="nx"&gt;i&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`Converted '&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;numberAsString&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;' to &lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;number&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-&lt;p&gt;(Cough)... Well, it's working, try it in the console if you don't believe me.&lt;/p&gt;
-
-&lt;p&gt;So, what the heck is happening?&lt;/p&gt;
-
-&lt;p&gt;Firstly, &lt;code&gt;var&lt;/code&gt; is an ancient keyword that has some primordial magic inside it and it is &lt;strong&gt;jumping&lt;/strong&gt; outside scopes. So far I know about &lt;code&gt;for&lt;/code&gt; and &lt;code&gt;try catch&lt;/code&gt;, maybe there are more, but it's too ancient for me to know them all.&lt;/p&gt;
-
-&lt;p&gt;Secondly, &lt;code&gt;for&lt;/code&gt; is the only space in JS that is allowing you to declare variables outside the plain scope. So, that space between &lt;code&gt;(&lt;/code&gt; and first &lt;code&gt;;&lt;/code&gt; - you can use as plain scope to declare something or to break something or someone...&lt;/p&gt;
-
-&lt;p&gt;Thirdly, space between &lt;code&gt;;&lt;/code&gt; and &lt;code&gt;;&lt;/code&gt; is considered something like an &lt;code&gt;if&lt;/code&gt; expression. So combining with variables declared before, you can exploit the third part which will make your loop go only once if the second validation is passed.&lt;/p&gt;
-
-&lt;p&gt;The thing is that you are actually not breaking any rules of JS. And the best thing is that IDE understands it and when you &lt;code&gt;Ctrl + Click&lt;/code&gt; on the variable used outside &lt;code&gt;for&lt;/code&gt; - it will jump right where it's declared.&lt;/p&gt;
-
-&lt;p&gt;So... at the cost of your own and the ones that will read your code sanity... It's an interesting trade-off. &lt;/p&gt;
-
-
-
-&lt;/p&gt;
-
-&lt;p&gt;The takeaway is that as developers we often face the decision to choose between fancy and readable code. The rule of thumb is to choose readability if you are in a team and whatever you want if you code alone. But to dive in such researching adventures is fine from time to time, it keeps you #er.&lt;/p&gt;
-
-
-
-
-&lt;p&gt;May the bugs avoid you,&lt;br&gt;
-&lt;a href="https://dev.to/sincovschi"&gt;Eugene&lt;/a&gt;.&lt;/p&gt;
-
-</description>
-      <category>javascript</category>
-      <category>programming</category>
-      <category>csharp</category>
-    </item>
-    <item>
-      <title>Just Ask Ipython for help</title>
-      <author>Waylon Walker</author>
-      <pubDate>Mon, 11 Oct 2021 14:24:25 +0000</pubDate>
-      <link>https://dev.to/waylonwalker/just-ask-ipython-for-help-324e</link>
-      <guid>https://dev.to/waylonwalker/just-ask-ipython-for-help-324e</guid>
-      <description>&lt;h2&gt;
-  &lt;a href="#it-happens-to-the-best-of-us"&gt;
-  &lt;/a&gt;
-  It happens to the best of us
-&lt;/h2&gt;
-
-&lt;p&gt;We can't all remember every single function signature out there, it's just not&lt;br&gt;
-possible.  If you want to stay productive while coding without the temptation&lt;br&gt;
-to hit YouTube or Twitter.  Use the built in help.  Here are 5 ways to get help&lt;br&gt;
-without leaving your terminal.&lt;/p&gt;
-
-&lt;p&gt;&lt;iframe width="710" height="399" src="https://www.youtube.com/embed/TZrRAP-9UMk"&gt;
-&lt;/iframe&gt;
-&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#docstrings"&gt;
-  &lt;/a&gt;
-  Docstrings
-&lt;/h2&gt;
-
-&lt;p&gt;In any python repl you can access the docstring of a function by calling for &lt;code&gt;help&lt;/code&gt;.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="n"&gt;help&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;df&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;rolling&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;In Ipython we can even get some syntax highlighting with the &lt;code&gt;?&lt;/code&gt;.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="n"&gt;df&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;rolling&lt;/span&gt;&lt;span class="err"&gt;?&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#source-code"&gt;
-  &lt;/a&gt;
-  Source Code
-&lt;/h2&gt;
-
-&lt;p&gt;Sometimes the docstrings are not good enough, and don't give us the content we&lt;br&gt;
-need, and we just need to look at the source.  Without leaving your terminal&lt;br&gt;
-there are two ways I often use to get to the source of a function I am trying&lt;br&gt;
-to use.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="nn"&gt;inspect&lt;/span&gt;
-&lt;span class="n"&gt;inspect&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;getsource&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;df&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;rolling&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;The more common way I do it is with the ipython &lt;code&gt;??&lt;/code&gt;.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;df.rolling??
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#bonus-richinspect"&gt;
-  &lt;/a&gt;
-  Bonus rich.inspect
-&lt;/h2&gt;
-
-&lt;p&gt;You thought the syntax highlighting was good with ipython, check out what&lt;br&gt;
-&lt;code&gt;rich.inspect&lt;/code&gt; can do! As far as I know there is no way to get to source code,&lt;br&gt;
-but the results are still fantastic.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;pip &lt;span class="nb"&gt;install &lt;/span&gt;rich
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;blockquote&gt;
-&lt;p&gt;Install rich&lt;br&gt;
-&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="kn"&gt;from&lt;/span&gt; &lt;span class="nn"&gt;rich&lt;/span&gt; &lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="n"&gt;inspect&lt;/span&gt;
-&lt;span class="n"&gt;inspect&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;cars&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;rolling&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;help&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="bp"&gt;True&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;blockquote&gt;
-&lt;p&gt;then inspect&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;h2&gt;
-  &lt;a href="#connect-with-me"&gt;
-  &lt;/a&gt;
-  Connect with me
-&lt;/h2&gt;
-
-&lt;p&gt;If you liked this one, check out the YouTube Channel, catch me live on twitch,&lt;br&gt;
-or connect on twitter, I'd love to hear from you.&lt;/p&gt;
-
-&lt;p&gt;twitter:  &lt;a href="https://twitter.com/_WaylonWalker"&gt;https://twitter.com/_WaylonWalker&lt;/a&gt;&lt;br&gt;
-twitch: &lt;a href="https://www.twitch.tv/waylonwalker"&gt;https://www.twitch.tv/waylonwalker&lt;/a&gt;&lt;br&gt;
-github: &lt;a href="https://github.com/waylonwalker/"&gt;https://github.com/waylonwalker/&lt;/a&gt;&lt;br&gt;
-twitch: &lt;a href="https://www.twitch.tv/waylonwalker"&gt;https://www.twitch.tv/waylonwalker&lt;/a&gt;&lt;/p&gt;
-
-</description>
-      <category>python</category>
     </item>
   </channel>
 </rss>
