@@ -7,6 +7,89 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>gRPC client doesn't like Let's Encrypt cross-signed root certs</title>
+      <author>Christoph Grothaus</author>
+      <pubDate>Thu, 14 Oct 2021 21:24:58 +0000</pubDate>
+      <link>https://dev.to/cgrothaus/grpc-client-doesnt-like-lets-encrypt-cross-signed-root-certs-93g</link>
+      <guid>https://dev.to/cgrothaus/grpc-client-doesnt-like-lets-encrypt-cross-signed-root-certs-93g</guid>
+      <description>&lt;p&gt;This is a story about gRPC client and a Let's Encrypt certificate chain that is cross-signed by two root certificates.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#our-context"&gt;
+  &lt;/a&gt;
+  Our context
+&lt;/h1&gt;
+
+&lt;p&gt;In one of our apps, we have a gRPC client that connects to a gRPC server of a 3rd party service that we use. The app is written in Ruby, thus we use the Ruby flavour of gRPC, which uses the &lt;a href="https://github.com/grpc/grpc"&gt;gRPC core C library&lt;/a&gt; under the hood.&lt;/p&gt;
+
+&lt;p&gt;As many do, said 3rd party service uses SSL connections secured by Let's Encrypt (LE) certs. There is a certificate chain that goes from those per-service LE certs to a LE certificate authority (CA) cert, which again is signed by widely known root certs. In this case it even was &lt;em&gt;cross-signed&lt;/em&gt; by two certs: &lt;em&gt;DST Root CA X3&lt;/em&gt; and &lt;em&gt;ISRG Root X1&lt;/em&gt;.&lt;/p&gt;
+
+&lt;p&gt;The first one had been used by LE longer ago, to &lt;em&gt;"get off the ground"&lt;/em&gt;, as they write, because it was widely trusted. In recent times LE preferred the second, newer one, but still supported the older one via cross-sign.&lt;/p&gt;
+
+&lt;p&gt;On Sep. 30th 2021, that older DST Root CA X3 cert expired (see this &lt;a href="https://letsencrypt.org/docs/dst-root-ca-x3-expiration-september-2021/"&gt;Let's Encrypt blogpost&lt;/a&gt; explaining the background). While that shouldn't have been a problem, because the ISRG Root X1 was also part of the chain, this caused us troubles.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#the-problem"&gt;
+  &lt;/a&gt;
+  The problem
+&lt;/h1&gt;
+
+&lt;p&gt;Last week – roughly one week after Sep. 30th – we restarted our app for the first time since weeks, through a deployment by CD pipeline. After restart, the gRPC client could not establish SSL connections to its gRPC server anymore. We got errors saying the server cert was invalid:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;E1006 13:48:18.326843613      93 ssl_transport_security.cc:1446] Handshake failed with fatal error SSL_ERROR_SSL: error:1000007d:SSL routines:OPENSSL_internal:CERTIFICATE_VERIFY_FAILED.
+GRPC::Unavailable: 14:failed to connect to all addresses.
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;After some digging, we found out there is a &lt;a href="https://github.com/grpc/grpc/issues/27532"&gt;bug in the gRPC core C library&lt;/a&gt;. It didn't get it that there are two root certs in the chain, out of which one was still valid. It stuck with the invalid DST Root CA X3 cert, and thus failed cert verification.&lt;/p&gt;
+
+&lt;p&gt;Reportedly, only the core library – and by that all languages building on it, like Ruby or Python – was affected, but not the Java or the .Net version.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#the-solution"&gt;
+  &lt;/a&gt;
+  The solution
+&lt;/h1&gt;
+
+&lt;p&gt;We could not wait for the bugfix. To get our app back running, we needed to persuade the gRPC client that the server cert indeed was valid. Therefore we removed the now-invalid DST Root CA X3 root cert from our Docker image, rebuilt the collection of CA certs, and forced gRPC to use that. That did the trick.&lt;/p&gt;
+
+&lt;p&gt;This is what we added to the Dockerfile (on a Debian base image):&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight docker"&gt;&lt;code&gt;&lt;span class="c"&gt;# remove the now-invalid root cert&lt;/span&gt;
+&lt;span class="k"&gt;RUN &lt;/span&gt;&lt;span class="nb"&gt;rm&lt;/span&gt; /usr/share/ca-certificates/mozilla/DST_Root_CA_X3.crt
+&lt;span class="c"&gt;# rebuild collection of root certs&lt;/span&gt;
+&lt;span class="k"&gt;RUN &lt;/span&gt;update-ca-certificates
+&lt;span class="c"&gt;# force gRPC to use that collection&lt;/span&gt;
+&lt;span class="k"&gt;ENV&lt;/span&gt;&lt;span class="s"&gt; GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Meanwhile, the mentioned bug is fixed. But maybe you can't upgrade easily or quickly, so I hope this story helps some of you.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#further-information"&gt;
+  &lt;/a&gt;
+  Further information
+&lt;/h1&gt;
+
+&lt;p&gt;gRPC isn't the only one affected by this. The older OpenSSL version 1.0.2 also stumbles. &lt;a href="https://dev.to/garutilorenzo/fix-let-s-encrypt-root-certificate-dst-root-ca-x3-expired-openssl-1-0-2-18f3"&gt;This post&lt;/a&gt; arrives at the same solution, and also has a nice collection of links for more background information.&lt;/p&gt;
+
+</description>
+      <category>ssl</category>
+      <category>letsencrypt</category>
+      <category>grpc</category>
+    </item>
+    <item>
       <title>How to Build a Responsive Form with Filter Functionality Using HTML, CSS, and JavaScript</title>
       <author>Kingsley Ubah</author>
       <pubDate>Thu, 14 Oct 2021 20:58:11 +0000</pubDate>
@@ -2091,6 +2174,108 @@ blitz dev
 </description>
     </item>
     <item>
+      <title>Strict mode in JavaScript</title>
+      <author>Abhishek Rath</author>
+      <pubDate>Thu, 14 Oct 2021 19:25:49 +0000</pubDate>
+      <link>https://dev.to/abhishek_rath/strict-mode-in-javascript-cl7</link>
+      <guid>https://dev.to/abhishek_rath/strict-mode-in-javascript-cl7</guid>
+      <description>&lt;h2&gt;
+  &lt;a href="#what-is-strict-mode"&gt;
+  &lt;/a&gt;
+  What is strict mode?
+&lt;/h2&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Strict mode was introduced in ECMAScript5 also known as ES5 in 2009.&lt;/li&gt;
+&lt;li&gt;Adding strict mode to JavaScript code allows your code to be checked more strictly.&lt;/li&gt;
+&lt;li&gt;Allows programmer to write more secure JavaScript code.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h2&gt;
+  &lt;a href="#benefits-of-strict-mode"&gt;
+  &lt;/a&gt;
+  Benefits of Strict Mode
+&lt;/h2&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Using strict mode in JavaScript code throws visible errors in developer console which would otherwise fail silently (shown in the examples below).&lt;/li&gt;
+&lt;li&gt;Forbids programmers to use certain syntax.&lt;/li&gt;
+&lt;li&gt;In some cases using strict mode in code can make the code to run faster.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h2&gt;
+  &lt;a href="#how-to-enable-strict-mode-in-javascript"&gt;
+  &lt;/a&gt;
+  How to enable strict mode in JavaScript?
+&lt;/h2&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;p&gt;To enable strict mode write &lt;code&gt;"use strict"&lt;/code&gt; or &lt;code&gt;'use strict'&lt;/code&gt; at the beginning of JavaScript code.&lt;br&gt;
+&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--4m3hoWQf--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/dzr31z7z292mrv2elkbo.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--4m3hoWQf--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/dzr31z7z292mrv2elkbo.png" alt="Strict mode for entire code"&gt;&lt;/a&gt;&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;The strict mode can also be used for a function.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;To enable strict mode in function, &lt;code&gt;"use strict"&lt;/code&gt; or &lt;code&gt;'use strict'&lt;/code&gt; must be the very first line in function body.&lt;br&gt;
+&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--V0KJdpjQ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/eizx9nbglojjtsa25jlc.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--V0KJdpjQ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/eizx9nbglojjtsa25jlc.png" alt="Strict mode in function"&gt;&lt;/a&gt;&lt;/p&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h2&gt;
+  &lt;a href="#common-mistakes-that-occur-in-nonstrict-mode"&gt;
+  &lt;/a&gt;
+  Common mistakes that occur in non-strict mode
+&lt;/h2&gt;
+
+&lt;h3&gt;
+  &lt;a href="#using-reserved-words-as-variable-names"&gt;
+  &lt;/a&gt;
+  Using reserved words as variable names
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--svMiAKXC--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/n1vd3f236atgcsdx96yk.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--svMiAKXC--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/n1vd3f236atgcsdx96yk.png" alt="Image description"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--mzsIMbns--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/4np27ow4229evpfdvhgw.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--mzsIMbns--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/4np27ow4229evpfdvhgw.png" alt="Output 20"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Wait!! Isn't &lt;strong&gt;&lt;em&gt;"let"&lt;/em&gt;&lt;/strong&gt; a reserved word in the JavaScript? Therefore it mustn't be used as a variable name according to naming an identifier rules.
+Here in the above code snippet JavaScript fails silently instead of throwing an error.&lt;/li&gt;
+&lt;li&gt;But, if we use strict mode, JavaScript engine will throw an error-
+&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--5KrmbZbr--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/9md3nht65fa8vvsnlvwu.png" alt="Strict mode in code snippet"&gt;
+&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--OBY-LNL_--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/iqdqx5mdg5qulqocoic5.png" alt="Produces error"&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3&gt;
+  &lt;a href="#using-variables-before-declaring-them"&gt;
+  &lt;/a&gt;
+  Using variables before declaring them
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--r62YrnT2--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/itj5u38vhvrln5k09uaa.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--r62YrnT2--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/itj5u38vhvrln5k09uaa.png" alt="variable used before declaration"&gt;&lt;/a&gt; &lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--D8F0AgBF--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/xzmq0fip1x8dtbg8g5z2.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--D8F0AgBF--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/xzmq0fip1x8dtbg8g5z2.png" alt="Output"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;p&gt;Using strict mode gives &lt;em&gt;Reference Error&lt;/em&gt;.&lt;br&gt;
+&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--048FuCu2--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/640wr270x9qp3lhl30iz.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--048FuCu2--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/640wr270x9qp3lhl30iz.png" alt="Variable used before declaration in strict mode"&gt;&lt;/a&gt;&lt;br&gt;
+&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--22fm0u_J--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/vmu9qm3h3b4rqg1e0ujz.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--22fm0u_J--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/vmu9qm3h3b4rqg1e0ujz.png" alt="Output"&gt;&lt;/a&gt;&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;To know more about the strict mode, checkout the documentation by &lt;a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Strict_mode"&gt;MDN&lt;/a&gt;&lt;/p&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h2&gt;
+  &lt;a href="#conclusion"&gt;
+  &lt;/a&gt;
+  Conclusion
+&lt;/h2&gt;
+
+&lt;ul&gt;
+&lt;li&gt;That will be all from my side. I hope, this article gave you a basic idea about the strict mode.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Keep Learning!!&lt;/p&gt;
+
+</description>
+      <category>javascript</category>
+      <category>webdev</category>
+      <category>strictmode</category>
+      <category>beginners</category>
+    </item>
+    <item>
       <title>What is Code Splitting?</title>
       <author>Anjan Shomooder</author>
       <pubDate>Thu, 14 Oct 2021 18:04:39 +0000</pubDate>
@@ -2595,312 +2780,6 @@ Every valid javascript is a valid typescript. so you can start by converting you
       <category>webdev</category>
       <category>security</category>
       <category>jamstack</category>
-    </item>
-    <item>
-      <title>Seven Months Later: My Developer Advocacy Journey So Far</title>
-      <author>Bradston Henry</author>
-      <pubDate>Thu, 14 Oct 2021 17:03:21 +0000</pubDate>
-      <link>https://dev.to/ibmdeveloper/seven-months-later-my-developer-advocacy-journey-so-far-a1l</link>
-      <guid>https://dev.to/ibmdeveloper/seven-months-later-my-developer-advocacy-journey-so-far-a1l</guid>
-      <description>&lt;p&gt;In February 2021, I started a new role as Developer Advocate here at IBM. Prior to this, I had worked as traditional software developer and this new role was HUGE departure from what I was used to. I want to share a bit about my experience and what I have learned and experienced along the way. &lt;/p&gt;
-
-&lt;p&gt;Just to give you some perspective, here is a quick snapshot of the past few months for me. It's been an absolute whirlwind. It's been an absolute blessing and I can't believe how much has happened and how incredible the journey has been so far. &lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Beyond anything I could have imagined!&lt;/strong&gt;&lt;/p&gt;
-
-
-
-
-&lt;p&gt;&lt;strong&gt;February 2021&lt;/strong&gt;: &lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Started new role as IBM Developer Advocate&lt;/li&gt;
-&lt;li&gt;Joined Dev.to and Released First Blog&lt;/li&gt;
-&lt;li&gt;Co-hosted First Webinar&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;&lt;strong&gt;March 2021&lt;/strong&gt;: &lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;First Blog with 1000+ Views&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;&lt;strong&gt;April 2021&lt;/strong&gt;:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Hosted First Webinar Solo&lt;/li&gt;
-&lt;li&gt;Second Blog with 1000+ Views&lt;/li&gt;
-&lt;li&gt;Released 6th Video on Youtube&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;&lt;strong&gt;May 2021&lt;/strong&gt;:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Visited Raleigh-Durham, NC for the first time and signed a lease   (Planned move from Baton Rouge, LA)&lt;/li&gt;
-&lt;li&gt;Two Blogs reach 3000+ Views&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;&lt;strong&gt;June 2021&lt;/strong&gt;&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;One-year anniversary of being married (Your boy is a newlywed)&lt;/li&gt;
-&lt;li&gt;Made 13-hour drive (over two days) from Baton Rouge to Durham, NC&lt;/li&gt;
-&lt;li&gt;Published 15th blog to Dev.to&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;&lt;strong&gt;July/August/September 2021&lt;/strong&gt; (All these months felt like one month 😅)&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Hosted and/or Co-Hosted 8th Webinar on Crowdcast&lt;/li&gt;
-&lt;li&gt;Two Blogs surpassed 6000+ views mark&lt;/li&gt;
-&lt;li&gt;One blog featured in weekly "must-reads" list on Dev.to&lt;/li&gt;
-&lt;li&gt;Had second wedding with close family (Me and my wife were unable to have a ceremony with family when we originally got married because of COVID)&lt;/li&gt;
-&lt;li&gt;Talk Proposal Accepted and will be &lt;a href="https://2021.devrel.net/speaker/bradston-henry/"&gt;Speaker at DevRelCon2021&lt;/a&gt;! (Will be announcing details soon on my Twitter and LinkedIn 😁)&lt;/li&gt;
-&lt;/ul&gt;
-
-
-
-
-&lt;p&gt;As you might be able to see, a lot has really happened in last 6+ months since I started as a Developer Advocate back in February 2021.&lt;/p&gt;
-
-&lt;p&gt;The biggest things I have really taken from my time as a Developer Advocate and working in the Developer Relations realm, is that being yourself is key. For most of my career, I have tried to be as "inoffensive" in all that I do. Because of cultural fears, societal fears, and any fear you could imagine bleeding over in to my career journey, I was always holding back. I never tried to be "too creative", or "too honest" or "too myself" because I feared the backlash I would receive (some fears coming from unreasonable expectations and other coming from lessons learned and experiences in the workplace). But Developer Advocacy has allowed me to tap into my true self.&lt;/p&gt;
-
-&lt;p&gt;It's so strange to say, but this is the most "Me" I have ever been in my professional career. All of my hobbies, passions, skills, and experiences have really come to bear in this role. &lt;/p&gt;
-
-&lt;p&gt;Imagine this! I have used my audio editing/recording, video editing, game development, writing, presentation and developments skills all in this ONE role! I feel that through my time as a developer Advocate I have been able to tap into parts of me I have been hoping to bring to the table in the workplace for years. &lt;/p&gt;
-
-&lt;p&gt;The most amazing part of it all, is that all these skills that I have been blessed enough to gain over the years are being used to assist others in &lt;strong&gt;their&lt;/strong&gt; career journey! I'm able to convey knowledge, share life lessons, and fundamentally help developers and those looking to grow their skills everyday. &lt;/p&gt;
-
-&lt;p&gt;And as you read this, I hope it inspires you to take chances and go after your aspirations. You never know where you'll land and where in your career journey that you'll begin to feel &lt;strong&gt;home&lt;/strong&gt;.&lt;/p&gt;
-
-&lt;p&gt;In many ways, I don't know what the next years of my career journey will look like, but I do feel that Developer Advocacy is the first step of many that will allow me to accomplish the dreams I aspire to.&lt;/p&gt;
-
-&lt;p&gt;As always, Thank you for reading my blog!&lt;/p&gt;
-
-&lt;p&gt;And before I go, Let me leave you with a quote from the American Pianist and luminary, &lt;a href="https://en.wikipedia.org/wiki/Thelonious_Monk"&gt;Thelonious Monk&lt;/a&gt;, that inspires me to be my most authentic self each day:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--gl2cAhg2--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/gzyjqavk4b44u1wlgvpw.jpeg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--gl2cAhg2--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/gzyjqavk4b44u1wlgvpw.jpeg" alt='Thelonious Monk Quote "A genius is the one most like himself." from AZQuotes.com'&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Thanks to all my IBM team and everyone who has encouraged me and inspired me on my journey so far. I couldn't have possibly made it this far with out you all pouring into me. I hope to make you all proud!&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;Onwards and Upwards My Friends!&lt;/p&gt;
-
-&lt;p&gt;Regards,&lt;/p&gt;
-
-&lt;p&gt;Bradston Henry&lt;/p&gt;
-
-&lt;p&gt;===================&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#highlights-from-my-journey-in-developer-advocacy"&gt;
-  &lt;/a&gt;
-  Highlights from my Journey in Developer Advocacy
-&lt;/h1&gt;
-
-
-
-
-&lt;h2&gt;
-  &lt;a href="#the-adventure-of-life"&gt;
-  &lt;/a&gt;
-  The Adventure of Life
-&lt;/h2&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--X8NivOcD--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/dwrr65mc323f007f1rfk.jpg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--X8NivOcD--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/dwrr65mc323f007f1rfk.jpg" alt="Talk about an adventure on the road!"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;em&gt;Still can't believe I drove this Mega-truck + my car halfway across the country. 😲 This is from halfway through the journey.&lt;/em&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--ZW5zGs9z--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/devbac2mx39i97xphlke.jpg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ZW5zGs9z--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/devbac2mx39i97xphlke.jpg" alt="Our Second Wedding Day!"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;em&gt;Can't believe it! We finally got married (again) yall! Some blessed to share this time with friends and family in spite of the times.&lt;/em&gt;&lt;/p&gt;
-
-
-
-
-&lt;h2&gt;
-  &lt;a href="#my-favorite-blogs-ive-written"&gt;
-  &lt;/a&gt;
-  My Favorite Blogs I've Written
-&lt;/h2&gt;
-
-
-&lt;div class="ltag__link"&gt;
-  &lt;a href="/ibmdeveloper" class="ltag__link__link"&gt;
-    &lt;div class="ltag__link__org__pic"&gt;
-      &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--m80pCZo7--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://res.cloudinary.com/practicaldev/image/fetch/s--EXAR3dVu--/c_fill%2Cf_auto%2Cfl_progressive%2Ch_150%2Cq_auto%2Cw_150/https://dev-to-uploads.s3.amazonaws.com/uploads/organization/profile_image/532/55bb82ef-84af-4295-b4a9-6731d5b83e1d.png" alt="IBM Developer"&gt;
-      &lt;div class="ltag__link__user__pic"&gt;
-        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Sthf4n7q--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://res.cloudinary.com/practicaldev/image/fetch/s--7sHQb0uz--/c_fill%2Cf_auto%2Cfl_progressive%2Ch_150%2Cq_auto%2Cw_150/https://dev-to-uploads.s3.amazonaws.com/uploads/user/profile_image/571773/c3edb21d-5d8d-4839-801b-80a450be711e.jpg" alt=""&gt;
-      &lt;/div&gt;
-    &lt;/div&gt;
-  &lt;/a&gt;
-  &lt;a href="/ibmdeveloper/creating-your-own-chat-room-with-react-node-and-socket-io-in-the-cloud-part-1-13dg" class="ltag__link__link"&gt;
-    &lt;div class="ltag__link__content"&gt;
-      &lt;h2&gt;Creating Your Own Chat Room with React, Node, and Socket.io in the Cloud: Part 1&lt;/h2&gt;
-      &lt;h3&gt;Bradston Henry for IBM Developer ・ May 7 ・ 15 min read&lt;/h3&gt;
-      &lt;div class="ltag__link__taglist"&gt;
-        &lt;span class="ltag__link__tag"&gt;#react&lt;/span&gt;
-        &lt;span class="ltag__link__tag"&gt;#socket&lt;/span&gt;
-        &lt;span class="ltag__link__tag"&gt;#cloud&lt;/span&gt;
-        &lt;span class="ltag__link__tag"&gt;#beginners&lt;/span&gt;
-      &lt;/div&gt;
-    &lt;/div&gt;
-  &lt;/a&gt;
-&lt;/div&gt;
-
-
-
-&lt;div class="ltag__link"&gt;
-  &lt;a href="/bradstondev" class="ltag__link__link"&gt;
-    &lt;div class="ltag__link__pic"&gt;
-      &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Sthf4n7q--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://res.cloudinary.com/practicaldev/image/fetch/s--7sHQb0uz--/c_fill%2Cf_auto%2Cfl_progressive%2Ch_150%2Cq_auto%2Cw_150/https://dev-to-uploads.s3.amazonaws.com/uploads/user/profile_image/571773/c3edb21d-5d8d-4839-801b-80a450be711e.jpg" alt="bradstondev"&gt;
-    &lt;/div&gt;
-  &lt;/a&gt;
-  &lt;a href="/bradstondev/how-game-dev-and-betting-on-myself-altered-my-career-path-forever-17bn" class="ltag__link__link"&gt;
-    &lt;div class="ltag__link__content"&gt;
-      &lt;h2&gt;How Game Dev and Betting on Myself Altered My Career Path Forever&lt;/h2&gt;
-      &lt;h3&gt;Bradston Henry ・ Aug 5 ・ 8 min read&lt;/h3&gt;
-      &lt;div class="ltag__link__taglist"&gt;
-        &lt;span class="ltag__link__tag"&gt;#career&lt;/span&gt;
-        &lt;span class="ltag__link__tag"&gt;#inspiration&lt;/span&gt;
-        &lt;span class="ltag__link__tag"&gt;#gamedev&lt;/span&gt;
-      &lt;/div&gt;
-    &lt;/div&gt;
-  &lt;/a&gt;
-&lt;/div&gt;
-
-
-
-
-
-&lt;h2&gt;
-  &lt;a href="#some-webinar-action"&gt;
-  &lt;/a&gt;
-  Some Webinar Action
-&lt;/h2&gt;
-
-&lt;p&gt;Learn about Red Hat and What it's all about! Fun Times!&lt;br&gt;
-&lt;a href="https://ibm.biz/red-hat-openshift-1001-07292021"&gt;Red Hat OpenShift 1001: What is Red Hat OpenShift and Why Does it Matter?&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;A webinar that shares how you can connect React to IBM Cloudant NoSQL DB&lt;br&gt;
-&lt;a href="https://ibm.biz/React-andCloudant-Basics-050621"&gt;React and Databasing: Basics of IBM Cloudant NoSQL DB&lt;/a&gt;&lt;/p&gt;
-
-
-&lt;h2&gt;
-  &lt;a href="#videos-for-the-people"&gt;
-  &lt;/a&gt;
-  Videos for the People
-&lt;/h2&gt;
-
-&lt;p&gt;&lt;strong&gt;Dad Jokes and Containers&lt;/strong&gt;&lt;br&gt;
-&lt;iframe width="710" height="399" src="https://www.youtube.com/embed/LCVBGrEClok"&gt;
-&lt;/iframe&gt;
-&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;From Amateur to Professional&lt;/strong&gt;&lt;br&gt;
-&lt;iframe width="710" height="399" src="https://www.youtube.com/embed/MR6h5-S2guE"&gt;
-&lt;/iframe&gt;
-&lt;/p&gt;
-
-
-
-
-&lt;h2&gt;
-  &lt;a href="#other-stuff-ive-been-up-to"&gt;
-  &lt;/a&gt;
-  Other Stuff I've Been up to
-&lt;/h2&gt;
-
-&lt;p&gt;Participated in GMTK 2021 with good friend and IBMer &lt;a href="https://www.linkedin.com/in/kyle-smith-67393b80/"&gt;Kyle&lt;/a&gt;. An absolute blast! Here is the game we made:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://sleeping-zebu-games.itch.io/build-it-like-human"&gt;https://sleeping-zebu-games.itch.io/build-it-like-human&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--6Bay7NjU--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/lyczbcj9cbhry9py0oqi.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--6Bay7NjU--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/lyczbcj9cbhry9py0oqi.png" alt="Build it Like Human"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Started my first ever Podcast called &lt;strong&gt;Super Agile Bros&lt;/strong&gt; with friends! We discuss gaming, anime and movies! Also, we are crazy!&lt;br&gt;
-&lt;a href="https://soundcloud.com/superagilebros"&gt;SoundCloud&lt;/a&gt;&lt;br&gt;
-&lt;a href="https://open.spotify.com/show/4zF8CE0KwAMSiqNWw0ipRe"&gt;Spotify&lt;/a&gt;&lt;br&gt;
-&lt;iframe width="100%" height="166" src="https://w.soundcloud.com/player/?url=https://soundcloud.com/superagilebros/episode-6-our-top-5-animes-list-which-to-watch-and-which-to-avoid&amp;amp;auto_play=false&amp;amp;color=%23000000&amp;amp;hide_related=false&amp;amp;show_comments=true&amp;amp;show_user=true&amp;amp;show_reposts=false&amp;amp;show_teaser=true"&gt;
-&lt;/iframe&gt;
-&lt;/p&gt;
-
-&lt;p&gt;==== FOLLOW ME ON SOCIAL MEDIA ====&lt;/p&gt;
-
-&lt;p&gt;Twitter: &lt;a href="https://twitter.com/BradstonDev"&gt;Bradston Dev&lt;/a&gt;&lt;br&gt;
-Dev.to: &lt;a class="mentioned-user" href="https://dev.to/bradstondev"&gt;@bradstondev&lt;/a&gt;
- &lt;br&gt;
-Youtube: &lt;a href="https://www.youtube.com/channel/UC6Ky8s71RP65akLb_XV1_OA"&gt;Bradston YT&lt;/a&gt;&lt;br&gt;
-LinkedIn : &lt;a href="https://www.linkedin.com/in/bradston-henry/"&gt;Bradston Henry&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Credits:&lt;br&gt;
-Cover Image: Stock Image provided by TheSplitFace, from Pond5&lt;br&gt;
-Quote Image: Provided by AZQoutes.com&lt;/p&gt;
-
-</description>
-      <category>career</category>
-      <category>gamedev</category>
-      <category>devrel</category>
-    </item>
-    <item>
-      <title>How to create your own custom VS code snippets.</title>
-      <author>Rahul Soni</author>
-      <pubDate>Thu, 14 Oct 2021 16:57:52 +0000</pubDate>
-      <link>https://dev.to/inosrahul/how-to-create-your-own-custom-vs-code-snippets-1a9a</link>
-      <guid>https://dev.to/inosrahul/how-to-create-your-own-custom-vs-code-snippets-1a9a</guid>
-      <description>&lt;p&gt;Code snippets can be very useful and can potentially increase productivity and reduce input errors.&lt;/p&gt;
-
-&lt;p&gt;With snippets we can insert commonly used code blocks and can create boilerplate templates saving us keystrokes.&lt;/p&gt;
-
-&lt;p&gt;Snippets in VS code are written in JSON and to create your own custom snippet.&lt;/p&gt;
-
-&lt;p&gt;Snippets can be configured through Preferences (Ctrl + Shift + P) -&amp;gt; Configure User Snippets.&lt;/p&gt;
-
-&lt;p&gt;It should look something like this.&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--n7aPQCZ0--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/t5ijjpgnzqrdeaaj8ivp.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--n7aPQCZ0--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/t5ijjpgnzqrdeaaj8ivp.png" alt="snippets"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Snippets can be configured for every file or specific languages in their JSON file.&lt;/p&gt;
-
-&lt;p&gt;Every snippet has 3 main properties&lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;prefix - Shortcut by which it will be called.&lt;/li&gt;
-&lt;li&gt;body - Actual code to be inserted&lt;/li&gt;
-&lt;li&gt;description - Description of the code&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;p&gt;This is a custom snippet with prefix &lt;strong&gt;arfc&lt;/strong&gt; for generating a React component. It works in following steps.&lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;Imports React&lt;/li&gt;
-&lt;li&gt;Creates a functional React component with placeholder name &lt;em&gt;functionName&lt;/em&gt;
-&lt;/li&gt;
-&lt;li&gt;Returns an empty &lt;em&gt;div&lt;/em&gt;
-&lt;/li&gt;
-&lt;li&gt;exports the component
-&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Tr802EVk--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/q9yalroltabwlhj667uw.png" alt="arfc"&gt;
-&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;p&gt;It will yield this code.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--4JrwVKMR--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/4xqdirsepqvthwy1kpz6.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--4JrwVKMR--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/4xqdirsepqvthwy1kpz6.png" alt="arfc result"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Another one of my favorite is&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--7M2KE6FI--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/48r8hrjxddf7du348lk6.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--7M2KE6FI--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/48r8hrjxddf7du348lk6.png" alt="fetch data"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;The &lt;strong&gt;ftcData&lt;/strong&gt; will inject this piece of code&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--fdu5Lc_w--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/5wtlqt1cncp4x2i8ft8v.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--fdu5Lc_w--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/5wtlqt1cncp4x2i8ft8v.png" alt="fetch api"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;A very good tool to generate custom snippets is this &lt;a href="https://snippet-generator.app/"&gt;Snippet Generator&lt;/a&gt;, which works for Sublime and Atom as well.&lt;/p&gt;
-
-&lt;p&gt;A very popular VS code extension for JavaScript, React, React-Native, Redux snippets&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--tH1vFqpi--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/8et000zlnuygc3hrfw5a.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--tH1vFqpi--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/8et000zlnuygc3hrfw5a.png" alt="vs code extension"&gt;&lt;/a&gt;&lt;/p&gt;
-
-</description>
-      <category>vscode</category>
-      <category>webdev</category>
-      <category>beginners</category>
-      <category>productivity</category>
     </item>
   </channel>
 </rss>
