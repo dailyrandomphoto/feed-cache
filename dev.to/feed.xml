@@ -28,6 +28,224 @@ I've been working on RuntDeale, and doing some personal things, I've also had so
       <category>runtdeale</category>
     </item>
     <item>
+      <title>Application with Elixir, business logic with Gleam</title>
+      <author>Paweł Świątkowski</author>
+      <pubDate>Mon, 18 Oct 2021 21:25:05 +0000</pubDate>
+      <link>https://dev.to/katafrakt/application-with-elixir-business-logic-with-gleam-1960</link>
+      <guid>https://dev.to/katafrakt/application-with-elixir-business-logic-with-gleam-1960</guid>
+      <description>&lt;p&gt;One of the young programming languages I look at from afar and root for is &lt;a href="https://gleam.run"&gt;Gleam&lt;/a&gt;. It is a statically typed language for BEAM, written in Rust. Similarly to Rust, if focuses on catching many potential bugs at compilation time and providing useful error messages, so it's easy to fix them. Since it's targeting BEAM, it can easily interop with other BEAM languages, such as Elixir or Erlang. And this fact allows to overcome some issues that languages in their infancy stage usually have.&lt;/p&gt;
+
+&lt;p&gt;My recent thought revolve around using Gleam to model the core business logic, while letting Elixir do the heavy application work around it. Let's face the facts: Phoenix is great, Ecto is great, ExUnit is great... It will take years for language such as Gleam to develop ecosystem similar to Elixir. On the other hand, I find modelling business logic with types easier and more maintainable than without them. And Elixir typespecs have their issues:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Dialyzer error messages are not very friendly, it usually takes me couple minutes to figure out what they &lt;em&gt;really&lt;/em&gt; mean.&lt;/li&gt;
+&lt;li&gt;Types are optional and there seems to be almost-consensus to write typespecs for public functions only. However, in my experience, because of that, bugs happen a lot in private functions, which are neither typespec'd, nor unit tested.&lt;/li&gt;
+&lt;li&gt;Dialyzer simply does not catch everything. In fact sometimes I'm surprised at the things it does not catch.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;In Gleam, all these issues are addressed: types are mandatory in every function, the compiler checks everything and error messages are quite informative. For example:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;error: Type mismatch
+   ┌─ /home/katafrakt/dev/poligon/gleamixir_test/src/booking.gleam:21:5
+   │
+21 │     _ -&amp;gt; Error(InvalidRoomNumber)
+   │     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+This case clause was found to return a different type than the previous
+one, but all case clauses must return the same type.
+
+Expected type:
+
+    Bool
+
+Found type:
+
+    Result(a, BookingError)
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;So I decided to have a look at how the interop between Gleam and Elixir works and if it could be useful. To set things us, I used &lt;a href="https://github.com/gleam-lang/mix_gleam"&gt;mix_gleam&lt;/a&gt; Hex package from Gleam team, which allows you to compile Gleam as part of Mix compilation. I just followed instructions in the readme and everything works. So, time to write the first "business logic" in Gleam.&lt;/p&gt;
+
+&lt;p&gt;To test things, I decided to code a fragment of super simple booking system for my imaginary estate. It's quite small - only has three rooms. But still, you can book them, if the details are valid. Here's the relevant code:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;// src/booking.gleam
+
+pub type Booking {
+  Booking(surname: String, room_no: Int, number_of_people: Int)
+}
+
+pub type BookingError {
+  InvalidRoomNumber
+  WrongNumberOfPeople
+}
+
+// Unfortunately, Gleam does not have default arguments nor multiple dispatch,
+// so we have to somehow bypass that by creating two pseudo-constructors
+pub fn new2(surname: String, room_no: Int) -&amp;gt; Booking {
+  new3(surname, room_no, 1)
+}
+
+pub fn new3(surname: String, room_no: Int, number_of_people: Int) -&amp;gt; Booking {
+  Booking(surname, room_no, number_of_people)
+}
+
+pub fn validate_booking(booking: Booking) -&amp;gt; Result(Booking, BookingError) {
+  case booking.room_no {
+    1 | 2 | 5 -&amp;gt; validate_capacity(booking)
+    _ -&amp;gt; Error(InvalidRoomNumber)
+  }
+}
+
+fn validate_capacity(booking: Booking) -&amp;gt; Result(Booking, BookingError) {
+  case room_capacity(booking.room_no) &amp;gt;= booking.number_of_people {
+    True -&amp;gt; Ok(booking)
+    False -&amp;gt; Error(WrongNumberOfPeople)
+  }
+}
+
+fn room_capacity(room_no: Int) -&amp;gt; Int {
+  case room_no {
+    1 -&amp;gt; 2
+    2 | 5 -&amp;gt; 4
+  }
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;It's not exactly Elixir, but I guess you can get what's going on, as it's quite idiomatic.&lt;/p&gt;
+
+&lt;p&gt;When compiled, Gleam modules are available like Erlang modules. So I can write this, for example:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;iex(1)&amp;gt; :booking.new2("Smith", 1)                                    
+{:booking, "Smith", 1, 1}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;As it turns out, Gleam types, when returned to Elixir, become a tuple with first element being a type name and the following elements field values. This works both ways, so I can pipe the result into another Gleam function.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;iex(2)&amp;gt; :booking.new2("Smith", 1) |&amp;gt; :booking.validate_booking()     
+{:ok, {:booking, "Smith", 1, 1}}
+iex(3)&amp;gt; :booking.new2("Smith", 3) |&amp;gt; :booking.validate_booking()
+{:error, :invalid_room_number}
+iex(4)&amp;gt; :booking.new3("Smith", 5, 6) |&amp;gt; :booking.validate_booking()
+{:error, :wrong_number_of_people}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This looks pretty good. A nice thing is that Gleam's &lt;code&gt;Result&lt;/code&gt; type maps elegantly into Elixir's &lt;code&gt;{:ok, value}&lt;/code&gt; or &lt;code&gt;{:error, message}&lt;/code&gt; convention.&lt;/p&gt;
+
+&lt;p&gt;Maybe I didn't see a lot, but it brings me close to the conclusion that &lt;strong&gt;yes, Gleam can be mixed with Elixir&lt;/strong&gt; in parts where full static typing is desirable and integration between the two languages goes pretty seamless. I would have to prepare a larger example to check it, but potentially looks good.&lt;/p&gt;
+
+&lt;p&gt;A few things I don't necessarily like in Gleam (or find missing):&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Completely unlike Elixir, it relies heavily on filenames - i.e. name of the file is the name of the resulting module. This is not necessarily bad, but I prefer less coupling between the filesystem and the code.&lt;/li&gt;
+&lt;li&gt;No support for multiple dispatch or default arguments forces me to write weird things like &lt;code&gt;new2&lt;/code&gt; and &lt;code&gt;new3&lt;/code&gt; pseudo-constructors. Perhaps in real example it wouldn't be so problematic though, as probably I'd be passing all the data at once.&lt;/li&gt;
+&lt;li&gt;I was surprised that sometimes the compiler wasn't able to infer the type, even though it should be possible.&lt;/li&gt;
+&lt;li&gt;The standard library at the moment does not include things like dates at all, although of course I can define relevant logic myself without a lot of problems.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h2&gt;
+  &lt;a href="#bonus-content-accessing-namespaced-gleam-modules"&gt;
+  &lt;/a&gt;
+  Bonus content: Accessing namespaced Gleam modules
+&lt;/h2&gt;
+
+&lt;p&gt;I wrote above that module names accessible to Elixir are named based on the filename of the file where Gleam code is written. It was pretty straightforward when I did it in &lt;code&gt;src/booking.gleam&lt;/code&gt; files and could access via &lt;code&gt;:booking.new()&lt;/code&gt;, but what if I had a file in a subdirectory? I checked it by creating a &lt;code&gt;src/transport/trains.gleam&lt;/code&gt; file and couldn't really find a way to call it from Elixir. I was close to the conclusion that it's impossible and you can only write publicly exported code in top-level namespace, but then I found how to list all the atoms defined for the application:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;iex(1)&amp;gt; :application.get_key(:gleamixir_test, :modules)
+{:ok, [GleamixirTest, :booking, :transport@trains]}
+iex(2)&amp;gt; :transport@trains.example()
+{:train, {:engine, "EU07", 160},
+ [
+   {:train_car, "Passenger double-decker", 160, "001"},
+   {:train_car, "Postal", 120, "005"},
+   {:train_car, "Passenger double-decker", 160, "002"},
+   {:train_car, "Restaurant", 160, "600"}
+ ]}
+iex(3)&amp;gt; :transport@trains.example() |&amp;gt; :transport@trains.max_speed()
+{:ok, 120}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;So, in short, you use &lt;code&gt;@&lt;/code&gt;-sign as a namespace separator.&lt;/p&gt;
+
+&lt;p&gt;And this is the code of &lt;code&gt;trains&lt;/code&gt; module if you're interested:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;import gleam/list
+import gleam/int
+
+pub type Train {
+  Train(engine: Engine, cars: List(TrainCar))
+}
+
+pub type Engine {
+  Engine(class: String, max_speed: Int)
+}
+
+pub type TrainCar {
+  TrainCar(car_type: String, max_speed: Int, serial_number: String)
+}
+
+pub fn example() {
+  Train(
+    engine: Engine("EU07", 160),
+    cars: [
+      TrainCar("Passenger double-decker", 160, "001"),
+      TrainCar("Postal", 120, "005"),
+      TrainCar("Passenger double-decker", 160, "002"),
+      TrainCar("Restaurant", 160, "600"),
+    ],
+  )
+}
+
+pub fn max_speed(train: Train) {
+  [
+    train.engine.max_speed,
+    ..list.map(train.cars, fn(c: TrainCar) { c.max_speed })
+  ]
+  |&amp;gt; list.sort(by: int.compare)
+  |&amp;gt; list.head()
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+</description>
+      <category>elixir</category>
+      <category>gleam</category>
+      <category>interlingua</category>
+    </item>
+    <item>
       <title>I like Svelte but...!</title>
       <author>BabakFP</author>
       <pubDate>Mon, 18 Oct 2021 20:29:50 +0000</pubDate>
@@ -126,6 +344,94 @@ No thanks😂&lt;/p&gt;
       <category>svelte</category>
       <category>javascript</category>
       <category>webdev</category>
+    </item>
+    <item>
+      <title>Parsing Addresses With Machine Learning</title>
+      <author>Lob</author>
+      <pubDate>Mon, 18 Oct 2021 20:10:45 +0000</pubDate>
+      <link>https://dev.to/lob/parsing-addresses-with-machine-learning-19ae</link>
+      <guid>https://dev.to/lob/parsing-addresses-with-machine-learning-19ae</guid>
+      <description>&lt;p&gt;&lt;em&gt;Editor’s note: Dave Currie joined Lob’s Atlas team in June 2020 as a remote contractor. Working as the team’s Machine Learning Engineer, he has helped to improve the accuracy of the Address Verification product by developing microservices that utilize machine learning. This article was written about one of these microservices.&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;When I tell people that my work is focused on improving an address verification product, I sometimes receive confused looks. If you think about a friend’s address, you might picture something like “1600 Pennsylvania Avenue, Washington, DC 20500”. An address as simple as this should be easy for a system to understand and verify if it exists or not. In this case, you’re right. Standard addresses that you’ve seen countless times before are quite easy to verify, but not all addresses are so simple.&lt;/p&gt;
+
+&lt;p&gt;In this post, I’ll share how we use machine learning to continually improve our address verification product at Lob to ensure our customers’ mailpieces get delivered to as many recipients as possible.  &lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#data-quality-issues"&gt;
+  &lt;/a&gt;
+  Data quality issues
+&lt;/h2&gt;
+
+&lt;p&gt;Lob’s Address Verification product receives millions of addresses everyday. When working at this scale, we see addresses with a range of formats:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;757 Lawrence St Apart C Phila PA 23444 Philadelphia PA 23444&lt;/li&gt;
+&lt;li&gt;931-29-176  Avenue Top Floor Queens NY 22577&lt;/li&gt;
+&lt;li&gt;123 Blueriver Rd 1 Pkwy Court N Dallas TX 93847&lt;/li&gt;
+&lt;li&gt;2883 Roosevelt Rd Ste 101 SLot 909 Deerborn MI 41982&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Although these addresses all have some complexities, they still follow common patterns. Building a rules-based parsing system could be complex and difficult to iterate on as more patterns are added to it. However, this is where machine learning can excel as it will detect these patterns as you add more training examples.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#ship-fast-and-iterate"&gt;
+  &lt;/a&gt;
+  Ship fast and iterate
+&lt;/h2&gt;
+
+&lt;p&gt;Given the benefits that machine learning can provide to this problem, we wanted to get a solution into production as soon as possible. The question became, how do we quickly train a model, especially when Lob has so much address data to choose from? The answer, active learning.&lt;/p&gt;
+
+&lt;p&gt;Active learning is a cyclical process of identifying the most useful training examples, labelling these, and retraining the model. We started with a list of 100,000 unique addresses (this large number makes it more likely that uncommon address formats will be included in the dataset), labelled 10 of these with their address labels (e.g., primary number, street name, zip code), trained the model using just these 10 examples, then predicted the parsings along with a confidence of these parsings on the remaining 999, 990 addresses.&lt;/p&gt;
+
+&lt;p&gt;After using just 10 training examples, it was easy to see that the model was beginning to understand patterns in the data. For example, primary numbers are often the numbers at the start of an address and states are often the two letters before the zip code. Choosing the next set of 10 addresses to label and add to the training data is easy, pick 10 that the model has low confidence in how to parse.&lt;/p&gt;
+
+&lt;p&gt;This iterative process of training and labelling continued until the model could provide a net benefit to our address verification product. At this point, we moved our machine learning parsing model into production and provided our customers with the added benefit of a more accurate service. Model development will continue to further increase its accuracy, primarily by adding more training examples and better standardization of the input address.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#standardizing-the-input-address"&gt;
+  &lt;/a&gt;
+  Standardizing the input address
+&lt;/h2&gt;
+
+&lt;p&gt;We can train a performant address parser with fewer training examples by standardizing the input address. By reducing the complexity of the task, the model requires fewer training examples to become proficient. Methods to standardize the input address can include:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Making all of the text uppercase&lt;/li&gt;
+&lt;li&gt;Removing unnecessary symbols: #(),%;_:&amp;lt;&amp;gt;{}&lt;/li&gt;
+&lt;li&gt;Correcting typos, e.g., “Sourth” to “South”&lt;/li&gt;
+&lt;li&gt;Separating words, e.g., “Rodeodrive” to “Rodeo drive”&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h2&gt;
+  &lt;a href="#the-need-for-speed"&gt;
+  &lt;/a&gt;
+  The need for speed
+&lt;/h2&gt;
+
+&lt;p&gt;A key feature of our address verification product is speed. Therefore, the library we chose to help build our address parser had to be up for the task. After comparing a few options, we chose &lt;a href="https://github.com/explosion/spaCy"&gt;spaCy&lt;/a&gt;. Given its state-of-the-art speed, named entity recognition feature, and documentation, spaCy is very suitable for this task.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#model-evaluation"&gt;
+  &lt;/a&gt;
+  Model evaluation
+&lt;/h2&gt;
+
+&lt;p&gt;Measuring the performance of an address parser (or any &lt;a href="https://en.wikipedia.org/wiki/Named-entity_recognition"&gt;named entity recognition&lt;/a&gt; [NER] model) won’t use traditional metrics from regression or classification problems. We chose the &lt;a href="https://studymachinelearning.com/jaccard-similarity-text-similarity-metric-in-nlp/"&gt;Jaccard coefficient&lt;/a&gt; as it is well suited for the evaluation of NER models. The parser’s performance on each address label was measured, then these scores were aggregated into a weighted average to compare the overall performance between two versions of the model. &lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#conclusion"&gt;
+  &lt;/a&gt;
+  Conclusion
+&lt;/h2&gt;
+
+&lt;p&gt;With a well-defined problem and plenty of data that is ready for labelling, a machine learning solution can be delivered in a matter of weeks. The quick feedback loop that active learning provides will help you to reach the desired performance much faster than labelling random examples. If possible, reduce the complexity for the model by standardizing the input data.&lt;/p&gt;
+
+&lt;p&gt;See Lob in action. &lt;a href="https://www.lob.com/sales"&gt;Request a demo today&lt;/a&gt;!&lt;/p&gt;
+
+</description>
+      <category>machinelearning</category>
+      <category>programming</category>
     </item>
     <item>
       <title>Database says NOPE</title>
@@ -1243,617 +1549,6 @@ If you find any issues, please feel free to submit an issue on the &lt;a href="h
       <category>webdev</category>
       <category>firebase</category>
       <category>javascript</category>
-    </item>
-    <item>
-      <title>Secure Password Handling in Python</title>
-      <author>Martin Heinz</author>
-      <pubDate>Mon, 18 Oct 2021 18:49:48 +0000</pubDate>
-      <link>https://dev.to/martinheinz/secure-password-handling-in-python-3fg1</link>
-      <guid>https://dev.to/martinheinz/secure-password-handling-in-python-3fg1</guid>
-      <description>&lt;p&gt;Almost every application requires some form of authentication, password handling or use of secure credentials such as API keys. You might not be security expert, but you should know how to deal with all these passwords and credentials securely to keep your application users' credentials and data protected as well as your own API keys and various token. &lt;/p&gt;
-
-&lt;p&gt;Keeping these security elements safe includes, generating them, verifying them, storing them securely and protecting them from adversaries. So, in this article we will explore Python libraries, tools and concepts that will help as with exactly that!&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#prompting-for-password"&gt;
-  &lt;/a&gt;
-  Prompting For Password
-&lt;/h2&gt;
-
-&lt;p&gt;Let's start simple - you have basic Python application with command line interface. You need to ask user for password. You could use &lt;code&gt;input()&lt;/code&gt;, but that would show the password in terminal, to avoid that you should use &lt;code&gt;getpass&lt;/code&gt; instead:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="nn"&gt;getpass&lt;/span&gt;
-
-&lt;span class="n"&gt;user&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;getpass&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;getuser&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
-&lt;span class="n"&gt;password&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;getpass&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;getpass&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
-&lt;span class="c1"&gt;# Do Stuff...
-&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;&lt;code&gt;getpass&lt;/code&gt; is a very simple package that allows you to prompt user for password as well as get their username by extracting current user's login name. Be aware though that not every system supports hiding of passwords. Python will try to warn you about that, so just read warnings in command line.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#generating"&gt;
-  &lt;/a&gt;
-  Generating
-&lt;/h2&gt;
-
-&lt;p&gt;Sometimes it might be preferable to generate a password rather than prompt user for one. For example if you want to set initial password that gets changed upon first login.&lt;/p&gt;
-
-&lt;p&gt;There isn't any library for generating passwords, but implementing it isn't difficult:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="nn"&gt;string&lt;/span&gt;
-&lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="nn"&gt;secrets&lt;/span&gt;
-
-&lt;span class="n"&gt;length&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="mi"&gt;15&lt;/span&gt;
-&lt;span class="c1"&gt;# Choose wide set of characters, but consider what your system can handle
-&lt;/span&gt;&lt;span class="n"&gt;alphabet&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;string&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;ascii_letters&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="n"&gt;string&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;digits&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="n"&gt;string&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;punctuation&lt;/span&gt;
-&lt;span class="n"&gt;password&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s"&gt;''&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;join&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;secrets&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;choice&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;alphabet&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="k"&gt;for&lt;/span&gt; &lt;span class="n"&gt;i&lt;/span&gt; &lt;span class="ow"&gt;in&lt;/span&gt; &lt;span class="nb"&gt;range&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;length&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;The passwords generated using above code will be strong, but very hard to remember. If it's just an initial, temporary password or short-lived token then it's fine, but if user should is it for longer, then it's more appropriate to use passphrase instead.&lt;/p&gt;
-
-&lt;p&gt;We could build a passphrase generator like we did with simple passwords above, but why bother when there's library available for this. This library is called &lt;code&gt;xkcdpass&lt;/code&gt; after &lt;a href="https://xkcd.com/936/"&gt;famous XKCD&lt;/a&gt; about password strength, and it does exactly what the comic describes - generates strong passphrase made of words:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="c1"&gt;# pip install xkcdpass
-&lt;/span&gt;&lt;span class="kn"&gt;from&lt;/span&gt; &lt;span class="nn"&gt;xkcdpass&lt;/span&gt; &lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="n"&gt;xkcd_password&lt;/span&gt; &lt;span class="k"&gt;as&lt;/span&gt; &lt;span class="n"&gt;xp&lt;/span&gt;
-
-&lt;span class="n"&gt;word_file&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;xp&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;locate_wordfile&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
-&lt;span class="n"&gt;words&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;xp&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;generate_wordlist&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;wordfile&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="n"&gt;word_file&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;min_length&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="mi"&gt;5&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;max_length&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="mi"&gt;10&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-
-&lt;span class="k"&gt;for&lt;/span&gt; &lt;span class="n"&gt;i&lt;/span&gt; &lt;span class="ow"&gt;in&lt;/span&gt; &lt;span class="nb"&gt;range&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;4&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;
-    &lt;span class="k"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;xp&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;generate_xkcdpassword&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;words&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;acrostic&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s"&gt;"python"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;numwords&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="mi"&gt;6&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;delimiter&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s"&gt;"*"&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;
-
-&lt;span class="c1"&gt;# punch*yesterday*throwback*heaviness*overnight*numbing
-# plethora*yesterday*thigh*handlebar*outmost*natural
-# pyromania*yearly*twisty*hyphen*overstuff*nuzzle
-# pandemic*yearly*theology*hatching*overlaid*neurosis
-&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;This snippet starts by finding a word/dictionary file on your system such as &lt;code&gt;/usr/dict/words&lt;/code&gt; and picks all the words of the specified length, from which it then generates a word list used for generating the passphrase. The generator itself has a few arguments which we can use to customize the passphrase. Apart from obvious ones like number of words and length, it also has &lt;em&gt;acrostic&lt;/em&gt; parameter, which is a word whose characters will be used as first letters of words in the passphrase (sounds complicated? well, see the example passphrases above).  &lt;/p&gt;
-
-&lt;p&gt;If you really wanted to build this yourself, instead of adding a dependency to your project, you can use this recipe in &lt;a href="https://docs.python.org/3/library/secrets.html#recipes-and-best-practices"&gt;Python docs&lt;/a&gt;.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#hashing"&gt;
-  &lt;/a&gt;
-  Hashing
-&lt;/h2&gt;
-
-&lt;p&gt;Now that we asked user for password or generated it for them, what do we do with it? We might want to store it somewhere in database, but as you probably (hopefully) know, you should never store a password in its plaintext format. Why is that? &lt;/p&gt;
-
-&lt;p&gt;Well, passwords should never be stored in a recoverable format, whether plain text or encrypted. They should be hashed using a cryptographically-strong one-way function. This way if someone gets hold of the passwords in database, they will have very hard time recovering any actual passwords, because only way to recover any password from hash is to brute-force it - that is - taking possible plaintext passwords, hashing them with same algorithm and comparing results with the entries in database.&lt;/p&gt;
-
-&lt;p&gt;To make the brute-forcing more difficult, additionally &lt;em&gt;salt&lt;/em&gt; should be used. Salt is a random string stored alongside the hashed password. It gets appended to the password before hashing, making it more random and therefore harder to guess (using &lt;a href="https://en.wikipedia.org/wiki/Rainbow_table"&gt;rainbow tables&lt;/a&gt;).&lt;/p&gt;
-
-&lt;p&gt;However, with modern hardware that can attempt billions of hashes per second, making the password hard to guess isn't enough, therefore &lt;em&gt;slow&lt;/em&gt; hash functions are used for password hashing making it much more inefficient for attacker to brute-force a password. &lt;/p&gt;
-
-&lt;p&gt;(Note: the above greatly over-simplifies logic and reasons for using these hash functions. For more thought-out explanation see for example this &lt;a href="https://sqreen.github.io/DevelopersSecurityBestPractices/safe-password-storage/python"&gt;article&lt;/a&gt;.)&lt;/p&gt;
-
-&lt;p&gt;There are quite a few libraries and individual hashing algorithms out there, but the above requirements narrow our choice down significantly. The go to solution for hashing in Python should be &lt;code&gt;passlib&lt;/code&gt; as it provides proper algorithms, as well as high-level interface usable even by people who aren't well-versed with cryptography.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="c1"&gt;# pip install passlib
-&lt;/span&gt;&lt;span class="kn"&gt;from&lt;/span&gt; &lt;span class="nn"&gt;passlib.hash&lt;/span&gt; &lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="n"&gt;bcrypt&lt;/span&gt;
-&lt;span class="kn"&gt;from&lt;/span&gt; &lt;span class="nn"&gt;getpass&lt;/span&gt; &lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="n"&gt;getpass&lt;/span&gt;
-
-&lt;span class="k"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;bcrypt&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;setting_kwds&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-&lt;span class="c1"&gt;# ('salt', 'rounds', 'ident', 'truncate_error')
-&lt;/span&gt;&lt;span class="k"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;bcrypt&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;default_rounds&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-&lt;span class="c1"&gt;# 12
-&lt;/span&gt;
-&lt;span class="n"&gt;hasher&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;bcrypt&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;using&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;rounds&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="mi"&gt;13&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;  &lt;span class="c1"&gt;# Make it slower
-&lt;/span&gt;
-&lt;span class="n"&gt;password&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;getpass&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
-&lt;span class="n"&gt;hashed_password&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;hasher&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nb"&gt;hash&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;password&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-&lt;span class="k"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;hashed_password&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-&lt;span class="c1"&gt;# $2b$13$H9.qdcodBFCYOWDVMrjx/uT.fbKzYloMYD7Hj2ItDmEOnX5lw.BX.
-# \__/\/ \____________________/\_____________________________/
-# Alg Rounds  Salt (22 char)            Hash (31 char)
-&lt;/span&gt;
-&lt;span class="k"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;hasher&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;verify&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;password&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;hashed_password&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;
-&lt;span class="c1"&gt;# True
-&lt;/span&gt;&lt;span class="k"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;hasher&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;verify&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"not-the-password"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;hashed_password&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;
-&lt;span class="c1"&gt;# False
-&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;In this snippet we use &lt;code&gt;bcrypt&lt;/code&gt; as our algorithm of choice, as it's one of the most popular and well tested hashing algorithms. First we inspect its possible settings and check what is the default number of rounds used by the algorithm. We then modify the &lt;em&gt;hasher&lt;/em&gt; to use higher number of rounds (cost factor) making the hashing slower and therefore, hashes harder to crack. This number should be the largest possible that doesn't cause intolerable delay for your users (~300ms). &lt;code&gt;passlib&lt;/code&gt; updates default rounds value periodically, so your don't necessarily need to change this value.&lt;/p&gt;
-
-&lt;p&gt;With hasher ready we prompt user for password and hash it. At this point we could store it in database, here for demonstration purposes, we go ahead and verify it against original plaintext password.&lt;/p&gt;
-
-&lt;p&gt;From the above code, we can see that whole usage of &lt;code&gt;passlib&lt;/code&gt; boils down to &lt;code&gt;hash&lt;/code&gt; and &lt;code&gt;modify&lt;/code&gt; methods of our algorithm of choice. If you however wanted more control over schemes, rounds, etc., then you can use &lt;code&gt;CryptContext&lt;/code&gt; class:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="kn"&gt;from&lt;/span&gt; &lt;span class="nn"&gt;passlib.context&lt;/span&gt; &lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="n"&gt;CryptContext&lt;/span&gt;
-&lt;span class="n"&gt;ctx&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;CryptContext&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;schemes&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s"&gt;"bcrypt"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;"argon2"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;"scrypt"&lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt;
-                   &lt;span class="n"&gt;default&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s"&gt;"bcrypt"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-                   &lt;span class="n"&gt;bcrypt__rounds&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="mi"&gt;14&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-
-&lt;span class="n"&gt;password&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;getpass&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
-&lt;span class="n"&gt;hashed_password&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;ctx&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nb"&gt;hash&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;password&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-&lt;span class="k"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;hashed_password&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-&lt;span class="c1"&gt;# $2b$14$pFTXqnHjn91C8k8ehbuM.uSJM.H5S0l7vkxE8NxgAiS2LiMWMziAe
-&lt;/span&gt;
-&lt;span class="k"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;ctx&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;verify&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;password&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;hashed_password&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;
-&lt;span class="k"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;ctx&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;verify&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"not-the-password"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;hashed_password&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;This context object allows us to work with multiple schemes, setting defaults or configuring cost factors. If your application authentication is simple, then this is probably not necessary, but in case you require ability to use multiple hashing algorithms, deprecate them, re-hash hashes or similar advanced tasks, then you might want to look into full &lt;code&gt;CryptContext&lt;/code&gt; integration &lt;a href="https://passlib.readthedocs.io/en/latest/narr/context-tutorial.html"&gt;tutorial&lt;/a&gt;.&lt;/p&gt;
-
-&lt;p&gt;Another reason why might you want to use &lt;code&gt;CryptContext&lt;/code&gt; is if you need to deal with operating system passwords such as the ones in &lt;code&gt;/etc/shadow&lt;/code&gt;. For that you can use preconfigured contexts available in &lt;code&gt;passlib.hosts&lt;/code&gt;, for more details see example &lt;a href="https://passlib.readthedocs.io/en/latest/lib/passlib.hosts.html#current-host-os"&gt;here&lt;/a&gt;.&lt;/p&gt;
-
-&lt;p&gt;For completeness let me also list a couple other libraries available, including their (different) use-cases: &lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;
-&lt;a href="https://github.com/pyca/bcrypt"&gt;bcrypt&lt;/a&gt; is a library and algorithm which we used above. This is the same code which is used by &lt;code&gt;passlib&lt;/code&gt; and there's not really a reason to use this low-level library.&lt;/li&gt;
-&lt;li&gt;
-&lt;a href="https://docs.python.org/3/library/crypt.html"&gt;crypt&lt;/a&gt; is a Python standard library module that provides functions that &lt;em&gt;could&lt;/em&gt; be used for password hashing. The algorithms provided are however dependent on your system, and the ones listed in docs aren't as strong as the ones shown above.&lt;/li&gt;
-&lt;li&gt;
-&lt;a href="https://docs.python.org/3/library/hashlib.html"&gt;hashlib&lt;/a&gt; is another builtin module. This one however includes strong hashing functions suitable for password hashing. Interface of this library makes the functions more customizable and therefore requires a bit more knowledge to use properly (securely). You could absolutely use functions from this module, such as &lt;code&gt;hashlib.scrypt&lt;/code&gt; for hashing your passwords.&lt;/li&gt;
-&lt;li&gt;
-&lt;a href="https://docs.python.org/3/library/hmac.html"&gt;hmac&lt;/a&gt;, the last hashing module Python standard library has to offer is just not suitable for password hashing. HMAC is used to verify integrity and authenticity of message and doesn't have the properties required for password hashing.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;Little side-note: With all the newly acquired knowledge about proper ways to store passwords, let's imagine that you forgot your password to some service. You click on &lt;em&gt;"Forgot password?"&lt;/em&gt; on the website and instead of a recovery link, they send you your actual password. That means that they store your password in plaintext, and it also means that you should run away from that service (and if you used same password in other places, then change it).&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#storing-securely"&gt;
-  &lt;/a&gt;
-  Storing Securely
-&lt;/h2&gt;
-
-&lt;p&gt;In the previous section we assumed that the intention was to store other users' credentials, but what about your own passwords that you're using to login into remote systems?&lt;/p&gt;
-
-&lt;p&gt;Leaving passwords in code is obviously terrible choice, as it's lying there in plaintext for anyone to see and you're also running risk of accidentally pushing it to git repo. A little better option would be to store it in environment variables. You can create &lt;code&gt;.env&lt;/code&gt; file, add it to &lt;code&gt;.gitignore&lt;/code&gt;, populate it with credentials needed for current project. You can then use &lt;code&gt;dotenv&lt;/code&gt; package to get all these variables into your application like so:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="c1"&gt;# pip install python-dotenv
-&lt;/span&gt;&lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="nn"&gt;os&lt;/span&gt;
-&lt;span class="kn"&gt;from&lt;/span&gt; &lt;span class="nn"&gt;os.path&lt;/span&gt; &lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="n"&gt;join&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;dirname&lt;/span&gt;
-&lt;span class="kn"&gt;from&lt;/span&gt; &lt;span class="nn"&gt;dotenv&lt;/span&gt; &lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="n"&gt;load_dotenv&lt;/span&gt;
-
-&lt;span class="n"&gt;dotenv_path&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;join&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;dirname&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;__file__&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt; &lt;span class="s"&gt;".env"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-&lt;span class="n"&gt;load_dotenv&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;dotenv_path&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-
-&lt;span class="n"&gt;API_KEY&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;os&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;environ&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;get&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"API_KEY"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;"default"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-
-&lt;span class="k"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;API_KEY&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-&lt;span class="c1"&gt;# a3491fb2-000f-4d9f-943e-127cfe29c39c
-&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;This snippet first builds path to the &lt;code&gt;.env&lt;/code&gt; file using &lt;code&gt;os.path&lt;/code&gt; functions, which is then used to load the environment variables using &lt;code&gt;load_dotenv()&lt;/code&gt;. If your &lt;code&gt;.env&lt;/code&gt; file is in current directory like in the example above, then you can simplify the code and just call &lt;code&gt;load_dotenv(find_dotenv())&lt;/code&gt; which automatically finds the environment file. When the file is loaded, all that's left is to retrieve individual variables using &lt;code&gt;os.environ.get&lt;/code&gt;.&lt;/p&gt;
-
-&lt;p&gt;Alternatively, if you don't want to pollute your environment with application variables and secrets you can load them directly like this:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="kn"&gt;from&lt;/span&gt; &lt;span class="nn"&gt;dotenv&lt;/span&gt; &lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="n"&gt;dotenv_values&lt;/span&gt;
-
-&lt;span class="n"&gt;config&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;dotenv_values&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;".env"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-&lt;span class="k"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;config&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-&lt;span class="c1"&gt;# OrderedDict([('API_KEY', 'a3491fb2-000f-4d9f-943e-127cfe29c39c')])
-&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;The above solution is fine, but we can do better. Instead of storing passwords in unprotected file, we can instead use system's &lt;em&gt;keyring&lt;/em&gt;, which is an application that can store secure credentials in encrypted file in your home directory. This file by default uses your user account login password for encryption, so it gets automatically unlocked when you login and you therefore don't have worry about extra password.&lt;/p&gt;
-
-&lt;p&gt;To use keyring credentials in Python applications, we can use library called &lt;code&gt;keyring&lt;/code&gt;:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="c1"&gt;# pip install keyring
-&lt;/span&gt;&lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="nn"&gt;keyring&lt;/span&gt;
-&lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="nn"&gt;keyring.util.platform_&lt;/span&gt; &lt;span class="k"&gt;as&lt;/span&gt; &lt;span class="n"&gt;keyring_platform&lt;/span&gt;
-
-&lt;span class="k"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;keyring_platform&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;config_root&lt;/span&gt;&lt;span class="p"&gt;())&lt;/span&gt;
-&lt;span class="c1"&gt;# /home/username/.config/python_keyring  # Might be different for you
-&lt;/span&gt;
-&lt;span class="k"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;keyring&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;get_keyring&lt;/span&gt;&lt;span class="p"&gt;())&lt;/span&gt;
-&lt;span class="c1"&gt;# keyring.backends.SecretService.Keyring (priority: 5)
-&lt;/span&gt;
-&lt;span class="n"&gt;NAMESPACE&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s"&gt;"my-app"&lt;/span&gt;
-&lt;span class="n"&gt;ENTRY&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s"&gt;"API_KEY"&lt;/span&gt;
-
-&lt;span class="n"&gt;keyring&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;set_password&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;NAMESPACE&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;ENTRY&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;"a3491fb2-000f-4d9f-943e-127cfe29c39c"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-&lt;span class="k"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;keyring&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;get_password&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;NAMESPACE&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;ENTRY&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;
-&lt;span class="c1"&gt;# a3491fb2-000f-4d9f-943e-127cfe29c39c
-&lt;/span&gt;
-&lt;span class="n"&gt;cred&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;keyring&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;get_credential&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;NAMESPACE&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;ENTRY&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-&lt;span class="k"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="sa"&gt;f&lt;/span&gt;&lt;span class="s"&gt;"Password for username &lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="n"&gt;cred&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;username&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="s"&gt; in namespace &lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="n"&gt;NAMESPACE&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="s"&gt; is &lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="n"&gt;cred&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;password&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="s"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-&lt;span class="c1"&gt;# Password for username API_KEY in namespace my-app is a3491fb2-000f-4d9f-943e-127cfe29c39c
-&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;In the above code, we start by checking location of keyring config file, which is the place where you can make some configuration adjustments if needed. We then check the active keyring and proceed with adding a password into it. Each entry has 3 attributes - &lt;em&gt;service&lt;/em&gt;, &lt;em&gt;username&lt;/em&gt; and &lt;em&gt;password&lt;/em&gt;, where service acts as a namespace, which in this case would be a name of an application. To create and retrieve an entry, we can just use &lt;code&gt;set_password&lt;/code&gt; and &lt;code&gt;get_password&lt;/code&gt; respectively. In addition to that, also &lt;code&gt;get_credential&lt;/code&gt; can be used - it returns a &lt;em&gt;credential&lt;/em&gt; object which has an attribute for username and password.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#closing-thoughts"&gt;
-  &lt;/a&gt;
-  Closing Thoughts
-&lt;/h2&gt;
-
-&lt;p&gt;Even if you're not security specialist, you're still responsible for basic security features of applications you build. This includes taking good care of users' data and especially passwords, so hopefully some of these examples and recipes will help you to do that.&lt;/p&gt;
-
-&lt;p&gt;Beyond the approaches and techniques shown in this article, the best way to handle passwords is to avoid using them altogether by delegating the authentication to OIDC provider (e.g. Google or GitHub) or by replacing them with key-based authentication and encryption, which we will dive into in the next article.&lt;/p&gt;
-
-</description>
-      <category>python</category>
-      <category>tutorial</category>
-      <category>security</category>
-    </item>
-    <item>
-      <title>Decode Builder Design Pattern</title>
-      <author>Terminator</author>
-      <pubDate>Mon, 18 Oct 2021 18:45:34 +0000</pubDate>
-      <link>https://dev.to/gauravratnawat/builder-pattern-2pk2</link>
-      <guid>https://dev.to/gauravratnawat/builder-pattern-2pk2</guid>
-      <description>&lt;h2&gt;
-  &lt;a href="#creational-design-pattern"&gt;
-  &lt;/a&gt;
-  Creational Design Pattern
-&lt;/h2&gt;
-
-&lt;ol&gt;
-&lt;li&gt;&lt;a href="https://dev.to/gauravratnawat/abstract-factory-haf"&gt;Abstract Factory&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://dev.to/gauravratnawat/builder-pattern-2pk2"&gt;Builder Pattern&lt;/a&gt;&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;h3&gt;
-  &lt;a href="#when-to-use"&gt;
-  &lt;/a&gt;
-  When to use
-&lt;/h3&gt;
-
-&lt;ul&gt;
-&lt;li&gt;To avoid dealing with inconsistent object when the object needs to be created over several steps.&lt;/li&gt;
-&lt;li&gt;To avoid too many constructor arguments.&lt;/li&gt;
-&lt;li&gt;To construct an object that should be immutable.&lt;/li&gt;
-&lt;li&gt;To encapsulate the complete creation logic.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h3&gt;
-  &lt;a href="#intent"&gt;
-  &lt;/a&gt;
-  Intent
-&lt;/h3&gt;
-
-&lt;p&gt;Separate the construction of a complex object from its representation so that the same construction process can create different representations.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#components"&gt;
-  &lt;/a&gt;
-  Components
-&lt;/h3&gt;
-
-&lt;ol&gt;
-&lt;li&gt;The Builder class specifies an abstract interface for creating parts of a Product object.&lt;/li&gt;
-&lt;li&gt;The ConcreteBuilder constructs and puts together parts of the product by implementing the Builder interface. It defines and keeps track of the representation it creates and provides an interface for saving the product.&lt;/li&gt;
-&lt;li&gt;The Director class constructs the complex object using the Builder interface.&lt;/li&gt;
-&lt;li&gt;The Product represents the complex object that is being built.&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;h3&gt;
-  &lt;a href="#structure"&gt;
-  &lt;/a&gt;
-  Structure
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--SjAv4G4A--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/1bjply6jkt7f3sssw3du.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--SjAv4G4A--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/1bjply6jkt7f3sssw3du.png" alt="Builder Pattern"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#implementation"&gt;
-  &lt;/a&gt;
-  Implementation
-&lt;/h3&gt;
-
-&lt;p&gt;1 Define the Product (House) that gets assembled in the builder pattern.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;package com.gaurav.builder;
-
-/* The house is the object that gets assembled in the builder pattern. */
-public class House {
-
-  private String floorType;
-  private String wallType;
-  private String roofType;
-
-  public String getFloorType() {
-    return floorType;
-  }
-
-  public void setFloorType(String floorType) {
-    this.floorType = floorType;
-  }
-
-  public String getWallType() {
-    return wallType;
-  }
-
-  public void setWallType(String wallType) {
-    this.wallType = wallType;
-  }
-
-  public String getRoofType() {
-    return roofType;
-  }
-
-  public void setRoofType(String roofType) {
-    this.roofType = roofType;
-  }
-
-  public String toString() {
-    return new String("\nConstructing House \n FloorType: " + floorType
-        + "\n WallType:  " + wallType + "\n RoofType:  " + roofType );
-  }
-}
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;2 Define the Builder interface (or abstract class) along with Concrete Builders. The Builder interface contains methods for the step by step construction of the product. It also has a build method for retrieving the product object.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;package com.gaurav.builder;
-
-public interface HouseBuilder {
-
-  public HouseBuilder buildFloor();
-  public HouseBuilder buildWall();
-  public HouseBuilder buildRoof();
-  public House build();
-
-}
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;3 Concrete Builders implement the Builder interface. A Concrete Builder is responsible for creating and assembling a Product object. Different Concrete Builders create and assemble Product objects differently.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;package com.gaurav.builder;
-
-public class ConcreteHouseBuilder implements HouseBuilder {
-
-  private House house;
-
-  public ConcreteHouseBuilder() {
-    house = new House();
-  }
-
-  public HouseBuilder buildFloor() {
-    house.setFloorType("concrete");
-    return this;
-  }
-
-  public HouseBuilder buildWall() {
-    house.setWallType("concrete");
-    return this;
-  }
-
-  public HouseBuilder buildRoof() {
-    house.setRoofType("concrete");
-    return this;
-  }
-
-  public House build() {
-    return house;
-  }
-
-}
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;
-package com.gaurav.builder;
-
-public class WoodenHouseBuilder implements HouseBuilder {
-
-  private House house;
-
-  public WoodenHouseBuilder() {
-    house = new House();
-  }
-
-  public HouseBuilder buildFloor() {
-    house.setFloorType("wood");
-    return this;
-  }
-
-  public HouseBuilder buildWall() {
-    house.setWallType("wood");
-    return this;
-  }
-
-  public HouseBuilder buildRoof() {
-    house.setRoofType("wood");
-    return this;
-  }
-
-  public House build() {
-    return house;
-  }
-
-}
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;4 A Director object is responsible for constructing a Product. It does this via the Builder interface to a Concrete Builder. It constructs a Product via the various Builder methods. The director class ensures that all the required operations are performed before the object is returned to the client in a 'consistent' state.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;package com.gaurav.builder;
-
-public class HouseBuildDirector {
-  private HouseBuilder builder;
-
-  public HouseBuildDirector(final HouseBuilder builder) {
-    this.builder = builder;
-  }
-
-  public House construct() {
-    /* call the necessary methods and return the consistent object*/
-    return builder.buildFloor().buildWall().buildRoof().build();
-  }
-
-}
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;5 The client code. The Client uses different builder objects to create different types of products. However, the construction process is same.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;package com.gaurav.client;
-
-import com.gaurav.builder.ConcreteHouseBuilder;
-import com.gaurav.builder.HouseBuildDirector;
-import com.gaurav.builder.HouseBuilder;
-import com.gaurav.builder.WoodenHouseBuilder;
-
-public class BuilderClient {
-
-  public static void main(final String[] arguments) {
-
-    /* Construct a concrete house */
-    HouseBuilder builder = new ConcreteHouseBuilder();
-    HouseBuildDirector carBuildDirector = new HouseBuildDirector(builder);
-    System.out.println(carBuildDirector.construct());
-
-    /* Construct a wooden house */
-    builder = new WoodenHouseBuilder();
-    carBuildDirector = new HouseBuildDirector(builder);
-    System.out.println(carBuildDirector.construct());
-  }
-}
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;Output
-Constructing House 
- FloorType: concrete
- WallType:  concrete
- RoofType:  concrete
-
-Constructing House 
- FloorType: wood
- WallType:  wood
- RoofType:  wood
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h3&gt;
-  &lt;a href="#benefits"&gt;
-  &lt;/a&gt;
-  Benefits
-&lt;/h3&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Construction process can be controlled by the director.&lt;/li&gt;
-&lt;li&gt;Useful when many operations have to be done to build an object.&lt;/li&gt;
-&lt;li&gt;Avoids Telescoping Constructor Pattern.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h3&gt;
-  &lt;a href="#drawbacks"&gt;
-  &lt;/a&gt;
-  Drawbacks
-&lt;/h3&gt;
-
-&lt;p&gt;Not suitable if a mutable object is required.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#real-world-examples"&gt;
-  &lt;/a&gt;
-  Real World Examples
-&lt;/h3&gt;
-
-&lt;p&gt;Building a house - We need to tell the architect what all we want as part of the building. The Architect then designs and constructs the building. It will be handed over only when everything is implemented. We do not get a 'partially' built house (which is unsafe).&lt;/p&gt;
-
-&lt;h4&gt;
-  &lt;a href="#java-sdk-examples"&gt;
-  &lt;/a&gt;
-  Java SDK Examples
-&lt;/h4&gt;
-
-&lt;p&gt;java.lang.StringBuilder append()&lt;br&gt;
-java.lang.StringBuffer append()&lt;br&gt;
-java.nio.ByteBuffer put()&lt;br&gt;
-javax.swing.GroupLayout.Group addComponent()&lt;br&gt;
-java.lang.Appendable implementations&lt;/p&gt;
-
-</description>
-      <category>java</category>
-      <category>architecture</category>
-      <category>design</category>
-      <category>designpattern</category>
     </item>
   </channel>
 </rss>
