@@ -7,6 +7,660 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>Spring Boot Testing — Testcontainers and Flyway</title>
+      <author>Semyon Kirekov</author>
+      <pubDate>Tue, 19 Oct 2021 17:41:25 +0000</pubDate>
+      <link>https://dev.to/kirekov/spring-boot-testing-testcontainers-and-flyway-2jpd</link>
+      <guid>https://dev.to/kirekov/spring-boot-testing-testcontainers-and-flyway-2jpd</guid>
+      <description>&lt;p&gt;This is the second part of the Spring Boot Testing article series. The code snippets are taken from this &lt;a href="https://github.com/SimonHarmonicMinor/spring-boot-test-example"&gt;repository&lt;/a&gt;. You can clone it and run tests to see how it works.&lt;/p&gt;
+
+&lt;p&gt;Previous Chapter. &lt;a href="https://dev.to/kirekov/spring-boot-testing-data-and-services-288f"&gt;Spring Boot Testing — Data and Services&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;So, we have learned how to test the &lt;a href="https://martinfowler.com/eaaCatalog/serviceLayer.html"&gt;service layer&lt;/a&gt; and the &lt;a href="https://martinfowler.com/eaaCatalog/repository.html"&gt;repository layer&lt;/a&gt; with the H2 database. Such tests have some benefits. For example, they are pretty fast and require no complex configuration neither on the local machine nor in the CI/CD environment. However, H2 is not the database that usually runs in production. If we use some vendor-specific features of one database, H2 might not help us. So, today we are going to discuss how to run test cases against the true DB server.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--vpleWMhV--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/x3aq161w7y6sf05s5qav.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--vpleWMhV--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/x3aq161w7y6sf05s5qav.png" alt="Cover Image"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#automatic-schema-creation"&gt;
+  &lt;/a&gt;
+  Automatic Schema Creation
+&lt;/h2&gt;
+
+&lt;p&gt;How can we run tests with the real database? Well, we could create a new instance locally and configure the test environment by editing &lt;code&gt;src/test/resources/application.yml&lt;/code&gt;. It does work but it makes the build hard to reproduce. Every developer that is working on the project has to be sure that they have two separate databases. One for development and another one for tests running. Besides, it makes executing the build on CI/CD environment a real challenge.&lt;/p&gt;
+
+&lt;p&gt;So, &lt;a href="https://www.testcontainers.org/"&gt;Testcontainers&lt;/a&gt; to the rescue! It’s a Java library that launches the service within the &lt;a href="https://www.docker.com/"&gt;Docker&lt;/a&gt; container, runs tests, and eventually destroys the container. You don’t need to worry about anything, the framework does the job. Just make sure you have Docker installed and then you are ready to go. The library supports dozens of different databases and modules (&lt;a href="https://www.testcontainers.org/modules/databases/postgres/"&gt;PostgreSQL&lt;/a&gt;, &lt;a href="https://www.testcontainers.org/modules/databases/mysql/"&gt;MySQL&lt;/a&gt;, &lt;a href="https://www.testcontainers.org/modules/databases/mongodb/"&gt;MongoDB&lt;/a&gt;, &lt;a href="https://www.testcontainers.org/modules/kafka/"&gt;Kafka&lt;/a&gt;, &lt;a href="https://www.testcontainers.org/modules/elasticsearch/"&gt;Elasticsearch&lt;/a&gt;, Nginx, &lt;a href="https://www.testcontainers.org/modules/nginx/"&gt;Toxiproxy&lt;/a&gt;, and many others). Even if you didn’t find the one that you need, you could use &lt;a href="https://www.testcontainers.org/features/creating_container/"&gt;generic container creation&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;The first step is to add the required dependencies.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight groovy"&gt;&lt;code&gt;&lt;span class="n"&gt;testImplementation&lt;/span&gt; &lt;span class="s1"&gt;'org.testcontainers:junit-jupiter'&lt;/span&gt;
+&lt;span class="n"&gt;testImplementation&lt;/span&gt; &lt;span class="s1"&gt;'org.testcontainers:postgresql'&lt;/span&gt;
+&lt;span class="n"&gt;runtimeOnly&lt;/span&gt; &lt;span class="s1"&gt;'org.postgresql:postgresql'&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Then we need to create a separate configuration file in &lt;code&gt;src/test/resources&lt;/code&gt;. Spring Boot is able to distinguish different configuration files by the &lt;a href="https://www.baeldung.com/spring-profiles"&gt;profiles&lt;/a&gt;. The profile name should be placed as a suffix like &lt;code&gt;application-PROFILE_NAME.yml&lt;/code&gt;. For example, the configuration file named &lt;code&gt;application-test-containers.yml&lt;/code&gt; is applied only when &lt;code&gt;test-containers&lt;/code&gt; profile is active.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;spring&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;datasource&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;url&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;jdbc:tc:postgresql:9.6.8:///test_database&lt;/span&gt;
+    &lt;span class="na"&gt;username&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;user&lt;/span&gt;
+    &lt;span class="na"&gt;password&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;password&lt;/span&gt;
+  &lt;span class="na"&gt;jpa&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;hibernate&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;ddl-auto&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;create&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Have you noticed the &lt;code&gt;tc&lt;/code&gt; suffix in the JDBC-connection string? That’s the magic that comes with the union of JUnit 5 and Testcontainers. The thing is that you don’t need any programmatic configurations at all! When the framework sees that &lt;code&gt;url&lt;/code&gt; contains the &lt;code&gt;tc&lt;/code&gt; suffix it runs all necessary Docker commands internally. You can find more examples &lt;a href="https://www.testcontainers.org/modules/databases/jdbc/"&gt;here&lt;/a&gt;.&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;We set &lt;code&gt;spring.jpa.hibernate.ddl-auto=create&lt;/code&gt; property&lt;br&gt;
+so the database schema shall be created automatically&lt;br&gt;
+according to definition of entity classes.&lt;br&gt;
+Flyway integration is described in the next section.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;Now let’s take a look at &lt;code&gt;PersonCreateService.createFamily&lt;/code&gt; method and its H2 test again.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight java"&gt;&lt;code&gt;&lt;span class="nd"&gt;@Service&lt;/span&gt;
+&lt;span class="nd"&gt;@RequiredArgsConstructor&lt;/span&gt;
+&lt;span class="kd"&gt;public&lt;/span&gt; &lt;span class="kd"&gt;class&lt;/span&gt; &lt;span class="nc"&gt;PersonCreateServiceImpl&lt;/span&gt; &lt;span class="kd"&gt;implements&lt;/span&gt; &lt;span class="nc"&gt;PersonCreateService&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+
+  &lt;span class="kd"&gt;private&lt;/span&gt; &lt;span class="kd"&gt;final&lt;/span&gt; &lt;span class="nc"&gt;PersonValidateService&lt;/span&gt; &lt;span class="n"&gt;personValidateService&lt;/span&gt;&lt;span class="o"&gt;;&lt;/span&gt;
+  &lt;span class="kd"&gt;private&lt;/span&gt; &lt;span class="kd"&gt;final&lt;/span&gt; &lt;span class="nc"&gt;PersonRepository&lt;/span&gt; &lt;span class="n"&gt;personRepository&lt;/span&gt;&lt;span class="o"&gt;;&lt;/span&gt;
+
+  &lt;span class="nd"&gt;@Override&lt;/span&gt;
+  &lt;span class="nd"&gt;@Transactional&lt;/span&gt;
+  &lt;span class="kd"&gt;public&lt;/span&gt; &lt;span class="nc"&gt;List&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nc"&gt;PersonDTO&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="nf"&gt;createFamily&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="nc"&gt;Iterable&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nc"&gt;String&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="n"&gt;firstNames&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt; &lt;span class="nc"&gt;String&lt;/span&gt; &lt;span class="n"&gt;lastName&lt;/span&gt;&lt;span class="o"&gt;)&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;final&lt;/span&gt; &lt;span class="kt"&gt;var&lt;/span&gt; &lt;span class="n"&gt;people&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nc"&gt;ArrayList&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nc"&gt;PersonDTO&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;();&lt;/span&gt;
+    &lt;span class="n"&gt;firstNames&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;forEach&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="n"&gt;firstName&lt;/span&gt; &lt;span class="o"&gt;-&amp;gt;&lt;/span&gt; &lt;span class="n"&gt;people&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;add&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="n"&gt;createPerson&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="n"&gt;firstName&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt; &lt;span class="n"&gt;lastName&lt;/span&gt;&lt;span class="o"&gt;)));&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="n"&gt;people&lt;/span&gt;&lt;span class="o"&gt;;&lt;/span&gt;
+  &lt;span class="o"&gt;}&lt;/span&gt;
+
+  &lt;span class="nd"&gt;@Override&lt;/span&gt;
+  &lt;span class="nd"&gt;@Transactional&lt;/span&gt;
+  &lt;span class="kd"&gt;public&lt;/span&gt; &lt;span class="nc"&gt;PersonDTO&lt;/span&gt; &lt;span class="nf"&gt;createPerson&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="nc"&gt;String&lt;/span&gt; &lt;span class="n"&gt;firstName&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt; &lt;span class="nc"&gt;String&lt;/span&gt; &lt;span class="n"&gt;lastName&lt;/span&gt;&lt;span class="o"&gt;)&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+    &lt;span class="n"&gt;personValidateService&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;checkUserCreation&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="n"&gt;firstName&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt; &lt;span class="n"&gt;lastName&lt;/span&gt;&lt;span class="o"&gt;);&lt;/span&gt;
+    &lt;span class="kd"&gt;final&lt;/span&gt; &lt;span class="kt"&gt;var&lt;/span&gt; &lt;span class="n"&gt;createdPerson&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;personRepository&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;saveAndFlush&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;
+        &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nf"&gt;Person&lt;/span&gt;&lt;span class="o"&gt;()&lt;/span&gt;
+            &lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;setFirstName&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="n"&gt;firstName&lt;/span&gt;&lt;span class="o"&gt;)&lt;/span&gt;
+            &lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;setLastName&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="n"&gt;lastName&lt;/span&gt;&lt;span class="o"&gt;)&lt;/span&gt;
+    &lt;span class="o"&gt;);&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nc"&gt;DTOConverters&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;toPersonDTO&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="n"&gt;createdPerson&lt;/span&gt;&lt;span class="o"&gt;);&lt;/span&gt;
+  &lt;span class="o"&gt;}&lt;/span&gt;
+&lt;span class="o"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight java"&gt;&lt;code&gt;&lt;span class="nd"&gt;@SpringBootTest&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="n"&gt;webEnvironment&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nc"&gt;WebEnvironment&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;NONE&lt;/span&gt;&lt;span class="o"&gt;)&lt;/span&gt;
+&lt;span class="nd"&gt;@AutoConfigureTestDatabase&lt;/span&gt;
+&lt;span class="kd"&gt;class&lt;/span&gt; &lt;span class="nc"&gt;PersonCreateServiceImplSpringBootTest&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+
+  &lt;span class="nd"&gt;@Autowired&lt;/span&gt;
+  &lt;span class="kd"&gt;private&lt;/span&gt; &lt;span class="nc"&gt;PersonRepository&lt;/span&gt; &lt;span class="n"&gt;personRepository&lt;/span&gt;&lt;span class="o"&gt;;&lt;/span&gt;
+  &lt;span class="nd"&gt;@MockBean&lt;/span&gt;
+  &lt;span class="kd"&gt;private&lt;/span&gt; &lt;span class="nc"&gt;PersonValidateService&lt;/span&gt; &lt;span class="n"&gt;personValidateService&lt;/span&gt;&lt;span class="o"&gt;;&lt;/span&gt;
+  &lt;span class="nd"&gt;@Autowired&lt;/span&gt;
+  &lt;span class="kd"&gt;private&lt;/span&gt; &lt;span class="nc"&gt;PersonCreateService&lt;/span&gt; &lt;span class="n"&gt;personCreateService&lt;/span&gt;&lt;span class="o"&gt;;&lt;/span&gt;
+
+  &lt;span class="nd"&gt;@BeforeEach&lt;/span&gt;
+  &lt;span class="kt"&gt;void&lt;/span&gt; &lt;span class="nf"&gt;init&lt;/span&gt;&lt;span class="o"&gt;()&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+    &lt;span class="n"&gt;personRepository&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;deleteAll&lt;/span&gt;&lt;span class="o"&gt;();&lt;/span&gt;
+  &lt;span class="o"&gt;}&lt;/span&gt;
+
+  &lt;span class="nd"&gt;@Test&lt;/span&gt;
+  &lt;span class="kt"&gt;void&lt;/span&gt; &lt;span class="nf"&gt;shouldCreateOnePerson&lt;/span&gt;&lt;span class="o"&gt;()&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;final&lt;/span&gt; &lt;span class="kt"&gt;var&lt;/span&gt; &lt;span class="n"&gt;people&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;personCreateService&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;createFamily&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;
+        &lt;span class="nc"&gt;List&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;of&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Simon"&lt;/span&gt;&lt;span class="o"&gt;),&lt;/span&gt;
+        &lt;span class="s"&gt;"Kirekov"&lt;/span&gt;
+    &lt;span class="o"&gt;);&lt;/span&gt;
+    &lt;span class="n"&gt;assertEquals&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt; &lt;span class="n"&gt;people&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;size&lt;/span&gt;&lt;span class="o"&gt;());&lt;/span&gt;
+    &lt;span class="kd"&gt;final&lt;/span&gt; &lt;span class="kt"&gt;var&lt;/span&gt; &lt;span class="n"&gt;person&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;people&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;get&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="o"&gt;);&lt;/span&gt;
+    &lt;span class="n"&gt;assertEquals&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Simon"&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt; &lt;span class="n"&gt;person&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;getFirstName&lt;/span&gt;&lt;span class="o"&gt;());&lt;/span&gt;
+    &lt;span class="n"&gt;assertEquals&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Kirekov"&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt; &lt;span class="n"&gt;person&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;getLastName&lt;/span&gt;&lt;span class="o"&gt;());&lt;/span&gt;
+    &lt;span class="n"&gt;assertTrue&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="n"&gt;person&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;getDateCreated&lt;/span&gt;&lt;span class="o"&gt;().&lt;/span&gt;&lt;span class="na"&gt;isBefore&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="nc"&gt;ZonedDateTime&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;now&lt;/span&gt;&lt;span class="o"&gt;()));&lt;/span&gt;
+  &lt;span class="o"&gt;}&lt;/span&gt;
+
+  &lt;span class="nd"&gt;@Test&lt;/span&gt;
+  &lt;span class="kt"&gt;void&lt;/span&gt; &lt;span class="nf"&gt;shouldRollbackIfAnyUserIsNotValidated&lt;/span&gt;&lt;span class="o"&gt;()&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+    &lt;span class="n"&gt;doThrow&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nc"&gt;ValidationFailedException&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;""&lt;/span&gt;&lt;span class="o"&gt;))&lt;/span&gt;
+        &lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;when&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="n"&gt;personValidateService&lt;/span&gt;&lt;span class="o"&gt;)&lt;/span&gt;
+        &lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;checkUserCreation&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"John"&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt; &lt;span class="s"&gt;"Brown"&lt;/span&gt;&lt;span class="o"&gt;);&lt;/span&gt;
+    &lt;span class="n"&gt;assertThrows&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="nc"&gt;ValidationFailedException&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;class&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt; &lt;span class="o"&gt;()&lt;/span&gt; &lt;span class="o"&gt;-&amp;gt;&lt;/span&gt; &lt;span class="n"&gt;personCreateService&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;createFamily&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;
+        &lt;span class="nc"&gt;List&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;of&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Matilda"&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt; &lt;span class="s"&gt;"Vasya"&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt; &lt;span class="s"&gt;"John"&lt;/span&gt;&lt;span class="o"&gt;),&lt;/span&gt;
+        &lt;span class="s"&gt;"Brown"&lt;/span&gt;
+    &lt;span class="o"&gt;));&lt;/span&gt;
+    &lt;span class="n"&gt;assertEquals&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt; &lt;span class="n"&gt;personRepository&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;count&lt;/span&gt;&lt;span class="o"&gt;());&lt;/span&gt;
+  &lt;span class="o"&gt;}&lt;/span&gt;
+&lt;span class="o"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;How do we run the test with Testcontainers PostgreSQL instance? All we have to do is to add two annotations. &lt;code&gt;@AutoConfigureTestDatabase&lt;/code&gt; though should be removed.&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;
+&lt;code&gt;@ActiveProfiles("test-containers")&lt;/code&gt; — activates the &lt;code&gt;test-containers&lt;/code&gt; profile so the Spring could read the configuration file that was described earlier&lt;/li&gt;
+&lt;li&gt;
+&lt;code&gt;@Testcontainers&lt;/code&gt; — tells to run PostgreSQL instance in Docker &lt;a href="https://www.testcontainers.org/modules/databases/jdbc/"&gt;automagically&lt;/a&gt;
+&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight java"&gt;&lt;code&gt;&lt;span class="nd"&gt;@SpringBootTest&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="n"&gt;webEnvironment&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nc"&gt;WebEnvironment&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;NONE&lt;/span&gt;&lt;span class="o"&gt;)&lt;/span&gt;
+&lt;span class="nd"&gt;@Testcontainers&lt;/span&gt;
+&lt;span class="nd"&gt;@ActiveProfiles&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"test-containers"&lt;/span&gt;&lt;span class="o"&gt;)&lt;/span&gt;
+&lt;span class="kd"&gt;class&lt;/span&gt; &lt;span class="nc"&gt;PersonCreateServiceImplTestContainers&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+
+  &lt;span class="nd"&gt;@Autowired&lt;/span&gt;
+  &lt;span class="kd"&gt;private&lt;/span&gt; &lt;span class="nc"&gt;PersonRepository&lt;/span&gt; &lt;span class="n"&gt;personRepository&lt;/span&gt;&lt;span class="o"&gt;;&lt;/span&gt;
+  &lt;span class="nd"&gt;@MockBean&lt;/span&gt;
+  &lt;span class="kd"&gt;private&lt;/span&gt; &lt;span class="nc"&gt;PersonValidateService&lt;/span&gt; &lt;span class="n"&gt;personValidateService&lt;/span&gt;&lt;span class="o"&gt;;&lt;/span&gt;
+  &lt;span class="nd"&gt;@Autowired&lt;/span&gt;
+  &lt;span class="kd"&gt;private&lt;/span&gt; &lt;span class="nc"&gt;PersonCreateService&lt;/span&gt; &lt;span class="n"&gt;personCreateService&lt;/span&gt;&lt;span class="o"&gt;;&lt;/span&gt;
+
+  &lt;span class="nd"&gt;@BeforeEach&lt;/span&gt;
+  &lt;span class="kt"&gt;void&lt;/span&gt; &lt;span class="nf"&gt;init&lt;/span&gt;&lt;span class="o"&gt;()&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+    &lt;span class="n"&gt;personRepository&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;deleteAll&lt;/span&gt;&lt;span class="o"&gt;();&lt;/span&gt;
+  &lt;span class="o"&gt;}&lt;/span&gt;
+
+  &lt;span class="nd"&gt;@Test&lt;/span&gt;
+  &lt;span class="kt"&gt;void&lt;/span&gt; &lt;span class="nf"&gt;shouldCreateOnePerson&lt;/span&gt;&lt;span class="o"&gt;()&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;final&lt;/span&gt; &lt;span class="kt"&gt;var&lt;/span&gt; &lt;span class="n"&gt;people&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;personCreateService&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;createFamily&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;
+        &lt;span class="nc"&gt;List&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;of&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Simon"&lt;/span&gt;&lt;span class="o"&gt;),&lt;/span&gt;
+        &lt;span class="s"&gt;"Kirekov"&lt;/span&gt;
+    &lt;span class="o"&gt;);&lt;/span&gt;
+    &lt;span class="n"&gt;assertEquals&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt; &lt;span class="n"&gt;people&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;size&lt;/span&gt;&lt;span class="o"&gt;());&lt;/span&gt;
+    &lt;span class="kd"&gt;final&lt;/span&gt; &lt;span class="kt"&gt;var&lt;/span&gt; &lt;span class="n"&gt;person&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;people&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;get&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="o"&gt;);&lt;/span&gt;
+    &lt;span class="n"&gt;assertEquals&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Simon"&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt; &lt;span class="n"&gt;person&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;getFirstName&lt;/span&gt;&lt;span class="o"&gt;());&lt;/span&gt;
+    &lt;span class="n"&gt;assertEquals&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Kirekov"&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt; &lt;span class="n"&gt;person&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;getLastName&lt;/span&gt;&lt;span class="o"&gt;());&lt;/span&gt;
+    &lt;span class="n"&gt;assertTrue&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="n"&gt;person&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;getDateCreated&lt;/span&gt;&lt;span class="o"&gt;().&lt;/span&gt;&lt;span class="na"&gt;isBefore&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="nc"&gt;ZonedDateTime&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;now&lt;/span&gt;&lt;span class="o"&gt;()));&lt;/span&gt;
+  &lt;span class="o"&gt;}&lt;/span&gt;
+
+  &lt;span class="nd"&gt;@Test&lt;/span&gt;
+  &lt;span class="kt"&gt;void&lt;/span&gt; &lt;span class="nf"&gt;shouldRollbackIfAnyUserIsNotValidated&lt;/span&gt;&lt;span class="o"&gt;()&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+    &lt;span class="n"&gt;doThrow&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nc"&gt;ValidationFailedException&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;""&lt;/span&gt;&lt;span class="o"&gt;))&lt;/span&gt;
+        &lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;when&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="n"&gt;personValidateService&lt;/span&gt;&lt;span class="o"&gt;)&lt;/span&gt;
+        &lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;checkUserCreation&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"John"&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt; &lt;span class="s"&gt;"Brown"&lt;/span&gt;&lt;span class="o"&gt;);&lt;/span&gt;
+    &lt;span class="n"&gt;assertThrows&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="nc"&gt;ValidationFailedException&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;class&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt; &lt;span class="o"&gt;()&lt;/span&gt; &lt;span class="o"&gt;-&amp;gt;&lt;/span&gt; &lt;span class="n"&gt;personCreateService&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;createFamily&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;
+        &lt;span class="nc"&gt;List&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;of&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Matilda"&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt; &lt;span class="s"&gt;"Vasya"&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt; &lt;span class="s"&gt;"John"&lt;/span&gt;&lt;span class="o"&gt;),&lt;/span&gt;
+        &lt;span class="s"&gt;"Brown"&lt;/span&gt;
+    &lt;span class="o"&gt;));&lt;/span&gt;
+    &lt;span class="n"&gt;assertEquals&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt; &lt;span class="n"&gt;personRepository&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;count&lt;/span&gt;&lt;span class="o"&gt;());&lt;/span&gt;
+  &lt;span class="o"&gt;}&lt;/span&gt;
+&lt;span class="o"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--ZiTXzm3O--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/e8dgoz3cijg0f6ptxhz1.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ZiTXzm3O--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/e8dgoz3cijg0f6ptxhz1.png" alt="Test results"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;See? Piece of cake!&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#repository-tests"&gt;
+  &lt;/a&gt;
+  Repository Tests
+&lt;/h2&gt;
+
+&lt;p&gt;What about testing repository layers? Let’s see H2 example again.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight java"&gt;&lt;code&gt;&lt;span class="nd"&gt;@DataJpaTest&lt;/span&gt;
+&lt;span class="kd"&gt;class&lt;/span&gt; &lt;span class="nc"&gt;PersonRepositoryDataJpaTest&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+
+  &lt;span class="nd"&gt;@Autowired&lt;/span&gt;
+  &lt;span class="kd"&gt;private&lt;/span&gt; &lt;span class="nc"&gt;PersonRepository&lt;/span&gt; &lt;span class="n"&gt;personRepository&lt;/span&gt;&lt;span class="o"&gt;;&lt;/span&gt;
+
+  &lt;span class="nd"&gt;@Test&lt;/span&gt;
+  &lt;span class="kt"&gt;void&lt;/span&gt; &lt;span class="nf"&gt;shouldReturnAlLastNames&lt;/span&gt;&lt;span class="o"&gt;()&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+    &lt;span class="n"&gt;personRepository&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;saveAndFlush&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nc"&gt;Person&lt;/span&gt;&lt;span class="o"&gt;().&lt;/span&gt;&lt;span class="na"&gt;setFirstName&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"John"&lt;/span&gt;&lt;span class="o"&gt;).&lt;/span&gt;&lt;span class="na"&gt;setLastName&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Brown"&lt;/span&gt;&lt;span class="o"&gt;));&lt;/span&gt;
+    &lt;span class="n"&gt;personRepository&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;saveAndFlush&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nc"&gt;Person&lt;/span&gt;&lt;span class="o"&gt;().&lt;/span&gt;&lt;span class="na"&gt;setFirstName&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Kyle"&lt;/span&gt;&lt;span class="o"&gt;).&lt;/span&gt;&lt;span class="na"&gt;setLastName&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Green"&lt;/span&gt;&lt;span class="o"&gt;));&lt;/span&gt;
+    &lt;span class="n"&gt;personRepository&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;saveAndFlush&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nc"&gt;Person&lt;/span&gt;&lt;span class="o"&gt;().&lt;/span&gt;&lt;span class="na"&gt;setFirstName&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Paul"&lt;/span&gt;&lt;span class="o"&gt;).&lt;/span&gt;&lt;span class="na"&gt;setLastName&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Brown"&lt;/span&gt;&lt;span class="o"&gt;));&lt;/span&gt;
+
+    &lt;span class="n"&gt;assertEquals&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="nc"&gt;Set&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;of&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Brown"&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt; &lt;span class="s"&gt;"Green"&lt;/span&gt;&lt;span class="o"&gt;),&lt;/span&gt; &lt;span class="n"&gt;personRepository&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;findAllLastNames&lt;/span&gt;&lt;span class="o"&gt;());&lt;/span&gt;
+  &lt;span class="o"&gt;}&lt;/span&gt;
+&lt;span class="o"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The rules are the same but there is a slight difference. &lt;code&gt;@DataJpaTest&lt;/code&gt; is annotated with &lt;code&gt;@AutoConfigureTestDatabase&lt;/code&gt; itself. This annotation replaces any data source with the H2 instance by default. So, we need to override this behavior by adding &lt;code&gt;replace=Replace.NONE&lt;/code&gt; property.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight java"&gt;&lt;code&gt;
+&lt;span class="nd"&gt;@DataJpaTest&lt;/span&gt;
+&lt;span class="nd"&gt;@Testcontainers&lt;/span&gt;
+&lt;span class="nd"&gt;@ActiveProfiles&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"test-containers"&lt;/span&gt;&lt;span class="o"&gt;)&lt;/span&gt;
+&lt;span class="nd"&gt;@AutoConfigureTestDatabase&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="n"&gt;replace&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nc"&gt;Replace&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;NONE&lt;/span&gt;&lt;span class="o"&gt;)&lt;/span&gt;
+&lt;span class="kd"&gt;class&lt;/span&gt; &lt;span class="nc"&gt;PersonRepositoryTestContainers&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+
+  &lt;span class="nd"&gt;@Autowired&lt;/span&gt;
+  &lt;span class="kd"&gt;private&lt;/span&gt; &lt;span class="nc"&gt;PersonRepository&lt;/span&gt; &lt;span class="n"&gt;personRepository&lt;/span&gt;&lt;span class="o"&gt;;&lt;/span&gt;
+
+  &lt;span class="nd"&gt;@Test&lt;/span&gt;
+  &lt;span class="kt"&gt;void&lt;/span&gt; &lt;span class="nf"&gt;shouldReturnAlLastNames&lt;/span&gt;&lt;span class="o"&gt;()&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+    &lt;span class="n"&gt;personRepository&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;saveAndFlush&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nc"&gt;Person&lt;/span&gt;&lt;span class="o"&gt;().&lt;/span&gt;&lt;span class="na"&gt;setFirstName&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"John"&lt;/span&gt;&lt;span class="o"&gt;).&lt;/span&gt;&lt;span class="na"&gt;setLastName&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Brown"&lt;/span&gt;&lt;span class="o"&gt;));&lt;/span&gt;
+    &lt;span class="n"&gt;personRepository&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;saveAndFlush&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nc"&gt;Person&lt;/span&gt;&lt;span class="o"&gt;().&lt;/span&gt;&lt;span class="na"&gt;setFirstName&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Kyle"&lt;/span&gt;&lt;span class="o"&gt;).&lt;/span&gt;&lt;span class="na"&gt;setLastName&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Green"&lt;/span&gt;&lt;span class="o"&gt;));&lt;/span&gt;
+    &lt;span class="n"&gt;personRepository&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;saveAndFlush&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nc"&gt;Person&lt;/span&gt;&lt;span class="o"&gt;().&lt;/span&gt;&lt;span class="na"&gt;setFirstName&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Paul"&lt;/span&gt;&lt;span class="o"&gt;).&lt;/span&gt;&lt;span class="na"&gt;setLastName&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Brown"&lt;/span&gt;&lt;span class="o"&gt;));&lt;/span&gt;
+
+    &lt;span class="n"&gt;assertEquals&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="nc"&gt;Set&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;of&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Brown"&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt; &lt;span class="s"&gt;"Green"&lt;/span&gt;&lt;span class="o"&gt;),&lt;/span&gt; &lt;span class="n"&gt;personRepository&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;findAllLastNames&lt;/span&gt;&lt;span class="o"&gt;());&lt;/span&gt;
+  &lt;span class="o"&gt;}&lt;/span&gt;
+&lt;span class="o"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--v1NhInAI--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/tn14rvwmg44mbmst595a.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--v1NhInAI--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/tn14rvwmg44mbmst595a.png" alt="Test results"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Everything still works fine.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#flyway-integration"&gt;
+  &lt;/a&gt;
+  Flyway Integration
+&lt;/h2&gt;
+
+&lt;p&gt;&lt;a href="https://martinfowler.com/articles/evodb.html"&gt;The Evolutionary Database Design&lt;/a&gt; principle has been described a long time ago. Nowadays it is standard routine to use tools that implement this pattern. &lt;a href="https://flywaydb.org/"&gt;Flyway&lt;/a&gt; and &lt;a href="https://www.liquibase.org/"&gt;Liquibase&lt;/a&gt; are the most popular ones in the Java world. We are going to integrate Testcontainers with Flyway.&lt;/p&gt;
+
+&lt;p&gt;Firstly, the Flyway dependency is required.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight groovy"&gt;&lt;code&gt;&lt;span class="n"&gt;implementation&lt;/span&gt; &lt;span class="s2"&gt;"org.flywaydb:flyway-core"&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Secondly, it’s necessary to disable Flyway in &lt;code&gt;application-test-containers.yml&lt;/code&gt; because there will be a separate configuration file.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;spring&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;datasource&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;url&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;jdbc:tc:postgresql:9.6.8:///test_database&lt;/span&gt;
+    &lt;span class="na"&gt;username&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;user&lt;/span&gt;
+    &lt;span class="na"&gt;password&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;password&lt;/span&gt;
+  &lt;span class="na"&gt;jpa&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;hibernate&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;ddl-auto&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;create&lt;/span&gt;
+  &lt;span class="na"&gt;flyway&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;enabled&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="no"&gt;false&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Then we are going to create &lt;code&gt;application-test-containers-flyway.yml&lt;/code&gt;. The library provides lots of auto-configuration. So, actually, we don’t need to tune anything.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;spring&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;datasource&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;url&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;jdbc:tc:postgresql:9.6.8:///test_database&lt;/span&gt;
+    &lt;span class="na"&gt;username&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;user&lt;/span&gt;
+    &lt;span class="na"&gt;password&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;password&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Now it’s time to add SQL migrations. The default directory is &lt;code&gt;resources/db/migration&lt;/code&gt;.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight sql"&gt;&lt;code&gt;&lt;span class="k"&gt;create&lt;/span&gt; &lt;span class="k"&gt;table&lt;/span&gt; &lt;span class="n"&gt;person&lt;/span&gt;
+&lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="n"&gt;id&lt;/span&gt;           &lt;span class="nb"&gt;serial&lt;/span&gt; &lt;span class="k"&gt;primary&lt;/span&gt; &lt;span class="k"&gt;key&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="n"&gt;first_name&lt;/span&gt;   &lt;span class="nb"&gt;text&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="n"&gt;last_name&lt;/span&gt;    &lt;span class="nb"&gt;text&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="n"&gt;date_created&lt;/span&gt; &lt;span class="nb"&gt;timestamp&lt;/span&gt; &lt;span class="k"&gt;with&lt;/span&gt; &lt;span class="nb"&gt;time&lt;/span&gt; &lt;span class="k"&gt;zone&lt;/span&gt;
+&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Finally, we need to replace &lt;code&gt;test-containers&lt;/code&gt; profile with &lt;code&gt;test-containers-flyway&lt;/code&gt; one.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight java"&gt;&lt;code&gt;&lt;span class="nd"&gt;@SpringBootTest&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="n"&gt;webEnvironment&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nc"&gt;WebEnvironment&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;NONE&lt;/span&gt;&lt;span class="o"&gt;)&lt;/span&gt;
+&lt;span class="nd"&gt;@Testcontainers&lt;/span&gt;
+&lt;span class="nd"&gt;@ActiveProfiles&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"test-containers-flyway"&lt;/span&gt;&lt;span class="o"&gt;)&lt;/span&gt;
+&lt;span class="kd"&gt;class&lt;/span&gt; &lt;span class="nc"&gt;PersonCreateServiceImplTestContainersFlyway&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+
+  &lt;span class="nd"&gt;@Autowired&lt;/span&gt;
+  &lt;span class="kd"&gt;private&lt;/span&gt; &lt;span class="nc"&gt;PersonRepository&lt;/span&gt; &lt;span class="n"&gt;personRepository&lt;/span&gt;&lt;span class="o"&gt;;&lt;/span&gt;
+  &lt;span class="nd"&gt;@MockBean&lt;/span&gt;
+  &lt;span class="kd"&gt;private&lt;/span&gt; &lt;span class="nc"&gt;PersonValidateService&lt;/span&gt; &lt;span class="n"&gt;personValidateService&lt;/span&gt;&lt;span class="o"&gt;;&lt;/span&gt;
+  &lt;span class="nd"&gt;@Autowired&lt;/span&gt;
+  &lt;span class="kd"&gt;private&lt;/span&gt; &lt;span class="nc"&gt;PersonCreateService&lt;/span&gt; &lt;span class="n"&gt;personCreateService&lt;/span&gt;&lt;span class="o"&gt;;&lt;/span&gt;
+
+  &lt;span class="nd"&gt;@BeforeEach&lt;/span&gt;
+  &lt;span class="kt"&gt;void&lt;/span&gt; &lt;span class="nf"&gt;init&lt;/span&gt;&lt;span class="o"&gt;()&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+    &lt;span class="n"&gt;personRepository&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;deleteAll&lt;/span&gt;&lt;span class="o"&gt;();&lt;/span&gt;
+  &lt;span class="o"&gt;}&lt;/span&gt;
+
+  &lt;span class="nd"&gt;@Test&lt;/span&gt;
+  &lt;span class="kt"&gt;void&lt;/span&gt; &lt;span class="nf"&gt;shouldCreateOnePerson&lt;/span&gt;&lt;span class="o"&gt;()&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;final&lt;/span&gt; &lt;span class="kt"&gt;var&lt;/span&gt; &lt;span class="n"&gt;people&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;personCreateService&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;createFamily&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;
+        &lt;span class="nc"&gt;List&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;of&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Simon"&lt;/span&gt;&lt;span class="o"&gt;),&lt;/span&gt;
+        &lt;span class="s"&gt;"Kirekov"&lt;/span&gt;
+    &lt;span class="o"&gt;);&lt;/span&gt;
+    &lt;span class="n"&gt;assertEquals&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt; &lt;span class="n"&gt;people&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;size&lt;/span&gt;&lt;span class="o"&gt;());&lt;/span&gt;
+    &lt;span class="kd"&gt;final&lt;/span&gt; &lt;span class="kt"&gt;var&lt;/span&gt; &lt;span class="n"&gt;person&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;people&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;get&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="o"&gt;);&lt;/span&gt;
+    &lt;span class="n"&gt;assertEquals&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Simon"&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt; &lt;span class="n"&gt;person&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;getFirstName&lt;/span&gt;&lt;span class="o"&gt;());&lt;/span&gt;
+    &lt;span class="n"&gt;assertEquals&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Kirekov"&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt; &lt;span class="n"&gt;person&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;getLastName&lt;/span&gt;&lt;span class="o"&gt;());&lt;/span&gt;
+    &lt;span class="n"&gt;assertTrue&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="n"&gt;person&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;getDateCreated&lt;/span&gt;&lt;span class="o"&gt;().&lt;/span&gt;&lt;span class="na"&gt;isBefore&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="nc"&gt;ZonedDateTime&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;now&lt;/span&gt;&lt;span class="o"&gt;()));&lt;/span&gt;
+  &lt;span class="o"&gt;}&lt;/span&gt;
+
+  &lt;span class="nd"&gt;@Test&lt;/span&gt;
+  &lt;span class="kt"&gt;void&lt;/span&gt; &lt;span class="nf"&gt;shouldRollbackIfAnyUserIsNotValidated&lt;/span&gt;&lt;span class="o"&gt;()&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+    &lt;span class="n"&gt;doThrow&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nc"&gt;ValidationFailedException&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;""&lt;/span&gt;&lt;span class="o"&gt;))&lt;/span&gt;
+        &lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;when&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="n"&gt;personValidateService&lt;/span&gt;&lt;span class="o"&gt;)&lt;/span&gt;
+        &lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;checkUserCreation&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"John"&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt; &lt;span class="s"&gt;"Brown"&lt;/span&gt;&lt;span class="o"&gt;);&lt;/span&gt;
+    &lt;span class="n"&gt;assertThrows&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="nc"&gt;ValidationFailedException&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;class&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt; &lt;span class="o"&gt;()&lt;/span&gt; &lt;span class="o"&gt;-&amp;gt;&lt;/span&gt; &lt;span class="n"&gt;personCreateService&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;createFamily&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;
+        &lt;span class="nc"&gt;List&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;of&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Matilda"&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt; &lt;span class="s"&gt;"Vasya"&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt; &lt;span class="s"&gt;"John"&lt;/span&gt;&lt;span class="o"&gt;),&lt;/span&gt;
+        &lt;span class="s"&gt;"Brown"&lt;/span&gt;
+    &lt;span class="o"&gt;));&lt;/span&gt;
+    &lt;span class="n"&gt;assertEquals&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt; &lt;span class="n"&gt;personRepository&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;count&lt;/span&gt;&lt;span class="o"&gt;());&lt;/span&gt;
+  &lt;span class="o"&gt;}&lt;/span&gt;
+&lt;span class="o"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--6HiXUmJZ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/83im8cawj73bur4uw1gk.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--6HiXUmJZ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/83im8cawj73bur4uw1gk.png" alt="Tests result with Flyway schema creation"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#cicd-tests-running"&gt;
+  &lt;/a&gt;
+  CI/CD Tests Running
+&lt;/h2&gt;
+
+&lt;p&gt;Although Testcontainers’ purpose is to make tests easy to run there are some caveats in CI/CD environment build. Some vendors integrate with Testcontainers transparently. For example, &lt;a href="https://www.travis-ci.com/"&gt;Travis-CI&lt;/a&gt; spots the requirement to run a container automatically and does the job internally. But some other tools may require additional configuration — e.g., Jenkins.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#docker-wormhole"&gt;
+  &lt;/a&gt;
+  Docker Wormhole
+&lt;/h3&gt;
+
+&lt;p&gt;It’s a common approach to package the whole application build in a Docker image during the CI run. Testcontainers can handle it and run the defined containers on the host Docker server. In this case, we need to bind &lt;code&gt;/var/run/docker.sock&lt;/code&gt; as a volume. More than that, the directory inside the container should be the same as the one where the container was launched.&lt;/p&gt;
+
+&lt;p&gt;For instance, that’s a hypothetical command to run tests on a CI environment with &lt;code&gt;gradle&lt;/code&gt;.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;docker run &lt;span class="nt"&gt;-it&lt;/span&gt;   &lt;span class="se"&gt;\&lt;/span&gt;
+           &lt;span class="nt"&gt;--rm&lt;/span&gt;  &lt;span class="se"&gt;\&lt;/span&gt;
+           &lt;span class="nt"&gt;-v&lt;/span&gt; &lt;span class="nv"&gt;$PWD&lt;/span&gt;:&lt;span class="nv"&gt;$PWD&lt;/span&gt; &lt;span class="se"&gt;\&lt;/span&gt;
+           &lt;span class="nt"&gt;-w&lt;/span&gt; &lt;span class="nv"&gt;$PWD&lt;/span&gt;  &lt;span class="se"&gt;\&lt;/span&gt;
+           &lt;span class="nt"&gt;-v&lt;/span&gt; /var/run/docker.sock:/var/run/docker.sock gradle:7.1-jdk8 &lt;span class="se"&gt;\&lt;/span&gt;
+           gradle &lt;span class="nb"&gt;test&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;You can find more information on the official &lt;a href="https://www.testcontainers.org/supported_docker_environment/continuous_integration/dind_patterns/"&gt;Testcontainers guide page&lt;/a&gt;.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#conclusion"&gt;
+  &lt;/a&gt;
+  Conclusion
+&lt;/h2&gt;
+
+&lt;p&gt;Today we have discussed how to test the data and service layer with Testcontainers and Flyway. Next time we will test the API (controllers) level. If you have any questions or suggestions, please, leave your comments down below. Thanks for reading!&lt;/p&gt;
+
+</description>
+      <category>java</category>
+      <category>testing</category>
+      <category>docker</category>
+      <category>sql</category>
+    </item>
+    <item>
+      <title>nvm is for barbarians. Manage Node versions with Volta instead.</title>
+      <author>Jon Crowell</author>
+      <pubDate>Tue, 19 Oct 2021 17:35:25 +0000</pubDate>
+      <link>https://dev.to/jonrcrowell/nvm-is-for-barbarians-manage-node-versions-with-volta-instead-9ii</link>
+      <guid>https://dev.to/jonrcrowell/nvm-is-for-barbarians-manage-node-versions-with-volta-instead-9ii</guid>
+      <description>&lt;p&gt;&lt;strong&gt;&lt;em&gt;Previously published at &lt;a href="//www.fullstackfish.com"&gt;fullstackfish.com&lt;/a&gt;&lt;/em&gt;&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;Thanks to Volta, managing multiple versions of Node is no longer a pain.&lt;/p&gt;
+
+&lt;p&gt;Under the covers, all the Node version managers are doing the same thing: setting up symlinks to different versions of Node installed on your computer. The difference between them is how they manage those symlinks. If you know the correct version of Node for the project you are currently working on, you can use nvm to set it to the active version, and all is well, as long as you remember to do so. The problem here is that you need to know the correct version of Node. And if you're switching from a project that has different Node version requirements, you have to remember to switch each time you open one of those projects. As Wes Bos would say, that's no way to live your life. That's what barbarians do.&lt;/p&gt;
+
+&lt;p&gt;Volta takes a set-it-and-forget-it approach. You "pin" the version of Node you need for your project and &lt;strong&gt;Volta auto-magically switches to that version anytime you are working on that project&lt;/strong&gt;, without any action on your part. You can have multiple projects open at the same time, each with their own, different versions of Node, running simultaneously.&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;&lt;em&gt;"Because Volta’s toolchain always keeps track of where you are, it makes sure the tools you use always respect the settings of the project you’re working on. This means you don’t have to worry about changing the state of your installed software when switching between projects."&lt;/em&gt;&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;— &lt;a href="https://docs.volta.sh/guide/understanding#managing-your-toolchain"&gt;Understanding Volta&lt;/a&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+
+
+&lt;/blockquote&gt;
+
+&lt;h3&gt;
+  &lt;a href="#installation"&gt;
+  &lt;/a&gt;
+  Installation
+&lt;/h3&gt;
+
+&lt;p&gt;Go to the getting started page on the &lt;a href="https://docs.volta.sh/guide/getting-started"&gt;Volta site&lt;/a&gt; and follow the instructions for your operating system.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#usage"&gt;
+  &lt;/a&gt;
+  Usage
+&lt;/h3&gt;
+
+&lt;p&gt;Pin the version of Node you want to your project by running the &lt;code&gt;pin&lt;/code&gt; command in the root folder of your project. For example:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;volta pin node@14
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Volta adds an entry to your package.json.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight json"&gt;&lt;code&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="err"&gt;...&lt;/span&gt;&lt;span class="w"&gt;
+  &lt;/span&gt;&lt;span class="nl"&gt;"volta"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"node"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"14.18.0"&lt;/span&gt;&lt;span class="w"&gt;
+  &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Now anyone on your team that has Volta installed will get the benefit of having the correct version of Node pinned. If you don't have the specified version of Node, Volta will download and install it for you, then switch to that version. For any barbarians that may also be working on your project, the entry won't affect them, but will allow them to see the version of Node they'll need to use.&lt;/p&gt;
+
+&lt;p&gt;Volta is written in Rust and is completely cross-platform, working in Windows and in all Unix shells.&lt;/p&gt;
+
+&lt;p&gt;As web developers, we have more than enough things to worry about. Using Volta means that managing Node versions is no longer one of them.&lt;/p&gt;
+
+</description>
+      <category>javascript</category>
+      <category>nvm</category>
+      <category>node</category>
+      <category>volta</category>
+    </item>
+    <item>
+      <title>Let's Learn Kubernetes - Basics - 3</title>
+      <author>Prashant Ghildiyal</author>
+      <pubDate>Tue, 19 Oct 2021 17:33:20 +0000</pubDate>
+      <link>https://dev.to/pghildiyal/lets-learn-kubernetes-basics-3-4lm</link>
+      <guid>https://dev.to/pghildiyal/lets-learn-kubernetes-basics-3-4lm</guid>
+      <description>&lt;p&gt;Kubernetes is a container management tool that automates the deployment, scaling, and operations of an application. &lt;br&gt;
+In the previous blog of &lt;a href="https://dev.to/pghildiyal/let-s-learn-kubernetes-basics-2-2a9a"&gt;'Let's learn Kubernetes'&lt;/a&gt; Series, we have seen some fundamental topics such as Services, Load Balancers, ClusterIP, Nodeport, Ingress, DNS among others.&lt;/p&gt;
+
+
+&lt;div class="ltag__link"&gt;
+  &lt;a href="/pghildiyal" class="ltag__link__link"&gt;
+    &lt;div class="ltag__link__pic"&gt;
+      &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--vjSmCgLb--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://res.cloudinary.com/practicaldev/image/fetch/s--hvAQYJZQ--/c_fill%2Cf_auto%2Cfl_progressive%2Ch_150%2Cq_auto%2Cw_150/https://dev-to-uploads.s3.amazonaws.com/uploads/user/profile_image/568793/d19992e0-9401-4bf5-bef7-4c368a6961ce.jpg" alt="pghildiyal"&gt;
+    &lt;/div&gt;
+  &lt;/a&gt;
+  &lt;a href="/pghildiyal/let-s-learn-kubernetes-basics-2-2a9a" class="ltag__link__link"&gt;
+    &lt;div class="ltag__link__content"&gt;
+      &lt;h2&gt;Let's Learn Kubernetes - Basics - 2&lt;/h2&gt;
+      &lt;h3&gt;Prashant Ghildiyal ・ Oct 11 ・ 3 min read&lt;/h3&gt;
+      &lt;div class="ltag__link__taglist"&gt;
+        &lt;span class="ltag__link__tag"&gt;#kubernetes&lt;/span&gt;
+        &lt;span class="ltag__link__tag"&gt;#devops&lt;/span&gt;
+        &lt;span class="ltag__link__tag"&gt;#beginners&lt;/span&gt;
+        &lt;span class="ltag__link__tag"&gt;#go&lt;/span&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/a&gt;
+&lt;/div&gt;
+
+
+&lt;p&gt;Continuing with the series, this blog is all about storage in Kubernetes. In this blog we'll give a short explanation of each concept and then post a link that explains the same in-depth. &lt;/p&gt;
+
+&lt;p&gt;Before diving in, it would be great if you can check out, star our repo Devtron, An End-to-End Kubernetes Software Delivery Workflow, which makes the DevOps workflow flawless for Developers, DevOps Engineers.&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="ltag-github-readme-tag"&gt;
+  &lt;div class="readme-overview"&gt;
+    &lt;h2&gt;
+      &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--i3JOwpme--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/github-logo-ba8488d21cd8ee1fee097b8410db9deaa41d0ca30b004c0c63de0a479114156f.svg" alt="GitHub logo"&gt;
+      &lt;a href="https://github.com/devtron-labs"&gt;
+        devtron-labs
+      &lt;/a&gt; / &lt;a href="https://github.com/devtron-labs/devtron"&gt;
+        devtron
+      &lt;/a&gt;
+    &lt;/h2&gt;
+    &lt;h3&gt;
+      Software Delivery Workflow For Kubernetes
+    &lt;/h3&gt;
+  &lt;/div&gt;
+&lt;/div&gt;
+
+
+&lt;h2&gt;
+  &lt;a href="#storage-in-kubernetes"&gt;
+  &lt;/a&gt;
+  Storage in Kubernetes
+&lt;/h2&gt;
+
+&lt;p&gt;With the rise of Kubernetes as a method for hosting microservice-based processes, data storage is always a concern. When managing containerized environments, Kubernetes storage is useful for storage administrators, because it allows them to maintain multiple forms of persistent and non-persistent data in a Kubernetes cluster.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--TV8MjBAB--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/n4avkzywxxiiljd1abdq.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--TV8MjBAB--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/n4avkzywxxiiljd1abdq.png" alt="Kubernetes Storage Illustration"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;At a high level kubernetes uses the following types of storages described below:&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#persistent-volume-amp-persistent-volume-claims"&gt;
+  &lt;/a&gt;
+  Persistent Volume &amp;amp; Persistent Volume Claims
+&lt;/h3&gt;
+
+&lt;p&gt;A PersistentVolume (PV) is a storage resource in the cluster that has been provisioned by an administrator or dynamically provisioned using Storage Classes.&lt;/p&gt;
+
+&lt;p&gt;Persistent volumes are independent of the lifecycle of the pod that uses it, meaning that even if the pod shuts down, the data in the volume is not erased.In order for a Pod to start using these volumes, it must request a volume by issuing a persistent volume claim (PVC). PVCs describe the storage capacity and characteristics a pod requires, and the cluster attempts to match the request and provision the desired persistent volume.&lt;/p&gt;
+
+&lt;p&gt;On the other hand, A PersistentVolumeClaim (PVC) is a request sent by a Kubernetes node for storage.The claim can include specific storage parameters required by the application—for example an amount of storage, or a specific type of access (read/write, read-only, etc.). &lt;br&gt;
+Kubernetes looks for a PV that meets the criteria defined in the user’s PVC, and if there is one, it matches the claim to PV. This is called binding.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--l4dwrXjM--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/orklpdk0fnl3sw99bckt.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--l4dwrXjM--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/orklpdk0fnl3sw99bckt.png" alt="Persistent Volume Illustration"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;To know more about them checkout these listed links:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;p&gt;&lt;a href="https://theithollow.com/2019/03/04/kubernetes-persistent-volumes/"&gt;Kubernetes – Persistent Volumes&lt;/a&gt;&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;&lt;a href="https://www.youtube.com/watch?v=x2sMWUkasoE"&gt;Persistent Volumes (PV) &amp;amp; Persistent Volume Claim(PVC) - A Video&lt;/a&gt;&lt;/p&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3&gt;
+  &lt;a href="#storage-classes"&gt;
+  &lt;/a&gt;
+  Storage Classes
+&lt;/h3&gt;
+
+&lt;p&gt;Kubernetes Storage Class Objects are specified by name in Persistent Volume Claims to provision storage with a set of properties. The storage class itself identifies the provisioner that will be used and defines that set of properties in terms the provisioner understands.&lt;br&gt;
+Each Storage Class contains the fields provisioner, parameters, and reclaim policy, which is used when a Persistent Volume belonging to the class needs to be dynamically provisioned.&lt;/p&gt;
+
+&lt;p&gt;To get a detailed view regarding Storage Classes check out the listed links:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;p&gt;&lt;a href="https://cloud.ibm.com/docs/containers?topic=containers-kube_concepts#storageclasses"&gt;Storage Classes&lt;/a&gt;&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;&lt;a href="https://www.youtube.com/watch?v=RAXPUTSO9p0"&gt;What Is a Kubernetes Storage Class?&lt;/a&gt;&lt;/p&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3&gt;
+  &lt;a href="#dynamic-provisioning-of-storage-classes"&gt;
+  &lt;/a&gt;
+  Dynamic provisioning of Storage Classes:
+&lt;/h3&gt;
+
+&lt;p&gt;Kubernetes supports dynamic volume configuration, allowing you to create storage volumes on demand. Therefore, administrators do not have to manually create new storage volumes and then create a Persistent Volume object for use in the cluster. &lt;/p&gt;
+
+&lt;p&gt;When the user requests a specific type of storage, the entire process runs automatically. The cluster administrator defines storage class objects as needed. Each Storage Class refers to a volume plugin, also called a provisioner. &lt;/p&gt;
+
+&lt;p&gt;To get a more detailed view about the topic refer to the following video:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="https://www.youtube.com/watch?v=LQjQvN_HXvY"&gt;Dynamic Volume Provisioning in Kubernetes&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;The next blog of Let's learn Kubernetes would be the last blog of the series' Basics. If you like to learn about other significant topics in Kubernetes, you can follow the previous blogs.&lt;/p&gt;
+
+</description>
+      <category>beginners</category>
+      <category>kubernetes</category>
+      <category>devops</category>
+      <category>go</category>
+    </item>
+    <item>
       <title>How to Pass Components as Props in React</title>
       <author>Francisco Mendes</author>
       <pubDate>Tue, 19 Oct 2021 17:28:13 +0000</pubDate>
@@ -403,7 +1057,7 @@
       <category>webdev</category>
     </item>
     <item>
-      <title>FilteredContent @20/10/2021</title>
+      <title>FilteredContent @19/10/2021</title>
       <author>JP</author>
       <pubDate>Tue, 19 Oct 2021 17:24:20 +0000</pubDate>
       <link>https://dev.to/jeel/filteredcontent-20102021-260m</link>
@@ -477,7 +1131,32 @@
 &lt;/li&gt;
 &lt;/ul&gt;
 
-&lt;p&gt;✅ Reading completed. 👍&lt;/p&gt;
+&lt;h3&gt;
+  &lt;a href="#indian-startups-raised-109b-during-q321"&gt;
+  &lt;/a&gt;
+  5️⃣ Indian startups raised $10.9B during Q3'21
+&lt;/h3&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Read at &lt;a href="https://economictimes.indiatimes.com/tech/startups/indian-startups-raise-10-billion-in-a-quarter-for-the-first-time-report-says/articleshow/87106975.cms"&gt;indiatimes.com/...&lt;/a&gt;
+&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--wj60XjAz--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/6mpih4opz563wfherho8.png" alt="Image description"&gt;
+&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--f3FdtZnt--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/nd64246fxwrgh1fokn26.png" alt="Image description"&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3&gt;
+  &lt;a href="#funding-for-tech"&gt;
+  &lt;/a&gt;
+  6️⃣ Funding for tech.
+&lt;/h3&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Read at &lt;a href="https://inside.com/campaigns/inside-venture-capital-29840/sections/today-s-funding-10-19-2021-255384"&gt;inside.com/...&lt;/a&gt;
+&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--fQPyGEkn--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/960jdxujd6s5t0isu7w1.png" alt="Image description"&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;✅ Reading complete. 👍&lt;/p&gt;
 
 </description>
       <category>technology</category>
@@ -1063,6 +1742,100 @@ Buttons are often too tiny in mobile applications. It is possible of Mistypings 
       <category>css</category>
     </item>
     <item>
+      <title>Jumping into the NFT Space? You're probably going to get scammed. A quick outline to protect your crypto's!</title>
+      <author>Tessa Mero</author>
+      <pubDate>Tue, 19 Oct 2021 16:27:29 +0000</pubDate>
+      <link>https://dev.to/tessamero/jumping-into-the-nft-space-youre-probably-going-to-get-scammed-a-quick-outline-to-protect-your-cryptos-25k0</link>
+      <guid>https://dev.to/tessamero/jumping-into-the-nft-space-youre-probably-going-to-get-scammed-a-quick-outline-to-protect-your-cryptos-25k0</guid>
+      <description>
+
+&lt;p&gt;TLDR; don't click links, if browsing web, use browser you don't keep wallet on, don't click links, turn off discord DMs, research projects for validity, don't hold all cryptos in one wallet&lt;/p&gt;
+
+
+
+
+&lt;p&gt;You are feeling impulsive and in a rush. You have the case of "FOMO" - Fear of Missing Out. You know that if you don't click that link and mint an NFT within 1 minute, it will be sold out, and your chance of being able to profit significantly will be off the table.&lt;/p&gt;
+
+&lt;p&gt;I'm writing this blog post mostly to send to a lot of friends that are new to the NFT space. I've seen way too many friends get scammed, and I'm sick of it. The smartest of the people can fall for these, especially when you don't have a lot of time to think as you want to purchase it as quickly as possible.&lt;/p&gt;
+
+&lt;p&gt;Here's a quick outline of common scams that I see even the smartest people fall for. Don't be this person. Be careful, and don't rush into things until you are 100% sure it is the right decision.&lt;/p&gt;
+
+&lt;p&gt;These examples are specific to waiting on minting/launch dates, and not aftermarket NFT marketplace sales.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Discord DM's from Admins/Announcements&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;This is the most common one. These scammers are making possibly millions a day. They make hundreds of accounts mimicking the exact username of the admin (sometimes using Ascii characters) of the NFT servers you are in, and have professional written up messages to send. They spam every single person in the Discord server. A lot of these servers have from 1k members to 500k members in a short period of time, so it's easy to find at least a few suckers to click the links they send.&lt;/p&gt;
+
+&lt;p&gt;The link will look so close to the actual minting website. They will sometimes mention, "the website is back up and there's only 500 left!" so you feel rushed to click it before everyone does. &lt;/p&gt;
+
+&lt;p&gt;You go to the website, connect your wallet, and 1 second later your wallet is wiped clean of all your money.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;How to protect yourself from this scam?&lt;/strong&gt;&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Get Discord Nitro - you can turn off Direct Messagse (DM's) across all servers, then manually turn on DM's per server you want to receive messages in. This is the ONLY way. Or just don't open any DMs. Sometimes these DM's look like server announcements and not actual DM's so it can be risky.&lt;/li&gt;
+&lt;li&gt;Don't hold all of your cryptocurrency in one single browser wallet (Meta Mask, Phantom...). Create multiple wallets. Use one wallet for your main wallet for minting with the exact amount of tokens you plan on using. So if something goes wrong, you don't lose everything at once.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;&lt;strong&gt;RUG PULLS&lt;/strong&gt;&lt;br&gt;
+You join an NFT project, you see 30k followers on Twitter, 50k people joined the Discord in the last 7 days. It's legit, right? You go to mint on launch, everything goes fine. You pay 1 SOL ($160 ish each today), and everything is continuing as normal. The developers and owner of the project goes silent. The floor price (lowest value of the NFTs in the marketplace for that project) starts dropping. Everyone panics and sells off as fast as possible. Value drops to almost nothing. Then &lt;em&gt;poof&lt;/em&gt; the discord is closed down and they are gone.&lt;/p&gt;
+
+&lt;p&gt;There's many different ways a rug pull can happen. &lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;How to protect yourself from this scam?&lt;/strong&gt;&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Evaluate the number of Discord members vs how active people are chatting. It's easy to add 50k members of bots/fake people to make the numbers look good.&lt;/li&gt;
+&lt;li&gt;Do a &lt;a href="https://sparktoro.com/tools/fake-followers-audit"&gt;Twitter audit&lt;/a&gt; and figure out the number of fake users. Usually under 15% means 100% real followers. When it hits the 40%+, you know they buy all their followers. This is just from my experience auditing. Look at their Twitter activity, is there a lot of RT's, likes, and comments on their posts with 50k followers? No activity on every post with 50k followers? Hmm red flag yeah?&lt;/li&gt;
+&lt;li&gt;Research the project owner and artist. Are they all on anonymous accounts? Did they appear out of nowhere? All the members of the team have no followers with brand new social media accounts? No one knows their real identity? (Note: It is common everyone is on anonymous accounts, but it still pays off to do research and evaluate if it is worth the risk).&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;&lt;strong&gt;Twitter Replies with Official Mint Links&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;I see this common on Elon Musks tweets. He makes a post, and someone replies with a fake Elon Musk account, telling people to click the link, and if you send Bitcoin, you will receive 10x more bitcoin. People FALL for this. &lt;em&gt;sigh&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;Sometimes NFT projects will announce the official minting website on Twitter. Scammers can use fake accounts that look like that exact account and reply to it with a fake minting site designed to wipe out your wallet and take your cryptos. Be careful with links you click on. Think and evaluate before clicking on any links. The FOMO can wait, your money has more value.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Google searching NFT projects&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;Most of these NFT projects are new. Created a month before launch, using hype and quick marketing to get their project known. There are a percentage of these that are legitimate with a team that has a great road map and a plan for the project. It's hard to find this, but researching helps.&lt;/p&gt;
+
+&lt;p&gt;Sometimes you need to find that NFT project website, and you go on google. You will run into duplicates of that website scammers created that look so similar to the official URL, you cannot distinguish the difference. Even the website looks the same. Clicking the "Minting" or purchase button looks the same and works the same. Except - when you click on mint and you connect your wallet, it just takes ALL your money, and receive nothing.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;How to protect yourself from this scam?&lt;/strong&gt;&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Always, always, ALWAYS go to the official Discord server and find the channel that says "official links". Always click links from that channel and NOWHERE else. Unless links came from friends who are experienced and you trust.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;I'm going to keep adding to this list as I have more time, and I see more people in these communities fall for scams. I'll keep trying to educate others so they don't potentially lose their life savings&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;People in the NFT Discords posting links&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;I've seen random people post links to fake websites or NFT's that are exact copies of the project, but put on another marketplace, for half the price. People panic thinking they are jumping into a deal of a lifetime, click the link in the "general-chat" and purchase those NFTs. Then realize the value is $0 USD because it wasn't the actual project.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;How to protect yourself from this scam?&lt;/strong&gt;&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Like I said above, don't click links from ANYONE. Ever. Never, ever, ever, ever click links.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;&lt;strong&gt;Browsing the Web&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;When browsing the web, especially going to random websites looking at code scripts, NFT websites, or anything crypto related, there's that slight chance, (okay it is very common as it happened to me while searching for code samples working with opensea API), that it will randomly try to connect to your wallet. If you hit that connect button when clicking around too quickly on a website, it can potentially transfer everything out of your browser wallet and to their account.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;How to protect yourself from this scam?&lt;/strong&gt;&lt;br&gt;
+Keep your wallet on a browser that you don't use to browse the web. Simple :) &lt;/p&gt;
+
+&lt;p&gt;So for now, protect your cryptos, and be safe. &amp;lt;3&lt;/p&gt;
+
+</description>
+      <category>nfts</category>
+      <category>nft</category>
+      <category>blockchain</category>
+      <category>crypto</category>
+    </item>
+    <item>
       <title>How To Clone A Repository From Github Using Visual Studio 2019</title>
       <author>Benjamin Fadina</author>
       <pubDate>Tue, 19 Oct 2021 16:25:15 +0000</pubDate>
@@ -1076,690 +1849,6 @@ Buttons are often too tiny in mobile applications. It is possible of Mistypings 
       <category>repository</category>
       <category>github</category>
       <category>clone</category>
-    </item>
-    <item>
-      <title>How to practice JavaScript ?</title>
-      <author>ubuntu-mohammed-qasim</author>
-      <pubDate>Tue, 19 Oct 2021 16:22:55 +0000</pubDate>
-      <link>https://dev.to/mohammed_qasim_sattar/how-to-practice-javascript--a1i</link>
-      <guid>https://dev.to/mohammed_qasim_sattar/how-to-practice-javascript--a1i</guid>
-      <description>&lt;p&gt;I need to practice javascript anyone have idea how to start?&lt;/p&gt;
-
-</description>
-      <category>javascript</category>
-      <category>beginners</category>
-      <category>programming</category>
-      <category>react</category>
-    </item>
-    <item>
-      <title>Let's build a simple REST API with Node.js and Express</title>
-      <author>Amrin</author>
-      <pubDate>Tue, 19 Oct 2021 16:22:03 +0000</pubDate>
-      <link>https://dev.to/coderamrin/lets-build-a-simple-rest-api-with-nodejs-and-express-27b6</link>
-      <guid>https://dev.to/coderamrin/lets-build-a-simple-rest-api-with-nodejs-and-express-27b6</guid>
-      <description>&lt;p&gt;Hey there, hope you are doing well. &lt;/p&gt;
-
-&lt;p&gt;Today we will build a simple REST API with node.js and express.  &lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#prerequisite"&gt;
-  &lt;/a&gt;
-  Prerequisite:
-&lt;/h3&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Basic knowledge of Javascript&lt;/li&gt;
-&lt;li&gt;Basic understanding of command line&lt;/li&gt;
-&lt;li&gt;Installed node.js&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h4&gt;
-  &lt;a href="#what-is-rest-api"&gt;
-  &lt;/a&gt;
-  What is REST API?
-&lt;/h4&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;Let’s say you’re trying to find videos about Batman on Youtube. You open up Youtube, type “Batman” into a search field, hit enter, and you see a list of videos about Batman. A REST API works in a similar way. You search for something, and you get a list of results back from the service you’re requesting from.&lt;/p&gt;
-
-&lt;p&gt;An API is an application programming interface. It is a set of rules that allow programs to talk to each other. The developer creates the API on the server and allows the client to talk to it.&lt;/p&gt;
-
-&lt;p&gt;REST determines how the API looks like. It stands for “Representational State Transfer”. It is a set of rules that developers follow when they create their API. One of these rules states that you should be able to get a piece of data (called a resource) when you link to a specific URL.&lt;/p&gt;
-
-&lt;p&gt;Each URL is called a request while the data sent back to you is called a response.&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;This quote is from &lt;a href="https://www.smashingmagazine.com/2018/01/understanding-using-rest-api/"&gt;smashingmagazine&lt;/a&gt;, check out the complete article if you want to know more.  &lt;/p&gt;
-
-&lt;p&gt;In a much simpler way, REST API is a way to communicate with the web &lt;a href="https://developer.mozilla.org/en-US/docs/Learn/Common_questions/What_is_a_web_server"&gt;server&lt;/a&gt; so that we can get the data, delete it and update it.  &lt;/p&gt;
-
-&lt;p&gt;Enough definitions let's build the API. &lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#setting-up-the-project"&gt;
-  &lt;/a&gt;
-  Setting up the project:
-&lt;/h3&gt;
-
-&lt;ul&gt;
-&lt;li&gt;create the project folder&lt;/li&gt;
-&lt;li&gt;run "npm init -y" to initialize the app&lt;/li&gt;
-&lt;li&gt;to install express run "npm install express"
-&lt;/li&gt;
-&lt;li&gt;create "server.js file" file&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;Open the server.js file in your code editor. Let's build the API:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;express&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;require&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;express&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;app&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;express&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
-&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;port&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="mi"&gt;5000&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; 
-
-&lt;span class="nx"&gt;app&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="kd"&gt;get&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;/&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;req&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;res&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nx"&gt;res&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;send&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;hello world!&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="p"&gt;});&lt;/span&gt;
-
-&lt;span class="nx"&gt;app&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;listen&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;port&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`app listening at http://localhost:&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;port&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-&lt;span class="p"&gt;});&lt;/span&gt;
-
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Let's break down the code line by line:&lt;/p&gt;
-
-&lt;p&gt;On line 1 we exported the express from the node-module folder so that we can use it to create the server. In line 2 we initialized the server with the express() function. And in line three we created the port variable with the value of 5000. &lt;/p&gt;
-
-&lt;p&gt;In this line, we are initializing a route with &lt;a href="https://expressjs.com/en/guide/routing.html"&gt;app.get&lt;/a&gt;. What we are saying is, when someone goes to the root route (&lt;a href="http://example.com/"&gt;http://example.com/&lt;/a&gt;) then send a "Hello world" response.  &lt;/p&gt;
-
-&lt;p&gt;at the end line, we are saying is run the server on PORT 5000. &lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#conclusion"&gt;
-  &lt;/a&gt;
-  Conclusion
-&lt;/h3&gt;
-
-&lt;p&gt;That's it for today.&lt;br&gt;
-We've just built a simple REST API with node and express. &lt;br&gt;
-If you want a complete Node.js and Express project tutorial let me know in the comment below. &lt;br&gt;
-I'll write a detailed article if you are interested :)&lt;/p&gt;
-
-&lt;p&gt;And, I publish new articles every Tuesday and Friday.Follow me at &lt;a class="mentioned-user" href="https://dev.to/coderamrin"&gt;@coderamrin&lt;/a&gt;
- me to get notified when I publish a new article. &lt;/p&gt;
-
-&lt;p&gt;You can also connect with me on Twitter at &lt;a href="https://twitter.com/CoderAmrin"&gt;@coderamrin&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Thanks for reading  &lt;/p&gt;
-
-&lt;h4&gt;
-  &lt;a href="#resources"&gt;
-  &lt;/a&gt;
-  Resources:
-&lt;/h4&gt;
-
-&lt;ul&gt;
-&lt;li&gt;
-&lt;a href="https://www.smashingmagazine.com/2018/01/understanding-using-rest-api/"&gt;https://www.smashingmagazine.com/2018/01/understanding-using-rest-api/&lt;/a&gt; &lt;/li&gt;
-&lt;li&gt;&lt;a href="https://www.youtube.com/watch?v=lsMQRaeKNDk"&gt;https://www.youtube.com/watch?v=lsMQRaeKNDk&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;
-&lt;a href="https://www.edureka.co/blog/rest-api-with-node-js/"&gt;https://www.edureka.co/blog/rest-api-with-node-js/&lt;/a&gt; &lt;/li&gt;
-&lt;/ul&gt;
-
-</description>
-      <category>javascript</category>
-      <category>node</category>
-      <category>beginners</category>
-      <category>programming</category>
-    </item>
-    <item>
-      <title>10 Awesome HTML Tags You Didn't Know About</title>
-      <author>Rohan Kiratsata</author>
-      <pubDate>Tue, 19 Oct 2021 16:20:18 +0000</pubDate>
-      <link>https://dev.to/rohankiratsata/10-awesome-html-tags-you-didnt-know-about-3p26</link>
-      <guid>https://dev.to/rohankiratsata/10-awesome-html-tags-you-didnt-know-about-3p26</guid>
-      <description>&lt;p&gt;Hello fellow developers! Today I'm going to tell you the 10 best HTML tags that you didn't know about. There are a lot of HTML tags that we are not familiar with. So let's jump into it.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#1-abbreviation-raw-ltabbrgt-endraw-"&gt;
-  &lt;/a&gt;
-  1. Abbreviation &lt;code&gt;&amp;lt;abbr&amp;gt;&lt;/code&gt;
-&lt;/h2&gt;
-
-&lt;p&gt;The abbr tag is used to display an abbreviation or acronym. It provides an description or expansion of words.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;p&amp;gt;&lt;/span&gt;Example of abbr tag :&lt;span class="nt"&gt;&amp;lt;/p&amp;gt;&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;p&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;abbr&lt;/span&gt; &lt;span class="na"&gt;title=&lt;/span&gt;&lt;span class="s"&gt;"Cascading Style Sheets"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;CSS&lt;span class="nt"&gt;&amp;lt;/abbr&amp;gt;&lt;/span&gt; is used to style your &lt;span class="nt"&gt;&amp;lt;abbr&lt;/span&gt; &lt;span class="na"&gt;title=&lt;/span&gt;&lt;span class="s"&gt;"Hyper Text Markup Language"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;HTML&lt;span class="nt"&gt;&amp;lt;/abbr&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;/p&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h4&gt;
-  &lt;a href="#live-demo"&gt;
-  &lt;/a&gt;
-  Live Demo:
-&lt;/h4&gt;
-
-CSS is used to style your HTML
-
-
-
-
-
-&lt;h2&gt;
-  &lt;a href="#2-kbd-raw-ltkbdgt-endraw-"&gt;
-  &lt;/a&gt;
-  2. Kbd &lt;code&gt;&amp;lt;kbd&amp;gt;&lt;/code&gt;
-&lt;/h2&gt;
-
-&lt;p&gt;The kbd tag defines the textual user input from keyboard, voice input, or any other textual input. You can also add your own CSS.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;p&amp;gt;&lt;/span&gt;Shortcut for Copy is &lt;span class="nt"&gt;&amp;lt;kbd&amp;gt;&lt;/span&gt;Ctrl&lt;span class="nt"&gt;&amp;lt;/kbd&amp;gt;&lt;/span&gt; + &lt;span class="nt"&gt;&amp;lt;kbd&amp;gt;&lt;/span&gt;C&lt;span class="nt"&gt;&amp;lt;/kbd&amp;gt;&amp;lt;/p&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h4&gt;
-  &lt;a href="#live-demo"&gt;
-  &lt;/a&gt;
-  Live Demo:
-&lt;/h4&gt;
-
-&lt;p&gt;Shortcut for Copy is Ctrl + C&lt;/p&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#3-color-picker-raw-ltinput-typecolorgt-endraw-"&gt;
-  &lt;/a&gt;
-  3. Color Picker &lt;code&gt;&amp;lt;input type="color"&amp;gt;&lt;/code&gt;
-&lt;/h2&gt;
-
-&lt;p&gt;Input element of type &lt;code&gt;color&lt;/code&gt; provides a user interface element which lets user to choose a color.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;p&amp;gt;&lt;/span&gt;
-    Choose Color : &lt;span class="nt"&gt;&amp;lt;input&lt;/span&gt; &lt;span class="na"&gt;type=&lt;/span&gt;&lt;span class="s"&gt;"color"&lt;/span&gt; &lt;span class="na"&gt;name=&lt;/span&gt;&lt;span class="s"&gt;"colorPicker"&lt;/span&gt; &lt;span class="na"&gt;value=&lt;/span&gt;&lt;span class="s"&gt;"#222"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt; 
-&lt;span class="nt"&gt;&amp;lt;/p&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h4&gt;
-  &lt;a href="#example-output"&gt;
-  &lt;/a&gt;
-  Example Output:
-&lt;/h4&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--t5fqpyBn--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/7rxr0hb7hg8071zjdysf.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--t5fqpyBn--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/7rxr0hb7hg8071zjdysf.png" alt="Color Picker Image"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#4-meter-raw-ltmetergt-endraw-"&gt;
-  &lt;/a&gt;
-  4. Meter &lt;code&gt;&amp;lt;meter&amp;gt;&lt;/code&gt;
-&lt;/h2&gt;
-
-&lt;p&gt;The meter tag represents either a scalar value within a known range or a fractional value.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight html"&gt;&lt;code&gt;Remaining Storage : 
-&lt;span class="nt"&gt;&amp;lt;meter&lt;/span&gt; &lt;span class="na"&gt;id=&lt;/span&gt;&lt;span class="s"&gt;"storage"&lt;/span&gt; &lt;span class="na"&gt;min=&lt;/span&gt;&lt;span class="s"&gt;"0"&lt;/span&gt; &lt;span class="na"&gt;max=&lt;/span&gt;&lt;span class="s"&gt;"100"&lt;/span&gt; &lt;span class="na"&gt;value=&lt;/span&gt;&lt;span class="s"&gt;"30"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;/meter&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h4&gt;
-  &lt;a href="#example-output"&gt;
-  &lt;/a&gt;
-  Example Output:
-&lt;/h4&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--AGAoZkqO--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/4xglpwj5htthn0gw4sfn.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--AGAoZkqO--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/4xglpwj5htthn0gw4sfn.png" alt="Meter Tag Image"&gt;&lt;/a&gt;&lt;/p&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#5-address-raw-ltaddressgt-endraw-"&gt;
-  &lt;/a&gt;
-  5. Address &lt;code&gt;&amp;lt;address&amp;gt;&lt;/code&gt;
-&lt;/h2&gt;
-
-&lt;p&gt;The address tag indicates that the enclosed HTML provides contact information for a person or organization.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;address&amp;gt;&lt;/span&gt;
-  &lt;span class="nt"&gt;&amp;lt;a&lt;/span&gt; &lt;span class="na"&gt;href=&lt;/span&gt;&lt;span class="s"&gt;"mailto:john@website.com"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;John@website.com&lt;span class="nt"&gt;&amp;lt;/a&amp;gt;&amp;lt;br&amp;gt;&lt;/span&gt;
-  &lt;span class="nt"&gt;&amp;lt;a&lt;/span&gt; &lt;span class="na"&gt;href=&lt;/span&gt;&lt;span class="s"&gt;"tel:+111234567890"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;(11) 123-456-7890&lt;span class="nt"&gt;&amp;lt;/a&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;/address&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h4&gt;
-  &lt;a href="#live-demo"&gt;
-  &lt;/a&gt;
-  Live Demo:
-&lt;/h4&gt;
-
-&lt;p&gt;&lt;a href="mailto:john@website.com"&gt;&lt;/a&gt;&lt;a href="mailto:John@website.com"&gt;John@website.com&lt;/a&gt;&lt;br&gt;&lt;br&gt;
-  &lt;a href="tel:+111234567890"&gt;(11) 123-456-7890&lt;/a&gt;&lt;/p&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#6-option-group-raw-ltoptgroupgt-endraw-"&gt;
-  &lt;/a&gt;
-  6. Option Group &lt;code&gt;&amp;lt;optgroup&amp;gt;&lt;/code&gt;
-&lt;/h2&gt;
-
-&lt;p&gt;The optgroup tag is used to add the definition or heading between group of option inside select tag.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;select&lt;/span&gt; &lt;span class="na"&gt;id=&lt;/span&gt;&lt;span class="s"&gt;"Cities"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;optgroup&lt;/span&gt; &lt;span class="na"&gt;label=&lt;/span&gt;&lt;span class="s"&gt;"India"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&amp;lt;/optgroup&amp;gt;&lt;/span&gt;
-
-    &lt;span class="nt"&gt;&amp;lt;option&lt;/span&gt; &lt;span class="na"&gt;value=&lt;/span&gt;&lt;span class="s"&gt;"Mumbai"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;Mumbai&lt;span class="nt"&gt;&amp;lt;/option&amp;gt;&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;option&lt;/span&gt; &lt;span class="na"&gt;value=&lt;/span&gt;&lt;span class="s"&gt;"Delhi"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;Delhi&lt;span class="nt"&gt;&amp;lt;/option&amp;gt;&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;option&lt;/span&gt; &lt;span class="na"&gt;value=&lt;/span&gt;&lt;span class="s"&gt;"Ahmedabad"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;Ahmedabad&lt;span class="nt"&gt;&amp;lt;/option&amp;gt;&lt;/span&gt;
-
-    &lt;span class="nt"&gt;&amp;lt;optgroup&lt;/span&gt; &lt;span class="na"&gt;label=&lt;/span&gt;&lt;span class="s"&gt;"America"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&amp;lt;/optgroup&amp;gt;&lt;/span&gt;
-
-    &lt;span class="nt"&gt;&amp;lt;option&lt;/span&gt; &lt;span class="na"&gt;value=&lt;/span&gt;&lt;span class="s"&gt;"New York"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;New York&lt;span class="nt"&gt;&amp;lt;/option&amp;gt;&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;option&lt;/span&gt; &lt;span class="na"&gt;value=&lt;/span&gt;&lt;span class="s"&gt;"Nevada"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;Nevada&lt;span class="nt"&gt;&amp;lt;/option&amp;gt;&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;option&lt;/span&gt; &lt;span class="na"&gt;value=&lt;/span&gt;&lt;span class="s"&gt;"California"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;California&lt;span class="nt"&gt;&amp;lt;/option&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;/select&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h4&gt;
-  &lt;a href="#example-demo"&gt;
-  &lt;/a&gt;
-  Example Demo:
-&lt;/h4&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--nvFEGE4m--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/tc9ige4t4oqlrexj08nn.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--nvFEGE4m--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/tc9ige4t4oqlrexj08nn.png" alt="OptGroup Example"&gt;&lt;/a&gt;&lt;/p&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#7-deleted-text-raw-ltdelgt-endraw-"&gt;
-  &lt;/a&gt;
-  7. Deleted Text &lt;code&gt;&amp;lt;del&amp;gt;&lt;/code&gt;
-&lt;/h2&gt;
-
-&lt;p&gt;This Tag is used to represent a text that has been deleted from a document.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;p&amp;gt;&lt;/span&gt;HTML is &lt;span class="nt"&gt;&amp;lt;del&amp;gt;&lt;/span&gt;Programming&lt;span class="nt"&gt;&amp;lt;/del&amp;gt;&lt;/span&gt; Markup language &lt;span class="nt"&gt;&amp;lt;/p&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h4&gt;
-  &lt;a href="#live-demo"&gt;
-  &lt;/a&gt;
-  Live Demo:
-&lt;/h4&gt;
-
-&lt;p&gt;HTML is &lt;del&gt;Programming&lt;/del&gt; Markup language &lt;/p&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#8-inserted-text-raw-ltinsgt-endraw-"&gt;
-  &lt;/a&gt;
-  8. Inserted Text &lt;code&gt;&amp;lt;ins&amp;gt;&lt;/code&gt;
-&lt;/h2&gt;
-
-&lt;p&gt;This Tag is used to represent a text that has been Inserted from a Document.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;p&amp;gt;&lt;/span&gt;HTML is &lt;span class="nt"&gt;&amp;lt;del&amp;gt;&lt;/span&gt;Programming&lt;span class="nt"&gt;&amp;lt;/del&amp;gt;&lt;/span&gt; &lt;span class="nt"&gt;&amp;lt;ins&amp;gt;&lt;/span&gt;Markup&lt;span class="nt"&gt;&amp;lt;/ins&amp;gt;&lt;/span&gt; language &lt;span class="nt"&gt;&amp;lt;/p&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h4&gt;
-  &lt;a href="#live-demo"&gt;
-  &lt;/a&gt;
-  Live Demo:
-&lt;/h4&gt;
-
-&lt;p&gt;HTML is &lt;del&gt;Programming&lt;/del&gt; &lt;u&gt;Markup&lt;/u&gt; language &lt;/p&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#9-details-raw-ltdetailsgt-endraw-"&gt;
-  &lt;/a&gt;
-  9. Details &lt;code&gt;&amp;lt;details&amp;gt;&lt;/code&gt;
-&lt;/h2&gt;
-
-&lt;p&gt;The details tag creates a collapse widget in which information is visible only when is toggled to "open" state.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;details&amp;gt;&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;summary&amp;gt;&lt;/span&gt;Click on Me&lt;span class="nt"&gt;&amp;lt;/summary&amp;gt;&lt;/span&gt;
-    This is the example details tag in HTML. &lt;span class="nt"&gt;&amp;lt;br&amp;gt;&lt;/span&gt;
-    PS: I can hack NASA using HTML.
-&lt;span class="nt"&gt;&amp;lt;/details&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h4&gt;
-  &lt;a href="#live-demo"&gt;
-  &lt;/a&gt;
-  Live Demo:
-&lt;/h4&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s---pzuO-au--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/a68xj37774qqjyhiu66y.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s---pzuO-au--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/a68xj37774qqjyhiu66y.png" alt="Details Example Image 0"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--_bOCwjFH--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/fgixw2cdpu1d3x7e40pw.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--_bOCwjFH--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/fgixw2cdpu1d3x7e40pw.png" alt="Details Example Image"&gt;&lt;/a&gt;&lt;/p&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#10-mark-raw-ltmarkgt-endraw-"&gt;
-  &lt;/a&gt;
-  10. Mark &lt;code&gt;&amp;lt;mark&amp;gt;&lt;/code&gt;
-&lt;/h2&gt;
-
-&lt;p&gt;The mark tag is used to highlight or mark the text.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;p&amp;gt;&lt;/span&gt;Example of Object Oriented Programming Languages are 
-    &lt;span class="nt"&gt;&amp;lt;mark&amp;gt;&lt;/span&gt;Java, C++, Python, JavaScript&lt;span class="nt"&gt;&amp;lt;/mark&amp;gt;&lt;/span&gt; 
-    and Example of Procedural Programming Languages are 
-    &lt;span class="nt"&gt;&amp;lt;mark&amp;gt;&lt;/span&gt;C, FORTRAN, PASCAL&lt;span class="nt"&gt;&amp;lt;/mark&amp;gt;&amp;lt;/p&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h4&gt;
-  &lt;a href="#live-demo"&gt;
-  &lt;/a&gt;
-  Live Demo:
-&lt;/h4&gt;
-
-&lt;p&gt;Example of Object Oriented Programming Languages are Java, C++, Python, JavaScript and Example of Procedural Programming Languages are C, FORTRAN, PASCAL&lt;/p&gt;
-
-
-
-
-&lt;p&gt;So that's it for today.There are many more Unknown HTML tags, so keep exploring and keep coding. I would like to hear your views and suggestions.&lt;/p&gt;
-
-&lt;p&gt;KEEP CODING...KEEP HUSTLING&lt;/p&gt;
-
-</description>
-      <category>html</category>
-      <category>webdev</category>
-      <category>programming</category>
-      <category>css</category>
-    </item>
-    <item>
-      <title>Circular Progress Bar using HTML and CSS</title>
-      <author>Shantanu Jana</author>
-      <pubDate>Tue, 19 Oct 2021 16:12:59 +0000</pubDate>
-      <link>https://dev.to/shantanu_jana/circular-progress-bar-using-html-and-css-1oda</link>
-      <guid>https://dev.to/shantanu_jana/circular-progress-bar-using-html-and-css-1oda</guid>
-      <description>&lt;p&gt;Circular Progress Bar is a popular web element that is mainly used on business or personal websites. If you want to create a circular progress bar using HTML and CSS, then this article will help you. Here I am going to show you how to make a simple CSS circle progress bar.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://www.foolishdeveloper.com/2021/09/circular-progress-bar-using-html-css.html"&gt;Watch its live demo&lt;/a&gt; to learn how it works. When you load the page, this animation will go from zero to your assigned meaning. A percentage of text is used here, but no animation is used in this text. It is made in a very simple way. &lt;/p&gt;
-
-&lt;p&gt;In this article, I will show you step by step how I made this circular progress bar design.To make it, you need to have an idea about basic HTML and CSS.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#step-1-the-basic-structure-of-circular-progress-bar"&gt;
-  &lt;/a&gt;
-  Step 1: The basic structure of Circular Progress Bar
-&lt;/h3&gt;
-
-&lt;p&gt;I have used HTML and CSS to create the basic structure of the Circular Progress Bar. I have created a small circle on the webpage.&lt;/p&gt;
-
-&lt;p&gt;The width and height of this circle are 150 px. The background color of the circle is white and margins are used to place it in the middle.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;div&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"circle-wrap"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-  &lt;span class="nt"&gt;&amp;lt;div&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"circle"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-
-  &lt;span class="nt"&gt;&amp;lt;/div&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;/div&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="nt"&gt;body&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="nl"&gt;font-family&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;"Roboto"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nb"&gt;sans-serif&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;background&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="m"&gt;#d2eaf1&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;span class="nc"&gt;.circle-wrap&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="nl"&gt;margin&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;150px&lt;/span&gt; &lt;span class="nb"&gt;auto&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;width&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;150px&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;height&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;150px&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;background&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;#fefcff&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;border-radius&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;50%&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;border&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;1px&lt;/span&gt; &lt;span class="nb"&gt;solid&lt;/span&gt; &lt;span class="m"&gt;#cdcbd0&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--9Op7W0CU--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/n4skngoh6mu01aq3woav.jpg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--9Op7W0CU--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/n4skngoh6mu01aq3woav.jpg" alt="The basic structure of Circular Progress Bar"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#step-2-half-of-the-simple-css-circle-progress-bar"&gt;
-  &lt;/a&gt;
-  Step 2: Half of the simple CSS circle progress bar
-&lt;/h3&gt;
-
-&lt;p&gt;As I said before, the animation in this circle is divided into two parts. This means that the animation has been divided into two parts up to the customer value.&lt;/p&gt;
-
-&lt;p&gt;I have made the first part of those two parts. Width and height 150 have been used to make this animation equal in size to the Circular Progress Bar. Similarly, &lt;code&gt;border-radius 50%&lt;/code&gt; has been used to make it round. &lt;/p&gt;
-
-&lt;p&gt;Here I have set the background-color to blue. If you want to play an animation in another color, you can use that color here.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;div&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"mask half"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;div&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"fill"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&amp;lt;/div&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;/div&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="nc"&gt;.circle-wrap&lt;/span&gt; &lt;span class="nc"&gt;.circle&lt;/span&gt; &lt;span class="nc"&gt;.mask&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt;
-&lt;span class="nc"&gt;.circle-wrap&lt;/span&gt; &lt;span class="nc"&gt;.circle&lt;/span&gt; &lt;span class="nc"&gt;.fill&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="nl"&gt;width&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;150px&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;height&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;150px&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;position&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;absolute&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;border-radius&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;50%&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;span class="nc"&gt;.mask&lt;/span&gt; &lt;span class="nc"&gt;.fill&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="nl"&gt;clip&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;rect&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="m"&gt;0px&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="m"&gt;75px&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="m"&gt;150px&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="m"&gt;0px&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-  &lt;span class="nl"&gt;background-color&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;#227ded&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--ngE1Nxqc--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/3v5u3cfmktpzvox8vkbj.jpg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ngE1Nxqc--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/3v5u3cfmktpzvox8vkbj.jpg" alt="Half of the simple CSS circle progress bar"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#step-3-the-other-half-of-the-circular-progress-bar"&gt;
-  &lt;/a&gt;
-  Step 3: The other half of the Circular Progress Bar
-&lt;/h3&gt;
-
-&lt;p&gt;Now I have designed the other half of the Circular Progress Bar. I set the time to three seconds by adding animation here. This means that when this page is opened, the animation will take 3 seconds to reach the meaning you set from zero.&lt;/p&gt;
-
-&lt;p&gt;Here 135 degrees have been used using transform. This transform will determine where the animation will end in this circle. &lt;/p&gt;
-
-&lt;p&gt;➤ We know that a circle is formed by 360. Since here we have divided the &lt;strong&gt;&lt;a href="https://www.foolishdeveloper.com/2021/09/circular-progress-bar-using-html-css.html"&gt;CSS circle progress bar&lt;/a&gt;&lt;/strong&gt; into two parts, so each part is 180 degrees. &lt;/p&gt;
-
-&lt;p&gt;➤ Here we have set a &lt;code&gt;135-degree&lt;/code&gt; animation for each part using Transform. So it will be &lt;code&gt;270 degrees&lt;/code&gt; for the total circle. Here I want to increase the animation to 75% so I have used 270 degrees.&lt;/p&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;(360/100) * 75 = 270 &lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;You determine the value of this degree according to your needs. For example, if you want the animation of the Circular Progress Bar will be up to 80%. But for that, you have to use &lt;code&gt;144 degrees here&lt;/code&gt;. Lastly, I have implemented this animation using @keyframes.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;div&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"mask full"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-   &lt;span class="nt"&gt;&amp;lt;div&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"fill"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&amp;lt;/div&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;/div&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="nc"&gt;.circle-wrap&lt;/span&gt; &lt;span class="nc"&gt;.circle&lt;/span&gt; &lt;span class="nc"&gt;.mask&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="nl"&gt;clip&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;rect&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="m"&gt;0px&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="m"&gt;150px&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="m"&gt;150px&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="m"&gt;75px&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;span class="nc"&gt;.mask.full&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt;
-&lt;span class="nc"&gt;.circle&lt;/span&gt; &lt;span class="nc"&gt;.fill&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="nl"&gt;animation&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;fill&lt;/span&gt; &lt;span class="n"&gt;ease-in-out&lt;/span&gt; &lt;span class="m"&gt;3s&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;transform&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;rotate&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="m"&gt;135deg&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;span class="k"&gt;@keyframes&lt;/span&gt; &lt;span class="n"&gt;fill&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="err"&gt;0&lt;/span&gt;&lt;span class="o"&gt;%&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;transform&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;rotate&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="m"&gt;0deg&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-  &lt;span class="p"&gt;}&lt;/span&gt;
-  &lt;span class="err"&gt;100&lt;/span&gt;&lt;span class="o"&gt;%&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;transform&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;rotate&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="m"&gt;135deg&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-  &lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--oozo6kfd--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/d8q105trln1dtnyf1uhc.jpg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--oozo6kfd--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/d8q105trln1dtnyf1uhc.jpg" alt="The other half of the Circular Progress Bar"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#step-4-create-a-percentage-in-the-circular-progress-bar"&gt;
-  &lt;/a&gt;
-  Step 4: Create a percentage in the Circular Progress Bar
-&lt;/h3&gt;
-
-&lt;p&gt;Now I have added percentages in this circular progress bar. Although that percentage of animation is not added. &lt;/p&gt;
-
-&lt;p&gt;Added text using basic HTML and CSS code. I have used &lt;code&gt;text-align: center&lt;/code&gt; and position: absolute to place the text in the middle of the Circular Progress Bar.&lt;/p&gt;
-
-&lt;p&gt;I used &lt;code&gt;border-radius: 50%&lt;/code&gt; to make its background width and height 122 px and round. Here I have used &lt;code&gt;font-size: 2em&lt;/code&gt; to make the size of the text smaller and larger.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;div&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"inside-circle"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt; 75% &lt;span class="nt"&gt;&amp;lt;/div&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="nc"&gt;.circle-wrap&lt;/span&gt; &lt;span class="nc"&gt;.inside-circle&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="nl"&gt;width&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;122px&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;height&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;122px&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;border-radius&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;50%&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;background&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;#d2eaf1&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;line-height&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;120px&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;text-align&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;center&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;margin-top&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;14px&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;margin-left&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;14px&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;color&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;#1e51dc&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;position&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;absolute&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;z-index&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;100&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;font-weight&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;700&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;font-size&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;2em&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--F4urdXLs--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/akm0ix0uean3sbz4t88u.jpg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--F4urdXLs--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/akm0ix0uean3sbz4t88u.jpg" alt="Circular Progress Bar using HTML and CSS"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;As you can see in the picture above, now this CSS Circular Progress Bar is absolutely ready. Hope you find out from this article how I created this &lt;strong&gt;Circular Progress Bar using HTML and CSS&lt;/strong&gt;.&lt;/p&gt;
-
-&lt;p&gt;You can visit my blog for more tutorials like this. 😊&lt;br&gt;
-&lt;a href="https://www.foolishdeveloper.com/"&gt;https://www.foolishdeveloper.com/&lt;/a&gt;&lt;/p&gt;
-
-</description>
-      <category>html</category>
-      <category>javascript</category>
-      <category>beginners</category>
-      <category>webdev</category>
     </item>
   </channel>
 </rss>
