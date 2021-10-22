@@ -7,6 +7,207 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>Nebula Graph: how variable-Length Pattern Matching is implemented</title>
+      <author>lisahui</author>
+      <pubDate>Fri, 22 Oct 2021 06:06:50 +0000</pubDate>
+      <link>https://dev.to/lisahui/nebula-graph-how-variable-length-pattern-matching-is-implemented-1pb5</link>
+      <guid>https://dev.to/lisahui/nebula-graph-how-variable-length-pattern-matching-is-implemented-1pb5</guid>
+      <description>&lt;p&gt;At the very heart of openCypher, the MATCH clause allows you to specify simple query patterns to retrieve the relationships from a graph database. A variable-length pattern is commonly used to describe paths and it is Nebula Graph’s first try to get nGQL compatible with openCypher in the MATCH clause.&lt;/p&gt;
+
+&lt;p&gt;As can be seen from the previous articles of this series, an execution plan is composed of physical operators. Each operator is responsible for executing unique computational logics. To implement the MATCH clause, the operators such as GetNeighbors, GetVertices, Join, Project, Filter, and Loop, which have been introduced in the previous articles, are needed. Unlike the tree structure in a relational database, the execution process expressed by an execution plan in Nebula Graph is a cyclic graph. How to transform a variable-length pattern into a physical plan in Nebula Graph is the focus of the Planner. In this article, we will introduce how variable-length pattern matching is implemented in Nebula Graph.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#problem-analysis"&gt;
+  &lt;/a&gt;
+  Problem Analysis
+&lt;/h2&gt;
+
+&lt;h3&gt;
+  &lt;a href="#fixedlength-pattern"&gt;
+  &lt;/a&gt;
+  Fixed-Length Pattern
+&lt;/h3&gt;
+
+&lt;p&gt;In a MATCH clause, a fixed-length pattern is commonly used to search for a relationship. If a fixed-length pattern is considered a special case of the variable-length pattern, that is, a pattern describing a path of a specified length, the implementations of both can be unified. Here are the examples.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;// Fixed-length pattern MATCH (v)-[e]-(v2)
+// Variable-length pattern MATCH (v)-[e*1..1]-(v2)
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The preceding examples differ from each other in the type of the e variable. In the fixed-length pattern, e represents an edge, while in the variable-length one, e represents a list of edges of length 1.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#connecting-variablelength-patterns"&gt;
+  &lt;/a&gt;
+  Connecting Variable-Length Patterns
+&lt;/h3&gt;
+
+&lt;p&gt;According to the syntax of openCypher, a MATCH clause allows you to specify a combination of various patterns for describing complicated paths. For example, two variable-length patterns can be connected as follows.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;MATCH (v)-[e*1..3]-(v2)-[ee*2..4]-(v3)
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The pattern combination in the preceding example is extendable, which means by connecting variable-length and fixed-length patterns in different ways, various complicated paths can be queried. Therefore, we must find a pattern to generate an execution plan to iterate the whole process recursively. The following conditions must be considered:&lt;/p&gt;
+
+&lt;p&gt;The following variable-length path depends on the preceding one.&lt;br&gt;
+The variables in the following pattern depend on the preceding pattern.&lt;br&gt;
+Before the next traversal step, the starting vertex must be de-duplicated.&lt;br&gt;
+From the following example, you can see that as long as an execution plan can be generated for the part of ()-[:like*m..n]-, combinations and iterations may be applied to generate plans for the subsequent parts.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;()-[:like*m..n]- ()-[:like*k..l]- ()
+ \____________/   \____________/   \_/
+    Pattern1         Pattern2       Pattern3
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#execution-plan"&gt;
+  &lt;/a&gt;
+  Execution Plan
+&lt;/h2&gt;
+
+&lt;p&gt;In this section, we will introduce how the ()-[:like*m..n]- part in the preceding example is transformed into a physical execution plan in Nebula Graph. This pattern describes a graph of a minimum of m hops and a maximum of n hops. In Nebula Graph, a one-step traversal is completed by the GetNeighbors operator. To implement a multi-step traversal, each traversal step must call the GetNeighbors operator again on the basis of the previous step, and when the traversal of all the steps are completed, all the retrieved vertices and edges are connected end to end to form a single path. What users need is the paths of m to n relationships. However, in the execution process, paths of length 1 to length n are queried and are stored for output or for the next traversal, but only the paths of length m to n are retrieved.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#onestep-traversal"&gt;
+  &lt;/a&gt;
+  One-Step Traversal
+&lt;/h3&gt;
+
+&lt;p&gt;Let’s see what the one-step traversal looks like. In Nebula Graph, the source vertex is stored together with its outgoing edges, so retrieving them does not need to access data across partitions. However, the destination vertex and its incoming edges are stored in different partitions, so GetVertices is necessary for retrieving the properties of the vertex. In addition, to avoid replicated scanning of Storage, the source vertices must be de-duplicated before the traversal. The execution plan of a one-step traversal is shown as follows.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--BJ_RVjed--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/90186547/138244211-8f1aaec3-b1f4-4e52-b74c-7d547b4f350f.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--BJ_RVjed--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/90186547/138244211-8f1aaec3-b1f4-4e52-b74c-7d547b4f350f.png" alt="One-Step Traversal"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#multistep-traversal"&gt;
+  &lt;/a&gt;
+  Multi-Step Traversal
+&lt;/h3&gt;
+
+&lt;p&gt;The process of a multi-step traversal is the repetition of one-step traversal. However, we can see that the GetNeighbors operator can retrieve the properties of an edge’s source vertex, so the GetVertices operator can be omitted in the previous step. Here is an execution plan of a two-step traversal.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--EUbdh4ax--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/90186547/138244372-74619d76-8b10-481a-9dde-d065d801f847.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--EUbdh4ax--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/90186547/138244372-74619d76-8b10-481a-9dde-d065d801f847.png" alt="Multi-Step Traversal"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#storing-paths"&gt;
+  &lt;/a&gt;
+  Storing Paths
+&lt;/h3&gt;
+
+&lt;p&gt;The paths retrieved in each traversal step may be needed at the end of the traversal, so all the paths must be stored. The paths for a two-step traversal are connected by the Join operator. In the result of the example ()-[e:like*m..n]-, e represents a list of data (edges), so Union is needed to merge the results of each traversal step. The execution plan will be evolved further as follows.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--vbJSdFTC--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/90186547/138245877-36d53b4a-0643-4058-8ffb-23502edc0901.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--vbJSdFTC--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/90186547/138245877-36d53b4a-0643-4058-8ffb-23502edc0901.png" alt="One-Step Traversal"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#connecting-variablelength-patterns"&gt;
+  &lt;/a&gt;
+  Connecting Variable-Length Patterns
+&lt;/h3&gt;
+
+&lt;p&gt;After the implementations of the preceding process, a physical plan will be generated for the ()-[e:like*m..n]- pattern. If multiple similar patterns are connected together, such a process is iterated. However, before the iteration, the results of the previous process must be filtered to get the paths of length m to length n. The retrieved dataset of the previous process involves the paths of length 1 to length n, so filtering them by path length is needed. When the variable-length patterns are connected together, the execution plan becomes as follows.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--KS16LRwf--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/90186547/138246601-acec9a6e-07b7-4f2d-ba0e-40850dabb63c.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--KS16LRwf--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/90186547/138246601-acec9a6e-07b7-4f2d-ba0e-40850dabb63c.png" alt="One-Step Traversal"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;After the step-by-step decomposition of the patterns, the expected execution plan for the MATCH clause is finally generated. As you can see, it takes a lot of effort to transform a complicated pattern into the underlying interfaces for a traversal. Of course, the execution plan can be optimized, such as the multi-step traversal can be encapsulated by using the Loop operator and the sub-plan of a one-step traversal can be reused, which will not be detailed in this article. If you are interested, please refer to &lt;a href="https://github.com/vesoft-inc/nebula/blob/master/src/graph/planner/match/Expand.cpp"&gt;the source code of Nebula Graph&lt;/a&gt;.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#summary"&gt;
+  &lt;/a&gt;
+  Summary
+&lt;/h2&gt;
+
+&lt;p&gt;This article demonstrated the process of generating an execution plan for a MATCH clause with a variable-length pattern. While reading the article, you may have this question: Why such a basic and simple path query will generate such a complicated execution plan in Nebula Graph? It’s not like Neo4j, where only a few operators are needed to complete the same job. In Nebula Graph, complicated directed acyclic graphs (DAG) are generated.&lt;/p&gt;
+
+&lt;p&gt;The answer is that in Nebula Graph, the operators are closer to the underlying interfaces and there is a lack of semantic abstractions for higher-level graph operations. The operator granularity is too fine, so too many details need to be considered to implement the optimization of the upper layer. We will further study the execution operators to gradually improve the functionality and the performance of the MATCH clause.&lt;/p&gt;
+
+&lt;p&gt;If you encounter any problems in the process of using Nebula Graph, please refer to &lt;a&gt;Nebula Graph Database Manual&lt;/a&gt; to troubleshoot the problem. It records in detail the knowledge points and specific usage of the graph database and the graph database Nebula Graph.&lt;/p&gt;
+
+</description>
+      <category>tutorial</category>
+      <category>opensource</category>
+      <category>database</category>
+      <category>devops</category>
+    </item>
+    <item>
+      <title>5 proverbs for rapid development</title>
+      <author>Aatmaj</author>
+      <pubDate>Fri, 22 Oct 2021 06:06:40 +0000</pubDate>
+      <link>https://dev.to/aatmaj/5-proverbs-for-rapid-development-2o4o</link>
+      <guid>https://dev.to/aatmaj/5-proverbs-for-rapid-development-2o4o</guid>
+      <description>&lt;h2&gt;
+  &lt;a href="#let-us-see-five-proverbs-which-fit-perfectly-to-the-rapid-development-scenario"&gt;
+  &lt;/a&gt;
+  Let us see five proverbs which fit perfectly to the rapid development scenario.
+&lt;/h2&gt;
+
+
+
+
+&lt;h3&gt;
+  &lt;a href="#an-ounce-of-protection-is-worth-a-pound-of-cure"&gt;
+  &lt;/a&gt;
+  An ounce of protection is worth a pound of cure.
+&lt;/h3&gt;
+
+&lt;p&gt;A little precaution before a crisis hits is better than lot of firefighting afterwards.&lt;br&gt;
+Many times, developers neglect risk management. Risk management, identification and prevention are more critical than we think. Unidentified risks cause a lot of trouble in the later stages of software development. This is why, preventing such risks is wiser than to fix them after they get worsened. Identifying risks and taking precautions against them, that is protecting the project against the risk is a key to rapid development.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#a-stich-in-time-saves-nine"&gt;
+  &lt;/a&gt;
+  A stich in time saves nine
+&lt;/h3&gt;
+
+&lt;p&gt;Correction at early stages saves work later.&lt;br&gt;
+In a software development lifecycle, doing right things at the right time is very important. If work is delayed in the earlier stages, it can causes much trouble afterward. Example a flaw in the design time is not fixed is bound to cause a disaster. And one flaw in the implementation time if not fixed will take almost triple the time to fix at the debugging phase. &lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#cross-the-stream-where-it-is-shallowest"&gt;
+  &lt;/a&gt;
+  Cross the stream where it is shallowest.
+&lt;/h3&gt;
+
+&lt;p&gt;Don't complicate things unnecessarily.&lt;br&gt;
+Many developers believe that the more complicated things will be made, the better the project will execute. But that's not the case. In reality complicated practices, stringent methodologies actually lengthen the process rather than  making it faster. This is why many times the simple is the best. Complex design patters, complex code leads only to increasing the clutter of the program. Yes, this doesnt mean that one must nor use complex patterns or code. This means that one must always strive for a simpler solution to the problem.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#watch-the-doughnut-and-not-the-hole"&gt;
+  &lt;/a&gt;
+  Watch the doughnut, and not the hole.
+&lt;/h3&gt;
+
+&lt;p&gt;Focus on what you have rather than at what you don't.&lt;br&gt;
+In a software development lifecycle, one cannot get all the aspects perfect. In that case, you need to maximize what you have over what you don't. For example you might not have trained personnel, or say might not have enough time. But in such cases, you must focus on what you have and try to give the best possible. Focus on your strengths and try to win the match.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#too-many-cooks-spoil-the-broth"&gt;
+  &lt;/a&gt;
+  Too many cooks spoil the broth.
+&lt;/h3&gt;
+
+&lt;p&gt;If too many people are involved in a task or activity, it will not be done well.&lt;br&gt;
+This is often the case with software development scenarios. Too many people who are experienced and have their own different viewpoints. While difference in perspectives always leads to better ideas, there must be only one decision maker whome everyone  must follow. Disagree but commit must be the case with those who are the subordinates. If too many people are decision makers, then it will lead to chaos.&lt;/p&gt;
+
+</description>
+    </item>
+    <item>
       <title>Handful Github Repos for Full stack web developer</title>
       <author>rams codes</author>
       <pubDate>Fri, 22 Oct 2021 05:02:13 +0000</pubDate>
@@ -1055,6 +1256,53 @@ Channel link: https://www.youtube.com/c/AngleBrace&lt;/a&gt;
 
 &lt;p&gt;Follow me on &lt;a href="https://twitter.com/rainboestrykr"&gt;Twitter&lt;/a&gt;&lt;br&gt;
 Thank you ✨&lt;/p&gt;
+&lt;h2&gt;
+  &lt;a href="#disclaimer"&gt;
+  &lt;/a&gt;
+  Disclaimer
+&lt;/h2&gt;
+
+&lt;p&gt;This post is an excerpt from the following tweet of &lt;a class="mentioned-user" href="https://dev.to/denicmarko"&gt;@denicmarko&lt;/a&gt;
+ &lt;br&gt;
+&lt;/p&gt;
+&lt;blockquote class="ltag__twitter-tweet"&gt;
+
+  &lt;div class="ltag__twitter-tweet__main"&gt;
+    &lt;div class="ltag__twitter-tweet__header"&gt;
+      &lt;img class="ltag__twitter-tweet__profile-image" src="https://res.cloudinary.com/practicaldev/image/fetch/s--PUv9KUkw--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://pbs.twimg.com/profile_images/1308385514744098816/oDXuaci__normal.jpg" alt="Marko ⚡ Denic profile image"&gt;
+      &lt;div class="ltag__twitter-tweet__full-name"&gt;
+        Marko ⚡ Denic
+      &lt;/div&gt;
+      &lt;div class="ltag__twitter-tweet__username"&gt;
+        &lt;a class="mentioned-user" href="https://dev.to/denicmarko"&gt;@denicmarko&lt;/a&gt;
+
+      &lt;/div&gt;
+      &lt;div class="ltag__twitter-tweet__twitter-logo"&gt;
+        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ir1kO05j--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/twitter-f95605061196010f91e64806688390eb1a4dbc9e913682e043eb8b1e06ca484f.svg" alt="twitter logo"&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+    &lt;div class="ltag__twitter-tweet__body"&gt;
+      CSS tips you won't see in most tutorials.&lt;br&gt;&lt;br&gt;🧵
+    &lt;/div&gt;
+    &lt;div class="ltag__twitter-tweet__date"&gt;
+      10:17 AM - 20 Oct 2021
+    &lt;/div&gt;
+
+
+    &lt;div class="ltag__twitter-tweet__actions"&gt;
+      &lt;a href="https://twitter.com/intent/tweet?in_reply_to=1450768106872311809" class="ltag__twitter-tweet__actions__button"&gt;
+        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--fFnoeFxk--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/twitter-reply-action-238fe0a37991706a6880ed13941c3efd6b371e4aefe288fe8e0db85250708bc4.svg" alt="Twitter reply action"&gt;
+      &lt;/a&gt;
+      &lt;a href="https://twitter.com/intent/retweet?tweet_id=1450768106872311809" class="ltag__twitter-tweet__actions__button"&gt;
+        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--k6dcrOn8--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/twitter-retweet-action-632c83532a4e7de573c5c08dbb090ee18b348b13e2793175fea914827bc42046.svg" alt="Twitter retweet action"&gt;
+      &lt;/a&gt;
+      &lt;a href="https://twitter.com/intent/like?tweet_id=1450768106872311809" class="ltag__twitter-tweet__actions__button"&gt;
+        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--SRQc9lOp--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/twitter-like-action-1ea89f4b87c7d37465b0eb78d51fcb7fe6c03a089805d7ea014ba71365be5171.svg" alt="Twitter like action"&gt;
+      &lt;/a&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+&lt;/blockquote&gt;
+
 
 </description>
       <category>javascript</category>
@@ -1512,242 +1760,6 @@ The output:&lt;br&gt;
 </description>
       <category>cpp</category>
       <category>beginners</category>
-    </item>
-    <item>
-      <title>CONVERT BYTE SLICE TO AND FROM OTHER TYPES</title>
-      <author>birowo</author>
-      <pubDate>Fri, 22 Oct 2021 01:09:39 +0000</pubDate>
-      <link>https://dev.to/birowo/convert-byte-slice-to-and-from-other-types-4jkd</link>
-      <guid>https://dev.to/birowo/convert-byte-slice-to-and-from-other-types-4jkd</guid>
-      <description>&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;package main
-
-import (
-    "fmt"
-    "reflect"
-    "unsafe"
-)
-
-//byte slice pointer to string pointer convertion
-func bsPtrToStrPtr(bsPtr *[]byte) (strPtr *string) {
-    return (*string)(unsafe.Pointer(bsPtr))
-}
-
-//string pointer to byte slice pointer convertion
-func strPtrToBsPtr(strPtr *string) (bsPtr *[]byte) {
-    bsPtr = (*[]byte)(unsafe.Pointer(strPtr))
-    //the capacity of *bsPtr still not set
-    //so it must be set with the length of *strPtr
-    //setting its capacity must be done via reflection to reach their header
-    (*reflect.SliceHeader)(unsafe.Pointer(bsPtr)).Cap = (*reflect.SliceHeader)(unsafe.Pointer(strPtr)).Len
-    return
-}
-
-//byte slice pointer to int64 pointer convertion
-func bsPtrToInt64Ptr(bsPtr *[]byte) (int64Ptr *int64) {
-    return (*int64)(unsafe.Pointer((*reflect.SliceHeader)(unsafe.Pointer(bsPtr)).Data))
-}
-
-//int64 pointer to byte slice pointer convertion
-func int64PtrToBsPtr(int64Ptr *int64, bsPtr *[]byte) {
-    //int64 does not have header like string, so we can not do like this :
-    //bsPtr = (*[]byte)(unsafe.Pointer(int64Ptr)
-    //like on string convertion above
-    //if we do that, the SliceHeader.Data of *bsPtr will contain
-    //value (*int64Ptr), not pointer (int64Ptr) as it should be
-
-    slcHdr := (*reflect.SliceHeader)(unsafe.Pointer(bsPtr))
-    slcHdr.Data = uintptr(unsafe.Pointer(int64Ptr))
-    slcHdr.Len = 8 //we know that the size of int64 is 8 byte
-    slcHdr.Cap = 8
-}
-
-//reverse byte slice
-func reverse(bs []byte) {
-    for i, j := 0, len(bs)-1; i &amp;lt; j; i, j = i+1, j-1 {
-        bs[i], bs[j] = bs[j], bs[i]
-    }
-}
-
-func main() {
-    bs := []byte("test 123")
-    strPtr := bsPtrToStrPtr(&amp;amp;bs)
-    fmt.Printf("byte slice: %s, type: %T; string: %s, type: %T\n", bs, bs, *strPtr, *strPtr)
-
-    //be noticed that if we change bs value(must have same length with original value),
-    //then the value of *strPtr also changed
-    bs = []byte("123 test")
-    fmt.Printf("byte slice: %s, type: %T; string: %s, type: %T\n", bs, bs, *strPtr, *strPtr)
-    //and vice versa
-    *strPtr = "wertyuio"
-    fmt.Printf("byte slice: %s, type: %T; string: %s, type: %T\n", bs, bs, *strPtr, *strPtr)
-    fmt.Println("byte slice, length:", len(bs), "&amp;amp; capacity:", cap(bs), ";string length:", len(*strPtr))
-    fmt.Println()
-
-    str := "asdfghjkl"
-    bsPtr := strPtrToBsPtr(&amp;amp;str)
-    fmt.Printf("byte slice: %s, type: %T; string: %s, type: %T\n", *bsPtr, *bsPtr, str, str)
-
-    //be noticed that if we change str value(must have same length with original value),
-    //then the value of *bsPtr also changed
-    str = "lkjhgfdsa"
-    fmt.Printf("byte slice: %s, type: %T; string: %s, type: %T\n", *bsPtr, *bsPtr, str, str)
-    //and vice versa
-    *bsPtr = []byte("1234S6789")
-    fmt.Printf("byte slice: %s, type: %T; string: %s, type: %T\n", *bsPtr, *bsPtr, str, str)
-    fmt.Println("byte slice, length:", len(*bsPtr), "&amp;amp; capacity:", cap(*bsPtr), ";string length:", len(str))
-    fmt.Println()
-
-    //in slice, int64 allocation size is 8 bytes, index-0 hold LSB, index-7 hold MSB
-    //LSB: least significant byte mean if we change that byte will only change little amount of the value
-    //MSB: most significant byte mean the opposite of that I mentioned above
-    bs = []byte{0x15, 0x81, 0xe9, 0x7d, 0xf4, 0x10, 0x22, 0x11}
-    int64Ptr := bsPtrToInt64Ptr(&amp;amp;bs)
-    //if we print byte slice, it will be displayed as how we write it on code
-    //from index-0 will be displayed on leftmost, to last index will be displayed on rightmost
-    fmt.Printf("byte slice: %x, type: %T\n", bs, bs)
-    //however as int64 value, it will print MSB on leftmost and LSB on rightmost
-    fmt.Printf("int64(hex): %x, type: %T\n", *int64Ptr, *int64Ptr)
-    //bs = []byte{0xb1, 0x1c, 0x6c, 0xb1, 0xf4, 0x10, 0x22, 0x11}
-    *int64Ptr = 1234567890987654321
-    //if we change the int64 value, the byte slice value will also change
-    fmt.Printf("byte slice: %x, type: %T\n", bs, bs)
-    fmt.Printf("int64(hex): %x, type: %T\n", *int64Ptr, *int64Ptr)
-    fmt.Println()
-
-    _int64 := int64(1234543210987656789)
-    int64PtrToBsPtr(&amp;amp;_int64, &amp;amp;bs)
-    fmt.Printf("byte slice: %x, type: %T\n", bs, bs)
-    fmt.Printf("int64(hex): %x, type: %T\n", _int64, _int64)
-    _int64 = int64(1231231230321321321)
-    //bs = []byte{0x69, 0x65, 0xab, 0xd7, 0x47, 0x36, 0x16, 0x11}
-    fmt.Printf("byte slice: %x, type: %T\n", bs, bs)
-    fmt.Printf("int64(hex): %x, type: %T\n", _int64, _int64)
-    fmt.Println()
-
-    //other thing that also we must pay attention is about endianness (big endian &amp;amp; little endian)
-    //i found this article that might be worth it to read :
-    //https://www.freecodecamp.org/news/what-is-endianness-big-endian-vs-little-endian/
-    //to correct the endianness maybe we need byte slice reversal function :
-    bs = []byte{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f}
-    fmt.Printf("before reverse process: %x\n", bs)
-    reverse(bs)
-    fmt.Printf("after reverse process: %x\n", bs)
-}
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;build output :&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--ws6huNrt--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/21541959/138377141-84d7baeb-6637-4434-917d-aebc2443905a.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ws6huNrt--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://user-images.githubusercontent.com/21541959/138377141-84d7baeb-6637-4434-917d-aebc2443905a.png" alt="bytesliceconversion_go"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;playground : &lt;a href="https://play.golang.org/p/TCvWw1mf4kG"&gt;https://play.golang.org/p/TCvWw1mf4kG&lt;/a&gt;&lt;/p&gt;
-
-</description>
-      <category>go</category>
-      <category>conversion</category>
-      <category>byteslice</category>
-      <category>reflect</category>
-    </item>
-    <item>
-      <title>Desenvolvimento talvez não seja pra você</title>
-      <author>Tulio Calil</author>
-      <pubDate>Fri, 22 Oct 2021 01:04:04 +0000</pubDate>
-      <link>https://dev.to/tuliocalil/desenvolvimento-talvez-nao-seja-pra-voce-5dnk</link>
-      <guid>https://dev.to/tuliocalil/desenvolvimento-talvez-nao-seja-pra-voce-5dnk</guid>
-      <description>&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--VY9MGXg1--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/6dq931n014310xj8x9sf.jpg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--VY9MGXg1--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/6dq931n014310xj8x9sf.jpg" alt="Capa"&gt;&lt;/a&gt;&lt;br&gt;
-Sim, talvez não seja e não tem nenhum problema nisso.&lt;/p&gt;
-
-&lt;p&gt;Talvez os altos salários e toda a bolha de desenvolvedores que você tem contato tenham te seduzido. Talvez todas aquelas empresas hype, macbooks, leds rgb, monitores ultrawide e várias outras coisas brilhantes podem ter te convencido que essa área é para você. Você se esforça, se lamenta por não estar se identificando com aquilo e por mais um tempo tenta gostar da área. Mas até quando você deve insistir nisso? Quanto tempo você deveria gastar tentando gostar de algo que talvez não seja sua afinidade? Talvez devêssemos tentar primeiro nos entender para depois responder essa pergunta e eu vou tentar te ajudar com alguns exemplos que vivenciei.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#por-que-eu-quero-ser-dev-"&gt;
-  &lt;/a&gt;
-  Por que eu quero ser dev ?
-&lt;/h2&gt;
-
-&lt;p&gt;Talvez um amigo tenha te chamado e vendido pra você essa experiência que ele teve, com muita animação e brilho nos olhos, além de vários gadgets que ele aponta como fruto do seu trabalho;&lt;/p&gt;
-
-&lt;p&gt;Pode ser também que você faça uma faculdade de TI que tem o foco em desenvolvimento. Dessa forma, você se sente coagido a fazer apenas isso, afinal, as provas e trabalhos vão te cobrar esse conhecimento e é isso que importa pra uma faculdade.&lt;/p&gt;
-
-&lt;p&gt;E por que não um/uma marido/esposa que te influenciou para que vocês trabalhassem juntos e compartilhassem das mesmas experiências de trabalho?&lt;/p&gt;
-
-&lt;p&gt;Você participou de um Hackathon e se encantou por tudo aquilo que viu: criar algo do zero, fazer funcionar, desenhar telas e ver alguém testando.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#como-eu-me-sinto-sobre-isso-"&gt;
-  &lt;/a&gt;
-  Como eu me sinto sobre isso ?
-&lt;/h2&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Preciso de dinheiro de forma fácil e rápida e, pelo que vejo as pessoas falando, essa parece uma profissão para isso;&lt;/li&gt;
-&lt;li&gt;Um colega tem me pressionado e me dado muita força para que eu estude e entre na área, mas eu não acho que faz muito sentido pra mim;&lt;/li&gt;
-&lt;li&gt;Eu vejo o mercado de trabalho super aquecido e quero fazer parte disso, mas não estou achando tão fácil quanto parece;&lt;/li&gt;
-&lt;li&gt;Minha família deposita muita expectativa em mim e espera que eu entre na área depois de me formar;&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;Se você se identifica com algo dessa lista, você tem grandes chances de não ter o perfil para desenvolvedor, porém, não fique bravo comigo, pois não estou dizendo que você não seja capaz, mas apenas querendo que você veja a área de TI de uma maneira mais ampla. Agora veja se essas situações aqui fazem sentido pra você também:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Eu gosto muito de estar em um time criando sites, apps e outros produtos digitais e acho super legal como temos liberdade criativa para realizar algo do zero;&lt;/li&gt;
-&lt;li&gt;A sensação de estar com meus amigos trabalhando no mesmo projeto e podendo acrescentar de maneira positiva e super legal;&lt;/li&gt;
-&lt;li&gt;Eu amo fazer interfaces, imagens, animações e adoro vê-las implementadas em algum sistema real;&lt;/li&gt;
-&lt;li&gt;Eu fico fascinado com esse ecossistema de tecnologia e com todas as coisas conectadas, além dos horários flexíveis com mentalidades modernas;&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;Se alguma dessas situações fez sentido pra você, não não necessariamente desenvolvimento seja sua área, porém, muito provavelmente, TI seja! 🥳&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#ti-n%C3%A3o-se-resume-em-desenvolvimento"&gt;
-  &lt;/a&gt;
-  TI não se resume em desenvolvimento
-&lt;/h2&gt;
-
-&lt;p&gt;Isso é tão óbvio que, muitas vezes, é esquecido.&lt;br&gt;
-Você pode estar apaixonado pela área de TI e não pela área de desenvolvimento e você pode entrar nesse ecossistema com diversas outras profissões, que talvez façam mais sentido para você.&lt;/p&gt;
-
-&lt;p&gt;Mas quais outras profissões existem próximas ao desenvolvimento ?&lt;br&gt;
-Eu não vou conseguir listar todas, mas vou tentar ajudar o máximo possível. Se você, leitor, lembra de outras áreas não citadas, por favor comente !&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#al%C3%A9m-do-desenvolvimento"&gt;
-  &lt;/a&gt;
-  Além do desenvolvimento
-&lt;/h2&gt;
-
-&lt;ul&gt;
-&lt;li&gt;
-&lt;a href="https://www.linkedin.com/jobs/search/?keywords=ui%20ux%20designer"&gt;Ui/Ux Designer&lt;/a&gt; - Para você que super curte toda parte estética de criação de interfaces mas não suporta CSS e afins.&lt;/li&gt;
-&lt;li&gt;
-&lt;a href="https://www.linkedin.com/jobs/search/?geoId=106057199&amp;amp;keywords=devops&amp;amp;location=Brasil"&gt;Devops&lt;/a&gt; - Se você é aquela pessoa que super curte o mundo linux, sistemas operacionais, redes e é curioso sobre nuvem, essa é a sua cara.&lt;/li&gt;
-&lt;li&gt;
-&lt;a href="https://www.linkedin.com/jobs/search/?geoId=106057199&amp;amp;keywords=scrum%20master&amp;amp;location=Brasil"&gt;Scrum master&lt;/a&gt; - Se você tem mais um perfil de gerenciar, que tal gerenciar um time inteiro ?&lt;/li&gt;
-&lt;li&gt;
-&lt;a href="https://www.linkedin.com/jobs/search/?geoId=106057199&amp;amp;keywords=QA&amp;amp;location=Brasil"&gt;Quality Analyst&lt;/a&gt; - Você curte futucar aplicações procurando erros e sair clicando em tudo até a aplicação travar ? parabéns, você é o famoso QA.&lt;/li&gt;
-&lt;li&gt;
-&lt;a href="https://www.linkedin.com/jobs/search/?geoId=106057199&amp;amp;keywords=product%20owner&amp;amp;location=Brasil"&gt;Product Owner&lt;/a&gt; - Você tem mais um perfil de dono do projeto ? Defende como a aplicação deve ser desenvolvida e tem um bom senso de prioridade ?&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h2&gt;
-  &lt;a href="#conclus%C3%A3o"&gt;
-  &lt;/a&gt;
-  Conclusão
-&lt;/h2&gt;
-
-&lt;p&gt;Resumidamente, faça o que você gosta, dê o seu melhor.Entendo que isso não é possível para todos, mas se for o seu caso, tente.&lt;br&gt;
-Eu espero que essa postagem tenha te ajudado de alguma forma, sinta-se a vontade para comentar.&lt;br&gt;
-Meus posts costumam ser técnicos, mas escrevi esse pensando em algumas pessoas e espero que as ajudem.&lt;/p&gt;
-
-&lt;p&gt;Obrigado ao André por ter revisado o texto para mim!&lt;/p&gt;
-
-</description>
-      <category>beginners</category>
-      <category>programming</category>
-      <category>career</category>
-      <category>discuss</category>
     </item>
   </channel>
 </rss>
