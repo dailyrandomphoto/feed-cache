@@ -7,6 +7,314 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>How to Emulate Firebase Auth</title>
+      <author>Harvtronix</author>
+      <pubDate>Sun, 24 Oct 2021 01:26:27 +0000</pubDate>
+      <link>https://dev.to/harvtronix/how-to-emulate-firebase-auth-5ah7</link>
+      <guid>https://dev.to/harvtronix/how-to-emulate-firebase-auth-5ah7</guid>
+      <description>&lt;p&gt;I was recently building an app in which I was trying to integrate Firebase Authentication and Firebase Realtime Database. But I ran into a problem pretty quickly while I was testing things locally.&lt;/p&gt;
+
+&lt;p&gt;Even though Firebase has a super amazing Emulator Suite for local testing, authentication is not included. To me, this meant that the lovely auth-based Realtime DB rules I'd crafted were impossible to test locally unless I modified my DB rules beforehand. But that doesn't make for a very good permissions test, does it? There is an open issue on &lt;a href="https://github.com/firebase/firebase-tools/issues/1677"&gt;GitHub&lt;/a&gt; for addressing this, but at the time of writing, no solution has yet been included in the emulator suite.&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;&lt;strong&gt;Update 2020-10-27:&lt;/strong&gt; Firebase Auth is now part of the Emulator Suite! Upgrade the Firebase CLI to version 8.14.0 or greater to use it. If that's all you were looking for, the rest of this post might not be useful to you, but feel free to keep reading for a more detailed look at Firebase Auth and my general philosophy towards testing and modularization.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;I spent a bunch of hours trying to figure out how to string things together with Band-Aids and glue to do something that honestly seems like a pretty basic requirement for DB testing: Test my auth rules in both development and production without modifying the very security model I'm trying to test. After all, who would want to do "real" permissions testing for the first time in a production environment??&lt;/p&gt;
+
+&lt;p&gt;Nothing was working. I was stuck. I missed. &lt;a href="https://youtu.be/02WuLTpe3sI?t=355"&gt;Then I missed again. Then I got sad. I had a popsicle. And then I passed out in the snow.&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Just kidding on the last few, but what I &lt;em&gt;did&lt;/em&gt; do what have an epiphany in the shower. I do some of my best thinking there. &lt;em&gt;Anyone else? No? Okay. Moving on.&lt;/em&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#the-solution"&gt;
+  &lt;/a&gt;
+  The Solution
+&lt;/h2&gt;
+
+&lt;p&gt;My app in particular is using Google Login and the Google auth provider, so that's what I'm going to focus on here, but I believe this approach would translate to other auth providers as well.&lt;/p&gt;
+
+&lt;p&gt;The key to making this work is abstraction. Take any Firebase call that you'd normally make and hide it behind a function that may or may not do the same thing. Usually, it's the same sort of thing with some extras sprinkled in.&lt;/p&gt;
+
+&lt;p&gt;In this case, we'll be looking at the &lt;code&gt;firebase.initializeApp&lt;/code&gt; function. In the normal production environment, this is super simple. We pass in a &lt;code&gt;siteConfig&lt;/code&gt; object and we're on our merry way. However, when working locally and/or with Firebase Emulators, this doesn't work one-for-one. In &lt;a href="https://firebase.google.com/docs/rules/unit-tests"&gt;the docs&lt;/a&gt;, they indicate that we should use &lt;code&gt;initializeTestApp&lt;/code&gt; instead to perform our initialization. This comes from the &lt;code&gt;@firebase/testing&lt;/code&gt; module as opposed to the &lt;code&gt;firebase/app&lt;/code&gt; module. This might seem perfect on the surface, but the issue is that anywhere we might normally use &lt;code&gt;firebase.&amp;lt;sometThing&amp;gt;&lt;/code&gt; to interact with the default firebase app, we can't. We instead need to work with the app instance returned from the call to &lt;code&gt;firebase.initializeTestApp()&lt;/code&gt;. By extension, this means we should structure our code so that we're &lt;em&gt;always&lt;/em&gt; using &lt;code&gt;app.&amp;lt;someThing&amp;gt;&lt;/code&gt; in favor of &lt;code&gt;firebase.&amp;lt;someThing&amp;gt;&lt;/code&gt;, regardless of whether we're using &lt;code&gt;initializeApp&lt;/code&gt; or &lt;code&gt;initializeTestApp&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;Again, this doesn't seem too bad on the surface, but there's one more catch: In each case, the app instance (as provided by &lt;code&gt;initialize*App(siteConfig)&lt;/code&gt;) is slightly different. Namely, &lt;code&gt;app.auth()&lt;/code&gt; is not a thing for apps initialized via &lt;code&gt;initializeTestApp()&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;This is the crux of the auth emulation problem. And this is what we are going to solve. Let's take a look at some code.&lt;/p&gt;
+
+&lt;p&gt;Here is a utility function to initialize either a test or production app and return it:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;createApp&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;onAuthStateChanged&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;firebase&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;importFirebase&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+
+    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;isDevelopment&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;app&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;firebase&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;initializeTestApp&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;siteConfig&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+        &lt;span class="c1"&gt;// set up custom hooks for auth mocking&lt;/span&gt;
+        &lt;span class="nx"&gt;app&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;__internal__&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="nx"&gt;onAuthStateChanged&lt;/span&gt;
+        &lt;span class="p"&gt;}&lt;/span&gt;
+
+        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;app&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;else&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;app&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;firebase&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;initializeApp&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;siteConfig&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+        &lt;span class="c1"&gt;// Set up the auth observer&lt;/span&gt;
+        &lt;span class="nx"&gt;app&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;auth&lt;/span&gt;&lt;span class="p"&gt;().&lt;/span&gt;&lt;span class="nx"&gt;onAuthStateChanged&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;onAuthStateChanged&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;app&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;There's a lot going on here, so let's break it down line by line.&lt;/p&gt;
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;createApp&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;onAuthStateChanged&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;I went with &lt;code&gt;async&lt;/code&gt; here because, in a couple lines, you'll see some dynamic imports. More on that in a sec. The other important piece here is that this &lt;code&gt;createApp&lt;/code&gt; function takes an &lt;code&gt;onAuthStateChanged&lt;/code&gt; callback and not a &lt;code&gt;siteConfig&lt;/code&gt; object like &lt;code&gt;initializeApp&lt;/code&gt;. Since we control the module containing this abstraction function, we can put our &lt;code&gt;siteConfig&lt;/code&gt; object here too for easy access. I mean, you can put the &lt;code&gt;siteConfig&lt;/code&gt; wherever you want, but to me, it makes sense to have the same module own the config block and the utility functions since the goal is to drive all Firebase-related functions through this abstraction module.&lt;/p&gt;
+
+&lt;p&gt;The &lt;code&gt;onAuthStateChanged&lt;/code&gt; callback will be called when—&lt;em&gt;you guessed it&lt;/em&gt;—the auth state changes. In the production case, we can simply set up an auth observer in the usual manner, but in the development case, it's a bit more interesting. More on that in a sec.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;firebase&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;importFirebase&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Here's another layer of abstraction. We want a reference to Firebase as a module, and more specifically we might want a reference to the "testing" version of Firebase, but we don't actually care how it is obtained. Dynamic imports are a huge help here. This is what the definition of &lt;code&gt;importFirebase&lt;/code&gt; looks like:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;importFirebase&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;isDevelopment&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="k"&gt;import&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;@firebase/testing&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;else&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;firebase&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="k"&gt;import&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;firebase/app&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+        &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="k"&gt;import&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;firebase/auth&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+        &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="k"&gt;import&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;firebase/database&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;firebase&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;There's nothing too surprising here. We are either importing "test" Firebase from &lt;code&gt;@firebase/testing&lt;/code&gt; or we are importing "real" Firebase from &lt;code&gt;firebase/app&lt;/code&gt; along with our other Firebase dependencies. Dynamically importing "real" Firebase is a little more involved, but it's basically the traditional way of doing it converted to dynamic import-form.&lt;/p&gt;
+
+&lt;p&gt;I feel like this is a good time to mention that the reason for using dynamic imports here is so that you only ever end up importing &lt;em&gt;either&lt;/em&gt; the test Firebase &lt;em&gt;or&lt;/em&gt; the production one, but never both. Dynamic imports give us that flexibility.&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;The astute reader might realize that even with dynamic imports, Webpack will still bundle both modules into the output since we don't know until runtime which type of environment we'll be in. While this is true, it can be avoided by splitting the vendor modules out as part of the build and filtering out one of the two Firebase chunks, depending on the build type.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;h2&gt;
+  &lt;a href="#development-mode"&gt;
+  &lt;/a&gt;
+  Development Mode
+&lt;/h2&gt;
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;isDevelopment&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Assuming this is a React app created via &lt;code&gt;create-react-app&lt;/code&gt;, we can calculate whether or not this is a development build by looking for &lt;code&gt;process.env.NODE_ENV === 'development'&lt;/code&gt;&lt;/p&gt;
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;app&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;firebase&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;initializeTestApp&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;siteConfig&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Next, we need to initialize the test app using the now-obtained Firebase module, providing it our &lt;code&gt;siteConfig&lt;/code&gt; as usual. There's a key piece that needs to exist in the &lt;code&gt;siteConfig&lt;/code&gt; for this to work though: An &lt;code&gt;auth&lt;/code&gt; block. Here's an example config:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;siteConfig&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="na"&gt;apiKey&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;...&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="na"&gt;authDomain&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;window&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;location&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;host&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="na"&gt;databaseURL&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;isDevelopment&lt;/span&gt;
+        &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;http://localhost:9000?ns=...&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+        &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;https://....firebaseio.com&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="na"&gt;databaseName&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;...&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="na"&gt;projectId&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;...&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="na"&gt;storageBucket&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;....appspot.com&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="na"&gt;messagingSenderId&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;...&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="na"&gt;appId&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;...&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="na"&gt;measurementId&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;...&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="na"&gt;auth&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="na"&gt;uid&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;u111111&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+        &lt;span class="na"&gt;email&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;u111111@example.com&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;That auth block is the key because that means that we can "inject" a user/email into the app manually as we see fit. There's a caveat though... Since this isn't &lt;em&gt;real&lt;/em&gt; auth, we'll never get &lt;code&gt;onAuthStateChanged&lt;/code&gt; callbacks fired. We're going to need to do that ourselves. And the first step towards doing that is to store a reference to the provided callback in our test app for later:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// set up custom hooks for auth mocking&lt;/span&gt;
+&lt;span class="nx"&gt;app&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;__internal__&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="nx"&gt;onAuthStateChanged&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;app&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;blockquote&gt;
+&lt;p&gt;Here I chose &lt;code&gt;__internal__&lt;/code&gt; as a namespace that I figured nobody would collide with, but this could just as easily have been any other unique key on the app object.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;h2&gt;
+  &lt;a href="#production-mode"&gt;
+  &lt;/a&gt;
+  Production Mode
+&lt;/h2&gt;
+
+&lt;p&gt;The other case to consider here is the production case. Let's take a look at the &lt;code&gt;else&lt;/code&gt; block:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;else&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;app&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;firebase&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;initializeApp&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;siteConfig&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+    &lt;span class="c1"&gt;// Set up the auth observer&lt;/span&gt;
+    &lt;span class="nx"&gt;app&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;auth&lt;/span&gt;&lt;span class="p"&gt;().&lt;/span&gt;&lt;span class="nx"&gt;onAuthStateChanged&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;onAuthStateChanged&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;app&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This is very similar to what happens in development except we end up importing "real" Firebase and setting up an actual auth observer with that callback we took in as an argument.&lt;/p&gt;
+
+&lt;p&gt;All of this is to say that we can now call&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;app&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;MyFirebaseUtils&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;createApp&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;onAuthStateChanged&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;to get back a firebase app that's ready to go with either emulated auth in development or real auth in production.&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;I recommend holding onto this app instance in your application state so that it can be provided to any abstraction functions that may depend on it, such as simulating a login in development mode.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;h2&gt;
+  &lt;a href="#simulating-onauthstatechanged"&gt;
+  &lt;/a&gt;
+  Simulating onAuthStateChanged
+&lt;/h2&gt;
+
+&lt;p&gt;For any function we have that would trigger a login (or logout), we can add in a separate development-only flow in which we manually fire an &lt;code&gt;onAuthStateChanged&lt;/code&gt; event. Looking at the &lt;a href="https://firebase.google.com/docs/reference/js/firebase.auth.Auth#onauthstatechanged"&gt;docs&lt;/a&gt;, those events are either passed a user or &lt;code&gt;null&lt;/code&gt; depending on whether the user is logged in or not.&lt;/p&gt;
+
+&lt;p&gt;If our production flow for logging in a user looks like this:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;doGoogleLogin&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;app&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;onSuccess&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;onFailure&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;firebase&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;importFirebase&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;provider&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;firebase&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;auth&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;GoogleAuthProvider&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+
+    &lt;span class="c1"&gt;// Show the actual login popup. Succeeding here will update the internally managed uid and&lt;/span&gt;
+    &lt;span class="c1"&gt;// auth of the app, which allows subsequent database calls (and other stuff) to work.&lt;/span&gt;
+    &lt;span class="nx"&gt;app&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;auth&lt;/span&gt;&lt;span class="p"&gt;().&lt;/span&gt;&lt;span class="nx"&gt;signInWithPopup&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;provider&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+        &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;then&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;onSuccess&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+        &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="k"&gt;catch&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;onFailure&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Then we can add in a development flow, like this:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;doGoogleLogin&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;app&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;onSuccess&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;onFailure&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;isDevelopment&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="c1"&gt;// https://firebase.google.com/docs/reference/js/firebase.auth#usercredential&lt;/span&gt;
+        &lt;span class="nx"&gt;onSuccess&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt;
+            &lt;span class="na"&gt;credential&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+                &lt;span class="na"&gt;accessToken&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;TEST_ID_AUTH_TOKEN&lt;/span&gt;
+            &lt;span class="p"&gt;},&lt;/span&gt;
+            &lt;span class="na"&gt;user&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+                &lt;span class="na"&gt;uid&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;siteConfig&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;auth&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;uid&lt;/span&gt;
+            &lt;span class="p"&gt;}&lt;/span&gt;
+        &lt;span class="p"&gt;})&lt;/span&gt;
+
+        &lt;span class="c1"&gt;// Fire a simulated onAuthStateChanged event, passing it the user from our siteConfig.auth block&lt;/span&gt;
+        &lt;span class="nx"&gt;app&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;__internal__&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;onAuthStateChanged&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt;
+            &lt;span class="na"&gt;uid&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;siteConfig&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;auth&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;uid&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+            &lt;span class="na"&gt;getIdToken&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;TEST_ID_AUTH_TOKEN&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+        &lt;span class="p"&gt;})&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;else&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="c1"&gt;// production flow&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;And there you have it! A sorta-kinda way to emulate auth from within a Firebase-enabled app. Hopefully you find this useful. I've been successfully using this approach in my project to help with offline testing using Firebase emulators.&lt;/p&gt;
+
+</description>
+      <category>javascript</category>
+      <category>webdev</category>
+      <category>firebase</category>
+      <category>testing</category>
+    </item>
+    <item>
       <title>Introduction</title>
       <author>Mahamud Arteh</author>
       <pubDate>Sat, 23 Oct 2021 23:32:32 +0000</pubDate>
@@ -1243,6 +1551,88 @@ If the database is the bottleneck, tuning the Java application accessing the dat
       <category>performance</category>
     </item>
     <item>
+      <title>Media Queries - CSS</title>
+      <author>Sai Pavan</author>
+      <pubDate>Sat, 23 Oct 2021 20:23:45 +0000</pubDate>
+      <link>https://dev.to/alphastormaniac/media-queries-css-59om</link>
+      <guid>https://dev.to/alphastormaniac/media-queries-css-59om</guid>
+      <description>&lt;h2&gt;
+  &lt;a href="#what-is-a-mediaquery"&gt;
+  &lt;/a&gt;
+  What is a media-query?
+&lt;/h2&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--79vtssjE--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/8q00zfkx5057w72kccf5.jpg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--79vtssjE--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/8q00zfkx5057w72kccf5.jpg" alt="Image description"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;A Media Query is a CSS Technique that uses a @media and @import at-rules which helps in invoking CSS properties inside a block only if the desired condition is true for various device resolutions.&lt;/p&gt;
+
+&lt;p&gt;Ex:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="k"&gt;@media&lt;/span&gt; &lt;span class="n"&gt;only&lt;/span&gt; &lt;span class="n"&gt;screen&lt;/span&gt; &lt;span class="n"&gt;and&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;max-width&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;600px&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="nt"&gt;body&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="nl"&gt;background-color&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="no"&gt;lightyellow&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+  &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h1&gt;
+  &lt;a href="#adding-breakpoints"&gt;
+  &lt;/a&gt;
+  Adding breakpoints..
+&lt;/h1&gt;
+
+&lt;p&gt;Breakpoints help in eliminating clutter of rows and columns made in a web page. It was responsive but it wasn't made for a smaller screen with a lower resolution like Mobile Phones, Tablets, etc.&lt;/p&gt;
+
+&lt;p&gt;Ex:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="k"&gt;@media&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;max-width&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;768px&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; 
+  &lt;span class="nt"&gt;html&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+   &lt;span class="nl"&gt;color&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="no"&gt;gray&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+   &lt;span class="nl"&gt;font-size&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;1rem&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+  &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h1&gt;
+  &lt;a href="#improving-the-compatibility-with-outdated-or-older-browsers"&gt;
+  &lt;/a&gt;
+  Improving the compatibility with outdated or older browsers
+&lt;/h1&gt;
+
+&lt;p&gt;Certain browsers don't support media queries and the applied media features like styling does not get implemented. The example being displayed below has no effects on modern browsers.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="k"&gt;@media&lt;/span&gt; &lt;span class="n"&gt;only&lt;/span&gt; &lt;span class="n"&gt;screen&lt;/span&gt; &lt;span class="n"&gt;and&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;max-width&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;600px&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="nt"&gt;body&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="nl"&gt;background-color&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="no"&gt;lightblue&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+  &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+</description>
+      <category>css</category>
+      <category>webdev</category>
+      <category>vscode</category>
+    </item>
+    <item>
       <title>To all the devs with crazy ideas . . .</title>
       <author>Saurabh Rai</author>
       <pubDate>Sat, 23 Oct 2021 20:04:12 +0000</pubDate>
@@ -1707,590 +2097,6 @@ class UserController extends Controller
       <category>php</category>
       <category>tutorial</category>
       <category>beginners</category>
-    </item>
-    <item>
-      <title>Shell Scripting Basics: Beginner's Guide</title>
-      <author>Abdullah Adeel (AB)</author>
-      <pubDate>Sat, 23 Oct 2021 19:14:40 +0000</pubDate>
-      <link>https://dev.to/abdadeel/shell-scripting-basics-beginners-guide-1h2b</link>
-      <guid>https://dev.to/abdadeel/shell-scripting-basics-beginners-guide-1h2b</guid>
-      <description>&lt;h2&gt;
-  &lt;a href="#what-is-shell-scripting"&gt;
-  &lt;/a&gt;
-  What is shell scripting? 😕
-&lt;/h2&gt;
-
-&lt;p&gt;&lt;a href="https://i.giphy.com/media/3o7btPCcdNniyf0ArS/giphy.gif" class="article-body-image-wrapper"&gt;&lt;img src="https://i.giphy.com/media/3o7btPCcdNniyf0ArS/giphy.gif" alt="confused_person"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Shell scripting is the code that is designed to run in the &lt;code&gt;Unix&lt;/code&gt; shell. This means that you can write these generic pieces of instructions and execute them directly from the shell on &lt;code&gt;Linux&lt;/code&gt; and &lt;code&gt;MacOS&lt;/code&gt;. If you want similar functionality on your Windows machine, you can use the &lt;code&gt;shell/bash&lt;/code&gt; alternative for windows like  &lt;a href="https://git-scm.com/"&gt;Gitbash&lt;/a&gt;. In this article, together we will have a brief look at the syntax and basics of &lt;strong&gt;shell scripting&lt;/strong&gt; and some of the examples to see some practices examples of shell scripting.&lt;/p&gt;
-
-&lt;p&gt;&lt;code&gt;.sh&lt;/code&gt; is the extension for shell files. So if you want to follow along, you can create a file in your desired directory i-e &lt;code&gt;myscript.sh&lt;/code&gt;, and open the file in your favorite text editor or IDE.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;NOTE: ⚡&lt;/strong&gt;&lt;br&gt;
-Before you start executing the bash files, you might need to give the file proper permissions to execute the shell script. For that, open the terminal and navigate to the same directory as your script file and execute the following command there.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nb"&gt;chmod&lt;/span&gt; +x ./myscript.sh
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--OtwPDJBt--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1635001682266/WqLxBZspT.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--OtwPDJBt--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1635001682266/WqLxBZspT.png" alt="image.png"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#log-the-raw-hello-world-endraw-"&gt;
-  &lt;/a&gt;
-  Log the &lt;code&gt;Hello World 🙂&lt;/code&gt;
-&lt;/h2&gt;
-
-&lt;p&gt;Let's start with the good old &lt;code&gt;hello world&lt;/code&gt; example. To log anything to the console, use &lt;code&gt;echo&lt;/code&gt; followed by whatever you want to log.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="c"&gt;#! /bin/bash&lt;/span&gt;
-
-&lt;span class="nb"&gt;echo&lt;/span&gt; &lt;span class="s2"&gt;"hello world 🙂"&lt;/span&gt;
-
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;adding &lt;code&gt;#! /bin/bash&lt;/code&gt; represents the path to the bash.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#comments"&gt;
-  &lt;/a&gt;
-  Comments
-&lt;/h2&gt;
-
-&lt;p&gt;Comments in shell script start with &lt;code&gt;#&lt;/code&gt; and are completely ignored when executing.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="c"&gt;# This is a comment&lt;/span&gt;
-&lt;span class="nb"&gt;echo&lt;/span&gt; &lt;span class="s2"&gt;"hello world"&lt;/span&gt;
-
-&lt;span class="c"&gt;# This is also a comment&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#variables"&gt;
-  &lt;/a&gt;
-  Variables
-&lt;/h2&gt;
-
-&lt;p&gt;Variables in shell scripting are declared as below.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;NAME&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s2"&gt;"AB"&lt;/span&gt;
-
-&lt;span class="c"&gt;# log the name&lt;/span&gt;
-&lt;span class="nb"&gt;echo&lt;/span&gt; &lt;span class="nv"&gt;$NAME&lt;/span&gt;
-&lt;span class="c"&gt;# or&lt;/span&gt;
-&lt;span class="nb"&gt;echo&lt;/span&gt; &lt;span class="k"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;NAME&lt;/span&gt;&lt;span class="k"&gt;}&lt;/span&gt;
-
-&lt;span class="c"&gt;# Output:&lt;/span&gt;
-&lt;span class="c"&gt;# AB&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Variables in shell scripting: &lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;should contain letters, numbers, and underscores&lt;/li&gt;
-&lt;li&gt;are UPPERCASE by convention&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h2&gt;
-  &lt;a href="#reading-user-input"&gt;
-  &lt;/a&gt;
-  Reading User Input
-&lt;/h2&gt;
-
-&lt;p&gt;Below is how you can take and input from the user and store the value in a variable &lt;code&gt;NAME&lt;/code&gt;.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nb"&gt;read&lt;/span&gt; &lt;span class="nt"&gt;-p&lt;/span&gt; &lt;span class="s2"&gt;"Enter your name: "&lt;/span&gt; NAME
-&lt;span class="nb"&gt;echo&lt;/span&gt; &lt;span class="nv"&gt;$NAME&lt;/span&gt;
-
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h1&gt;
-  &lt;a href="#conditionals-raw-if-endraw-statement"&gt;
-  &lt;/a&gt;
-  Conditionals - &lt;code&gt;if&lt;/code&gt; statement
-&lt;/h1&gt;
-
-&lt;p&gt;The structure and syntax to define the &lt;code&gt;if&lt;/code&gt; statements in the shell are given below. It starts with &lt;code&gt;if&lt;/code&gt; followed by the condition in square brackets &lt;code&gt;[]&lt;/code&gt; and action block and ends with the reverse of &lt;code&gt;if&lt;/code&gt; which is &lt;code&gt;fi&lt;/code&gt;.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nb"&gt;read&lt;/span&gt; &lt;span class="nt"&gt;-p&lt;/span&gt; &lt;span class="s2"&gt;"Enter your name: "&lt;/span&gt; NAME
-
-&lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="o"&gt;[&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$NAME&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt; &lt;span class="o"&gt;==&lt;/span&gt; &lt;span class="s2"&gt;"AB"&lt;/span&gt; &lt;span class="o"&gt;]&lt;/span&gt;
-&lt;span class="k"&gt;then
-    &lt;/span&gt;&lt;span class="nb"&gt;echo&lt;/span&gt; &lt;span class="s2"&gt;"Hello AB"&lt;/span&gt;
-&lt;span class="k"&gt;else
-    &lt;/span&gt;&lt;span class="nb"&gt;echo&lt;/span&gt; &lt;span class="s2"&gt;"Hello World"&lt;/span&gt;
-&lt;span class="k"&gt;fi&lt;/span&gt;
-
-&lt;span class="c"&gt;# Output&lt;/span&gt;
-&lt;span class="c"&gt;# Enter your name: AB&lt;/span&gt;
-&lt;span class="c"&gt;# Hello AB&lt;/span&gt;
-
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;For else-if statements do,&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nb"&gt;read&lt;/span&gt; &lt;span class="nt"&gt;-p&lt;/span&gt; &lt;span class="s2"&gt;"Enter your name: "&lt;/span&gt; NAME
-&lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="o"&gt;[&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$NAME&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt; &lt;span class="o"&gt;==&lt;/span&gt; &lt;span class="s2"&gt;"AB"&lt;/span&gt; &lt;span class="o"&gt;]&lt;/span&gt;
-&lt;span class="k"&gt;then
-    &lt;/span&gt;&lt;span class="nb"&gt;echo&lt;/span&gt; &lt;span class="s2"&gt;"Hello AB"&lt;/span&gt;
-&lt;span class="k"&gt;elif&lt;/span&gt; &lt;span class="o"&gt;[&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$NAME&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt; &lt;span class="o"&gt;==&lt;/span&gt; &lt;span class="s2"&gt;"John"&lt;/span&gt;&lt;span class="o"&gt;]&lt;/span&gt;
-&lt;span class="k"&gt;then
-    &lt;/span&gt;&lt;span class="nb"&gt;echo&lt;/span&gt; &lt;span class="s2"&gt;"Hello John"&lt;/span&gt;
-&lt;span class="k"&gt;else
-    &lt;/span&gt;&lt;span class="nb"&gt;echo&lt;/span&gt; &lt;span class="s2"&gt;"Hello World"&lt;/span&gt;
-&lt;span class="k"&gt;fi&lt;/span&gt;
-
-&lt;span class="c"&gt;# Output&lt;/span&gt;
-&lt;span class="c"&gt;# Enter your name: John&lt;/span&gt;
-&lt;span class="c"&gt;# Hello John&lt;/span&gt;
-
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h1&gt;
-  &lt;a href="#comparision-operators"&gt;
-  &lt;/a&gt;
-  Comparision Operators
-&lt;/h1&gt;
-
-&lt;p&gt;Comparison operators are used for comparing two values i-e if they are equal, not equal, one is greater, greater or equal, etc.&lt;/p&gt;
-
-&lt;p&gt;In shell scripts, below is the syntax for how you can compare different values.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;
-&lt;span class="nv"&gt;NUMBER_1&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;7
-&lt;span class="nv"&gt;NUMBER_2&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;10
-
-&lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="o"&gt;[&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$NUMBER_1&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt; &lt;span class="nt"&gt;-lt&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$NUMBER_2&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt; &lt;span class="o"&gt;]&lt;/span&gt;
-&lt;span class="k"&gt;then
-    &lt;/span&gt;&lt;span class="nb"&gt;echo&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$NUMBER_1&lt;/span&gt;&lt;span class="s2"&gt; is less than &lt;/span&gt;&lt;span class="nv"&gt;$NUMBER_2&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;
-&lt;span class="k"&gt;elif&lt;/span&gt; &lt;span class="o"&gt;[&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$NUMBER_1&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt; &lt;span class="nt"&gt;-gt&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$NUMBER_2&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt; &lt;span class="o"&gt;]&lt;/span&gt;
-&lt;span class="k"&gt;then
-    &lt;/span&gt;&lt;span class="nb"&gt;echo&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$NUMBER_1&lt;/span&gt;&lt;span class="s2"&gt; is greater than &lt;/span&gt;&lt;span class="nv"&gt;$NUMBER_2&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;
-&lt;span class="k"&gt;else
-    &lt;/span&gt;&lt;span class="nb"&gt;echo&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$NUMBER_1&lt;/span&gt;&lt;span class="s2"&gt; is equal to &lt;/span&gt;&lt;span class="nv"&gt;$NUMBER_2&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;
-&lt;span class="k"&gt;fi&lt;/span&gt;
-
-&lt;span class="c"&gt;# Output&lt;/span&gt;
-&lt;span class="c"&gt;# 7 is less than 10&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Below is the table of other available options&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;
-&lt;code&gt;-eq&lt;/code&gt; : &lt;code&gt;num1&lt;/code&gt; -eq &lt;code&gt;num2&lt;/code&gt; -&amp;gt; &lt;code&gt;True&lt;/code&gt; if &lt;code&gt;num1&lt;/code&gt; is equal to &lt;code&gt;num2&lt;/code&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;-ne&lt;/code&gt; : &lt;code&gt;num1&lt;/code&gt; -ne &lt;code&gt;num2&lt;/code&gt; -&amp;gt; &lt;code&gt;True&lt;/code&gt; if &lt;code&gt;num1&lt;/code&gt; is not equal to &lt;code&gt;num2&lt;/code&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;-gt&lt;/code&gt; : &lt;code&gt;num1&lt;/code&gt; -gt &lt;code&gt;num2&lt;/code&gt; -&amp;gt; &lt;code&gt;True&lt;/code&gt; if &lt;code&gt;num1&lt;/code&gt; is greater than &lt;code&gt;num2&lt;/code&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;-ge&lt;/code&gt; : &lt;code&gt;num1&lt;/code&gt; -ge &lt;code&gt;num2&lt;/code&gt; -&amp;gt; &lt;code&gt;True&lt;/code&gt; if &lt;code&gt;num1&lt;/code&gt; greater than or equal to &lt;code&gt;num2&lt;/code&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;-lt&lt;/code&gt; : &lt;code&gt;num1&lt;/code&gt; -eq &lt;code&gt;num2&lt;/code&gt; -&amp;gt; &lt;code&gt;True&lt;/code&gt; if &lt;code&gt;num1&lt;/code&gt; is less than &lt;code&gt;num2&lt;/code&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;-le&lt;/code&gt; : &lt;code&gt;num1&lt;/code&gt; -eq &lt;code&gt;num2&lt;/code&gt; -&amp;gt; &lt;code&gt;True&lt;/code&gt; if &lt;code&gt;num1&lt;/code&gt; is less than or equal to &lt;code&gt;num2&lt;/code&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h1&gt;
-  &lt;a href="#logical-operators"&gt;
-  &lt;/a&gt;
-  Logical Operators
-&lt;/h1&gt;
-
-&lt;p&gt;Logical operators combine two conditions for the final result. The common logical operators are &lt;code&gt;AND&lt;/code&gt; and &lt;code&gt;OR&lt;/code&gt;. Let's see how we can implement them in a shell script.&lt;/p&gt;
-
-&lt;p&gt;The syntax for &lt;code&gt;AND&lt;/code&gt; is &lt;code&gt;&amp;amp;&amp;amp;&lt;/code&gt; and for &lt;code&gt;OR&lt;/code&gt; is &lt;code&gt;||&lt;/code&gt;. Here is an example of using them.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;NUMBER_1&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;7
-&lt;span class="nv"&gt;NUMBER_2&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;10
-&lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="o"&gt;[&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$NUMBER_1&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt; &lt;span class="nt"&gt;-lt&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$NUMBER_2&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt; &lt;span class="o"&gt;]&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; &lt;span class="o"&gt;[&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$NUMBER_1&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt; &lt;span class="nt"&gt;-gt&lt;/span&gt; &lt;span class="s2"&gt;"0"&lt;/span&gt; &lt;span class="o"&gt;]&lt;/span&gt;
-&lt;span class="k"&gt;then
-    &lt;/span&gt;&lt;span class="nb"&gt;echo&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$NUMBER_1&lt;/span&gt;&lt;span class="s2"&gt; is less than &lt;/span&gt;&lt;span class="nv"&gt;$NUMBER_2&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;
-&lt;span class="k"&gt;else
-    &lt;/span&gt;&lt;span class="nb"&gt;echo&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$NUMBER_1&lt;/span&gt;&lt;span class="s2"&gt; is greater than &lt;/span&gt;&lt;span class="nv"&gt;$NUMBER_2&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;
-&lt;span class="k"&gt;fi&lt;/span&gt;
-
-&lt;span class="c"&gt;# Output:&lt;/span&gt;
-&lt;span class="c"&gt;# 7 is less than 10&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h1&gt;
-  &lt;a href="#case-statement"&gt;
-  &lt;/a&gt;
-  Case Statement
-&lt;/h1&gt;
-
-&lt;p&gt;Case statements might be a little too much for a newbie to remember because of their weird syntax.  After each condition there is an extra &lt;code&gt;)&lt;/code&gt;  and if none of the cases is true, its default to &lt;code&gt;*&lt;/code&gt; block which behaves similar to &lt;code&gt;default&lt;/code&gt; like in &lt;code&gt;Javascript&lt;/code&gt;.  Have a look at the example below for a deeper understanding.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;
-&lt;span class="nb"&gt;read&lt;/span&gt; &lt;span class="nt"&gt;-p&lt;/span&gt; &lt;span class="s2"&gt;"Are you 18 or older: y/N: "&lt;/span&gt; ANSWER
-&lt;span class="k"&gt;case&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$ANSWER&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt; &lt;span class="k"&gt;in&lt;/span&gt;
-    &lt;span class="o"&gt;[&lt;/span&gt;yY] &lt;span class="p"&gt;|&lt;/span&gt; &lt;span class="o"&gt;[&lt;/span&gt;yY][eE][sS]&lt;span class="p"&gt;)&lt;/span&gt;
-        &lt;span class="nb"&gt;echo&lt;/span&gt; &lt;span class="s2"&gt;"You can drive!"&lt;/span&gt;
-        &lt;span class="p"&gt;;;&lt;/span&gt;
-    &lt;span class="o"&gt;[&lt;/span&gt;nN] &lt;span class="p"&gt;|&lt;/span&gt; &lt;span class="o"&gt;[&lt;/span&gt;nN][oO]&lt;span class="p"&gt;)&lt;/span&gt;
-        &lt;span class="nb"&gt;echo&lt;/span&gt; &lt;span class="s2"&gt;"You cannot drive"&lt;/span&gt;
-        &lt;span class="p"&gt;;;&lt;/span&gt;
-    &lt;span class="k"&gt;*&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-        &lt;span class="nb"&gt;echo&lt;/span&gt; &lt;span class="s2"&gt;"Invalid input"&lt;/span&gt;
-        &lt;span class="p"&gt;;;&lt;/span&gt;
-&lt;span class="k"&gt;esac&lt;/span&gt;
-
-: &lt;span class="s1"&gt;'
-Output:
-
-Are you 18 or older: y/N: yes
-You can drive!
-
-Are you 18 or older: y/N: y
-You can drive!
-
-Are you 18 or older: y/N: no
-You cannot drive
-'&lt;/span&gt;
-
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h1&gt;
-  &lt;a href="#simple-raw-for-endraw-loops"&gt;
-  &lt;/a&gt;
-  Simple &lt;code&gt;for&lt;/code&gt; loops
-&lt;/h1&gt;
-
-&lt;p&gt;Below is the simple syntax and structure of defining a for loop in a bash script.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="k"&gt;for &lt;/span&gt;i &lt;span class="k"&gt;in&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;1..5&lt;span class="o"&gt;}&lt;/span&gt;
-&lt;span class="k"&gt;do
-    &lt;/span&gt;&lt;span class="nb"&gt;echo&lt;/span&gt; &lt;span class="s2"&gt;"Number: &lt;/span&gt;&lt;span class="nv"&gt;$i&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;
-&lt;span class="k"&gt;done&lt;/span&gt;
-
-: &lt;span class="s1"&gt;'
-Output: 
-
-Number: 1
-Number: 2
-Number: 3
-Number: 4
-Number: 5
-'&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Loop over a list of given names&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="c"&gt;# Declare an array&lt;/span&gt;
-&lt;span class="nb"&gt;declare&lt;/span&gt; &lt;span class="nt"&gt;-a&lt;/span&gt; &lt;span class="nv"&gt;NAMES&lt;/span&gt;&lt;span class="o"&gt;=(&lt;/span&gt;&lt;span class="s2"&gt;"AB"&lt;/span&gt;, &lt;span class="s2"&gt;"Kevin"&lt;/span&gt;, &lt;span class="s2"&gt;"Lia"&lt;/span&gt;, &lt;span class="s2"&gt;"John"&lt;/span&gt;&lt;span class="o"&gt;)&lt;/span&gt;
-&lt;span class="k"&gt;for &lt;/span&gt;NAME &lt;span class="k"&gt;in&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="k"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;NAMES&lt;/span&gt;&lt;span class="p"&gt;[@]&lt;/span&gt;&lt;span class="k"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;
-    &lt;span class="k"&gt;do
-        &lt;/span&gt;&lt;span class="nb"&gt;echo&lt;/span&gt; &lt;span class="s2"&gt;"Hello &lt;/span&gt;&lt;span class="nv"&gt;$NAME&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;
-&lt;span class="k"&gt;done&lt;/span&gt;
-
-: &lt;span class="s1"&gt;'
-Output:
-
-Hello AB,
-Hello Kevin,
-Hello Lia,
-Hello John
-'&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h1&gt;
-  &lt;a href="#-raw-while-endraw-loops"&gt;
-  &lt;/a&gt;
-  &lt;code&gt;while&lt;/code&gt; loops
-&lt;/h1&gt;
-
-&lt;p&gt;The syntax for &lt;code&gt;while&lt;/code&gt; loops is similar to &lt;code&gt;for&lt;/code&gt; loops.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;
-&lt;span class="nv"&gt;COUNT&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;1
-&lt;span class="k"&gt;while&lt;/span&gt; &lt;span class="o"&gt;[&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$COUNT&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt; &lt;span class="nt"&gt;-le&lt;/span&gt; 5 &lt;span class="o"&gt;]&lt;/span&gt;
-&lt;span class="k"&gt;do
-    &lt;/span&gt;&lt;span class="nb"&gt;echo&lt;/span&gt; &lt;span class="s2"&gt;"Number: &lt;/span&gt;&lt;span class="nv"&gt;$COUNT&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;
-    &lt;span class="o"&gt;((&lt;/span&gt;COUNT++&lt;span class="o"&gt;))&lt;/span&gt;
-&lt;span class="k"&gt;done&lt;/span&gt;
-
-: &lt;span class="s1"&gt;'
-Output:
-
-Number: 1
-Number: 2
-Number: 3
-Number: 4
-Number: 5
-'&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h1&gt;
-  &lt;a href="#-raw-functions-endraw-"&gt;
-  &lt;/a&gt;
-  &lt;code&gt;Functions&lt;/code&gt;
-&lt;/h1&gt;
-
-&lt;p&gt;Functions work the same as they do in programming languages except in shell, they don't directly accept any argument but use placeholders in the function body as you will see in the example below.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;sayHello&lt;span class="o"&gt;()&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
-    &lt;span class="nb"&gt;echo&lt;/span&gt; &lt;span class="s2"&gt;"Hello World"&lt;/span&gt;
-&lt;span class="o"&gt;}&lt;/span&gt;
-sayHello
-
-: &lt;span class="s1"&gt;'
-Output:
-Hello World
-'&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Function with arguments.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="c"&gt;# function to add tow numbers&lt;/span&gt;
-&lt;span class="k"&gt;function &lt;/span&gt;add &lt;span class="o"&gt;()&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
-    &lt;span class="nv"&gt;SUM&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="k"&gt;$((&lt;/span&gt;&lt;span class="nv"&gt;$1&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="nv"&gt;$2&lt;/span&gt;&lt;span class="k"&gt;))&lt;/span&gt;
-    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nv"&gt;$SUM&lt;/span&gt;
-&lt;span class="o"&gt;}&lt;/span&gt;
-
-&lt;span class="c"&gt;# call the function&lt;/span&gt;
-add 7 3
-&lt;span class="nb"&gt;echo&lt;/span&gt; &lt;span class="s2"&gt;"Sum: &lt;/span&gt;&lt;span class="nv"&gt;$SUM&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;
-
-: &lt;span class="s1"&gt;'
-Output:
-Sum: 10
-'&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h1&gt;
-  &lt;a href="#general-commands"&gt;
-  &lt;/a&gt;
-  General Commands
-&lt;/h1&gt;
-
-&lt;p&gt;All the UNIX commands can be executed through the shell script like creating folders and files, reading and writing files, etc. &lt;/p&gt;
-
-&lt;p&gt;Below are some resources where you can learn about the basic commands:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt; &lt;a href="https://maker.pro/linux/tutorial/basic-linux-commands-for-beginners"&gt;Learn basic commands for Linux, a free and open-source operating system that you can make changes to and redistribute.&lt;/a&gt; &lt;/li&gt;
-&lt;li&gt; &lt;a href="https://hackr.io/blog/basic-linux-commands"&gt;Basic Linux Commands&lt;/a&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;Below is the example of first creating a folder &lt;code&gt;myfolder&lt;/code&gt;, creating a &lt;code&gt;.txt&lt;/code&gt; file in that folder, and writing to that file.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="c"&gt;#! /bin/bash&lt;/span&gt;
-
-&lt;span class="nb"&gt;mkdir &lt;/span&gt;myfolder
-&lt;span class="nb"&gt;touch&lt;/span&gt; &lt;span class="s2"&gt;"myfolder/myfile.txt"&lt;/span&gt;
-&lt;span class="nb"&gt;echo&lt;/span&gt; &lt;span class="s2"&gt;"hello world"&lt;/span&gt; &lt;span class="o"&gt;&amp;gt;&amp;gt;&lt;/span&gt; &lt;span class="s2"&gt;"myfolder/myfile.txt"&lt;/span&gt;
-
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h1&gt;
-  &lt;a href="#where-can-i-use-shell-scripting"&gt;
-  &lt;/a&gt;
-  Where can I use shell scripting
-&lt;/h1&gt;
-
-&lt;p&gt;You can use shell scripting to run any sequence of commands either on the server or on your local machine. Below are some real-world examples of shell scripting.&lt;/p&gt;
-
-&lt;p&gt;Here is a shell script that is hypothetically running on a server inside a docker container and waiting for the database to be available before starting the server. As soon as the database is up and available for connection, the server starts.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="c"&gt;#! /bin/bash&lt;/span&gt;
-
-postgres_ready&lt;span class="o"&gt;()&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
-python &lt;span class="o"&gt;&amp;lt;&amp;lt;&lt;/span&gt; &lt;span class="no"&gt;END&lt;/span&gt;&lt;span class="sh"&gt;
-import sys
-import psycopg2
-try:
-    psycopg2.connect(
-        dbname="&lt;/span&gt;&lt;span class="k"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;POSTGRES_DB&lt;/span&gt;&lt;span class="k"&gt;}&lt;/span&gt;&lt;span class="sh"&gt;",
-        user="&lt;/span&gt;&lt;span class="k"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;POSTGRES_USER&lt;/span&gt;&lt;span class="k"&gt;}&lt;/span&gt;&lt;span class="sh"&gt;",
-        password="&lt;/span&gt;&lt;span class="k"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;POSTGRES_PASSWORD&lt;/span&gt;&lt;span class="k"&gt;}&lt;/span&gt;&lt;span class="sh"&gt;",
-        host="&lt;/span&gt;&lt;span class="k"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;POSTGRES_HOST&lt;/span&gt;&lt;span class="k"&gt;}&lt;/span&gt;&lt;span class="sh"&gt;",
-        port="&lt;/span&gt;&lt;span class="k"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;POSTGRES_PORT&lt;/span&gt;&lt;span class="k"&gt;}&lt;/span&gt;&lt;span class="sh"&gt;",
-    )
-except psycopg2.OperationalError:
-    sys.exit(-1)
-sys.exit(0)
-&lt;/span&gt;&lt;span class="no"&gt;END
-&lt;/span&gt;&lt;span class="o"&gt;}&lt;/span&gt;
-&lt;span class="k"&gt;until &lt;/span&gt;postgres_ready&lt;span class="p"&gt;;&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
-  &lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&amp;amp;2 &lt;span class="nb"&gt;echo&lt;/span&gt; &lt;span class="s1"&gt;'Waiting for PostgreSQL to become available...'&lt;/span&gt;
-  &lt;span class="nb"&gt;sleep &lt;/span&gt;1
-&lt;span class="k"&gt;done&lt;/span&gt;
-&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&amp;amp;2 &lt;span class="nb"&gt;echo&lt;/span&gt; &lt;span class="s1"&gt;'PostgreSQL is available'&lt;/span&gt;
-
-: &lt;span class="s1"&gt;'
-# src 👇
-https://bit.ly/3nlrS2q
-'&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Another great example would be automating the GitHub commits and pushes (basic).&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="c"&gt;#! /bin/bash&lt;/span&gt;
-
-git add &lt;span class="nt"&gt;--all&lt;/span&gt;
-git commit &lt;span class="nt"&gt;-m&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$1&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;
-git push origin master
-
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;here &lt;code&gt;$1&lt;/code&gt; represent the extra flag/info you can pass to the script when executing the &lt;code&gt;.sh&lt;/code&gt; file from the shell.&lt;br&gt;
-The execution will be:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;./myfile.sh &lt;span class="s2"&gt;"your commit message here"&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Let's end it here and if you want to learn more advance shell scripting, please comment for part II. I would love to hear your ideas on what you want to implement through shell scripting and make your terminal life easier 😁.&lt;/p&gt;
-
-&lt;p&gt;Thanks&lt;/p&gt;
-
-</description>
-      <category>bash</category>
-      <category>docker</category>
-      <category>beginners</category>
-      <category>scripting</category>
-    </item>
-    <item>
-      <title>Divtober Day 23: Loud</title>
-      <author>Alvaro Montoro</author>
-      <pubDate>Sat, 23 Oct 2021 19:00:51 +0000</pubDate>
-      <link>https://dev.to/alvaromontoro/divtober-day-23-loud-44id</link>
-      <guid>https://dev.to/alvaromontoro/divtober-day-23-loud-44id</guid>
-      <description>&lt;p&gt;The word of the day for divtober is "loud." This required a demo with that extra push over the cliff, so I brought it up "one louder" to 11 with this volume knob:&lt;/p&gt;
-
-&lt;p&gt;&lt;iframe height="600" src="https://codepen.io/alvaromontoro/embed/BadpNdN?height=600&amp;amp;default-tab=result&amp;amp;embed-version=2"&gt;
-&lt;/iframe&gt;
-&lt;/p&gt;
-
-&lt;p&gt;It was developed using an input range as a base, so it is a bit interactive (but results may vary).&lt;/p&gt;
-
-&lt;p&gt;Firefox doesn't support pseudo-elements in inputs, so it will miss the "volume" label. It could be fixed by avoiding the pseudo-elements and making the input larger and using radial-gradients instead of box-shadows.&lt;/p&gt;
-
-</description>
-      <category>codepen</category>
-      <category>divtober</category>
-      <category>css</category>
-      <category>art</category>
     </item>
   </channel>
 </rss>
