@@ -7,6 +7,186 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>Prematurely hand-optimizing C++ code for shits and giggles</title>
+      <author>DrBearhands</author>
+      <pubDate>Mon, 01 Nov 2021 06:50:18 +0000</pubDate>
+      <link>https://dev.to/drbearhands/prematurely-hand-optimizing-c-code-for-shits-and-giggles-3i31</link>
+      <guid>https://dev.to/drbearhands/prematurely-hand-optimizing-c-code-for-shits-and-giggles-3i31</guid>
+      <description>&lt;p&gt;Left in the void that comes after abandoning a project, I decided to port a previous JavaScript / WebGL project to C++. Changing languages meant a complete overhaul of some core systems. I was looking at a &lt;a href="https://austinmorlan.com/posts/entity_component_system/"&gt;post by Austin Morlan about ECS achitectures&lt;/a&gt; for inspiration.&lt;/p&gt;
+
+&lt;p&gt;Here I saw this procedure:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight cpp"&gt;&lt;code&gt;&lt;span class="n"&gt;EntityManager&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+&lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="c1"&gt;// Initialize the queue with all possible entity IDs&lt;/span&gt;
+  &lt;span class="k"&gt;for&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Entity&lt;/span&gt; &lt;span class="n"&gt;entity&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; &lt;span class="n"&gt;entity&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt; &lt;span class="n"&gt;MAX_ENTITIES&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; &lt;span class="o"&gt;++&lt;/span&gt;&lt;span class="n"&gt;entity&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="n"&gt;mAvailableEntities&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;push&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;entity&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+  &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;this isn't bad code. Nonetheless, I did not like it. And not just because I have a distaste for CamelCase.&lt;/p&gt;
+
+&lt;p&gt;Initializing the value &lt;code&gt;mAvailableEntities&lt;/code&gt; potentially takes a long time. In the example &lt;code&gt;MAX_ENTITIES&lt;/code&gt; was set to 5k, so it's not so bad, but I may require far more entities than that.&lt;/p&gt;
+
+&lt;p&gt;Had this been a regular project with a clear goal, the correct approach would be to leave the code as is, since it's certainly readable. Then &lt;em&gt;if&lt;/em&gt; we run into performance issues in practice, find the procedures taking up the most times and optimize &lt;em&gt;those&lt;/em&gt;, and &lt;a href="https://youtu.be/r-TLSBdHe1A"&gt;&lt;em&gt;use statistical analysis&lt;/em&gt; to determine if our changes actually mattered&lt;/a&gt;. That is the correct way to optimize performance. That's not what I'm going to do here.&lt;/p&gt;
+
+&lt;p&gt;In this particular architecture, &lt;code&gt;mAvailableEntities&lt;/code&gt; is a pool of &lt;em&gt;all available entities&lt;/em&gt;. That is why it must be filled. We cannot use a simple incrementing counter because entities can be destroyed as well, in which case we'd want to recycle them.&lt;/p&gt;
+
+&lt;p&gt;Instead, we can combine the incrementing counter and the recycling pool. If the pool is not empty, grab an element from there, otherwise, use the counter. Unfortunately, that sentence contains the word "if".&lt;/p&gt;
+
+&lt;p&gt;Naive implementation of the above is:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight cpp"&gt;&lt;code&gt;&lt;span class="cp"&gt;#include &amp;lt;queue&amp;gt;
+#include &amp;lt;cstdint&amp;gt;
+&lt;/span&gt;
+&lt;span class="k"&gt;using&lt;/span&gt; &lt;span class="n"&gt;entity&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;std&lt;/span&gt;&lt;span class="o"&gt;::&lt;/span&gt;&lt;span class="kt"&gt;uint32_t&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="n"&gt;entity&lt;/span&gt; &lt;span class="n"&gt;counter&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="n"&gt;std&lt;/span&gt;&lt;span class="o"&gt;::&lt;/span&gt;&lt;span class="n"&gt;queue&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;entity&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="n"&gt;recycling_pool&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="n"&gt;entity&lt;/span&gt; &lt;span class="nf"&gt;create_entity&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;recycling_pool&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;empty&lt;/span&gt;&lt;span class="p"&gt;())&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="n"&gt;counter&lt;/span&gt;&lt;span class="o"&gt;++&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+  &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;else&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="k"&gt;auto&lt;/span&gt; &lt;span class="n"&gt;e&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;recycling_pool&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;front&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+    &lt;span class="n"&gt;recycling_pool&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;pop&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="n"&gt;e&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+  &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;(I've left out the check to prevent going over &lt;code&gt;MAX_ENTITIES&lt;/code&gt;)&lt;/p&gt;
+
+&lt;p&gt;and as we see on &lt;a href="https://godbolt.org/"&gt;compile explorer&lt;/a&gt;, this compiles to conditional jumps (jne):&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight llvm"&gt;&lt;code&gt;&lt;span class="err"&gt;create_entity&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="err"&gt;:&lt;/span&gt;
+        &lt;span class="err"&gt;movq&lt;/span&gt;    &lt;span class="err"&gt;recyclingPool+&lt;/span&gt;&lt;span class="m"&gt;16&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nv"&gt;%rip&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt; &lt;span class="nv"&gt;%rax&lt;/span&gt;
+        &lt;span class="err"&gt;cmpq&lt;/span&gt;    &lt;span class="err"&gt;recyclingPool+&lt;/span&gt;&lt;span class="m"&gt;48&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nv"&gt;%rip&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt; &lt;span class="nv"&gt;%rax&lt;/span&gt;
+        &lt;span class="err"&gt;pushq&lt;/span&gt;   &lt;span class="nv"&gt;%r12&lt;/span&gt;
+        &lt;span class="err"&gt;jne&lt;/span&gt;     &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="err"&gt;L9&lt;/span&gt;
+&lt;span class="p"&gt;...&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;conditional jumps can be a performance problem. &lt;/p&gt;
+
+&lt;p&gt;Modern CPUs have deep pipelines. Rather than fully executing one instruction and then moving on to the next one, they execute every instruction in multiple steps like an assembly line. While instruction &lt;code&gt;n&lt;/code&gt; is going through step &lt;code&gt;x&lt;/code&gt;, instruction &lt;code&gt;n-1&lt;/code&gt; (the instruction that came before &lt;code&gt;n&lt;/code&gt;) is going through step &lt;code&gt;x+1&lt;/code&gt; and &lt;code&gt;n+1&lt;/code&gt; is going through step &lt;code&gt;n-1&lt;/code&gt;. A pipeline of 20 steps is essentially doing 20 things at the same time and therefore ~20x as fast as it would be executing instructions one-by-one.&lt;/p&gt;
+
+&lt;p&gt;These pipelines require knowing ahead of time which instructions are coming up, which is uncertain with conditional jumps. Branch prediction works in some cases, such as loops, but not always.&lt;/p&gt;
+
+&lt;p&gt;So how do we get rid of branching?&lt;/p&gt;
+
+&lt;p&gt;The concept is conditional write-back. Rather than pick one branch or another, we do all branches, but don't write back the result in some cases. &lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://www.chessprogramming.org/Avoiding_Branches"&gt;C++ does not support conditional writeback directly, so we improvise a bit&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;First, replace &lt;code&gt;std::queue&lt;/code&gt; with a stack, and just use a primitive array &lt;code&gt;entity recycling_pool[MAX_ENTITIES]&lt;/code&gt;. This will be a bit easier to hack.&lt;/p&gt;
+
+&lt;p&gt;Then, we specify entity 0 to be invalid. We initialize &lt;code&gt;recycling_pool&lt;/code&gt; with a &lt;code&gt;0&lt;/code&gt; in the first element. Now we can take the head of &lt;code&gt;recycling_pool&lt;/code&gt; and it will function both as condition and value. This is rather like &lt;code&gt;Maybe Entity&lt;/code&gt; in e.g. Haskell, but more efficient and far less safe.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight cpp"&gt;&lt;code&gt;&lt;span class="n"&gt;entity&lt;/span&gt; &lt;span class="nf"&gt;create_entity&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+&lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="n"&gt;entity&lt;/span&gt; &lt;span class="n"&gt;new_entity&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;recycling_pool&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;unused_idx&lt;/span&gt;&lt;span class="p"&gt;];&lt;/span&gt;
+  &lt;span class="kt"&gt;bool&lt;/span&gt; &lt;span class="n"&gt;b_stack_empty&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="n"&gt;new_entity&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;...&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Now we have divergence: if not &lt;code&gt;b_stack_empty&lt;/code&gt;, we want to &lt;code&gt;pop&lt;/code&gt; the stack, otherwise, we want to increment the counter.&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;b_stack_empty&lt;/code&gt; is a boolean with the value 0 or 1, since it was generated from the &lt;code&gt;!&lt;/code&gt; operation (anything that isn't 0 counts as true in C++, but true as output is 1). we can abuse this:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;  unused_idx -= !b_stack_empty;
+  gen_counter += b_stack_empty;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;(NOTE: &lt;code&gt;gen_counter&lt;/code&gt; starts at 0, but valid values start at 1, so it's increment-then-use)&lt;/p&gt;
+
+&lt;p&gt;this is a specialized form of conditional write-back.&lt;/p&gt;
+
+&lt;p&gt;Then, if &lt;code&gt;b_stack_empty&lt;/code&gt;, we want to replace &lt;code&gt;new_entity&lt;/code&gt;, which will be an all-0 bits invalid value, with the current value of &lt;code&gt;gen_counter&lt;/code&gt;:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight cpp"&gt;&lt;code&gt;  &lt;span class="n"&gt;new_entity&lt;/span&gt; &lt;span class="o"&gt;+=&lt;/span&gt; &lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="n"&gt;b_stack_empty&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&lt;/span&gt; &lt;span class="n"&gt;gen_counter&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;since &lt;code&gt;b_stack_empty&lt;/code&gt; can have values 0 or 1, a non empty stack will evaluate to &lt;code&gt;0 &amp;amp; gen_counter&lt;/code&gt;, which equals 0, whereas an empty stack will give &lt;code&gt;-1 &amp;amp; gen_counter&lt;/code&gt; and since we're dealing with &lt;em&gt;unsigned&lt;/em&gt; integers, -1 is all 1's in binary, so &lt;code&gt;-1 &amp;amp; gen_counter&lt;/code&gt; equals &lt;code&gt;gen_counter&lt;/code&gt;. In the latter case we also know &lt;code&gt;new_entity = 0&lt;/code&gt;, and &lt;code&gt;0 + gen_counter = gen_counter&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;And so the full code (minus checking MAX_ENTITIES violation) is:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight cpp"&gt;&lt;code&gt;&lt;span class="cp"&gt;#include &amp;lt;cstdint&amp;gt;
+&lt;/span&gt;
+&lt;span class="k"&gt;using&lt;/span&gt; &lt;span class="n"&gt;entity&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;std&lt;/span&gt;&lt;span class="o"&gt;::&lt;/span&gt;&lt;span class="kt"&gt;uint32_t&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="n"&gt;entity&lt;/span&gt; &lt;span class="n"&gt;unused_idx&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="n"&gt;entity&lt;/span&gt; &lt;span class="n"&gt;gen_counter&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="k"&gt;const&lt;/span&gt; &lt;span class="n"&gt;entity&lt;/span&gt; &lt;span class="n"&gt;MAX_ENTITIES&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="mi"&gt;5000&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="n"&gt;entity&lt;/span&gt; &lt;span class="n"&gt;recycling_pool&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;MAX_ENTITIES&lt;/span&gt;&lt;span class="p"&gt;];&lt;/span&gt;
+
+&lt;span class="n"&gt;entity&lt;/span&gt; &lt;span class="nf"&gt;create_entity&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+&lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="n"&gt;entity&lt;/span&gt; &lt;span class="n"&gt;new_entity&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;recycling_pool&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;unused_idx&lt;/span&gt;&lt;span class="p"&gt;];&lt;/span&gt;
+  &lt;span class="kt"&gt;bool&lt;/span&gt; &lt;span class="n"&gt;b_stack_empty&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="n"&gt;new_entity&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+  &lt;span class="n"&gt;unused_idx&lt;/span&gt; &lt;span class="o"&gt;-=&lt;/span&gt; &lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="n"&gt;b_stack_empty&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+  &lt;span class="n"&gt;gen_counter&lt;/span&gt; &lt;span class="o"&gt;+=&lt;/span&gt; &lt;span class="n"&gt;b_stack_empty&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+  &lt;span class="n"&gt;new_entity&lt;/span&gt; &lt;span class="o"&gt;+=&lt;/span&gt; &lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="n"&gt;b_stack_empty&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&lt;/span&gt; &lt;span class="n"&gt;gen_counter&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="n"&gt;new_entity&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Compiler explorer confirms there are no conditional jumps.&lt;/p&gt;
+
+&lt;p&gt;The resulting assembly is also a lot smaller (24 lines vs 103), but I expect that is mostly due to the omission of &lt;code&gt;std::queue&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;I want to reiterate that this is &lt;em&gt;dumb&lt;/em&gt;. The code is likely to have gotten slower in practice, even though it is more consistent, because branch prediction is probably right more often than not, and now we're executing &lt;em&gt;all&lt;/em&gt; the branches. Code maintainability has also suffered.&lt;/p&gt;
+
+&lt;p&gt;This is merely an interesting learning experience.&lt;/p&gt;
+
+</description>
+      <category>cpp</category>
+      <category>performance</category>
+    </item>
+    <item>
       <title>Add Data Bars in Excel using Java</title>
       <author>Jane</author>
       <pubDate>Mon, 01 Nov 2021 06:22:18 +0000</pubDate>
@@ -1384,82 +1564,6 @@ O Yeoman foi criado para ser um facilitador na criação e configuração de nov
       <category>discuss</category>
       <category>ruby</category>
       <category>cpp</category>
-    </item>
-    <item>
-      <title>Pumpkins fall! 🎃</title>
-      <author>Okyn</author>
-      <pubDate>Sun, 31 Oct 2021 23:15:01 +0000</pubDate>
-      <link>https://dev.to/0kyn/pumpkins-fall-43dg</link>
-      <guid>https://dev.to/0kyn/pumpkins-fall-43dg</guid>
-      <description>&lt;h1&gt;
-  &lt;a href="#happy-halloween-2021"&gt;
-  &lt;/a&gt;
-  Happy Halloween 2021!
-&lt;/h1&gt;
-
-&lt;p&gt;I challenged myself and decided to code a tiny project related to Halloween and &lt;a href="https://developer.mozilla.org/en-US/docs/Web/API/Canvas_API"&gt;Canvas&lt;/a&gt;!&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Si89C1aY--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/0tp83lagbjdeulf8m08w.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Si89C1aY--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/0tp83lagbjdeulf8m08w.png" alt="screenshot" width="880" height="572"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#confetti"&gt;
-  &lt;/a&gt;
-  Confetti 🎊
-&lt;/h2&gt;
-
-&lt;p&gt;I was looking toward a way to get a random particles generator in a canvas, and I came across this great tool &lt;a href="https://github.com/Agezao/confetti-js"&gt;confetti-js&lt;/a&gt; which widely inspired this project.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#halloween2021"&gt;
-  &lt;/a&gt;
-  halloween-2021
-&lt;/h2&gt;
-
-&lt;p&gt;Nearly everything stands in the app config:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;app&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="na"&gt;target&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;canvas&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="na"&gt;images&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;./images/bat.png&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;./images/pumpkin.png&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;./images/sweet.png&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt;
-    &lt;span class="na"&gt;max&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="mi"&gt;30&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="na"&gt;speed&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="mi"&gt;3&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="na"&gt;width&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;window&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;innerWidth&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="na"&gt;height&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;window&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;innerHeight&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="na"&gt;imageMinWidth&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="mi"&gt;30&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="na"&gt;imageMaxWidth&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="mi"&gt;100&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;One helpful function:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;getRandomInt&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;min&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;max&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nx"&gt;min&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nb"&gt;Math&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;ceil&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;min&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-    &lt;span class="nx"&gt;max&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nb"&gt;Math&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;floor&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;max&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nb"&gt;Math&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;floor&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nb"&gt;Math&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;random&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;max&lt;/span&gt; &lt;span class="o"&gt;-&lt;/span&gt; &lt;span class="nx"&gt;min&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="nx"&gt;min&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Demo and code (which might be frightening 😱) are available.&lt;/p&gt;
-
-&lt;p&gt;Demo: &lt;a href="https://0kyn.github.io/halloween-2021/"&gt;https://0kyn.github.io/halloween-2021/&lt;/a&gt;&lt;br&gt;
-Sources: &lt;a href="https://github.com/0kyn/halloween-2021"&gt;https://github.com/0kyn/halloween-2021&lt;/a&gt;&lt;/p&gt;
-
-</description>
-      <category>halloween</category>
-      <category>javascript</category>
-      <category>html</category>
-      <category>webdev</category>
     </item>
   </channel>
 </rss>
