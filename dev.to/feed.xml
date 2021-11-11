@@ -7,6 +7,783 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>How To Use OpenTelemetry With AWS Lambda</title>
+      <author>Tom Zach</author>
+      <pubDate>Thu, 11 Nov 2021 16:54:44 +0000</pubDate>
+      <link>https://dev.to/aspecto/how-to-use-opentelemetry-with-aws-lambda-87l</link>
+      <guid>https://dev.to/aspecto/how-to-use-opentelemetry-with-aws-lambda-87l</guid>
+      <description>&lt;p&gt;&lt;a href="https://aws.amazon.com/lambda/"&gt;Lambda&lt;/a&gt; is the AWS solution for serverless functions.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://opentelemetry.io/"&gt;OpenTelemetry&lt;/a&gt; is an open-source meant to create traces and send them to a backend and gain visibility.&lt;/p&gt;
+
+&lt;p&gt;The observability-aware developer which has serverless lambdas as part of his stack will surely tackle the need to connect OpenTelemetry with lambda.&lt;/p&gt;
+
+&lt;p&gt;If you are such a developer, this guide is for you.&lt;/p&gt;
+
+&lt;p&gt;Today, I’ll show you exactly how to deploy a tracing-enabled lambda with OpenTelemetry.&lt;/p&gt;
+
+&lt;p&gt;&lt;em&gt;This article is part of the &lt;a href="https://www.aspecto.io/?utm_source=post&amp;amp;utm_medium=dev.to&amp;amp;utm_campaign=how-to-use-opentelemetry-with-aws"&gt;Aspecto&lt;/a&gt; Hello World series, where we tackle distributed services-related topics for you. Our team searches the web for common issues, then we solve them ourselves and bring you complete how-to guides. Aspecto is an OpenTelemetry-based distributed tracing platform for developers and teams of distributed applications.&lt;/em&gt;&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#setting-up"&gt;
+  &lt;/a&gt;
+  Setting Up
+&lt;/h1&gt;
+
+&lt;p&gt;Create a new directory for your project, and add the following package.json (or this packages to your existing project):&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;{
+ "name": "lambda-otel-post",
+ "version": "1.0.0",
+ "description": "",
+ "main": "handler.js",
+ "dependencies": {
+   "@opentelemetry/api": "1.0.2",
+   "@opentelemetry/instrumentation": "0.25.0",
+   "@opentelemetry/auto-instrumentations-node": "0.25.0",
+   "@opentelemetry/instrumentation-aws-lambda": "0.25.0",
+   "@opentelemetry/instrumentation-http": "0.25.0",
+   "@opentelemetry/sdk-trace-base": "0.25.0",
+   "@opentelemetry/sdk-trace-node": "0.25.0",
+   "axios": "^0.24.0"
+ },
+ "devDependencies": {},
+ "scripts": {
+   "test": "echo \"Error: no test specified\" &amp;amp;&amp;amp; exit 1"
+ },
+ "author": "",
+ "license": "ISC"
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Run installs:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;npm install
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#add-the-handlerjs"&gt;
+  &lt;/a&gt;
+  Add the handler.js
+&lt;/h2&gt;
+
+&lt;p&gt;This code is a simple lambda entry point that contains a call to an external API and returns a message.&lt;/p&gt;
+
+&lt;p&gt;Later on, we will want to make sure that a span has been created for this HTTP call, and also for the actual lambda invocation.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;'use strict';
+
+const axios = require("axios");
+
+module.exports.hello = async (event) =&amp;gt; {
+ const todoItem = await axios('https://jsonplaceholder.typicode.com/todos/1');
+
+ return {
+   statusCode: 200,
+   body: JSON.stringify(
+     {
+       message: 'Some Message Here',
+       input: event,
+     },
+     null,
+     2
+   ),
+ };
+
+ // Use this code if you don't use the http event with the LAMBDA-PROXY integration
+ // return { message: 'Go Serverless v1.0! Your function executed successfully!', event };
+};
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h1&gt;
+  &lt;a href="#add-the-lambda-wrapper-file-that-enables-tracing-with-opentelemetry"&gt;
+  &lt;/a&gt;
+  Add the lambda wrapper file that enables tracing with OpenTelemetry
+&lt;/h1&gt;
+
+&lt;p&gt;Let’s add the following lambda-wrapper.js file:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;const { SimpleSpanProcessor, ConsoleSpanExporter } = require("@opentelemetry/sdk-trace-base");
+const { NodeTracerProvider } = require('@opentelemetry/sdk-trace-node');
+const { AwsLambdaInstrumentation } = require('@opentelemetry/instrumentation-aws-lambda');
+const { registerInstrumentations } = require('@opentelemetry/instrumentation');
+const { getNodeAutoInstrumentations } = require("@opentelemetry/auto-instrumentations-node");
+
+const provider = new NodeTracerProvider();
+provider.addSpanProcessor(new SimpleSpanProcessor(new ConsoleSpanExporter()))
+provider.register();
+
+registerInstrumentations({
+ instrumentations: [
+   getNodeAutoInstrumentations(),
+   new AwsLambdaInstrumentation({
+     disableAwsContextPropagation: true
+   })
+ ],
+});
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Notice I am using &lt;code&gt;ConsoleSpanExporter&lt;/code&gt;, which writes all the telemetry data to the console. &lt;/p&gt;
+
+&lt;p&gt;In production, you would probably want to have this sent to some other tool like &lt;a href="https://www.jaegertracing.io/"&gt;Jaeger&lt;/a&gt; or an &lt;a href="https://www.aspecto.io/?utm_source=post&amp;amp;utm_medium=dev.to&amp;amp;utm_campaign=how-to-use-opentelemetry-with-aws"&gt;observability vendor&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;For this blog post, however, this exporter will do.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#a-note-on-raw-disableawscontextpropagation-endraw-"&gt;
+  &lt;/a&gt;
+  A note on &lt;code&gt;disableAwsContextPropagation&lt;/code&gt;
+&lt;/h3&gt;
+
+&lt;p&gt;Another thing you’re probably wondering is why I added &lt;code&gt;disableAwsContextPropagation:true&lt;/code&gt;. &lt;/p&gt;
+
+&lt;p&gt;The reason for this is the lambda instrumentation is trying to use the &lt;a href="https://aws.amazon.com/blogs/developer/category/developer-tools/aws-x-ray/"&gt;X-Ray&lt;/a&gt; context headers by default (even when we’re not using X-Ray), causing us to have a non-sampled context and a &lt;code&gt;NonRecordingSpan&lt;/code&gt;. &lt;/p&gt;
+
+&lt;p&gt;To fix this, we use the &lt;code&gt;disableAwsContextPropagation&lt;/code&gt; flag.&lt;/p&gt;
+
+&lt;p&gt;More information about this can be found &lt;a href="https://github.com/open-telemetry/opentelemetry-js-contrib/pull/546"&gt;here&lt;/a&gt; and in the instrumentation &lt;a href="https://www.npmjs.com/package/@opentelemetry/instrumentation-aws-lambda"&gt;docs&lt;/a&gt;.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#deploy-the-lambda"&gt;
+  &lt;/a&gt;
+  Deploy the lambda
+&lt;/h1&gt;
+
+&lt;p&gt;There are various ways of deploying lambda to S3 and this is not the scope of the tutorial.&lt;/p&gt;
+
+&lt;p&gt;I chose to use a serverless framework, but you can also use AWS CLI / other forms to do this.&lt;/p&gt;
+
+&lt;p&gt;If you use serverless, this is the serverless.yml file.&lt;/p&gt;
+
+&lt;p&gt;Do not forget to set the correct region &amp;amp; function name.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;service: lambda-otel-post
+
+# You can pin your service to only deploy with a specific Serverless version
+# Check out our docs for more details
+frameworkVersion: '2'
+
+provider:
+ name: aws
+ runtime: nodejs12.x
+ lambdaHashingVersion: 20201221
+ environment:
+   NODE_OPTIONS: --require lambda-wrapper
+
+
+
+ region: eu-west-2
+
+functions:
+ tom-otel-lambda-post:
+   handler: handler.hello
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#add-environment-variable"&gt;
+  &lt;/a&gt;
+  Add environment variable
+&lt;/h2&gt;
+
+&lt;p&gt;For the tracing code to run, we need to make sure Node requires it before any other file has been required.&lt;/p&gt;
+
+&lt;p&gt;That’s why we need to add this value for the NODE_OPTIONS environment variable: “–require lambda-wrapper”.&lt;/p&gt;
+
+&lt;p&gt;If you use serverless with the file above, it is done for you automatically.&lt;/p&gt;
+
+&lt;p&gt;If not, head to the configuration section of the deployed lambda and set it:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--_x0SZwvp--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/dcvzuzz0gdhg5o3uakwz.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--_x0SZwvp--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/dcvzuzz0gdhg5o3uakwz.png" alt="AWS configuration section, environment variable " width="880" height="195"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;The reason for this necessity is that the wrapper file must be included before any other file for the OpenTelemetry instrumentations to work properly.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#calling-the-lambda-function"&gt;
+  &lt;/a&gt;
+  Calling the lambda function
+&lt;/h2&gt;
+
+&lt;p&gt;Now when you run your lambda(I used the built-in AWS console’s test utility), you should expect to see 2 spans being created – one for the lambda invocation, and the other for the outgoing HTTP call.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--_6tvyBHx--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/xa135ifguf6w0ogqbgar.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--_6tvyBHx--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/xa135ifguf6w0ogqbgar.png" alt="The AWS console UI for invoking the lambda function" width="880" height="265"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Indeed, that’s what we get:&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#this-is-the-outgoing-http-span"&gt;
+  &lt;/a&gt;
+  This is the outgoing HTTP span
+&lt;/h2&gt;
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;{
+  traceId: '4f373b61315c23fa47605a72b94ab59e',
+  parentId: '7ce4ab2283755eda',
+  name: 'HTTPS GET',
+  id: '54c07955525dad7f',
+  kind: 2,
+  timestamp: 1635332193754154,
+  duration: 82864,
+  attributes: {
+    'http.url': 'https://jsonplaceholder.typicode.com/todos/1',
+    'http.method': 'GET',
+    'http.target': '/todos/1',
+    'net.peer.name': 'jsonplaceholder.typicode.com',
+    'net.peer.ip': '104.21.4.48',
+    'net.peer.port': 443,
+    'http.host': 'jsonplaceholder.typicode.com:443',
+    'http.response_content_length_uncompressed': 83,
+    'http.status_code': 200,
+    'http.status_text': 'OK',
+    'http.flavor': '1.1',
+    'net.transport': 'ip_tcp'
+  },
+  status: { code: 1 },
+  events: []
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;And the lambda invocation span:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;{
+  traceId: '4f373b61315c23fa47605a72b94ab59e',
+  parentId: undefined,
+  name: 'lambda-otel-post-dev-tom-otel-lambda-post',
+  id: '7ce4ab2283755eda',
+  kind: 1,
+  timestamp: 1635332193747990,
+  duration: 93019,
+  attributes: {
+    'faas.execution': 'ed075caa-4d54-44f8-96b4-b96085acbf9a',
+    'faas.id': 'arn:aws:lambda:eu-west-2:MY-AWS-ID:function:lambda-otel-post-dev-tom-otel-lambda-post',
+    'cloud.account.id': 'MY-AWS-ID'
+  },
+  status: { code: 0 },
+  events: []
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;That would be it for today folks, you can now export those spans to wherever you like.&lt;/p&gt;
+
+&lt;p&gt;P.S. If you don’t have an easy way of visualizing these traces just yet, feel free to check out &lt;a href="https://www.aspecto.io/?utm_source=post&amp;amp;utm_medium=dev.to&amp;amp;utm_campaign=how-to-use-opentelemetry-with-aws"&gt;Aspecto&lt;/a&gt; (it’s free). This is what a single trace would look like:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--61Z475GA--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/e174usakq3tm1sqpc3s3.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--61Z475GA--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/e174usakq3tm1sqpc3s3.png" alt="Aspecto distributed tracing platform UI trace overview" width="880" height="411"&gt;&lt;/a&gt;&lt;/p&gt;
+
+</description>
+      <category>aws</category>
+      <category>webdev</category>
+      <category>opensource</category>
+      <category>tutorial</category>
+    </item>
+    <item>
+      <title>How to Support IE11 Users as You Move to Angular 13</title>
+      <author>Mark Thompson</author>
+      <pubDate>Thu, 11 Nov 2021 16:54:00 +0000</pubDate>
+      <link>https://dev.to/mthompsoncode/how-to-support-ie11-users-as-you-move-to-angular-13-179j</link>
+      <guid>https://dev.to/mthompsoncode/how-to-support-ie11-users-as-you-move-to-angular-13-179j</guid>
+      <description>&lt;p&gt;IE 11 won't be supported in Angular 13. You can support it in 12 while you migrate to 13, or drop support. Either way, you need to act.&lt;/p&gt;
+
+&lt;p&gt;Internet Explorer 11 is a legacy browser and support for it in Angular 13 is being dropped officially. Sticking with Angular 12 is not a viable long term option. Here are ways to support your users when upgrading your Angular version.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#table-of-contents"&gt;
+  &lt;/a&gt;
+  Table Of Contents
+&lt;/h2&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="#tsconfig"&gt;Update tsconfig.json and populate polyfills&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="#differential-loading"&gt;Use Differential Loading&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="#customize-user-experience"&gt;How to Customize User Experience for IE 11&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="#drop-support-the-good-way"&gt;How to Drop Support for IE 11 the Good Way&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;As an Angular developer, you want to provide support for as many browsers as you can, but in the case of Internet Explorer 11, this is becoming increasingly difficult, and soon will no longer be possible. Current market share is &lt;a href="https://gs.statcounter.com/browser-market-share#monthly-202103-202103-bar"&gt;likely less than 1%&lt;/a&gt; and will drop even more as &lt;a href="https://docs.microsoft.com/en-us/lifecycle/faq/internet-explorer-microsoft-edge"&gt;Microsoft retires IE 11 in June 2022&lt;/a&gt;. &lt;/p&gt;
+
+&lt;p&gt;Even more challenging is that Angular 12 doesn't offer support for IE 11 by default, and Angular 13, coming out next week, is &lt;a href="https://github.com/angular/angular/issues/41840"&gt;completely dropping support&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://angular.io/guide/browser-support"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--yqhch0jb--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/4phx885s2uzyxk1bb300.jpeg" alt="Angular browser support" width="880" height="579"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#choose-a-support-path"&gt;
+  &lt;/a&gt;
+  Choose a Support Path
+&lt;/h2&gt;
+
+&lt;p&gt;There are two ways you can support IE 11 with Angular 12 as you prepare to migrate to Angular 13:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;&lt;p&gt;Update &lt;code&gt;tsconfig.json&lt;/code&gt; to use ES5 and update polyfills.ts for ES6/ES7&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Use Differential Loading&lt;/p&gt;&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;Or you could decide to drop support for IE 11.  You should customize the user experience because if you don't, users will get a blank screen.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#update-tsconfigjson-and-populate-polyfills"&gt;
+  &lt;/a&gt;
+  Update tsconfig.json and populate polyfills &lt;a&gt;&lt;/a&gt;
+&lt;/h2&gt;
+
+&lt;p&gt;By default, Angular compiles ES6 or ES7. IE 11 only supports ES5. You can update your &lt;code&gt;tsconfig.json&lt;/code&gt; to target ES5. You'll also need to populate your Angular project polyfills.&lt;/p&gt;
+
+&lt;p&gt;Advantages of updating tsconfig.json and including polyfills:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;Configuration prepares building and local development for IE 11 support&lt;/li&gt;
+&lt;li&gt;Faster builds than using Differential Loading&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;Disadvantages:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;Imports a lot of polyfills and bloat bundle for legacy AND modern browsers&lt;/li&gt;
+&lt;li&gt;This approach has been abandoned as a standard after Angular 7&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;h3&gt;
+  &lt;a href="#definitions"&gt;
+  &lt;/a&gt;
+  Definitions
+&lt;/h3&gt;
+
+&lt;p&gt;You'll change the target variable in tsconfig.json, and populate the polyfills file that came with the Angular project. If you're not familiar with these things, here's what they are.&lt;/p&gt;
+
+&lt;p&gt;&lt;b&gt;target&lt;/b&gt;: JavaScript language version for emitted JavaScript.&lt;/p&gt;
+
+&lt;p&gt;&lt;b&gt;Angular polyfills&lt;/b&gt; are fallbacks for missing JavaScript behavior. There are two types:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;Browser polyfills that are applied before loading ZoneJS.&lt;/li&gt;
+&lt;li&gt;Application imports that are files imported after ZoneJS that should be loaded before your main file.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;Polyfills are applied in this order: Browser polyfills → Import ZoneJS → Application imports. You will only need to focus on browser polyfills.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#the-steps"&gt;
+  &lt;/a&gt;
+  The Steps
+&lt;/h3&gt;
+
+&lt;ol&gt;
+&lt;li&gt;Open &lt;code&gt;tsconfig.json&lt;/code&gt; and update &lt;code&gt;target&lt;/code&gt; to &lt;code&gt;es5&lt;/code&gt;.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--K1QuZ7zD--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/qhcbt52k8zifu8fiou0a.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--K1QuZ7zD--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/qhcbt52k8zifu8fiou0a.png" alt="tsconfig example with target es2017" width="410" height="369"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;Open &lt;code&gt;polyfills.js&lt;/code&gt; found in the src directory and add &lt;code&gt;import 'core-js';&lt;/code&gt; under browser polyfills.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--p2GrGHi1--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/srlznhb3rzlr37y8jqv2.jpeg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--p2GrGHi1--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/srlznhb3rzlr37y8jqv2.jpeg" alt="es5 polyfill example" width="880" height="605"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;NOTE: When serving the application, the build was at 505.3 kB. After adding the import of core-js,  it's 1.2 MB. 😬&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#use-differential-loading"&gt;
+  &lt;/a&gt;
+  Use Differential Loading &lt;a&gt;&lt;/a&gt;
+&lt;/h2&gt;
+
+&lt;p&gt;Differential Loading is the more modern technique introduced in Angular 8. The approach here is  to make two builds. One uses ES5 syntax and a more modern one that uses ES6 syntax. The ES6 build won't include as many polyfills and  going to be much smaller. The ES5 build will have polyfills and be more bloated. &lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#considerations"&gt;
+  &lt;/a&gt;
+  Considerations
+&lt;/h3&gt;
+
+&lt;p&gt;Advantages of using differential loading:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;Smaller bundle sizes for modern browsers&lt;/li&gt;
+&lt;li&gt;ES5 bundle includes all required polyfills for legacy browser support automatically&lt;/li&gt;
+&lt;li&gt;Latest approach to supporting legacy browsers&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;Disadvantages:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;Creates two bundles so longer build times&lt;/li&gt;
+&lt;li&gt;Extra configuration is required for local development for legacy browsers&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;h3&gt;
+  &lt;a href="#the-steps"&gt;
+  &lt;/a&gt;
+  The Steps
+&lt;/h3&gt;
+
+&lt;ol&gt;
+&lt;li&gt;&lt;p&gt;Find your browser's list file. Depending on the version of Angular, it will be &lt;code&gt;.browserslistrc&lt;/code&gt; or &lt;code&gt;browserslist&lt;/code&gt;. &lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Remove the word "not" from the IE 11 line.&lt;/p&gt;&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--lZcH_FBD--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/sdqg4dcxep5dv5srijjq.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--lZcH_FBD--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/sdqg4dcxep5dv5srijjq.png" alt="where to update browsers list for IE 11 support" width="880" height="355"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Before I continue, I'll explain what just happened.&lt;/p&gt;
+
+&lt;p&gt;After you changed the browser's list file, when you look at your Angular project through Inspector, you'll see three additional scripts. Here's what it looked like before:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--9AC3PQkI--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/50ibik1v1t2e09h1pwhu.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--9AC3PQkI--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/50ibik1v1t2e09h1pwhu.png" alt="No differential loading dom example" width="880" height="374"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;And after:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Y44-me-z--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/okz6ej0irbs8wwa9f0hc.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Y44-me-z--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/okz6ej0irbs8wwa9f0hc.png" alt="Using differential loading dom example" width="880" height="413"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;You will have two runtimes, two polyfills, and two mains. Modern browsers will only run the top script that is of type &lt;code&gt;module&lt;/code&gt;. Legacy browsers like IE 11 will run the second one, the &lt;code&gt;nomodule&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--UXXIvDcF--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/tq8te6jzcsrtnssxsv9z.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--UXXIvDcF--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/tq8te6jzcsrtnssxsv9z.png" alt="module vs nomodule scripts examples example" width="880" height="162"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;NOTE: The rest of these steps are only needed if you want to run the project locally in development mode if you only use differential loading.&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;&lt;p&gt;Next up, you're going to create two new custom files in your application, a &lt;code&gt;polyfills.es5.js&lt;/code&gt; in the src directory and &lt;code&gt;tsconfig.es5.json&lt;/code&gt; at the root of your project.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Next steps are similar what you did for older &lt;code&gt;tsconfig.json&lt;/code&gt; method above. Populate the polyfills file with your import. Then switch the tsconfig target to ES5 and to include your new polyfills file.&lt;/p&gt;&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--QYN6oAql--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/18s95616drt7zkbf1n7q.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--QYN6oAql--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/18s95616drt7zkbf1n7q.png" alt="es5 custom polyfill and tsconfig example" width="880" height="350"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;Now you're going to update &lt;code&gt;angular.json&lt;/code&gt;.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--SE9S6ZFD--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/swaidcz0rqk3ex3hclno.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--SE9S6ZFD--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/swaidcz0rqk3ex3hclno.png" alt="angular json custom es5 build configuration example" width="880" height="730"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Add a new build configuration. You can see on line 72 that I've added &lt;code&gt;development-es5&lt;/code&gt;, where I copied all of the properties for &lt;code&gt;development&lt;/code&gt;, and added two extra ones:&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;"tsConfig": "tsconfig.es5.json",&lt;/code&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;"polyfills": "src/polyfills.es5.ts"&lt;/code&gt;&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;To use this build when you serve locally, you need to add this new build configuration to the serve configurations. &lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--k0KUzMDy--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/w4uooec98cfzvdkt7q8k.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--k0KUzMDy--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/w4uooec98cfzvdkt7q8k.png" alt="angular json custom es5 serve configuration example" width="880" height="678"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;As I did starting at line 94 above, use the same identifier, &lt;code&gt;development-es5&lt;/code&gt;, and set &lt;code&gt;browserTarget&lt;/code&gt; to "&lt;code&gt;handling-ie:build:development-es5"&lt;/code&gt;. Now you can serve your project for IE 11 using &lt;code&gt;ng serve --configuration development-es5&lt;/code&gt;.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#why-you-shouldnt-just-drop-support"&gt;
+  &lt;/a&gt;
+  Why You Shouldn't Just Drop Support
+&lt;/h2&gt;
+
+&lt;p&gt;You could drop support for IE 11. If you do, here's what an IE 11 user will see:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--gD1PdWRa--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/az7bnustz576t86c6tbe.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--gD1PdWRa--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/az7bnustz576t86c6tbe.png" alt="blank page using IE 11 since IE 11 is trash" width="880" height="392"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Not a good user experience. Instead, we can change a few things to let our visitor know that they need a different browser.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#how-to-customize-user-experience-for-ie-11"&gt;
+  &lt;/a&gt;
+  How to Customize User Experience for IE 11 &lt;a&gt;&lt;/a&gt;
+&lt;/h2&gt;
+
+&lt;p&gt;You don't want IE 11 users to see a white page. Instead, you can warn them about their browser or tell them to do something. Instead, you can use the same approach as you did with Differential Loading. Set a flag and take advantage of that flag to write specific code for legacy browsers.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--JwtHZzFG--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/4mdnmi8wzjjkjeusnc4z.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--JwtHZzFG--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/4mdnmi8wzjjkjeusnc4z.png" alt="module vs nomodule scripts example" width="880" height="163"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;So you can call a &lt;code&gt;no-es6.js&lt;/code&gt; script that will only run for legacy browsers by using the &lt;code&gt;nomodule&lt;/code&gt; attribute.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--PY2X3nTg--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/95wd9ir04xhjwt9al82o.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--PY2X3nTg--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/95wd9ir04xhjwt9al82o.png" alt="no-es6 script example" width="880" height="495"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;In this script, I set a property, &lt;code&gt;nomodule&lt;/code&gt;, to true on &lt;code&gt;window&lt;/code&gt;. Throughout my application, I can check for that value and I can see whether or not you are using IE.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--mmG4tzCz--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/zh9sdgsenngmotp9vzvo.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--mmG4tzCz--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/zh9sdgsenngmotp9vzvo.png" alt="custom property on window example to flag IE 11" width="880" height="284"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Note that &lt;code&gt;nomodule&lt;/code&gt; is a custom property. That's not something that &lt;code&gt;window&lt;/code&gt; has. Create a &lt;code&gt;window.d.ts&lt;/code&gt;  in the src directory and add that property to &lt;code&gt;global&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--ReFKzw2o--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/sn437spsoek9hvmmxa0v.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ReFKzw2o--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/sn437spsoek9hvmmxa0v.png" alt="types support for custom property on window or global example" width="880" height="275"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#how-to-drop-support-for-ie-11-the-good-way"&gt;
+  &lt;/a&gt;
+  How to Drop Support for IE 11 the Good Way &lt;a&gt;&lt;/a&gt;
+&lt;/h2&gt;
+
+&lt;p&gt;Finally, there will probably come a time when you offer no support for IE 11 and you've turned off differential loading or whatever you were using. How do you still provide a good user experience?&lt;/p&gt;
+
+&lt;p&gt;You can update your browser's list to say not IE, but your users will see a blank page.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Lpols_tX--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ffqqykrvu6flk1mm2lx3.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Lpols_tX--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ffqqykrvu6flk1mm2lx3.png" alt="example of where to include not to drop support for IE 11 in browsers list" width="880" height="355"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Instead, you can update the &lt;code&gt;no-es6.js&lt;/code&gt; script.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--ac_h94Xl--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/3klzibtgy8ncu92zye6a.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ac_h94Xl--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/3klzibtgy8ncu92zye6a.png" alt="redirecting from legacy browser example" width="880" height="440"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;You can do all sorts of things here. In my example, I check for iIE. If I think you’re using IE, I’m going to try to use the &lt;code&gt;microsoft-edge&lt;/code&gt; handler and open Edge to navigate the site. On IE, I’ll navigate you to a &lt;a href="https://support.microsoft.com/en-us/topic/this-website-works-better-in-microsoft-edge-160fa918-d581-4932-9e4e-1075c4713595"&gt;Microsoft support page&lt;/a&gt; that explains that IE is dropping support soon. If you're not using IE, I navigate you to a generic "hey, your browser is bad"page.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#what-will-you-do"&gt;
+  &lt;/a&gt;
+  What Will You Do?
+&lt;/h2&gt;
+
+&lt;p&gt;To sum it all up, there are two main ways to support IE 11. You can update your &lt;code&gt;tsconfig.json&lt;/code&gt;, or you can use Differential Loading.&lt;/p&gt;
+
+&lt;p&gt;And you can provide a better user experience when you are dropping support and you can also provide a better user experience when you fully drop support. It's definitely time to decide what you'll do. &lt;/p&gt;
+
+&lt;p&gt;What do you think you'll do? Have these methods been helpful? Do you have other techniques for managing IE 11 and Angular 13? We'd love to know your thoughts. Drop us a note in the comments section below.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#resources"&gt;
+  &lt;/a&gt;
+  Resources
+&lt;/h2&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="https://angular.io/guide/browser-support#enabling-polyfills-with-cli-projects"&gt;Angular polyfills docs&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://github.com/zloirock/core-js/tree/master/packages/core-js/es"&gt;core-js&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://angular.io/guide/deprecations#internet-explorer-11"&gt;Angular 13 deprecating IE 11&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://blog.angular.io/version-8-of-angular-smaller-bundles-cli-apis-and-alignment-with-the-ecosystem-af0261112a27"&gt;Angular blog on Differential Loading&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Modules#other_differences_between_modules_and_standard_scripts"&gt;Javascript modules vs standard scripts&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://www.typescriptlang.org/docs/handbook/declaration-merging.html#global-augmentation"&gt;Adding custom properties to Window type&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+</description>
+      <category>angular</category>
+      <category>tutorial</category>
+      <category>codequality</category>
+      <category>ie11</category>
+    </item>
+    <item>
+      <title>Selenium 4.0 - Major Changes</title>
+      <author>Dilpreet Johal</author>
+      <pubDate>Thu, 11 Nov 2021 16:51:09 +0000</pubDate>
+      <link>https://dev.to/automationbro/selenium-40-major-changes-1m4f</link>
+      <guid>https://dev.to/automationbro/selenium-40-major-changes-1m4f</guid>
+      <description>&lt;p&gt;Hey guys, in this article, I will be going over some of the major changes that happened with Selenium 4.0. Let's get started!&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#switch-to-w3c%C2%A0protocol"&gt;
+  &lt;/a&gt;
+  Switch to W3C Protocol
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--3R9iiMoF--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/19p6mwc5uvrcldi1t0zp.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--3R9iiMoF--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/19p6mwc5uvrcldi1t0zp.png" alt="W3C protocol" width="600" height="408"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;The Selenium project migrated to an entirely new protocol - W3C protocol and they no longer will be using the JSON wire protocol. &lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#why-did-this%C2%A0happen"&gt;
+  &lt;/a&gt;
+  Why did this happen?
+&lt;/h4&gt;
+
+&lt;p&gt;Because all the recent browsers (e.g., Chrome, Firefox, Safari, etc.), including Internet Explorer, are considered W3C compliant. The reason it's done that way is so that all browsers are developed similar way and theres no compatibility issues. Now this migration will ensure that tests runs consistently across all these browsers.&lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#stability"&gt;
+  &lt;/a&gt;
+  Stability
+&lt;/h4&gt;
+
+&lt;p&gt;As Selenium WebDriver and browsers use the same protocol, flakiness in web automation can be considerably reduced and hence improving stability of the tests.&lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#actions-api%C2%A0support"&gt;
+  &lt;/a&gt;
+  Actions API support
+&lt;/h4&gt;
+
+&lt;p&gt;W3C protocol also has &lt;a href="https://w3c.github.io/webdriver/#actions"&gt;richer Actions API support&lt;/a&gt; in comparison to the one in JSON Wire Protocol. It lets you perform - &lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;multi-touch actions&lt;/li&gt;
+&lt;li&gt;zoom-in, zoom-out&lt;/li&gt;
+&lt;li&gt;pressing two keys simultaneously&lt;/li&gt;
+&lt;li&gt;and more…&lt;/li&gt;
+&lt;/ul&gt;
+
+
+
+
+&lt;h3&gt;
+  &lt;a href="#selenium-grid%C2%A040"&gt;
+  &lt;/a&gt;
+  Selenium Grid 4.0
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Lx3leJR0--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/o2ow25mncf8nexydq5by.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Lx3leJR0--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/o2ow25mncf8nexydq5by.png" alt="Selenium Grid 4.0 Architecture" width="800" height="480"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;There were also bunch of changes that happened with Selenium Grid 4.0 as well. &lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#docker-support%C2%A0"&gt;
+  &lt;/a&gt;
+  Docker Support 
+&lt;/h4&gt;
+
+&lt;p&gt;With Grid 4.0, you now can easily spin up docker containers quickly to run tests in different browsers instead of setting up virtual machines. All steps are well documented in the &lt;a href="https://github.com/SeleniumHQ/docker-selenium"&gt;GitHub repository&lt;/a&gt;.&lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#kubernetes-support"&gt;
+  &lt;/a&gt;
+  Kubernetes Support
+&lt;/h4&gt;
+
+&lt;p&gt;Grid 4.0 has also been redesigned to deploy the grid on Kubernetes for better scaling capabilities. You can take a look at an &lt;a href="https://github.com/kubernetes/examples/tree/master/staging/selenium"&gt;example here&lt;/a&gt; to get Grid 4.0 setup with Kubernetes.&lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#improved-ui"&gt;
+  &lt;/a&gt;
+  Improved UI
+&lt;/h4&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--UrBRR4ax--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/gyffw84cn5qkd8oayr6e.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--UrBRR4ax--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/gyffw84cn5qkd8oayr6e.png" alt="Grid 4.0 Improved UI" width="800" height="376"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Selenium Grid 4.0 also has a fancy UI now which easily lets you see all the running containers, number of sessions and max concurrency. It also has a VNC player plugged in to watch videos of the tests running within the container! 🤯&lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#ipv6-and-https%C2%A0protocol"&gt;
+  &lt;/a&gt;
+  IPV6 and HTTPS protocol
+&lt;/h4&gt;
+
+&lt;p&gt;Selenium grid also supports IPv6 addresses now along with IPv4 and you can now communicate to HTTPS protocol using Grid 4 as well.&lt;/p&gt;
+
+
+
+
+&lt;h3&gt;
+  &lt;a href="#new-locator%C2%A0strategy"&gt;
+  &lt;/a&gt;
+  New Locator Strategy
+&lt;/h3&gt;
+
+&lt;p&gt;Selenium 4.0 came out with a new &lt;a href="https://www.selenium.dev/documentation/webdriver/locating_elements/#relative-locators"&gt;Relative locator strategy&lt;/a&gt; that's a bit more friendly as its based on visual representation of the DOM. The available locators are - &lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;below - web element located below the specified element&lt;/li&gt;
+&lt;li&gt;toLeftOf - web element located to the left of the specified element&lt;/li&gt;
+&lt;li&gt;toRightOf - web element located to the right of the specified element&lt;/li&gt;
+&lt;li&gt;above - web element located above the specified element&lt;/li&gt;
+&lt;li&gt;near - web element located near (approx. 50 pixels) the specified element&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Here's an example - &lt;br&gt;
+&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--TpqAdsDq--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/rox5axda7szab8jvvqqa.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--TpqAdsDq--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/rox5axda7szab8jvvqqa.png" alt="Relative 'above' locator strategy" width="800" height="185"&gt;&lt;/a&gt;&lt;/p&gt;
+
+
+&lt;h3&gt;
+  &lt;a href="#cdp-integration-amp-bidi%C2%A0apis"&gt;
+  &lt;/a&gt;
+  CDP Integration &amp;amp; BiDi APIs
+&lt;/h3&gt;
+
+&lt;p&gt;With Selenium 4, you also get access to the Chrome Debugging protocol which has a set of APIs that lets you do things like:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;viewing console logs&lt;/li&gt;
+&lt;li&gt;intercept network requests&lt;/li&gt;
+&lt;li&gt;perform basic auth&lt;/li&gt;
+&lt;li&gt;throttle network performance &lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;But since this is with CDP it will only work with Chromium based browsers.&lt;br&gt;
+However, Selenium team is working on getting &lt;a href="https://www.selenium.dev/documentation/webdriver/bidi_apis/"&gt;Webdriver BiDirectional Protocol&lt;/a&gt; implemented for all the browsers so that you are not limited with a particular browser or a version.&lt;/p&gt;
+
+
+&lt;h3&gt;
+  &lt;a href="#selenium-ide"&gt;
+  &lt;/a&gt;
+  Selenium IDE
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--JVsHDEyt--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/vj9dvdbjzmzspbqz58yt.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--JVsHDEyt--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/vj9dvdbjzmzspbqz58yt.png" alt="Selenium IDE" width="600" height="375"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Aside from Selenium 4 changes, we also have a brand new Selenium IDE with improved UI and better user experience.&lt;/li&gt;
+&lt;li&gt;It also comes with its own command line runner to run tests in any browser, parallel or on a grid.&lt;/li&gt;
+&lt;li&gt;IDE also has control flow structure, with available commands like if, while and times in the IDE itself&lt;/li&gt;
+&lt;li&gt;Selenium IDE also records multiple locators for each element it interacts with. If one locator fails during playback, the others will be tried until one is successful.&lt;/li&gt;
+&lt;li&gt;You can also do code export for all the official language bindings such as Java, .Net, Python, Ruby &amp;amp; JavaScript.&lt;/li&gt;
+&lt;li&gt;IDE can be extended through the use of &lt;a href="https://www.selenium.dev/selenium-ide/docs/en/plugins/plugins-getting-started"&gt;plugins&lt;/a&gt; as well&lt;/li&gt;
+&lt;/ul&gt;
+
+
+
+&lt;p&gt;&lt;strong&gt;If you would like to see a demo of some of the features listed above, you can checkout the video below -&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;iframe width="710" height="399" src="https://www.youtube.com/embed/ZdUBoR45gko"&gt;
+&lt;/iframe&gt;
+&lt;/p&gt;
+
+
+
+
+&lt;p&gt;📧 Subscribe to my &lt;a href="https://automationbro.com/mailing-list"&gt;mailing list&lt;/a&gt; to get access to more content like this as well as be part of amazing free giveaways.&lt;/p&gt;
+
+&lt;p&gt;👍 You can follow my content here as well - &lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="https://twitter.com/automationbro"&gt;Twitter&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://www.linkedin.com/company/automation-bro"&gt;LinkedIn&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;...&lt;/p&gt;
+
+&lt;p&gt;I love coffees! And, if this post helped you out and you would like to support my work, you can do that by clicking on the button below and buying me a cup of coffee -&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://www.buymeacoffee.com/automationbro"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--lUHFj71T--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/i/4aw2ub3f4qkyjk0ivwt4.png" alt="Buy me a coffee" width="500" height="109"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;You can also support me by liking and sharing this content.&lt;/p&gt;
+
+&lt;p&gt;Thanks for reading!&lt;/p&gt;
+
+</description>
+      <category>testing</category>
+      <category>webdev</category>
+      <category>programming</category>
+      <category>javascript</category>
+    </item>
+    <item>
       <title>How to test your github actions locally</title>
       <author>Rajvir Singh</author>
       <pubDate>Thu, 11 Nov 2021 16:48:03 +0000</pubDate>
@@ -1703,623 +2480,6 @@ and creating a &lt;code&gt;tests/&lt;/code&gt; folder for the tests to live in.&
 
 </description>
       <category>opensource</category>
-    </item>
-    <item>
-      <title>Learn to test your packages NPM locally.</title>
-      <author>Ivan Zadivar</author>
-      <pubDate>Thu, 11 Nov 2021 15:00:15 +0000</pubDate>
-      <link>https://dev.to/ivanz123/learn-to-test-your-packages-npm-locally-523a</link>
-      <guid>https://dev.to/ivanz123/learn-to-test-your-packages-npm-locally-523a</guid>
-      <description>&lt;p&gt;Hi guys! In this post we are going to learn how to test the NPM package before being deployed to NPM. and that other developers can use it.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#initialize-project"&gt;
-  &lt;/a&gt;
-  Initialize project.
-&lt;/h2&gt;
-
-&lt;p&gt;In this part, we are going to initialize a simple Node.js project that allows us to perform basic mathematical operations. Get started!&lt;/p&gt;
-
-&lt;p&gt;Create directory.&lt;br&gt;
-&lt;code&gt;mkdir operations-basic&lt;/code&gt;&lt;/p&gt;
-
-&lt;p&gt;Enter directory.&lt;br&gt;
-&lt;code&gt;cd operations-basic&lt;/code&gt;&lt;/p&gt;
-
-&lt;p&gt;Initialize project NPM&lt;br&gt;
-&lt;code&gt;npm init -y&lt;/code&gt;&lt;/p&gt;
-
-&lt;p&gt;Initialize project with Typescript&lt;br&gt;
-&lt;code&gt;tsc --init&lt;/code&gt;&lt;/p&gt;
-
-&lt;p&gt;Perfect, now we create src/index.ts and add the following content.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;src&lt;/span&gt; &lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;index&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;ts&lt;/span&gt;
-
-&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;sum&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;number&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;b&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;number&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt; &lt;span class="kr"&gt;number&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;a&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="nx"&gt;b&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;subtract&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;number&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;b&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;number&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt; &lt;span class="kr"&gt;number&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;a&lt;/span&gt; &lt;span class="o"&gt;-&lt;/span&gt; &lt;span class="nx"&gt;b&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;multiplication&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;number&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;b&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;number&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt; &lt;span class="kr"&gt;number&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;a&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt; &lt;span class="nx"&gt;b&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;division&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;a&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;number&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;b&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;number&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt; &lt;span class="kr"&gt;number&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;b&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="k"&gt;throw&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nb"&gt;Error&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Cannot divide by zero&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;a&lt;/span&gt; &lt;span class="o"&gt;/&lt;/span&gt; &lt;span class="nx"&gt;b&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Nice, now we update &lt;em&gt;tsconfig.json&lt;/em&gt; and add the following content.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight json"&gt;&lt;code&gt;&lt;span class="err"&gt;&amp;gt;&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;tsconfig.json&lt;/span&gt;&lt;span class="w"&gt;
-
-&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="nl"&gt;"compilerOptions"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="err"&gt;/*&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;Visit&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;https://aka.ms/tsconfig.json&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;to&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;read&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;more&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;about&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;this&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;file&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;*/&lt;/span&gt;&lt;span class="w"&gt;
-
-    &lt;/span&gt;&lt;span class="err"&gt;/*&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;Language&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;and&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;Environment&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;*/&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"target"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"ES5"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-
-    &lt;/span&gt;&lt;span class="err"&gt;/*&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;Modules&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;*/&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"module"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"commonjs"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;                                &lt;/span&gt;&lt;span class="err"&gt;/*&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;Specify&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;what&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;module&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;code&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;is&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;generated.&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;*/&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"rootDir"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"./src"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;                                  &lt;/span&gt;&lt;span class="err"&gt;/*&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;Specify&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;the&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;root&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;folder&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;within&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;your&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;source&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;files.&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;*/&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"baseUrl"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"./src"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-
-    &lt;/span&gt;&lt;span class="err"&gt;/*&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;Emit&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;*/&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"declaration"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;                              &lt;/span&gt;&lt;span class="err"&gt;/*&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;Generate&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;.d.ts&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;files&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;from&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;TypeScript&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;and&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;JavaScript&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;files&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;in&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;your&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;project.&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;*/&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"sourceMap"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;                                &lt;/span&gt;&lt;span class="err"&gt;/*&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;Create&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;source&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;map&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;files&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;for&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;emitted&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;JavaScript&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;files.&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;*/&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"outDir"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"./lib"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;                                   &lt;/span&gt;&lt;span class="err"&gt;/*&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;Specify&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;an&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;output&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;folder&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;for&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;all&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;emitted&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;files.&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;*/&lt;/span&gt;&lt;span class="w"&gt;
-
-    &lt;/span&gt;&lt;span class="err"&gt;/*&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;Interop&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;Constraints&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;*/&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"esModuleInterop"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;                         &lt;/span&gt;&lt;span class="err"&gt;/*&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;Disable&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;resolving&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;symlinks&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;to&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;their&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;realpath.&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;This&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;correlates&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;to&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;the&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;same&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;flag&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;in&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;node.&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;*/&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"forceConsistentCasingInFileNames"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;            &lt;/span&gt;&lt;span class="err"&gt;/*&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;Ensure&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;that&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;casing&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;is&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;correct&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;in&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;imports.&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;*/&lt;/span&gt;&lt;span class="w"&gt;
-
-    &lt;/span&gt;&lt;span class="err"&gt;/*&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;Type&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;Checking&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;*/&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"strict"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;                            &lt;/span&gt;&lt;span class="err"&gt;/*&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;Enable&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;error&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;reporting&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;for&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;expressions&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;and&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;declarations&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;with&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;an&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;implied&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;`any`&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;type..&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;*/&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"strictNullChecks"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;                         &lt;/span&gt;&lt;span class="err"&gt;/*&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;When&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;type&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;checking&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;take&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;into&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;account&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;`&lt;/span&gt;&lt;span class="kc"&gt;null&lt;/span&gt;&lt;span class="err"&gt;`&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;and&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;`undefined`.&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;*/&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"strictFunctionTypes"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;                            &lt;/span&gt;&lt;span class="err"&gt;/*&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;Ensure&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;'use&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;strict'&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;is&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;always&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;emitted.&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;*/&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"noUnusedLocals"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;                           &lt;/span&gt;&lt;span class="err"&gt;/*&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;Enable&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;error&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;reporting&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;when&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;a&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;local&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;variables&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;aren't&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;read.&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;*/&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"noUnusedParameters"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;                          &lt;/span&gt;&lt;span class="err"&gt;/*&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;Interpret&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;optional&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;property&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;types&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;as&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;written&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;rather&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;than&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;adding&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;'undefined'.&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;*/&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"noImplicitReturns"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;                        &lt;/span&gt;&lt;span class="err"&gt;/*&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;Enable&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;error&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;reporting&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;for&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;codepaths&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;that&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;do&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;not&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;explicitly&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;return&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;in&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;a&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;function.&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;*/&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"skipLibCheck"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="w"&gt;                                 &lt;/span&gt;&lt;span class="err"&gt;/*&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;Skip&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;type&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;checking&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;all&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;.d.ts&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;files.&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;*/&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
-
-&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Magnificent, we update &lt;em&gt;package.json&lt;/em&gt; file.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight json"&gt;&lt;code&gt;&lt;span class="err"&gt;&amp;gt;&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;package.json&lt;/span&gt;&lt;span class="w"&gt;
-
-&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="nl"&gt;"name"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"operations-basic"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="nl"&gt;"version"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"0.1.0"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="nl"&gt;"description"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"Little descriptions of what your package does"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="nl"&gt;"main"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"lib/index.js"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="nl"&gt;"types"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"lib"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="nl"&gt;"scripts"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"build"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"tsc -p ."&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="p"&gt;},&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="nl"&gt;"keywords"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s2"&gt;"Some keywords"&lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="nl"&gt;"author"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"name"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"&amp;lt;Your name&amp;gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"email"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"&amp;lt;Your email&amp;gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"url"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"https://github.com/&amp;lt;Your username&amp;gt;"&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="p"&gt;},&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="nl"&gt;"repository"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"url"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"https://github.com/&amp;lt;Your username&amp;gt;/&amp;lt;Package name&amp;gt;"&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="p"&gt;},&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="nl"&gt;"license"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"MIT"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="nl"&gt;"dependencies"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="p"&gt;},&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="nl"&gt;"devDependencies"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#testing-locally"&gt;
-  &lt;/a&gt;
-  Testing locally.
-&lt;/h2&gt;
-
-&lt;p&gt;Now, we execute &lt;code&gt;npm run build&lt;/code&gt; this command generate a directory &lt;em&gt;lib&lt;/em&gt; which will be the one that will be uploaded to NPM, with its declarations, mappings, etc.&lt;/p&gt;
-
-&lt;p&gt;Beautiful. in this you should be able to see the lib folder, if so, run the following command.&lt;/p&gt;
-
-&lt;p&gt;&lt;code&gt;npm link&lt;/code&gt;&lt;/p&gt;
-
-&lt;p&gt;What this command will do is a symbolic link, with the name of your folder, and it will be added to the global packages on your computer. Similar when you download a package as follows: &lt;code&gt;npm installl -g some-package&lt;/code&gt;&lt;/p&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;Note: Remember that it is a symbolic link, so any change you make, you will only have to compile it and then execute &lt;code&gt;npm link&lt;/code&gt; and the changes will be reflected in the repositories where you use it.&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;Perfect, now it is created, now we can add to this package with the project that we want to test. And we do it in the following way.&lt;/p&gt;
-
-&lt;p&gt;&lt;code&gt;npm link package-name&lt;/code&gt;&lt;/p&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;Note: In the case that you want to test multiple packages at the same time, it is necessary that you execute them in a single command.&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;&lt;code&gt;npm link package-name-one package-name-two package-name-three&lt;/code&gt;&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#considerations"&gt;
-  &lt;/a&gt;
-  Considerations.
-&lt;/h2&gt;
-
-&lt;ul&gt;
-&lt;li&gt;It is very important that the package name is unique.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;Well guys, this is it for today. You already know that if you have a more efficient way to test an npm package locally, feel free to share it in the comments, it would be of great help.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#follow-me-on-social-networks"&gt;
-  &lt;/a&gt;
-  Follow me on social networks.
-&lt;/h2&gt;
-
-&lt;ul&gt;
-&lt;li&gt;🎉 Twitter: &lt;a href="https://twitter.com/ToSatn2"&gt;https://twitter.com/ToSatn2&lt;/a&gt;
-&lt;/li&gt;
-&lt;li&gt;💡 Github: &lt;a href="https://github.com/IvanZM123"&gt;https://github.com/IvanZM123&lt;/a&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-
-</description>
-      <category>npm</category>
-      <category>tutorial</category>
-      <category>beginners</category>
-      <category>opensource</category>
-    </item>
-    <item>
-      <title>Media query , responsive web</title>
-      <author>Dahye Ji</author>
-      <pubDate>Thu, 11 Nov 2021 14:59:20 +0000</pubDate>
-      <link>https://dev.to/daaahailey/media-query-2l55</link>
-      <guid>https://dev.to/daaahailey/media-query-2l55</guid>
-      <description>&lt;h1&gt;
-  &lt;a href="#media-query"&gt;
-  &lt;/a&gt;
-  Media query
-&lt;/h1&gt;
-
-&lt;p&gt;Media queries are useful when you want to &lt;strong&gt;&lt;em&gt;modify your site or app depending on a device's general type&lt;/em&gt;&lt;/strong&gt;(such as screen and print) or specific characteristics and parameters(such as &lt;strong&gt;screen resolution, device orientation, operating system preference or browser viewport width&lt;/strong&gt;).&lt;br&gt;
-The most common way is targeting particular viewport ranges and apply custom styles.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="c"&gt;/* at-rule - media type - media feature */&lt;/span&gt;
-&lt;span class="c"&gt;/* at-rule - media type - media feature - operator - media feature */&lt;/span&gt; 
-&lt;span class="k"&gt;@media&lt;/span&gt; &lt;span class="n"&gt;screen&lt;/span&gt; &lt;span class="n"&gt;and&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;min-width&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;480px&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="nc"&gt;.element&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-   &lt;span class="c"&gt;/* apply style */&lt;/span&gt;
-  &lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#media"&gt;
-  &lt;/a&gt;
-  @media
-&lt;/h2&gt;
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="k"&gt;@media&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;media-type&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt; &lt;span class="p"&gt;([&lt;/span&gt;&lt;span class="n"&gt;media-feature&lt;/span&gt;&lt;span class="p"&gt;])&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="c"&gt;/* styles */&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h3&gt;
-  &lt;a href="#media-queries-are-used-for-the-following"&gt;
-  &lt;/a&gt;
-  Media queries are used for the following.
-&lt;/h3&gt;
-
-&lt;ul&gt;
-&lt;li&gt;to conditionally apply styles with the CSS @media and @import at-rules.&lt;/li&gt;
-&lt;li&gt;to target specific media for the &lt;code&gt;&amp;lt;style&amp;gt;&lt;/code&gt;, &lt;code&gt;&amp;lt;link&amp;gt;&lt;/code&gt;, &lt;code&gt;&amp;lt;source&amp;gt;&lt;/code&gt;, and other HTML elements with the media = attribute.&lt;/li&gt;
-&lt;li&gt;to test and monitor media states using the Window.matchMedia() and MediaQueryList.addListener() javaScript methods.
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="cp"&gt;&amp;lt;!DOCTYPE html&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;html&lt;/span&gt; &lt;span class="na"&gt;lang=&lt;/span&gt;&lt;span class="s"&gt;"ko"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;head&amp;gt;&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;meta&lt;/span&gt; &lt;span class="na"&gt;charset=&lt;/span&gt;&lt;span class="s"&gt;"UTF-8"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;meta&lt;/span&gt; &lt;span class="na"&gt;http-equiv=&lt;/span&gt;&lt;span class="s"&gt;"X-UA-Compatible"&lt;/span&gt; &lt;span class="na"&gt;content=&lt;/span&gt;&lt;span class="s"&gt;"IE=edge"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;meta&lt;/span&gt; &lt;span class="na"&gt;name=&lt;/span&gt;&lt;span class="s"&gt;"viewport"&lt;/span&gt; &lt;span class="na"&gt;content=&lt;/span&gt;&lt;span class="s"&gt;"width=device-width, initial-scale=1.0"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;title&amp;gt;&lt;/span&gt;media query&lt;span class="nt"&gt;&amp;lt;/title&amp;gt;&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;style&amp;gt;&lt;/span&gt;
-        &lt;span class="c"&gt;/* mobile first!! bootstrap이 대표적 */&lt;/span&gt;
-        &lt;span class="nt"&gt;body&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-            &lt;span class="nl"&gt;background-color&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="no"&gt;tomato&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-        &lt;span class="p"&gt;}&lt;/span&gt;
-        &lt;span class="c"&gt;/* for devices that has screen size of 1000px and smaller  */&lt;/span&gt;
-        &lt;span class="k"&gt;@media&lt;/span&gt; &lt;span class="n"&gt;screen&lt;/span&gt; &lt;span class="n"&gt;and&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;max-width&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="m"&gt;1000px&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-            &lt;span class="nt"&gt;body&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-                &lt;span class="nl"&gt;background-color&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="no"&gt;green&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-            &lt;span class="p"&gt;}&lt;/span&gt;
-        &lt;span class="p"&gt;}&lt;/span&gt;
- &lt;span class="c"&gt;/* for devices that has screen size of 500px and smaller 
- */&lt;/span&gt;
-        &lt;span class="k"&gt;@media&lt;/span&gt; &lt;span class="n"&gt;screen&lt;/span&gt; &lt;span class="n"&gt;and&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;max-width&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="m"&gt;500px&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-            &lt;span class="nt"&gt;body&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-                &lt;span class="nl"&gt;background-color&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="no"&gt;violet&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-            &lt;span class="p"&gt;}&lt;/span&gt;
-        &lt;span class="p"&gt;}&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;/style&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;/head&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;body&amp;gt;&lt;/span&gt;
-
-&lt;span class="nt"&gt;&amp;lt;/body&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;/html&amp;gt;&lt;/span&gt;
-
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#types-of-media-query"&gt;
-  &lt;/a&gt;
-  Types of media query
-&lt;/h2&gt;
-
-&lt;ul&gt;
-&lt;li&gt;
-&lt;code&gt;&lt;strong&gt;all&lt;/strong&gt;&lt;/code&gt;: matches all devices&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;&lt;strong&gt;print&lt;/strong&gt;&lt;/code&gt;: matches documents that are viewed in a print preview or any media that breaks the content up into pages intended to print&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;&lt;strong&gt;screen&lt;/strong&gt;&lt;/code&gt;: matches all &lt;strong&gt;&lt;u&gt;devices with a screen&lt;/u&gt;&lt;/strong&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;&lt;strong&gt;speech&lt;/strong&gt;&lt;/code&gt;: matches devices that read the content audibly, such as screenreader.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;Code below is for @media print&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;abbr&lt;/span&gt; &lt;span class="na"&gt;title=&lt;/span&gt;&lt;span class="s"&gt;"world wide web consortium"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;w3c&lt;span class="nt"&gt;&amp;lt;/abbr&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="k"&gt;@media&lt;/span&gt; &lt;span class="n"&gt;print&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="py"&gt;abbr&lt;/span&gt;&lt;span class="p"&gt;::&lt;/span&gt;&lt;span class="n"&gt;after&lt;/span&gt; &lt;span class="err"&gt;{&lt;/span&gt;
-                &lt;span class="c"&gt;/* attr() : css 속성 함수입니다. */&lt;/span&gt;
-        &lt;span class="n"&gt;content&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;' ('&lt;/span&gt;&lt;span class="n"&gt;attr&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;title&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="s2"&gt;')'&lt;/span&gt;
-    &lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="err"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h3&gt;
-  &lt;a href="#logical-operators"&gt;
-  &lt;/a&gt;
-  Logical operators
-&lt;/h3&gt;
-
-&lt;ul&gt;
-&lt;li&gt;
-&lt;code&gt;&lt;strong&gt;and&lt;/strong&gt;&lt;/code&gt;: used for &lt;u&gt;combining multiple media features together into a single media query&lt;/u&gt;, requiring each chained feature to return true for the query to be true. 조건을 모두 만족하는 경우에만 스타일 적용.
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="c"&gt;/* matches screen between 320px AND 768px */&lt;/span&gt;
-&lt;span class="k"&gt;@media&lt;/span&gt; &lt;span class="n"&gt;screen&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;min-width&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;320px&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="n"&gt;and&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;max-width&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;768px&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="nc"&gt;.element&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="c"&gt;/* styles */&lt;/span&gt;
-  &lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;ul&gt;
-&lt;li&gt;
-&lt;code&gt;&lt;strong&gt;not&lt;/strong&gt;&lt;/code&gt;: used to negate a media query, returning true if the query would otherwise return false. 조건을 반전하는 경우 스타일 적용.
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="k"&gt;@media&lt;/span&gt; &lt;span class="n"&gt;print&lt;/span&gt; &lt;span class="n"&gt;and&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt; &lt;span class="n"&gt;not&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;color&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="nt"&gt;body&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;background-color&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;none&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;ul&gt;
-&lt;li&gt;
-&lt;code&gt;&lt;strong&gt;,(comma)&lt;/strong&gt;&lt;/code&gt;: commas are used to combine multiple media queries into a single rule. Each query in a comma-separated list is treated separately from the others Thus, if any of the queries in a list is true, the entire media statement returns true. In other words, lists behave like a logical or operator. 조건중 하나라도 만족하는 경우 스타일 적용
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="c"&gt;/* matches screens where either the user prefers dark mode or the screen is at least 1200px wide */&lt;/span&gt;
-&lt;span class="k"&gt;@media&lt;/span&gt; &lt;span class="n"&gt;screen&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;prefers-color-scheme&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;dark&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;min-width&lt;/span&gt; &lt;span class="m"&gt;1200px&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="nc"&gt;.element&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="c"&gt;/* styles */&lt;/span&gt;
-  &lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;ul&gt;
-&lt;li&gt;
-&lt;code&gt;&lt;strong&gt;only&lt;/strong&gt;&lt;/code&gt;: Applies a style only if an entire query matches. If you use the only operator, you must also specify a media type. 미디어쿼리를 지원 하는 브라우저에서만 작동
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="nt"&gt;body&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nl"&gt;background&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="no"&gt;black&lt;/span&gt;&lt;span class="p"&gt;;}&lt;/span&gt;
-
-&lt;span class="k"&gt;@media&lt;/span&gt; &lt;span class="n"&gt;screen&lt;/span&gt; &lt;span class="n"&gt;and&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;min-width&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="m"&gt;481px&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="n"&gt;and&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;max-width&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="m"&gt;1280px&lt;/span&gt;&lt;span class="p"&gt;){&lt;/span&gt;
-  &lt;span class="nt"&gt;body&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nl"&gt;background&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="no"&gt;red&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;span class="k"&gt;@media&lt;/span&gt; &lt;span class="n"&gt;screen&lt;/span&gt; &lt;span class="n"&gt;and&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;max-width&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="m"&gt;480px&lt;/span&gt;&lt;span class="p"&gt;){&lt;/span&gt; 
-  &lt;span class="nt"&gt;body&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nl"&gt;background&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="no"&gt;green&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;span class="k"&gt;@media&lt;/span&gt; &lt;span class="n"&gt;not&lt;/span&gt; &lt;span class="n"&gt;screen&lt;/span&gt; &lt;span class="n"&gt;and&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;orientation&lt;/span&gt; &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;landscape&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="c"&gt;/* not always come after @media. default value is portrait */&lt;/span&gt;
-  &lt;span class="nt"&gt;body&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nl"&gt;background&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="no"&gt;pink&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;span class="k"&gt;@media&lt;/span&gt; &lt;span class="n"&gt;screen&lt;/span&gt; &lt;span class="n"&gt;and&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;-webkit-device-pixel-ratio&lt;/span&gt; &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;2&lt;/span&gt;&lt;span class="p"&gt;){&lt;/span&gt; 
-  &lt;span class="nt"&gt;body&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nl"&gt;background&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="no"&gt;royalblue&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h1&gt;
-  &lt;a href="#how-to-check-the-pixel-ratio-of-a-device"&gt;
-  &lt;/a&gt;
-  How to check the pixel ratio of a device?
-&lt;/h1&gt;
-
-&lt;p&gt;1.Use BOM api. (&lt;strong&gt;&lt;code&gt;window.devicePixelRatio&lt;/code&gt;&lt;/strong&gt;)&lt;br&gt;
-2.You can also check here: &lt;a href="https://johankj.github.io/devicePixelRatio/"&gt;https://johankj.github.io/devicePixelRatio/&lt;/a&gt;&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#about-viewport"&gt;
-  &lt;/a&gt;
-  About &lt;a href="https://experienceleague.adobe.com/docs/target/using/experiences/vec/mobile-viewports.html?lang=en"&gt;viewport&lt;/a&gt;
-&lt;/h2&gt;
-
-</description>
-      <category>mediaquery</category>
-      <category>css</category>
-      <category>responsive</category>
-      <category>responsiveweb</category>
-    </item>
-    <item>
-      <title>Better Ways to Write Tailwind CSS in CSS</title>
-      <author>Mark Mead</author>
-      <pubDate>Thu, 11 Nov 2021 14:48:38 +0000</pubDate>
-      <link>https://dev.to/markmead/better-ways-to-write-tailwind-css-in-css-4pnh</link>
-      <guid>https://dev.to/markmead/better-ways-to-write-tailwind-css-in-css-4pnh</guid>
-      <description>&lt;p&gt;There may come a point when you're using Tailwind CSS that you need to write CSS. This is rare, especially since &lt;a href="https://tailwindcss.com/docs/just-in-time-mode"&gt;Tailwind CSS JIT mode&lt;/a&gt; came out, allowing you to write Tailwind CSS classes that don't exist, but are created on build. &lt;/p&gt;
-
-&lt;p&gt;There's a few approaches to writting CSS in Tailwind CSS: &lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;&lt;p&gt;Write custom CSS &lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;Write Tailwind CSS classes with &lt;code&gt;theme()&lt;/code&gt; &lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;Write Tailwind CSS classes with &lt;code&gt;@apply&lt;/code&gt; &lt;/p&gt;&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;p&gt;I'm not a fan of &lt;code&gt;theme()&lt;/code&gt; I think it looks messy in CSS files, so I will typically reach for &lt;code&gt;@apply&lt;/code&gt; and then write custom CSS when needed. &lt;/p&gt;
-
-&lt;p&gt;Here's an example of creating a &lt;code&gt;.button&lt;/code&gt; class in Tailwind CSS that sets up a default style, this is a common use case of writing CSS with Tailwind CSS. &lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;&lt;code&gt;theme()&lt;/code&gt;&lt;/strong&gt;&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="nc"&gt;.button&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; 
-  &lt;span class="nl"&gt;display&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;inline-flex&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; 
-  &lt;span class="nl"&gt;justify-content&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;center&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; 
-  &lt;span class="nl"&gt;align-items&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;center&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; 
-  &lt;span class="nl"&gt;padding&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;theme&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;'spacing.3'&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="n"&gt;theme&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;'spacing.6'&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt; 
-  &lt;span class="nl"&gt;font-size&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;theme&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;'fontSize.sm'&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt; 
-  &lt;span class="nl"&gt;font-weight&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;theme&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;'fontWeight.semibold'&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt; 
-  &lt;span class="nl"&gt;letter-spacing&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;theme&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;'letterSpacing.wider'&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt; 
-  &lt;span class="nl"&gt;text-transform&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;uppercase&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; 
-  &lt;span class="nl"&gt;border-radius&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;theme&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;'borderRadius.lg'&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt; 
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;&lt;strong&gt;&lt;code&gt;@apply&lt;/code&gt;&lt;/strong&gt;&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="nc"&gt;.button&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; 
-  &lt;span class="err"&gt;@apply&lt;/span&gt; &lt;span class="err"&gt;inline-flex&lt;/span&gt; &lt;span class="err"&gt;justify-center&lt;/span&gt; &lt;span class="err"&gt;items-center&lt;/span&gt; &lt;span class="err"&gt;px-6&lt;/span&gt; &lt;span class="err"&gt;py-3&lt;/span&gt; &lt;span class="err"&gt;text-sm&lt;/span&gt; &lt;span class="err"&gt;font-semibold&lt;/span&gt; &lt;span class="err"&gt;tracking-wider&lt;/span&gt; &lt;span class="err"&gt;uppercase&lt;/span&gt; &lt;span class="err"&gt;rounded-lg;&lt;/span&gt; 
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;There's pros and cons to both of these approaches:&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;&lt;code&gt;theme()&lt;/code&gt;&lt;/strong&gt; &lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Doesn't keep a clear split between Tailwind CSS and CSS 👎 &lt;/li&gt;
-&lt;li&gt;Slower to write 👎 &lt;/li&gt;
-&lt;li&gt;Looks more like traditional CSS 👍 &lt;/li&gt;
-&lt;li&gt;Uses CSS values instead of Tailwind CSS classes (👍 for onboarding developers) &lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;&lt;strong&gt;&lt;code&gt;@apply&lt;/code&gt;&lt;/strong&gt; &lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Can become very long 👎 &lt;/li&gt;
-&lt;li&gt;Not loved by the Tailwind CSS developers (👎 if they decide to stop supporting it) &lt;/li&gt;
-&lt;li&gt;Keeps a clear split between Tailwind CSS and CSS 👍 &lt;/li&gt;
-&lt;li&gt;Fast to write 👍 &lt;/li&gt;
-&lt;li&gt;Uses Tailwind CSS classes (👍 for Tailwind CSS lovers) &lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;I believe that the benefits of &lt;code&gt;@apply&lt;/code&gt; outweigh the issues, especially when the biggest issue has multiple solutions. &lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#how-to-write-better-tailwind-css-in-css"&gt;
-  &lt;/a&gt;
-  How to Write Better Tailwind CSS in CSS
-&lt;/h2&gt;
-
-&lt;p&gt;I've found two approaches that solve the issue of "Can become very long" when using &lt;code&gt;@apply&lt;/code&gt;: &lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#multiple-lines"&gt;
-  &lt;/a&gt;
-  Multiple Lines
-&lt;/h3&gt;
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="nc"&gt;.button&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; 
-  &lt;span class="err"&gt;@apply&lt;/span&gt; &lt;span class="err"&gt;inline-flex&lt;/span&gt; &lt;span class="err"&gt;justify-center&lt;/span&gt; &lt;span class="err"&gt;items-center;&lt;/span&gt; 
-  &lt;span class="err"&gt;@apply&lt;/span&gt; &lt;span class="err"&gt;px-6&lt;/span&gt; &lt;span class="err"&gt;py-3;&lt;/span&gt; 
-  &lt;span class="err"&gt;@apply&lt;/span&gt; &lt;span class="err"&gt;text-sm&lt;/span&gt; &lt;span class="err"&gt;font-semibold&lt;/span&gt; &lt;span class="err"&gt;tracking-wider&lt;/span&gt; &lt;span class="err"&gt;uppercase;&lt;/span&gt; 
-  &lt;span class="err"&gt;@apply&lt;/span&gt; &lt;span class="err"&gt;rounded-lg;&lt;/span&gt; 
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;This has full support and when written correctly will help you read and write Tailwind CSS in CSS faster. &lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#stacking-css"&gt;
-  &lt;/a&gt;
-  Stacking CSS
-&lt;/h3&gt;
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="nc"&gt;.button&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; 
-  &lt;span class="err"&gt;@apply&lt;/span&gt; 
-    &lt;span class="err"&gt;inline-flex&lt;/span&gt; &lt;span class="err"&gt;justify-center&lt;/span&gt; &lt;span class="err"&gt;items-center&lt;/span&gt; 
-    &lt;span class="err"&gt;px-6&lt;/span&gt; &lt;span class="err"&gt;py-3&lt;/span&gt; &lt;span class="err"&gt;text-sm&lt;/span&gt; 
-    &lt;span class="err"&gt;font-semibold&lt;/span&gt; &lt;span class="err"&gt;tracking-wider&lt;/span&gt; &lt;span class="err"&gt;uppercase&lt;/span&gt; 
-    &lt;span class="err"&gt;rounded-lg;&lt;/span&gt; 
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;This approach looks messy and CSS formatters will break it. &lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#how-to-order-css-in-tailwind-css"&gt;
-  &lt;/a&gt;
-  How to Order CSS in Tailwind CSS
-&lt;/h3&gt;
-
-&lt;p&gt;There's a simple approach I take when writting CSS with Tailwind CSS, it's all in the order of the &lt;code&gt;@apply&lt;/code&gt; use: &lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;
-&lt;strong&gt;Display&lt;/strong&gt; - &lt;code&gt;inline-flex justify-center items-center&lt;/code&gt; &lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;Spacing&lt;/strong&gt; - &lt;code&gt;px-6 py-3&lt;/code&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;Font&lt;/strong&gt; - &lt;code&gt;text-sm font-semibold tracking-wider uppercase&lt;/code&gt; &lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;Style&lt;/strong&gt; - &lt;code&gt;rounded-lg&lt;/code&gt; &lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;Transition&lt;/strong&gt; - &lt;code&gt;transition-shadow&lt;/code&gt; &lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;State&lt;/strong&gt; - &lt;code&gt;hover:shadow-xl focus:ring-2&lt;/code&gt; &lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;Other/Custom&lt;/strong&gt; - &lt;code&gt;background-image: url('...')&lt;/code&gt; &lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;p&gt;Write your Tailwind CSS like that in CSS files and you'll be fast and the code you write will be readable.&lt;/p&gt;
-
-</description>
-      <category>tailwindcss</category>
-      <category>css</category>
-      <category>frontend</category>
     </item>
   </channel>
 </rss>
