@@ -7,6 +7,695 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>Automate Azure Service Bus SAS tokens with Github</title>
+      <author>Marcel.L</author>
+      <pubDate>Sun, 14 Nov 2021 10:04:58 +0000</pubDate>
+      <link>https://dev.to/pwd9000/automate-azure-service-bus-sas-tokens-with-github-37ok</link>
+      <guid>https://dev.to/pwd9000/automate-azure-service-bus-sas-tokens-with-github-37ok</guid>
+      <description>&lt;h2&gt;
+  &lt;a href="#overview"&gt;
+  &lt;/a&gt;
+  Overview
+&lt;/h2&gt;
+
+&lt;p&gt;In todays tutorial I will demonstrate how to use powerShell in Github Actions to automate Azure Service Bus SAS tokens to generate short lived usable tokens with a validity period of 10 minutes and securely store the newly generated SAS tokens inside of an Azure Key Vault ready for consumption.&lt;/p&gt;
+
+&lt;p&gt;We will create an &lt;a href="https://docs.microsoft.com/en-gb/azure/service-bus-messaging/service-bus-messaging-overview"&gt;Azure Service Bus&lt;/a&gt; and &lt;a href="https://docs.microsoft.com/en-gb/azure/key-vault/general/overview"&gt;Key Vault&lt;/a&gt; and a single &lt;strong&gt;reusable&lt;/strong&gt; github workflow to handle our SAS token requests as well as a service principal / Azure identity to fully automate everything. For the purpose of this demonstration we will also have a main workflow that is triggered manually. Our main workflow, when triggered, will first call our &lt;strong&gt;reusable&lt;/strong&gt; github workflow that will generate our temporary SAS token that will only be valid for 10 minutes and store the SAS token inside of the key vault (The token validity period can be adjusted based on your needs or requirement). Our main workflow will then retrieve the SAS token from the key vault and send the message through to our service bus queue.&lt;/p&gt;
+
+&lt;p&gt;This means that whenever we need to call our service bus we can now generate a temporary SAS token to call our Azure service bus using a &lt;strong&gt;reusable&lt;/strong&gt; GitHub workflow to generate our token for us and we can access the token securely from key vault using a different process or even a different github workflow.&lt;/p&gt;
+
+&lt;p&gt;Lets take a look at a sample use case flow diagram of how this would look like:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--1FDO57P_--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Github-Rotate-ServiceBus-SAS/assets/flowdiag001.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--1FDO57P_--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Github-Rotate-ServiceBus-SAS/assets/flowdiag001.png" alt="image.png" width="842" height="312"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Note:&lt;/strong&gt; Maintaining Service Bus SAS tokens using an Azure key vault is particularly useful for teams who maintain secrets management and need to ensure that only relevant users, principals and processes can access secrets from a secure managed location and also be rotated on a regular basis. Azure key vaults are also particularly useful for security or ops teams who maintain secrets management, instead of giving other teams access to your deployment repositories in Github, teams who look after deployments no longer have to worry about giving access to other teams in order to manage secrets as secrets management will be done from an Azure key vault which nicely separates roles of responsibility when spread across different teams.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#protecting-secrets-in-github"&gt;
+  &lt;/a&gt;
+  Protecting secrets in github
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;a href="https://docs.github.com/en/actions/reference/encrypted-secrets"&gt;Github Secrets&lt;/a&gt; is a great way that will allow us to store sensitive information in our organization, repository, or repository environments. In fact we will set up a github secret later in this tutorial that will allow us to authenticate to Azure.&lt;/p&gt;
+
+&lt;p&gt;Even though this is a great feature to be able to have secrets management in Github, you may be looking after many repositories all with different secrets, this can become an administrative overhead when secrets or keys need to be rotated on a regular basis for best security practice, that's where &lt;a href="https://docs.microsoft.com/en-gb/azure/key-vault/general/overview"&gt;Azure key vault&lt;/a&gt; can also be utilized as a central source for all your secret management in your GitHub workflows.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#what-do-we-need-to-start-generating-service-bus-sas-tokens"&gt;
+  &lt;/a&gt;
+  What do we need to start generating Service Bus SAS tokens?
+&lt;/h3&gt;
+
+&lt;p&gt;For the purpose of this demo and so you can follow along, I will set up the Azure environment with all the relevant resources described below.&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;
+&lt;strong&gt;Azure key vault:&lt;/strong&gt; This will be where we centrally store, access and manage all our Service Bus SAS tokens.&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;Service Bus Namespace:&lt;/strong&gt; We will create a service Bus Namespace and Queue.&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;Azure AD App &amp;amp; Service Principal:&lt;/strong&gt; This is what we will use to authenticate to Azure from our github workflows.&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;Github repository:&lt;/strong&gt; This is where we will keep all our source code and workflows.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;h3&gt;
+  &lt;a href="#create-an-azure-key-vault"&gt;
+  &lt;/a&gt;
+  Create an Azure key vault
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;strong&gt;NOTE:&lt;/strong&gt; A complete script for all the steps/Pre-Reqs described in building the environment can be found on my &lt;a href="https://github.com/Pwd9000-ML/blog-devto/tree/main/posts/Github-Rotate-ServiceBus-SAS/code/Pre-Reqs.ps1"&gt;GitHub code page&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;For this step I will be using Azure CLI using a powershell console. First we will log into Azure by running:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight powershell"&gt;&lt;code&gt;&lt;span class="n"&gt;az&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;login&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;Next we will set some variables:&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight powershell"&gt;&lt;code&gt;&lt;span class="c"&gt;#Set variables&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="nv"&gt;$randomInt&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Get-Random&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;-Maximum&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;9999&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="nv"&gt;$subscriptionId&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;$&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;az&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;account&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;show&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--query&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"id"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--output&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;tsv&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="nv"&gt;$resourceGroupName&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"Actions-Service-Bus-Demo"&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="nv"&gt;$location&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"UKSouth"&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="nv"&gt;$keyVaultName&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"secrets-vault&lt;/span&gt;&lt;span class="nv"&gt;$randomInt&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="nv"&gt;$nameSpaceName&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"githubactions"&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="nv"&gt;$queueName&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"queue01"&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="nv"&gt;$policyName&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"myauthrule"&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="nv"&gt;$currentUser&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;$&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;az&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;ad&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;signed-in-user&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;show&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--query&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"objectId"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--output&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;tsv&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;Next we will create a &lt;code&gt;resource group&lt;/code&gt; and &lt;code&gt;key vault&lt;/code&gt; by running:&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight powershell"&gt;&lt;code&gt;&lt;span class="c"&gt;#Create ResourceGroup and Key Vault&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="n"&gt;az&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;group&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;create&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--name&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$resourceGroupName&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;-l&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$location&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="n"&gt;az&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;keyvault&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;create&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--name&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$keyVaultName&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--resource-group&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$resourceGroupName&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--location&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$location&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--enable-rbac-authorization&lt;/span&gt;&lt;span class="w"&gt;
+
+&lt;/span&gt;&lt;span class="c"&gt;#Grant Key Vault Creator/Current User [Key Vault Secrets Officer]&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="n"&gt;az&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;role&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;assignment&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;create&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--assignee-object-id&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$currentUser&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="se"&gt;`
+&lt;/span&gt;&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nt"&gt;--role&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"Key Vault Secrets Officer"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="se"&gt;`
+&lt;/span&gt;&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nt"&gt;--scope&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"/subscriptions/&lt;/span&gt;&lt;span class="nv"&gt;$subscriptionId&lt;/span&gt;&lt;span class="s2"&gt;/resourceGroups/&lt;/span&gt;&lt;span class="nv"&gt;$resourceGroupName&lt;/span&gt;&lt;span class="s2"&gt;/providers/Microsoft.KeyVault/vaults/&lt;/span&gt;&lt;span class="nv"&gt;$keyVaultName&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="se"&gt;`
+&lt;/span&gt;&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nt"&gt;--assignee-principal-type&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"User"&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;As you see above we use the option &lt;code&gt;--enable-rbac-authorization&lt;/code&gt;. The reason for this is because our &lt;code&gt;current logged in user&lt;/code&gt; as well as our &lt;code&gt;service principal&lt;/code&gt; used by our github workflow we will create later, will access this key vault using the RBAC permission model. We also grant the key vault creator, in our case the &lt;code&gt;current logged in user&lt;/code&gt; &lt;a href="https://docs.microsoft.com/en-us/azure/role-based-access-control/built-in-roles#key-vault-secrets-officer"&gt;Key Vault Secrets Officer&lt;/a&gt; access to the key vault as we will store our service bus policy primary key in the key vault.&lt;/p&gt;
+&lt;h3&gt;
+  &lt;a href="#create-an-azure-service-bus"&gt;
+  &lt;/a&gt;
+  Create an Azure Service Bus
+&lt;/h3&gt;
+
+&lt;p&gt;Next we will create a &lt;code&gt;Service Bus Namespace&lt;/code&gt; and &lt;code&gt;Queue&lt;/code&gt; by running:&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight powershell"&gt;&lt;code&gt;&lt;span class="c"&gt;#Create Service Bus and Queue (and policy with Send and Listen rights)&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="n"&gt;az&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;servicebus&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;namespace&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;create&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--resource-group&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$resourceGroupName&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--name&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$nameSpaceName&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--location&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$location&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--sku&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"Basic"&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="n"&gt;az&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;servicebus&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;queue&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;create&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--resource-group&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$resourceGroupName&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--namespace-name&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$nameSpaceName&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--name&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$queueName&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="n"&gt;az&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;servicebus&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;namespace&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;authorization-rule&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;create&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--resource-group&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$resourceGroupName&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--namespace-name&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$nameSpaceName&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--name&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$policyName&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--rights&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"Send"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"Listen"&lt;/span&gt;&lt;span class="w"&gt;
+
+&lt;/span&gt;&lt;span class="c"&gt;#Retrieve and save primary key of new policy to key vault (will be used later as a GH Secret in GH workflow)&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="nv"&gt;$policyPrimaryKey&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;az&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;servicebus&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;namespace&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;authorization-rule&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;keys&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;list&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--resource-group&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$resourceGroupName&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--namespace-name&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$nameSpaceName&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--name&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$policyName&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--query&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"primaryKey"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--output&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;tsv&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="n"&gt;az&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;keyvault&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;secret&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;set&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--vault-name&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$keyVaultName&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--name&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="si"&gt;$(&lt;/span&gt;&lt;span class="nv"&gt;$policyName&lt;/span&gt;&lt;span class="si"&gt;)&lt;/span&gt;&lt;span class="s2"&gt;PrimaryKey"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--value&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$policyPrimaryKey&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;You will notice that our Service Bus has a Policy called &lt;code&gt;myauthrule&lt;/code&gt; with only &lt;code&gt;Send&lt;/code&gt; and &lt;code&gt;Listen&lt;/code&gt; configured:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--xCgAOk0r--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Github-Rotate-ServiceBus-SAS/assets/sb1.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--xCgAOk0r--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Github-Rotate-ServiceBus-SAS/assets/sb1.png" alt="image.png" width="880" height="300"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;And our policies &lt;code&gt;Primary Key&lt;/code&gt; will be saved in our key vault called &lt;code&gt;myauthrulePrimaryKey&lt;/code&gt;. We will use this secret later in our GitHub workflow to generate our temp SAS token:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--ZhktzvX_--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Github-Rotate-ServiceBus-SAS/assets/sb2.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ZhktzvX_--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Github-Rotate-ServiceBus-SAS/assets/sb2.png" alt="image.png" width="610" height="520"&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;h3&gt;
+  &lt;a href="#create-an-azure-ad-app-amp-service-principal"&gt;
+  &lt;/a&gt;
+  Create an Azure AD App &amp;amp; Service Principal
+&lt;/h3&gt;
+
+&lt;p&gt;Next we will create our &lt;code&gt;Azure AD App&lt;/code&gt; by running the following in a powershell console window:&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight powershell"&gt;&lt;code&gt;&lt;span class="c"&gt;# a name for our azure ad app&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="nv"&gt;$appName&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s2"&gt;"gitHubActionsVaultUser"&lt;/span&gt;&lt;span class="w"&gt;
+
+&lt;/span&gt;&lt;span class="c"&gt;# create Azure AD app&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="n"&gt;az&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;ad&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;app&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;create&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--display-name&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$appName&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--homepage&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"http://localhost/&lt;/span&gt;&lt;span class="nv"&gt;$appName&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;Next we will retrieve the App ID and set it to a powershell variable &lt;code&gt;$appId&lt;/code&gt;&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight powershell"&gt;&lt;code&gt;&lt;span class="c"&gt;# get the app id&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="nv"&gt;$appId&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="err"&gt;$&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;az&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;ad&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;app&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;list&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--display-name&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$appName&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--query&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[]&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;appId&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;-o&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;tsv&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;Now that we have our &lt;code&gt;appId&lt;/code&gt; we can create our service principal that we will use to authenticate our GitHub workflow with Azure and also give our principal the correct &lt;code&gt;Role Based Access Control (RBAC)&lt;/code&gt; permissions on our key vault we created earlier. We will give our principal the RBAC/IAM role: &lt;a href="https://docs.microsoft.com/en-us/azure/role-based-access-control/built-in-roles#key-vault-secrets-officer"&gt;Key Vault Secrets Officer&lt;/a&gt; because we want our workflow to be able to retrieve &lt;code&gt;secret keys&lt;/code&gt; and also set secrets for our &lt;code&gt;Service Bus SAS tokens&lt;/code&gt;.&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight powershell"&gt;&lt;code&gt;&lt;span class="c"&gt;#Create Service Principal to be used as GH Secret credential to authenticate to Azure (Make note of JSON output on this step)&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="n"&gt;az&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;ad&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;sp&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;create-for-rbac&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--name&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$appId&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="se"&gt;`
+&lt;/span&gt;&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nt"&gt;--role&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"Key Vault Secrets Officer"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="se"&gt;`
+&lt;/span&gt;&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nt"&gt;--scopes&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;/subscriptions/&lt;/span&gt;&lt;span class="nv"&gt;$subscriptionId&lt;/span&gt;&lt;span class="nx"&gt;/resourceGroups/&lt;/span&gt;&lt;span class="nv"&gt;$resourceGroupName&lt;/span&gt;&lt;span class="nx"&gt;/providers/Microsoft.KeyVault/vaults/&lt;/span&gt;&lt;span class="nv"&gt;$keyVaultName&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="se"&gt;`
+&lt;/span&gt;&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nt"&gt;--sdk-auth&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;The above command will output a JSON object with the role assignment credentials that provide access to your key vault. Copy this JSON object for later. You will only need the sections with the &lt;code&gt;clientId&lt;/code&gt;, &lt;code&gt;clientSecret&lt;/code&gt;, &lt;code&gt;subscriptionId&lt;/code&gt;, and &lt;code&gt;tenantId&lt;/code&gt; values:&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight json"&gt;&lt;code&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+  &lt;/span&gt;&lt;span class="nl"&gt;"clientId"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"&amp;lt;GUID&amp;gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+  &lt;/span&gt;&lt;span class="nl"&gt;"clientSecret"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"&amp;lt;PrincipalSecret&amp;gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+  &lt;/span&gt;&lt;span class="nl"&gt;"subscriptionId"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"&amp;lt;GUID&amp;gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+  &lt;/span&gt;&lt;span class="nl"&gt;"tenantId"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"&amp;lt;GUID&amp;gt;"&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+&lt;h3&gt;
+  &lt;a href="#configure-our-github-repository"&gt;
+  &lt;/a&gt;
+  Configure our GitHub repository
+&lt;/h3&gt;
+
+&lt;p&gt;Next we will configure our Github repository and Github workflow. My Github repository is called &lt;code&gt;Azure-Service-Bus-SAS-Management&lt;/code&gt;. You can also take a look or even use my github repository as a template &lt;a href="https://github.com/Pwd9000-ML/Azure-Service-Bus-SAS-Management"&gt;HERE&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;Remember at the beginning of this post I mentioned that we will create a github secret, we will now create this secret on our repository which will be used to authenticate our Github workflow to Azure when it's triggered.&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;&lt;p&gt;In &lt;a href="https://github.com"&gt;GitHub&lt;/a&gt;, browse your repository.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Select Settings &amp;gt; Secrets &amp;gt; New repository secret.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Paste the JSON object output from the Azure CLI command we ran earlier into the secret's value field. Give the secret the name &lt;code&gt;AZURE_CREDENTIALS&lt;/code&gt;.&lt;/p&gt;&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--ix6L7L7I--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Github-Rotate-ServiceBus-SAS/assets/githubAzureCredentials1.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ix6L7L7I--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Github-Rotate-ServiceBus-SAS/assets/githubAzureCredentials1.png" alt="image.png" width="880" height="581"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Because we will have two workflows in this demo we will create our &lt;strong&gt;reusable&lt;/strong&gt; workflow first called &lt;code&gt;new-service-bus-sas-token.yaml&lt;/code&gt; then we will create our main workflow that will send a message to our Service bus called &lt;code&gt;main.yaml&lt;/code&gt;.&lt;/p&gt;
+&lt;h3&gt;
+  &lt;a href="#configure-our-github-workflows"&gt;
+  &lt;/a&gt;
+  Configure our GitHub workflows
+&lt;/h3&gt;
+
+&lt;p&gt;Now create a folder in the repository called &lt;code&gt;.github&lt;/code&gt; and underneath another folder called &lt;code&gt;workflows&lt;/code&gt;. In the workflows folder we will create a YAML file called &lt;code&gt;new-service-bus-sas-token.yaml&lt;/code&gt;. The YAML file can also be accessed &lt;a href="https://github.com/Pwd9000-ML/Azure-Service-Bus-SAS-Management/blob/master/.github/workflows/new-service-bus-sas-token.yaml"&gt;HERE&lt;/a&gt;.&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="c1"&gt;## //code/new-service-bus-sas-token.yaml&lt;/span&gt;
+&lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;New Service Bus SAS Token&lt;/span&gt;
+
+&lt;span class="na"&gt;on&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;workflow_call&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;secrets&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;azure_credentials&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="na"&gt;description&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;Azure&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;Credential&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;passed&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;from&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;the&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;main&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;caller&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;workflow'&lt;/span&gt;
+        &lt;span class="na"&gt;required&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="no"&gt;true&lt;/span&gt;
+
+&lt;span class="na"&gt;jobs&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;new-sas-token&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;runs-on&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;windows-latest&lt;/span&gt;
+    &lt;span class="na"&gt;env&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;KEY_VAULT_NAME&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;secrets-vault7839&lt;/span&gt;
+      &lt;span class="na"&gt;SB_NAMESPACE&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;githubactions&lt;/span&gt;
+      &lt;span class="na"&gt;SB_POLICY_NAME&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;myauthrule&lt;/span&gt;
+      &lt;span class="na"&gt;SB_POLICY_KEY_NAME&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;myauthrulePrimaryKey&lt;/span&gt;
+
+    &lt;span class="na"&gt;steps&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Check out repository&lt;/span&gt;
+        &lt;span class="na"&gt;uses&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;actions/checkout@v2&lt;/span&gt;
+
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Log into Azure using github secret AZURE_CREDENTIALS&lt;/span&gt;
+        &lt;span class="na"&gt;uses&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Azure/login@v1&lt;/span&gt;
+        &lt;span class="na"&gt;with&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+          &lt;span class="na"&gt;creds&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ secrets.azure_credentials }}&lt;/span&gt;
+          &lt;span class="na"&gt;enable-AzPSSession&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="no"&gt;true&lt;/span&gt;
+
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Get Service Bus Policy Key&lt;/span&gt;
+        &lt;span class="na"&gt;uses&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Azure/get-keyvault-secrets@v1&lt;/span&gt;
+        &lt;span class="na"&gt;with&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+          &lt;span class="na"&gt;keyvault&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ env.KEY_VAULT_NAME }}&lt;/span&gt;
+          &lt;span class="na"&gt;secrets&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ env.SB_POLICY_KEY_NAME }}&lt;/span&gt;
+        &lt;span class="na"&gt;id&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;sbPrimaryKey&lt;/span&gt;
+
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Generate Service Bus SAS token&lt;/span&gt;
+        &lt;span class="na"&gt;uses&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;azure/powershell@v1&lt;/span&gt;
+        &lt;span class="na"&gt;with&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+          &lt;span class="na"&gt;inlineScript&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="pi"&gt;|&lt;/span&gt;
+            &lt;span class="s"&gt;$null = [Reflection.Assembly]::LoadWithPartialName("System.Web")&lt;/span&gt;
+
+            &lt;span class="s"&gt;#Set Variables&lt;/span&gt;
+            &lt;span class="s"&gt;$keyVaultName="${{ env.KEY_VAULT_NAME }}"&lt;/span&gt;
+            &lt;span class="s"&gt;$serviceBusNameSpace="${{ env.SB_NAMESPACE }}"&lt;/span&gt;
+            &lt;span class="s"&gt;$accessPolicyName="${{ env.SB_POLICY_NAME }}"&lt;/span&gt;
+            &lt;span class="s"&gt;$accessPolicyKeyName="${{ env.SB_POLICY_KEY_NAME }}"&lt;/span&gt;
+            &lt;span class="s"&gt;$dateTime=(Get-Date).ToString()&lt;/span&gt;
+            &lt;span class="s"&gt;$URI="$serviceBusNameSpace.servicebus.windows.net"&lt;/span&gt;
+            &lt;span class="s"&gt;$accessPolicyKey="${{ steps.sbPrimaryKey.outputs.myauthrulePrimaryKey }}"&lt;/span&gt;
+
+            &lt;span class="s"&gt;#Generate Temp SAS Token&lt;/span&gt;
+            &lt;span class="s"&gt;##Token expires now+600(10 min)&lt;/span&gt;
+            &lt;span class="s"&gt;$expires=([DateTimeOffset]::Now.ToUnixTimeSeconds())+600&lt;/span&gt;
+            &lt;span class="s"&gt;$signatureString=[System.Web.HttpUtility]::UrlEncode($URI)+ "`n" + [string]$expires&lt;/span&gt;
+            &lt;span class="s"&gt;$HMAC = New-Object System.Security.Cryptography.HMACSHA256&lt;/span&gt;
+            &lt;span class="s"&gt;$HMAC.key = [Text.Encoding]::ASCII.GetBytes($accessPolicyKey)&lt;/span&gt;
+            &lt;span class="s"&gt;$signature = $HMAC.ComputeHash([Text.Encoding]::ASCII.GetBytes($signatureString))&lt;/span&gt;
+            &lt;span class="s"&gt;$signature = [Convert]::ToBase64String($signature)&lt;/span&gt;
+            &lt;span class="s"&gt;$SASToken = "SharedAccessSignature sr=" + [System.Web.HttpUtility]::UrlEncode($URI) + "&amp;amp;sig=" + [System.Web.HttpUtility]::UrlEncode($signature) + "&amp;amp;se=" + $expires + "&amp;amp;skn=" + $accessPolicyName&lt;/span&gt;
+
+            &lt;span class="s"&gt;#Set Temp SAS token in Azure Key Vault&lt;/span&gt;
+            &lt;span class="s"&gt;Write-Output "Update SAS token in: [$keyVaultName]" &lt;/span&gt;
+            &lt;span class="s"&gt;$secretToken = ConvertTo-SecureString -String $SASToken -AsPlainText -Force&lt;/span&gt;
+            &lt;span class="s"&gt;$tags = @{ "Automation" = "Github-Workflow";  "Temp-SAS" = "true"; "Generated-On" = "$dateTime"}&lt;/span&gt;
+            &lt;span class="s"&gt;$null = Set-AzKeyVaultSecret -VaultName $keyVaultName -Name "$accessPolicyName-SAS-TOKEN" -SecretValue $secretToken -Tags $tags&lt;/span&gt;
+            &lt;span class="s"&gt;Write-Output 'SAS Token Saved to Key Vault Secret as: [$accessPolicyName-SAS-TOKEN] '&lt;/span&gt;
+          &lt;span class="na"&gt;azPSVersion&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;latest'&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;The above YAML workflow has a special trigger as shown below, which will only run when called by another GitHub workflow. Also note that we have to declare any secrets that are sent into the workflow from the caller using the &lt;code&gt;secrets&lt;/code&gt; argument.&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="c1"&gt;## //code/new-service-bus-sas-token.yaml#L3-L8&lt;/span&gt;
+&lt;span class="na"&gt;on&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;workflow_call&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;secrets&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;azure_credentials&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="na"&gt;description&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;Azure&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;Credential&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;passed&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;from&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;the&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;main&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;caller&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;workflow'&lt;/span&gt;
+        &lt;span class="na"&gt;required&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="no"&gt;true&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;&lt;strong&gt;Note:&lt;/strong&gt; The only fields that needs to be updated for the &lt;code&gt;new-service-bus-sas-token.yaml&lt;/code&gt; workflow to be used in your environment are shown below. (Unfortunately it is not possible to use environment variables inside of step outputs, so we also have to explicitly reference our key vault secret name):&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="c1"&gt;## //code/new-service-bus-sas-token.yaml#L7-L11&lt;/span&gt;
+&lt;span class="na"&gt;env&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;KEY_VAULT_NAME&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;secrets-vault7839&lt;/span&gt;
+  &lt;span class="na"&gt;SB_NAMESPACE&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;githubactions&lt;/span&gt;
+  &lt;span class="na"&gt;SB_POLICY_NAME&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;myauthrule&lt;/span&gt;
+  &lt;span class="na"&gt;SB_POLICY_KEY_NAME&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;myauthrulePrimaryKey&lt;/span&gt;
+
+&lt;span class="c1"&gt;## //code/new-service-bus-sas-token.yaml#L49-L49&lt;/span&gt;
+&lt;span class="s"&gt;$accessPolicyKey="${{ steps.sbPrimaryKey.outputs.myauthrulePrimaryKey }}"&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;Note that our &lt;strong&gt;reusable&lt;/strong&gt; github workflow will save the temporary Service Bus SAS token in Azure keyvault under the &lt;code&gt;secret&lt;/code&gt; key name: &lt;strong&gt;[ServiceBusPolicyName-SAS-TOKEN]&lt;/strong&gt;. This SAS token will only be valid for 10 minutes.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--NnomcFln--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Github-Rotate-ServiceBus-SAS/assets/sastoken.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--NnomcFln--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Github-Rotate-ServiceBus-SAS/assets/sastoken.png" alt="image.png" width="677" height="532"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Now onto our main workflow file. In the same workflows folder we will create a second YAML file called &lt;code&gt;main.yaml&lt;/code&gt;. The YAML file can also be accessed &lt;a href="https://github.com/Pwd9000-ML/Azure-Service-Bus-SAS-Management/blob/master/.github/workflows/main.yaml"&gt;HERE&lt;/a&gt;.&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="c1"&gt;## //code/main.yaml&lt;/span&gt;
+&lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Send Service Bus Message&lt;/span&gt;
+&lt;span class="na"&gt;on&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;workflow_dispatch&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+
+&lt;span class="na"&gt;jobs&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;new-sas-token&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Generate New Sas Token&lt;/span&gt;
+    &lt;span class="na"&gt;uses&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Pwd9000-ML/Azure-Service-Bus-SAS-Management/.github/workflows/new-service-bus-sas-token.yaml@master&lt;/span&gt;
+    &lt;span class="na"&gt;secrets&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;azure_credentials&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ secrets.AZURE_CREDENTIALS }}&lt;/span&gt;
+
+  &lt;span class="na"&gt;send-sb-message&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Send Service Bus Message&lt;/span&gt;
+    &lt;span class="na"&gt;needs&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;new-sas-token&lt;/span&gt;
+    &lt;span class="na"&gt;runs-on&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;windows-latest&lt;/span&gt;
+    &lt;span class="na"&gt;env&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;KEY_VAULT_NAME&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;secrets-vault7839&lt;/span&gt;
+      &lt;span class="na"&gt;SB_NAMESPACE&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;githubactions&lt;/span&gt;
+      &lt;span class="na"&gt;SB_QUEUE_NAME&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;queue01&lt;/span&gt;
+      &lt;span class="na"&gt;SB_POLICY_SAS_NAME&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;myauthrule-SAS-TOKEN&lt;/span&gt;
+
+    &lt;span class="na"&gt;steps&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Check out repository&lt;/span&gt;
+      &lt;span class="na"&gt;uses&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;actions/checkout@v2&lt;/span&gt;
+
+    &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Log into Azure using github secret AZURE_CREDENTIALS&lt;/span&gt;
+      &lt;span class="na"&gt;uses&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Azure/login@v1&lt;/span&gt;
+      &lt;span class="na"&gt;with&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="na"&gt;creds&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ secrets.AZURE_CREDENTIALS }}&lt;/span&gt;
+        &lt;span class="na"&gt;enable-AzPSSession&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="no"&gt;true&lt;/span&gt;
+
+    &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Get Service Bus SAS Token&lt;/span&gt;
+      &lt;span class="na"&gt;uses&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Azure/get-keyvault-secrets@v1&lt;/span&gt;
+      &lt;span class="na"&gt;with&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="na"&gt;keyvault&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ env.KEY_VAULT_NAME }}&lt;/span&gt;
+        &lt;span class="na"&gt;secrets&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ env.SB_POLICY_SAS_NAME }}&lt;/span&gt;
+      &lt;span class="na"&gt;id&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;sbSasToken&lt;/span&gt;
+
+    &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Send Service Bus Message&lt;/span&gt;
+      &lt;span class="na"&gt;uses&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;azure/powershell@v1&lt;/span&gt;
+      &lt;span class="na"&gt;with&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="na"&gt;inlineScript&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="pi"&gt;|&lt;/span&gt;
+          &lt;span class="s"&gt;$message = [pscustomobject] @{ "Body" = "Hello ActionsHackathon21" }&lt;/span&gt;
+
+          &lt;span class="s"&gt;$serviceBusNameSpace="${{ env.SB_NAMESPACE }}"&lt;/span&gt;
+          &lt;span class="s"&gt;$serviceBusQueueName="${{ env.SB_QUEUE_NAME }}"&lt;/span&gt;
+          &lt;span class="s"&gt;$body = $message.Body&lt;/span&gt;
+          &lt;span class="s"&gt;$message.psobject.properties.Remove("Body")&lt;/span&gt;
+
+          &lt;span class="s"&gt;$URI = "https://$serviceBusNameSpace.servicebus.windows.net/$serviceBusQueueName/messages"&lt;/span&gt;
+          &lt;span class="s"&gt;$token = "${{ steps.sbSasToken.outputs.myauthrule-SAS-TOKEN }}"&lt;/span&gt;
+          &lt;span class="s"&gt;$headers = @{ "Authorization" = "$token"; "Content-Type" = "application/atom+xml;type=entry;charset=utf-8" }&lt;/span&gt;
+          &lt;span class="s"&gt;$headers.Add("BrokerProperties", $(ConvertTo-JSON -InputObject $message -Compress))&lt;/span&gt;
+
+          &lt;span class="s"&gt;#Invoke rest method&lt;/span&gt;
+          &lt;span class="s"&gt;$null = Invoke-RestMethod -Uri $URI -Headers $headers -Method "Post" -Body $body&lt;/span&gt;
+        &lt;span class="na"&gt;azPSVersion&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;latest'&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;The above YAML workflow has a manual trigger as shown below. Also note that we have to explicitly pass secrets on to our &lt;strong&gt;reusable&lt;/strong&gt; workflow we are calling in the first job using the &lt;code&gt;secrets&lt;/code&gt; argument.&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="c1"&gt;## Trigger: //code/main.yaml#L2-L3&lt;/span&gt;
+&lt;span class="na"&gt;on&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;workflow_dispatch&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+
+&lt;span class="c1"&gt;## Explicitly pass secret: //code/main.yaml#L6-L10&lt;/span&gt;
+&lt;span class="na"&gt;new-sas-token&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+&lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Generate New Sas Token&lt;/span&gt;
+&lt;span class="na"&gt;uses&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Pwd9000-ML/Azure-Service-Bus-SAS-Management/.github/workflows/new-service-bus-sas-token.yaml@master&lt;/span&gt;
+&lt;span class="na"&gt;secrets&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;azure_credentials&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ secrets.AZURE_CREDENTIALS }}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;&lt;strong&gt;Note:&lt;/strong&gt; The only fields that needs to be updated for the &lt;code&gt;main.yaml&lt;/code&gt; workflow to be used in your environment are shown below. (Unfortunately it is not possible to use environment variables inside of step outputs, so we also have to explicitly reference our key vault secret name):&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="c1"&gt;## //code/new-service-bus-sas-token.yaml#L16-L20&lt;/span&gt;
+&lt;span class="na"&gt;env&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;KEY_VAULT_NAME&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;secrets-vault7839&lt;/span&gt;
+    &lt;span class="na"&gt;SB_NAMESPACE&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;githubactions&lt;/span&gt;
+    &lt;span class="na"&gt;SB_QUEUE_NAME&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;queue01&lt;/span&gt;
+    &lt;span class="na"&gt;SB_POLICY_SAS_NAME&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;myauthrule-SAS-TOKEN&lt;/span&gt;
+
+&lt;span class="c1"&gt;## //code/new-service-bus-sas-token.yaml#L51-L51&lt;/span&gt;
+&lt;span class="s"&gt;$token = "${{ steps.sbSasToken.outputs.myauthrule-SAS-TOKEN }}"&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+&lt;h3&gt;
+  &lt;a href="#testing-workflows"&gt;
+  &lt;/a&gt;
+  Testing Workflows
+&lt;/h3&gt;
+
+&lt;p&gt;Let's trigger our &lt;code&gt;main.yaml&lt;/code&gt; workflow. It should trigger our &lt;strong&gt;reusable&lt;/strong&gt; workflow called &lt;code&gt;new-service-bus-sas-token.yaml&lt;/code&gt; that will generate a temp Service Bus SAS token and save this token in our Key Vault. Afterwards it will return to the &lt;code&gt;main.yaml&lt;/code&gt; workflow and retrieve the temp SAS token from the key vault and send our Service Bus a message with a body of: &lt;strong&gt;"Hello ActionsHackathon21"&lt;/strong&gt;.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--yk9IPxQE--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Github-Rotate-ServiceBus-SAS/assets/gh1.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--yk9IPxQE--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Github-Rotate-ServiceBus-SAS/assets/gh1.png" alt="image.png" width="880" height="311"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Both our workflows ran successfully. The first job generates our temp SAS token from a &lt;strong&gt;reusable&lt;/strong&gt; workflow and the second job consumes that temporary SAS token from key vault sends our message to our Service Bus using the short lived SAS token.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--XQLK2U0i--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Github-Rotate-ServiceBus-SAS/assets/gh2.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--XQLK2U0i--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Github-Rotate-ServiceBus-SAS/assets/gh2.png" alt="image.png" width="880" height="421"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;As you can see our message was sent to our Service Bus Queue using the temporary SAS token retrieved from the keyvault:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s---TbtHO_U--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Github-Rotate-ServiceBus-SAS/assets/test.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s---TbtHO_U--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Github-Rotate-ServiceBus-SAS/assets/test.png" alt="image.png" width="880" height="701"&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;h3&gt;
+  &lt;a href="#conclusion"&gt;
+  &lt;/a&gt;
+  Conclusion
+&lt;/h3&gt;
+
+&lt;p&gt;The main take away of this tutorial is to know that we can create &lt;strong&gt;reusable&lt;/strong&gt; GitHub Action workflows that can be called as separate jobs in other workflows. By carving up large workflows and referencing reusable workflows we can cut down on duplication and also make our workflows much more dynamic. Additionally we did something cool by creating a security process in which we generate short lived secure Service Bus SAS tokens that are stored in an Azure Key Vault and can be permissioned and consumed by other services in a controlled manner.&lt;/p&gt;
+
+&lt;p&gt;I hope you have enjoyed this post and have learned something new. You can also find the code samples used in this blog post on my &lt;a href="https://github.com/Pwd9000-ML/blog-devto/tree/main/posts/Github-Rotate-ServiceBus-SAS/code"&gt;Github&lt;/a&gt; page.&lt;/p&gt;
+
+&lt;p&gt;Additionally you can use this &lt;a href="https://github.com/Pwd9000-ML/Azure-Service-Bus-SAS-Management"&gt;github repository&lt;/a&gt; used in this tutorial as a template in your own github account and start to generate and automate your Service Bus SAS tokens today. ❤️&lt;/p&gt;
+&lt;h3&gt;
+  &lt;a href="#author"&gt;
+  &lt;/a&gt;
+  &lt;em&gt;Author&lt;/em&gt;
+&lt;/h3&gt;
+
+&lt;p&gt;Like, share, follow me on: 🐙 &lt;a href="https://github.com/Pwd9000-ML"&gt;GitHub&lt;/a&gt; | 🐧 &lt;a href="https://twitter.com/pwd9000"&gt;Twitter&lt;/a&gt; | 👾 &lt;a href="https://www.linkedin.com/in/marcel-l-61b0a96b/"&gt;LinkedIn&lt;/a&gt;&lt;/p&gt;
+
+
+&lt;div class="ltag__user ltag__user__id__620034"&gt;
+  
+    .ltag__user__id__620034 .follow-action-button {
+      background-color: #0cbb58 !important;
+      color: #000000 !important;
+      border-color: #0cbb58 !important;
+    }
+  
+    &lt;a href="/pwd9000" class="ltag__user__link profile-image-link"&gt;
+      &lt;div class="ltag__user__pic"&gt;
+        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Amb4rEJN--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://res.cloudinary.com/practicaldev/image/fetch/s--L_SDLOmq--/c_fill%2Cf_auto%2Cfl_progressive%2Ch_150%2Cq_auto%2Cw_150/https://dev-to-uploads.s3.amazonaws.com/uploads/user/profile_image/620034/93be2c72-3a13-478e-8af1-a4bedc1b2331.jpeg" alt="pwd9000 image"&gt;
+      &lt;/div&gt;
+    &lt;/a&gt;
+  &lt;div class="ltag__user__content"&gt;
+    &lt;h2&gt;
+&lt;a class="ltag__user__link" href="/pwd9000"&gt;Marcel.L&lt;/a&gt;Follow
+&lt;/h2&gt;
+    &lt;div class="ltag__user__summary"&gt;
+      &lt;a class="ltag__user__link" href="/pwd9000"&gt;Cloud Solutions &amp;amp; DevOps Architect.&lt;/a&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+&lt;/div&gt;
+
+
+
+</description>
+      <category>devops</category>
+      <category>security</category>
+      <category>azure</category>
+      <category>github</category>
+    </item>
+    <item>
+      <title>Debugging HTTP headers in Hugo</title>
+      <author>·ſ</author>
+      <pubDate>Sun, 14 Nov 2021 09:57:10 +0000</pubDate>
+      <link>https://dev.to/jmau111/debugging-http-headers-in-hugo-2807</link>
+      <guid>https://dev.to/jmau111/debugging-http-headers-in-hugo-2807</guid>
+      <description>&lt;p&gt;Hugo can add all headers, including security headers, on the local server ( when you type &lt;code&gt;hugo server&lt;/code&gt; in the terminal). It's pretty helpful for the debug, as some can break your website.&lt;/p&gt;
+
+&lt;p&gt;I had a problem setting them at first, but it occurred to me it was a small typo in the documentation, as it does not work well if you target .html only:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://discourse.gohugo.io/t/cant-make-the-local-server-use-headers/35519/"&gt;read the thread&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;The documentation has been updated since then, and you can test headers locally with a few lines in &lt;code&gt;config.toml&lt;/code&gt;, for example:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;[server]
+    [[server.headers]]
+        for = '/**'
+        [server.headers.values]
+            Permissions-Policy = "interest-cohort=()"
+            Strict-Transport-Security = "max-age=31536000; includeSubDomains"
+            X-Frame-Options = "SAMEORIGIN"
+            X-Content-Type-Options = "nosniff"
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;a href="https://gohugo.io/getting-started/configuration/#configure-server"&gt;See complete documentation&lt;/a&gt;&lt;/p&gt;
+
+</description>
+      <category>hugo</category>
+      <category>http</category>
+      <category>headers</category>
+      <category>server</category>
+    </item>
+    <item>
+      <title>Setup Node Version Manager (NVM) on macOS M1 Silicon</title>
+      <author>Eric Bishard</author>
+      <pubDate>Sun, 14 Nov 2021 09:50:41 +0000</pubDate>
+      <link>https://dev.to/httpjunkie/setup-node-version-manager-nvm-on-mac-m1-7kl</link>
+      <guid>https://dev.to/httpjunkie/setup-node-version-manager-nvm-on-mac-m1-7kl</guid>
+      <description>&lt;p&gt;As a web developer these days, we typically need to be able to switch versions of Node on the fly, for this we want to install Node Version Manager on a clean install of our machine, we don't want to start by installin Node on it's own as this will give us a single version of Node (whichever we decide to install)&lt;/p&gt;
+
+&lt;p&gt;If you install Node first and then try to install NVM, things can get complicated, so if you have already installed Node, my suggestion is to completely remove it before installing NVM.&lt;/p&gt;
+
+&lt;p&gt;As well, NVM is explicitly not supported when installed via homebrew - the only correct way to install it is with the install script in &lt;a href="https://github.com/nvm-sh/nvm/blob/master/README.md#install--update-script"&gt;NVM's Readme&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;So if you have a Mac M1, these are the steps I would encourage you to try.&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;Navigate to your home directory
+&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nb"&gt;cd&lt;/span&gt; ~
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;ol&gt;
+&lt;li&gt;Create a &lt;code&gt;.zshrc&lt;/code&gt; file (if it doesn't exist)
+&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nb"&gt;touch&lt;/span&gt; .zshrc
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;ol&gt;
+&lt;li&gt;Install NVM using the curl command found on the NVM Readme
+&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;curl &lt;span class="nt"&gt;-o-&lt;/span&gt; https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh | bash
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This last command will update your &lt;code&gt;.zshrc&lt;/code&gt; file to look like the following:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nb"&gt;export &lt;/span&gt;&lt;span class="nv"&gt;NVM_DIR&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$HOME&lt;/span&gt;&lt;span class="s2"&gt;/.nvm"&lt;/span&gt;
+&lt;span class="o"&gt;[&lt;/span&gt; &lt;span class="nt"&gt;-s&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$NVM_DIR&lt;/span&gt;&lt;span class="s2"&gt;/nvm.sh"&lt;/span&gt; &lt;span class="o"&gt;]&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; &lt;span class="se"&gt;\.&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$NVM_DIR&lt;/span&gt;&lt;span class="s2"&gt;/nvm.sh"&lt;/span&gt;  &lt;span class="c"&gt;# This loads nvm&lt;/span&gt;
+&lt;span class="o"&gt;[&lt;/span&gt; &lt;span class="nt"&gt;-s&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$NVM_DIR&lt;/span&gt;&lt;span class="s2"&gt;/bash_completion"&lt;/span&gt; &lt;span class="o"&gt;]&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; &lt;span class="se"&gt;\.&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$NVM_DIR&lt;/span&gt;&lt;span class="s2"&gt;/bash_completion"&lt;/span&gt;  &lt;span class="c"&gt;# This loads nvm bash_completion&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;ol&gt;
+&lt;li&gt;Install Node using NVM
+&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;nvm &lt;span class="nb"&gt;install &lt;/span&gt;node
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This will install the latest version of Node (currently Node v&lt;code&gt;17.x&lt;/code&gt;).&lt;/p&gt;
+
+&lt;p&gt;NOTE: Node versions before v&lt;code&gt;15.x&lt;/code&gt; are not necessarily ARM compatible, but it seems that Node has addressed this issue, so if you do install a version prior to v&lt;code&gt;15.x&lt;/code&gt; hopefully, you will not need to use Rosetta to run.&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;Install LTS version of Node
+&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;nvm &lt;span class="nb"&gt;install&lt;/span&gt; &lt;span class="nt"&gt;--lts&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Running this command installed the current LTS at the time of this GIST which is v&lt;code&gt;16.x&lt;/code&gt;, I think I will try to stick with this version or better when developing, however; that's the beauty of NVM is that if I need and older version it's easy to switch!&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;List the versions of Node I have installed
+&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;nvm &lt;span class="nb"&gt;ls&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;ol&gt;
+&lt;li&gt;Select an alternate version that I have installed
+&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;nvm use 16
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;or&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;nvm use &lt;span class="nt"&gt;--lts&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Finallly, to clear the nvm cache to reduce clutter, run:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;nvm cache clear
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Those will both allow me to use the LTS version we just installed! Hope that helps, Happy Noding~!&lt;/p&gt;
+
+&lt;p&gt;This is not widely talked about and the best sources I have found on the subject came from &lt;a href="https://www.youtube.com/watch?v=LOd0Dx_ZrYQ"&gt;Code Fallacy on YouTube&lt;/a&gt; and &lt;a href="https://twitter.com/mkbaldwin21"&gt;Michael Baldwin&lt;/a&gt; who both have good information on this topic, so much thanks to them where credit is due...&lt;/p&gt;
+
+</description>
+      <category>node</category>
+      <category>javascript</category>
+      <category>devops</category>
+    </item>
+    <item>
       <title>Migration of Categories (Collections) using Shopify API</title>
       <author>ThePylot</author>
       <pubDate>Sun, 14 Nov 2021 09:27:49 +0000</pubDate>
@@ -1890,425 +2579,6 @@ My solution(javascript):&lt;br&gt;
       <category>javascript</category>
       <category>webdev</category>
       <category>programming</category>
-    </item>
-    <item>
-      <title>How to toggle Dark/Light Mode using JavaScript</title>
-      <author>SnowBit</author>
-      <pubDate>Sun, 14 Nov 2021 07:13:57 +0000</pubDate>
-      <link>https://dev.to/snowbit/how-to-toggle-darklight-mode-using-javascript-2ecn</link>
-      <guid>https://dev.to/snowbit/how-to-toggle-darklight-mode-using-javascript-2ecn</guid>
-      <description>&lt;p&gt;Hello, I am back with a new amazing article on &lt;strong&gt;Toggle Dark / Light Mode&lt;/strong&gt;&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--pVuasyKR--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://snowbit-coderboi.github.io/dark-light-toggle/assets/banner.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--pVuasyKR--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://snowbit-coderboi.github.io/dark-light-toggle/assets/banner.png" alt="Banner" width="880" height="417"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Let's get started 🚀&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#libraries-used"&gt;
-  &lt;/a&gt;
-  &lt;strong&gt;Libraries used&lt;/strong&gt;
-&lt;/h3&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Fontawesome&lt;/li&gt;
-&lt;li&gt;
-&lt;p&gt;Bootstrap&lt;/p&gt;
-
-
-&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;Create &lt;code&gt;index.html&lt;/code&gt;&lt;br&gt;
-&lt;/p&gt;&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;div&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"container"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-        &lt;span class="nt"&gt;&amp;lt;div&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"header d-flex justify-content-between"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-            &lt;span class="nt"&gt;&amp;lt;h1&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"title mt-2"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;Catty's Blog&lt;span class="nt"&gt;&amp;lt;/h1&amp;gt;&lt;/span&gt;
-            &lt;span class="nt"&gt;&amp;lt;span&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"mt-4 fs-3 dark toggle"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&amp;lt;i&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"fas fa-moon d-none"&lt;/span&gt; &lt;span class="na"&gt;id=&lt;/span&gt;&lt;span class="s"&gt;"dark"&lt;/span&gt; &lt;span class="na"&gt;title=&lt;/span&gt;&lt;span class="s"&gt;"Switch to Dark Mode"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&amp;lt;/i&amp;gt;&amp;lt;/span&amp;gt;&lt;/span&gt;          
-            &lt;span class="nt"&gt;&amp;lt;span&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"mt-4 fs-3 light toggle"&lt;/span&gt; &lt;span class="na"&gt;id=&lt;/span&gt;&lt;span class="s"&gt;"light"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&amp;lt;i&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"fas fa-sun"&lt;/span&gt; &lt;span class="na"&gt;title=&lt;/span&gt;&lt;span class="s"&gt;"Switch to Light Mode"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&amp;lt;/i&amp;gt;&amp;lt;/span&amp;gt;&lt;/span&gt;          
-        &lt;span class="nt"&gt;&amp;lt;/div&amp;gt;&lt;/span&gt;
-        &lt;span class="nt"&gt;&amp;lt;center&amp;gt;&lt;/span&gt;
-            &lt;span class="nt"&gt;&amp;lt;div&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"main"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-                &lt;span class="nt"&gt;&amp;lt;div&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;""&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-                    &lt;span class="nt"&gt;&amp;lt;img&lt;/span&gt; &lt;span class="na"&gt;src=&lt;/span&gt;&lt;span class="s"&gt;"assets/cat-2.webp"&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"catty mt-2 rounded-circle"&lt;/span&gt; &lt;span class="na"&gt;alt=&lt;/span&gt;&lt;span class="s"&gt;"I am Catty"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-                    &lt;span class="nt"&gt;&amp;lt;div&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"card-body"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-                        &lt;span class="nt"&gt;&amp;lt;h1&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"card-title"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-                            Hello there, I am &lt;span class="nt"&gt;&amp;lt;a&lt;/span&gt; &lt;span class="na"&gt;href=&lt;/span&gt;&lt;span class="s"&gt;"http://github.com/snowbit-coderboi"&lt;/span&gt; &lt;span class="na"&gt;target=&lt;/span&gt;&lt;span class="s"&gt;"_blank"&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"catty-name text-decoration-none"&lt;/span&gt; &lt;span class="na"&gt;id=&lt;/span&gt;&lt;span class="s"&gt;"cattyName"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;Catty&lt;span class="nt"&gt;&amp;lt;/a&amp;gt;&lt;/span&gt;
-                        &lt;span class="nt"&gt;&amp;lt;/h1&amp;gt;&lt;/span&gt;
-                        &lt;span class="nt"&gt;&amp;lt;p&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"info"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-                            Lorem Ipsum is simply dummy text of the printing and typesetting industry. Lorem Ipsum has been the industry's standard dummy text ever since the 1500s, when an unknown printer took a galley of type and scrambled it to make a type specimen book. It has survived not only five centuries, but also the leap into electronic typesetting, remaining essentially unchanged. It was popularised in the 1960s with the release of Letraset sheets containing Lorem Ipsum passages, and more recently with desktop publishing software like Aldus PageMaker including versions of Lorem Ipsum.
-                        &lt;span class="nt"&gt;&amp;lt;/p&amp;gt;&lt;/span&gt;
-                    &lt;span class="nt"&gt;&amp;lt;/div&amp;gt;&lt;/span&gt;
-                &lt;span class="nt"&gt;&amp;lt;/div&amp;gt;&lt;/span&gt;
-            &lt;span class="nt"&gt;&amp;lt;/div&amp;gt;&lt;/span&gt;
-        &lt;span class="nt"&gt;&amp;lt;/center&amp;gt;&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;/div&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;ul&gt;
-&lt;li&gt;In &lt;code&gt;style.css&lt;/code&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight css"&gt;&lt;code&gt;&lt;span class="k"&gt;@import&lt;/span&gt; &lt;span class="sx"&gt;url('https://fonts.googleapis.com/css2?family=Amatic+SC:wght@700&amp;amp;display=swap')&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="k"&gt;@import&lt;/span&gt; &lt;span class="sx"&gt;url('https://fonts.googleapis.com/css2?family=Sacramento&amp;amp;display=swap')&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="nt"&gt;body&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;background-color&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;#212224&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;color&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;#fff&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.5s&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;-webkit-transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.5s&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;-moz-transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.5s&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;-ms-transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.5s&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;-o-transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.5s&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;span class="nc"&gt;.title&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;font-family&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;'Amatic SC'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nb"&gt;cursive&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;font-size&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;60px&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="py"&gt;user-select&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;none&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;span class="nc"&gt;.toggle&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;cursor&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;pointer&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.5s&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;-webkit-transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.70s&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;-moz-transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.70s&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;-ms-transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.70s&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;-o-transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.70s&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="nf"&gt;#light&lt;/span&gt;&lt;span class="nd"&gt;:hover&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;color&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="no"&gt;yellow&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;span class="nc"&gt;.catty-name&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;color&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;#fff&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.3s&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;-webkit-transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.3s&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;-moz-transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.3s&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;-ms-transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.3s&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;-o-transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.3s&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="nc"&gt;.catty-name&lt;/span&gt;&lt;span class="nd"&gt;:hover&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;color&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;#fff&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.7s&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;-webkit-transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.7s&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;-moz-transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.7s&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;-ms-transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.7s&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;-o-transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.7s&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;font-size&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;70px&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="nc"&gt;.main&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;margin-bottom&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;15px&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;margin-top&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;20px&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="nc"&gt;.card-title&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;font-family&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;'Sacramento'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nb"&gt;cursive&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;font-size&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;60px&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="nc"&gt;.card-list&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="c"&gt;/* font-family: 'Sacramento', cursive; */&lt;/span&gt;
-    &lt;span class="nl"&gt;font-size&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;30px&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;list-style&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;none&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="nc"&gt;.card-list&lt;/span&gt; &lt;span class="nt"&gt;li&lt;/span&gt;&lt;span class="nd"&gt;:before&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nl"&gt;content&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;'😸'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; &lt;span class="nl"&gt;margin-left&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;-10px&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; &lt;span class="nl"&gt;margin-right&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;10px&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; 
-
-&lt;span class="nc"&gt;.catty&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;max-height&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;200px&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;object-fit&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;contain&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="c"&gt;/* transform: rotate(20deg); */&lt;/span&gt;
-    &lt;span class="nl"&gt;transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.70s&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;-webkit-transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.70s&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;-moz-transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.70s&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;-ms-transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.70s&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;-o-transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.70s&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="nc"&gt;.catty&lt;/span&gt;&lt;span class="nd"&gt;:hover&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.70s&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;-webkit-transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.70s&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;-moz-transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.70s&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;-ms-transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.70s&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;-o-transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.70s&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-  &lt;span class="nl"&gt;-webkit-transform&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;rotate&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="m"&gt;350deg&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-  &lt;span class="nl"&gt;-moz-transform&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;rotate&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="m"&gt;350deg&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-  &lt;span class="nl"&gt;-o-transform&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;rotate&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="m"&gt;350deg&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-  &lt;span class="nl"&gt;-ms-transform&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;rotate&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="m"&gt;350deg&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-  &lt;span class="nl"&gt;transform&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;rotate&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="m"&gt;360deg&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="nc"&gt;.catty&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;max-height&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;200px&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;object-fit&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;contain&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="c"&gt;/* transform: rotate(20deg); */&lt;/span&gt;
-    &lt;span class="nl"&gt;transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.70s&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;-webkit-transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.70s&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;-moz-transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.70s&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;-ms-transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.70s&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;-o-transition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;0.70s&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="nc"&gt;.info&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;text-align&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nb"&gt;justify&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;line-height&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;2em&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;max-width&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;900px&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-    &lt;span class="nl"&gt;font-size&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="m"&gt;18px&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;ul&gt;
-&lt;li&gt;In &lt;code&gt;index.js&lt;/code&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;dark&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nb"&gt;document&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;getElementById&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;dark&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;light&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nb"&gt;document&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;getElementById&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;light&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;catty&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nb"&gt;document&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;getElementById&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;cattyName&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-
-&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;toggleDark&lt;/span&gt;&lt;span class="p"&gt;(){&lt;/span&gt;
-    &lt;span class="nx"&gt;dark&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;classList&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;add&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;d-none&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-    &lt;span class="nx"&gt;light&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;classList&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;remove&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;d-none&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-    &lt;span class="nb"&gt;document&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;body&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;style&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;backgroundColor&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;#212224&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
-    &lt;span class="nb"&gt;document&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;body&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;style&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;color&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;#fff&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
-    &lt;span class="nx"&gt;catty&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;style&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;color&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;#fff&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;span class="nx"&gt;dark&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;addEventListener&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;click&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;toggleDark&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-
-&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;toggleLight&lt;/span&gt;&lt;span class="p"&gt;(){&lt;/span&gt;
-    &lt;span class="nx"&gt;light&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;classList&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;add&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;d-none&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-    &lt;span class="nx"&gt;dark&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;classList&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;remove&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;d-none&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-    &lt;span class="nb"&gt;document&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;body&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;style&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;backgroundColor&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;#fff&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
-    &lt;span class="nb"&gt;document&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;body&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;style&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;color&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;#000&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
-    &lt;span class="nx"&gt;catty&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;style&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;color&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;#000&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="nx"&gt;light&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;addEventListener&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;click&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;toggleLight&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Check out the live demo: &lt;a href="https://snowbit-coderboi.github.io/dark-light-toggle/"&gt;https://snowbit-coderboi.github.io/dark-light-toggle/&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Download Code / Assets: &lt;a href="https://github.com/snowbit-coderboi/dark-light-toggle"&gt;https://github.com/snowbit-coderboi/dark-light-toggle&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;I hope you liked this post; And make sure to share the feedback 🙂 in comment sections&lt;/p&gt;
-
-</description>
-      <category>webdev</category>
-      <category>javascript</category>
-      <category>beginners</category>
-      <category>tutorial</category>
-    </item>
-    <item>
-      <title>The pragmatic programmer book tips (Part 4)</title>
-      <author>Wassim Ben Jdida</author>
-      <pubDate>Sun, 14 Nov 2021 07:11:57 +0000</pubDate>
-      <link>https://dev.to/wassimbj/the-pragmatic-programmer-book-tips-part-4-9kh</link>
-      <guid>https://dev.to/wassimbj/the-pragmatic-programmer-book-tips-part-4-9kh</guid>
-      <description>&lt;h3&gt;
-  &lt;a href="#30-you-cant-write-perfect-software"&gt;
-  &lt;/a&gt;
-  #30 - You Can't Write Perfect Software
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;em&gt;But Pragmatic Programmers take this a step further. They don't trust themselves, either. Knowing that no one writes perfect code, including themselves, Pragmatic Programmers code in defenses against their own mistakes.&lt;/em&gt;&lt;br&gt;
- &lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#31-design-with-contracts"&gt;
-  &lt;/a&gt;
-  #31 - Design with Contracts
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;em&gt;In languages that do not support DBC (Design By Contracts) in the code, this might be as far as you can go—and that's not too bad. DBC is, after all, a design technique. Even without automatic checking, you can put the contract in the code as comments and still get a very real benefit. If nothing else, the commented contracts give you a place to start looking when trouble strikes.&lt;/em&gt;&lt;br&gt;
- &lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#32-crash-early"&gt;
-  &lt;/a&gt;
-  #32 - Crash Early
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;em&gt;One of the benefits of detecting problems as soon as you can is that you can crash earlier. And many times, crashing your program is the best thing you can do. The alternative may be to continue, writing corrupted data to some vital database or commanding the washing machine into its twentieth consecutive spin cycle.&lt;/em&gt;&lt;br&gt;
- &lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#33-if-it-cant-happen-use-assertions-to-ensure-that-it-wont"&gt;
-  &lt;/a&gt;
-  #33 - If It Can't Happen, Use Assertions to Ensure That It Won't
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;em&gt;"This code won't be used 30 years from now, so two-digit dates are fine." "This application will never be used abroad, so why internationalize it?" "count can't be negative." "This printf can't fail."&lt;br&gt;
-Let's not practice this kind of self-deception, particularly when coding.&lt;br&gt;
-Whenever you find yourself thinking "but of course that could never happen," add code to check it.&lt;/em&gt;&lt;/p&gt;
-
-&lt;p&gt; &lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#34-use-exceptions-for-exceptional-problems"&gt;
-  &lt;/a&gt;
-  #34 - Use Exceptions for Exceptional Problems
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;em&gt;One of the problems with exceptions is knowing when to use them. We believe that exceptions should rarely be used as part of a program's normal flow; exceptions should be reserved for unexpected events. Assume that an uncaught exception will terminate your program and ask yourself, "Will this code still run if I remove all the exception handlers?" If the answer is "no," then maybe exceptions are being used in nonexceptional circumstances.&lt;/em&gt;&lt;br&gt;
- &lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#35-finish-what-you-start"&gt;
-  &lt;/a&gt;
-  #35 - Finish What You Start
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;em&gt;We all manage resources whenever we code: memory, transactions, threads, files, timers—all kinds of things with limited availability. Most of the time, resource usage follows a predictable pattern: you allocate the resource, use it, and then deallocate it. However, many developers have no consistent plan for dealing with resource allocation and deallocation.&lt;/em&gt;&lt;br&gt;
- &lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#36-minimize-coupling-between-modules"&gt;
-  &lt;/a&gt;
-  #36 - Minimize Coupling Between Modules
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;em&gt;You can see symptoms of this phenomenon in a number of ways:&lt;/em&gt;&lt;br&gt;
-&lt;em&gt;1. Large C or C++ projects where the command to link a unit test is longer than the test program itself&lt;/em&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;em&gt;2. "Simple" changes to one module that propagate through unrelated modules in the system&lt;/em&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;em&gt;3. Developers who are afraid to change code because they aren't sure what might be affected&lt;/em&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;em&gt;The Law of Demeter for functions attempts to minimize coupling between modules in any given program. It tries to prevent you from reaching into an object to gain access to a third object's methods.&lt;/em&gt;&lt;br&gt;
- &lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#37-configure-dont-integrate"&gt;
-  &lt;/a&gt;
-  #37 - Configure, Don't Integrate
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;em&gt;First, we want to make our systems highly configurable. Not just things such as screen colors and prompt text, but deeply ingrained items such as the choice of algorithms, database products, middleware technology, and user-interface style.&lt;br&gt;
-These items should be implemented as configuration options, not through integration or engineering.&lt;/em&gt;&lt;br&gt;
- &lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#38-put-abstractions-in-code-details-in-metadata"&gt;
-  &lt;/a&gt;
-  #38 - Put Abstractions in Code Details in Metadata
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;em&gt;Use metadata to describe configuration options for an application: tuning parameters, user preferences, the installation directory, and so on.&lt;/em&gt;&lt;br&gt;
-&lt;em&gt;Metadata is any data that describes the application—how it should run, what resources it should use, and so on. Typically, metadata is accessed and used at runtime, not at compile time. You use metadata all the time—at least your programs do. Suppose you click on an option to hide the toolbar on your Web browser. The browser will store that preference, as metadata, in some sort of internal database.&lt;/em&gt;&lt;br&gt;
- &lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#39-analyze-workflow-to-improve-concurrency"&gt;
-  &lt;/a&gt;
-  #39 - Analyze Workflow to Improve Concurrency
-&lt;/h3&gt;
-
-&lt;p&gt;&lt;em&gt;In many projects, we need to model and analyze the user's workflows as part of requirements analysis. We'd like to find out what can happen at the same time, and what must happen in a strict order. One way to do this is to capture their description of workflow using a notation such as the UML activity diagram&lt;/em&gt;&lt;br&gt;
- &lt;/p&gt;
-
-</description>
-      <category>programming</category>
-      <category>webdev</category>
-      <category>engineering</category>
-    </item>
-    <item>
-      <title>Creating an empty branch on an existing git repo</title>
-      <author>Chris Bongers</author>
-      <pubDate>Sun, 14 Nov 2021 07:00:56 +0000</pubDate>
-      <link>https://dev.to/dailydevtips1/creating-an-empty-branch-on-an-existing-git-repo-2nm9</link>
-      <guid>https://dev.to/dailydevtips1/creating-an-empty-branch-on-an-existing-git-repo-2nm9</guid>
-      <description>&lt;p&gt;Sometimes you need a separate empty branch for your project.&lt;br&gt;
-In my case, because I'm going to switch frameworks. And it's easier to start with an empty repo and work my way up from there.&lt;/p&gt;
-
-&lt;p&gt;This repo should have nothing in it, and if it has no git history, that's a win!&lt;/p&gt;
-&lt;h2&gt;
-  &lt;a href="#introducing-git-orphan-branches"&gt;
-  &lt;/a&gt;
-  Introducing git orphan branches
-&lt;/h2&gt;
-
-&lt;p&gt;For this purpose, we can use orphan branches.&lt;br&gt;
-These branches are created with nothing in them, as they are orphaned from their ancestor.&lt;/p&gt;
-
-&lt;p&gt;Let's go through this process on our existing git test project, which you can find &lt;a href="https://github.com/rebelchris/git-test"&gt;here on GitHub&lt;/a&gt;.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--qpOdmAmD--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1635918397239/BVfj0dfXI.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--qpOdmAmD--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1635918397239/BVfj0dfXI.png" alt="Git branch with files and history" width="880" height="306"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;As you can see in the image, it has some files and a commit history here.&lt;/p&gt;
-
-&lt;p&gt;From our terminal, navigate to the root of this project.&lt;br&gt;
-In there, you can run the following command to create an orphan branch.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;git checkout &lt;span class="nt"&gt;--orphan&lt;/span&gt; version-2
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;We need to remove all files that might have been staged in this process by running the following command.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;git &lt;span class="nb"&gt;rm&lt;/span&gt; &lt;span class="nt"&gt;-rf&lt;/span&gt; &lt;span class="nb"&gt;.&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Then we have two options. We could add a new readme file or push an empty commit.&lt;br&gt;
-The steps for a readme you already know, so let's try out an empty commit.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;git commit &lt;span class="nt"&gt;--allow-empty&lt;/span&gt; &lt;span class="nt"&gt;-m&lt;/span&gt; &lt;span class="s2"&gt;"Starting a new version"&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;And then we can push this new branch.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;git push origin version-2
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--6Tw-yIT6--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1635918638195/f-CU0lTxu.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--6Tw-yIT6--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1635918638195/f-CU0lTxu.png" alt="Fully empty git orphan" width="880" height="275"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;As you can see, this branch is empty and has no git history!&lt;br&gt;
-This is a perfect way to get started on a new framework or complete rework of your application.&lt;/p&gt;
-
-&lt;p&gt;You can view the branch on &lt;a href="https://github.com/rebelchris/git-test/tree/version-2"&gt;GitHub&lt;/a&gt;.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#thank-you-for-reading-and-lets-connect"&gt;
-  &lt;/a&gt;
-  Thank you for reading, and let's connect!
-&lt;/h3&gt;
-
-&lt;p&gt;Thank you for reading my blog. Feel free to subscribe to my email newsletter and connect on &lt;a href="https://www.facebook.com/DailyDevTipsBlog"&gt;Facebook&lt;/a&gt; or &lt;a href="https://twitter.com/DailyDevTips1"&gt;Twitter&lt;/a&gt;&lt;/p&gt;
-
-</description>
-      <category>github</category>
-      <category>git</category>
-      <category>beginners</category>
     </item>
   </channel>
 </rss>
