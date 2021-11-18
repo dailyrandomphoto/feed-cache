@@ -7,6 +7,578 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>Creating an Async API using Postgres - Building a Chess Analysis App (Part 3)</title>
+      <author>propelauthblog</author>
+      <pubDate>Thu, 18 Nov 2021 01:41:50 +0000</pubDate>
+      <link>https://dev.to/propelauth/creating-an-async-api-using-postgres-building-a-chess-analysis-app-part-3-11ke</link>
+      <guid>https://dev.to/propelauth/creating-an-async-api-using-postgres-building-a-chess-analysis-app-part-3-11ke</guid>
+      <description>&lt;p&gt;In our &lt;a href="https://blog.propelauth.com/chess-analysis-2-flask-and-cerberus/"&gt;last post&lt;/a&gt;, we built a synchronous API that validates and analyzes a chess position. We noted that performing a CPU intensive task synchronously in the web server seems like a bad idea.&lt;/p&gt;
+
+&lt;p&gt;In this post, we'll turn that synchronous API into an asynchronous one using Postgres.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#analyzing-the-requests-asynchronously"&gt;
+  &lt;/a&gt;
+  Analyzing the requests asynchronously
+&lt;/h2&gt;
+
+&lt;p&gt;We cannot have our webserver waiting on an analysis. We also, ideally, want to be resilient to a large number of analyses requested at the same time overloading us. This looks like a good time to use a &lt;strong&gt;queue&lt;/strong&gt;.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#what-is-a-queue"&gt;
+  &lt;/a&gt;
+  What is a queue?
+&lt;/h3&gt;
+
+&lt;p&gt;The basic idea behind a queue is that instead of analyzing the request immediately, we store it somewhere to be analyzed later, alongside an ID.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--MLmk_7Ys--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/i4qte27la5dsh8uo9ov3.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--MLmk_7Ys--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/i4qte27la5dsh8uo9ov3.png" alt="Placing an item in a queue" width="880" height="243"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;The user can use the ID to check if the analysis is ready.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--z_OqWBeD--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/o1jqzfkcoirmeu2m80p9.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--z_OqWBeD--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/o1jqzfkcoirmeu2m80p9.png" alt="Checking the status of an item" width="880" height="254"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Separately, some other service is running. It will read a chess position from the queue, analyze the position, and store the result somewhere. Services that read from queues and process them are typically called &lt;strong&gt;workers&lt;/strong&gt;.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--A4bKAjAb--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/rcwr361g2i4an5quy4rw.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--A4bKAjAb--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/rcwr361g2i4an5quy4rw.png" alt="Worker processing the queue" width="880" height="326"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;One of the many nice things about this approach is that you can scale up or down the number of workers depending on demand.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#how-do-we-make-a-queue"&gt;
+  &lt;/a&gt;
+  How do we make a queue?
+&lt;/h3&gt;
+
+&lt;p&gt;There are a lot of ways to actually implement queues. There are products like &lt;a href="https://kafka.apache.org/"&gt;Kafka&lt;/a&gt; or &lt;a href="https://www.rabbitmq.com/"&gt;RabbitMQ&lt;/a&gt;. There are managed services like &lt;a href="https://aws.amazon.com/sqs/"&gt;AWS SQS&lt;/a&gt; or &lt;a href="https://aws.amazon.com/kinesis/"&gt;AWS Kinesis&lt;/a&gt;. There are libraries like &lt;a href="https://docs.celeryproject.org/en/stable/"&gt;Celery&lt;/a&gt; which can be used with Redis or RabbitMQ. For the workers, you can use serverless functions like &lt;a href="https://aws.amazon.com/lambda/"&gt;AWS Lambda&lt;/a&gt; or you can have a pool of servers waiting for work.&lt;/p&gt;
+
+&lt;p&gt;In our case, we are going to use &lt;a href="https://www.postgresql.org/"&gt;Postgres&lt;/a&gt; as a queue for two main reasons:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;We're going to need a database anyway, so using Postgres as both a queue and a DB means less stuff to manage.&lt;/li&gt;
+&lt;li&gt;I personally like debugging queues via SQL. We can get a ton of insight into what's going on in a familiar language.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;h3&gt;
+  &lt;a href="#using-postgres-as-a-queue"&gt;
+  &lt;/a&gt;
+  Using Postgres as a queue
+&lt;/h3&gt;
+
+&lt;p&gt;To make a simple queue, we ultimately only need three functions:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;
+&lt;code&gt;add_request_to_queue(request)&lt;/code&gt; - adds the request the queue, so it can be processed later&lt;/li&gt;
+&lt;li&gt;
+&lt;code&gt;claim_unprocessed_request()&lt;/code&gt; - returns any request that hasn't been processed yet. No one else should be able to claim this request until we are done.&lt;/li&gt;
+&lt;li&gt;
+&lt;code&gt;finish_processing_request(request, result)&lt;/code&gt; - saves the result of processing a request.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;It's important that when a worker claims a request, no other worker can also claim it. Otherwise, we are just wasting time having multiple workers doing the same task.&lt;/p&gt;
+
+&lt;p&gt;Imagine we have a table named &lt;code&gt;queue&lt;/code&gt;. &lt;code&gt;add_request_to_queue&lt;/code&gt; for Postgres can be a simple SQL query:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight sql"&gt;&lt;code&gt;&lt;span class="k"&gt;INSERT&lt;/span&gt; &lt;span class="k"&gt;INTO&lt;/span&gt; &lt;span class="n"&gt;queue&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;id&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;request&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;status&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;created_at&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; 
+           &lt;span class="k"&gt;VALUES&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;gen_random_uuid&lt;/span&gt;&lt;span class="p"&gt;(),&lt;/span&gt; &lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="n"&gt;request&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s1"&gt;'unprocessed'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;now&lt;/span&gt;&lt;span class="p"&gt;())&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;where &lt;code&gt;:request&lt;/code&gt; is whatever information the worker needs to process the request. In our case, that's the chess position that we want to analyze and any arguments.&lt;/p&gt;
+
+&lt;p&gt;A first pass at &lt;code&gt;claim_unprocessed_request&lt;/code&gt; could be a simple select statement:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight sql"&gt;&lt;code&gt;&lt;span class="k"&gt;SELECT&lt;/span&gt; &lt;span class="n"&gt;id&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;request&lt;/span&gt; &lt;span class="k"&gt;FROM&lt;/span&gt; &lt;span class="n"&gt;queue&lt;/span&gt; 
+&lt;span class="k"&gt;WHERE&lt;/span&gt; &lt;span class="n"&gt;status&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s1"&gt;'unprocessed'&lt;/span&gt; 
+&lt;span class="k"&gt;ORDER&lt;/span&gt; &lt;span class="k"&gt;BY&lt;/span&gt; &lt;span class="n"&gt;created_at&lt;/span&gt;
+&lt;span class="k"&gt;LIMIT&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;However, this doesn't stop anyone else from claiming the same request. &lt;br&gt;
+Luckily for us, Postgres has two clauses that can help us out.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight sql"&gt;&lt;code&gt;&lt;span class="k"&gt;SELECT&lt;/span&gt; &lt;span class="n"&gt;id&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;request&lt;/span&gt; &lt;span class="k"&gt;FROM&lt;/span&gt; &lt;span class="n"&gt;queue&lt;/span&gt; 
+&lt;span class="k"&gt;WHERE&lt;/span&gt; &lt;span class="n"&gt;status&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s1"&gt;'unprocessed'&lt;/span&gt; 
+&lt;span class="k"&gt;ORDER&lt;/span&gt; &lt;span class="k"&gt;BY&lt;/span&gt; &lt;span class="n"&gt;created_at&lt;/span&gt;
+&lt;span class="k"&gt;FOR&lt;/span&gt; &lt;span class="k"&gt;UPDATE&lt;/span&gt; &lt;span class="n"&gt;SKIP&lt;/span&gt; &lt;span class="n"&gt;LOCKED&lt;/span&gt;
+&lt;span class="k"&gt;LIMIT&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;code&gt;FOR UPDATE&lt;/code&gt; locks the row because we are planning to update it. &lt;code&gt;SKIP LOCKED&lt;/code&gt; will skip over any rows that are currently locked. With this, no two workers will ever grab the same row.&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;finish_processing_request&lt;/code&gt; can be as simple as updating the row with the result of the analysis. We need to do this in the same transaction as our select statement (that is why we are using &lt;code&gt;FOR UPDATE&lt;/code&gt;), so the overall flow becomes:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;Begin a transaction&lt;/li&gt;
+&lt;li&gt;Select a request with &lt;code&gt;FOR UPDATE SKIP LOCKED&lt;/code&gt;
+&lt;/li&gt;
+&lt;li&gt;Process the request&lt;/li&gt;
+&lt;li&gt;Save the result and make the status no longer 'unprocessed'&lt;/li&gt;
+&lt;li&gt;Commit the transaction&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;h2&gt;
+  &lt;a href="#sqlalchemy"&gt;
+  &lt;/a&gt;
+  SQLAlchemy
+&lt;/h2&gt;
+
+&lt;p&gt;Now that we know what we need to do, let's translate it to python. We'll use the ORM &lt;a href="https://www.sqlalchemy.org/"&gt;SQLAlchemy&lt;/a&gt; to interact with our database and &lt;a href="https://pypi.org/project/psycopg2/"&gt;psycopg2&lt;/a&gt; as our Postgres adapter.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="c"&gt;# this is a library which adds some flask-specific features to sqlalchemy&lt;/span&gt;
+&lt;span class="o"&gt;(&lt;/span&gt;venv&lt;span class="o"&gt;)&lt;/span&gt; &lt;span class="nv"&gt;$ &lt;/span&gt;pip &lt;span class="nb"&gt;install &lt;/span&gt;flask-sqlalchemy 
+&lt;span class="o"&gt;(&lt;/span&gt;venv&lt;span class="o"&gt;)&lt;/span&gt; &lt;span class="nv"&gt;$ &lt;/span&gt;pip &lt;span class="nb"&gt;install &lt;/span&gt;psycopg2-binary
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;You'll want to set up and install Postgres, which you can do either with Docker or with their &lt;a href="https://www.postgresql.org/download/"&gt;installers&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;Afterwards, we can set up our database table. In the earlier example, we had a &lt;code&gt;status&lt;/code&gt; column. In this example, we are going to just use a nullable &lt;code&gt;analysis_result&lt;/code&gt; column. This is a little less general since it doesn't allow for error statues, but should be easy to extend.&lt;/p&gt;
+
+&lt;p&gt;We'll put our models in a new file &lt;code&gt;models.py&lt;/code&gt;.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="kn"&gt;from&lt;/span&gt; &lt;span class="nn"&gt;datetime&lt;/span&gt; &lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="n"&gt;datetime&lt;/span&gt;
+
+&lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="nn"&gt;sqlalchemy&lt;/span&gt;
+&lt;span class="kn"&gt;from&lt;/span&gt; &lt;span class="nn"&gt;flask_sqlalchemy&lt;/span&gt; &lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="n"&gt;SQLAlchemy&lt;/span&gt;
+&lt;span class="kn"&gt;from&lt;/span&gt; &lt;span class="nn"&gt;sqlalchemy.dialects.postgresql&lt;/span&gt; &lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="n"&gt;UUID&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;JSON&lt;/span&gt;
+
+&lt;span class="n"&gt;db&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;SQLAlchemy&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+
+
+&lt;span class="k"&gt;class&lt;/span&gt; &lt;span class="nc"&gt;Analysis&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Model&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;
+    &lt;span class="c1"&gt;# Let the DB generate a UUID for us
+&lt;/span&gt;    &lt;span class="nb"&gt;id&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Column&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;UUID&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;as_uuid&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="bp"&gt;True&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt; &lt;span class="n"&gt;primary_key&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="bp"&gt;True&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;server_default&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="n"&gt;sqlalchemy&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;text&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"gen_random_uuid()"&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt; &lt;span class="p"&gt;)&lt;/span&gt;
+
+    &lt;span class="c1"&gt;# The 4 parameters to our request
+&lt;/span&gt;    &lt;span class="n"&gt;fen&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Column&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;String&lt;/span&gt;&lt;span class="p"&gt;(),&lt;/span&gt; &lt;span class="n"&gt;nullable&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="bp"&gt;False&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="n"&gt;num_moves_to_return&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Column&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;INT&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;nullable&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="bp"&gt;False&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="n"&gt;time_limit&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Column&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;FLOAT&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;nullable&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="bp"&gt;False&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="n"&gt;depth_limit&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Column&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;INT&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+    &lt;span class="c1"&gt;# The result of an analysis. Null means we haven't processed it yet
+&lt;/span&gt;    &lt;span class="n"&gt;analysis_result&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Column&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;JSON&lt;/span&gt;&lt;span class="p"&gt;())&lt;/span&gt;
+
+    &lt;span class="n"&gt;created_at&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Column&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;TIMESTAMP&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;default&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="n"&gt;datetime&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;utcnow&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;nullable&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="bp"&gt;False&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="n"&gt;updated_at&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Column&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;TIMESTAMP&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;default&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="n"&gt;datetime&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;utcnow&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;onupdate&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="n"&gt;datetime&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;utcnow&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;nullable&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="bp"&gt;False&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+    &lt;span class="c1"&gt;# A conditional index on created_at, whenever analysis_result is null
+&lt;/span&gt;    &lt;span class="n"&gt;__table_args__&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;
+        &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Index&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;'ordered_by_created_at'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;created_at&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;postgresql_where&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;analysis_result&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;is_&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="bp"&gt;None&lt;/span&gt;&lt;span class="p"&gt;))),&lt;/span&gt;
+    &lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We can then create this table from the python console.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="o"&gt;(&lt;/span&gt;venv&lt;span class="o"&gt;)&lt;/span&gt; &lt;span class="nv"&gt;$ &lt;/span&gt;python
+&lt;span class="c"&gt;# ...&lt;/span&gt;
+&lt;span class="o"&gt;&amp;gt;&amp;gt;&amp;gt;&lt;/span&gt; from models import db
+&lt;span class="o"&gt;&amp;gt;&amp;gt;&amp;gt;&lt;/span&gt; db.create_all&lt;span class="o"&gt;()&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#finishing-the-api"&gt;
+  &lt;/a&gt;
+  Finishing the API
+&lt;/h2&gt;
+
+&lt;p&gt;We're almost done with the API. Let's look at the remaining code in &lt;code&gt;app.py&lt;/code&gt; in sections.&lt;/p&gt;
+
+&lt;p&gt;First, make sure we set any SQLALCHEMY config values and call &lt;code&gt;db.init_app(app)&lt;/code&gt;&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="c1"&gt;# ... same as before
+&lt;/span&gt;
+&lt;span class="kn"&gt;from&lt;/span&gt; &lt;span class="nn"&gt;models&lt;/span&gt; &lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;Analysis&lt;/span&gt;
+
+&lt;span class="n"&gt;app&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;Flask&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;__name__&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="c1"&gt;# This is the default URI for postgres
+&lt;/span&gt;&lt;span class="n"&gt;app&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;config&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s"&gt;'SQLALCHEMY_DATABASE_URI'&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s"&gt;'postgresql://postgres:postgres@localhost:5432/postgres'&lt;/span&gt;
+&lt;span class="n"&gt;app&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;config&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s"&gt;'SQLALCHEMY_TRACK_MODIFICATIONS'&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="bp"&gt;False&lt;/span&gt;
+&lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;init_app&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;app&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Next, we'll update our &lt;code&gt;analyze&lt;/code&gt; function to no longer analyze synchronously, but instead store the analysis to the database for later processing. The database will return an autogenerated UUID that we will return to the user.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="o"&gt;@&lt;/span&gt;&lt;span class="n"&gt;app&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;route&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"/analyze"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;methods&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s"&gt;"POST"&lt;/span&gt;&lt;span class="p"&gt;])&lt;/span&gt;
+&lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;analyze&lt;/span&gt;&lt;span class="p"&gt;():&lt;/span&gt;
+    &lt;span class="c1"&gt;# Validate the request, same as before
+&lt;/span&gt;    &lt;span class="n"&gt;parsed_request&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;parse_request&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;request&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;get_json&lt;/span&gt;&lt;span class="p"&gt;())&lt;/span&gt;
+
+    &lt;span class="c1"&gt;# Save an analysis object to the database
+&lt;/span&gt;    &lt;span class="n"&gt;analysis&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;Analysis&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+        &lt;span class="n"&gt;fen&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="n"&gt;parsed_request&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;get&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"fen"&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+        &lt;span class="n"&gt;num_moves_to_return&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="n"&gt;parsed_request&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;get&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"num_moves_to_return"&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+        &lt;span class="n"&gt;time_limit&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="n"&gt;parsed_request&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;get&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"time_limit"&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+        &lt;span class="n"&gt;depth_limit&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="n"&gt;parsed_request&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;get&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"depth_limit"&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+    &lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;session&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;add&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;analysis&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;session&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;commit&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+
+    &lt;span class="c1"&gt;# The id is automatically populated after commiting
+&lt;/span&gt;    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="s"&gt;"id"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;analysis&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nb"&gt;id&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Finally, we need some way for our users to get their analysis. We'll create a new endpoint that accepts a UUID, validate that they pass in a UUID, and then fetch that UUID from the database. If the database object has &lt;code&gt;analysis_result&lt;/code&gt; set, we know that it has been analyzed. Otherwise, we can say that it's still pending analysis.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="c1"&gt;# Can move this to our parsers file
+# Make sure the UUID we are provided is valid
+&lt;/span&gt;&lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;parse_uuid&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;possible_uuid&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;
+    &lt;span class="k"&gt;try&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="n"&gt;uuid&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;UUID&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;possible_uuid&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="k"&gt;except&lt;/span&gt; &lt;span class="nb"&gt;ValueError&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="bp"&gt;None&lt;/span&gt;
+
+
+&lt;span class="o"&gt;@&lt;/span&gt;&lt;span class="n"&gt;app&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;route&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"/analysis"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;methods&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s"&gt;"GET"&lt;/span&gt;&lt;span class="p"&gt;])&lt;/span&gt;
+&lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;get_analysis&lt;/span&gt;&lt;span class="p"&gt;():&lt;/span&gt;
+    &lt;span class="c1"&gt;# 404 if the ID is invalid or not in our database
+&lt;/span&gt;    &lt;span class="nb"&gt;id&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;parse_uuid&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;request&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;args&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;get&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"id"&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;
+    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="nb"&gt;id&lt;/span&gt; &lt;span class="ow"&gt;is&lt;/span&gt; &lt;span class="bp"&gt;None&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="n"&gt;abort&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;404&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="n"&gt;analysis&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;Analysis&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;query&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;get_or_404&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nb"&gt;id&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="n"&gt;analysis&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;analysis_result&lt;/span&gt; &lt;span class="ow"&gt;is&lt;/span&gt; &lt;span class="bp"&gt;None&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="s"&gt;"status"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="s"&gt;"pending"&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="k"&gt;else&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="s"&gt;"status"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="s"&gt;"done"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s"&gt;"result"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="n"&gt;analysis&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;analysis_result&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;And that's it for the API. We can submit chess positions to be analyzed, and we get back an ID. We can then poll the ID which will return &lt;code&gt;pending&lt;/code&gt; until the analysis is ready. We can view this in action by running our server and using curl:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;curl &lt;span class="nt"&gt;-X&lt;/span&gt; POST 
+       &lt;span class="nt"&gt;-H&lt;/span&gt; &lt;span class="s2"&gt;"Content-Type: application/json"&lt;/span&gt; 
+       &lt;span class="nt"&gt;-d&lt;/span&gt; &lt;span class="s1"&gt;'{"fen": "8/8/6P1/4R3/8/6k1/2r5/6K1 b - - 0 1"}'&lt;/span&gt; localhost:5000/analyze
+&lt;span class="o"&gt;{&lt;/span&gt;&lt;span class="s2"&gt;"id"&lt;/span&gt;:&lt;span class="s2"&gt;"c5b0a5d9-2427-438c-bd4a-6e9afe135763"&lt;/span&gt;&lt;span class="o"&gt;}&lt;/span&gt;
+
+&lt;span class="nv"&gt;$ &lt;/span&gt;curl &lt;span class="s2"&gt;"localhost:5000/analysis?id=c5b0a5d9-2427-438c-bd4a-6e9afe135763"&lt;/span&gt;
+&lt;span class="o"&gt;{&lt;/span&gt;&lt;span class="s2"&gt;"status"&lt;/span&gt;:&lt;span class="s2"&gt;"pending"&lt;/span&gt;&lt;span class="o"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The only problem now is that there's no worker to actually analyze the chess position. We're going to get back &lt;code&gt;pending&lt;/code&gt; forever. Let's fix that now.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#creating-chess-analysis-workers"&gt;
+  &lt;/a&gt;
+  Creating chess analysis workers
+&lt;/h2&gt;
+
+&lt;p&gt;In addition to being a webserver, Flask also supports a &lt;a href="https://flask.palletsprojects.com/en/2.0.x/cli/"&gt;CLI&lt;/a&gt;. We can make a command which loops infinitely reading from the database and processing what it finds. In production, we can use something like systemd to keep the worker alive, and we can control how many processes we spawn to control how many positions can be analyzed in parallel per machine.&lt;/p&gt;
+
+&lt;p&gt;Let's start from the top, by making a &lt;code&gt;worker&lt;/code&gt; command in &lt;code&gt;app.py&lt;/code&gt;.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="o"&gt;@&lt;/span&gt;&lt;span class="n"&gt;app&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;cli&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;command&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"worker"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;worker&lt;/span&gt;&lt;span class="p"&gt;():&lt;/span&gt;
+    &lt;span class="k"&gt;with&lt;/span&gt; &lt;span class="n"&gt;app&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;app_context&lt;/span&gt;&lt;span class="p"&gt;():&lt;/span&gt;
+        &lt;span class="n"&gt;run_worker&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Then we'll go implement &lt;code&gt;run_worker&lt;/code&gt; in a new file &lt;code&gt;worker.py&lt;/code&gt;.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight python"&gt;&lt;code&gt;&lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="nn"&gt;time&lt;/span&gt;
+&lt;span class="kn"&gt;from&lt;/span&gt; &lt;span class="nn"&gt;chessengine&lt;/span&gt; &lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="n"&gt;analyze_position&lt;/span&gt;
+&lt;span class="kn"&gt;from&lt;/span&gt; &lt;span class="nn"&gt;models&lt;/span&gt; &lt;span class="kn"&gt;import&lt;/span&gt; &lt;span class="n"&gt;Analysis&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;db&lt;/span&gt;
+
+&lt;span class="c1"&gt;# Runs forever
+&lt;/span&gt;&lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;run_worker&lt;/span&gt;&lt;span class="p"&gt;():&lt;/span&gt;
+    &lt;span class="k"&gt;while&lt;/span&gt; &lt;span class="bp"&gt;True&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+        &lt;span class="k"&gt;try&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+            &lt;span class="n"&gt;did_work&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;fetch_and_analyze&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+
+            &lt;span class="c1"&gt;# If there was nothing to analyze, sleep for a bit
+&lt;/span&gt;            &lt;span class="c1"&gt;#   to not overload the DB
+&lt;/span&gt;            &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="ow"&gt;not&lt;/span&gt; &lt;span class="n"&gt;did_work&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+                &lt;span class="n"&gt;time&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;sleep&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;5&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+        &lt;span class="k"&gt;except&lt;/span&gt; &lt;span class="nb"&gt;Exception&lt;/span&gt; &lt;span class="k"&gt;as&lt;/span&gt; &lt;span class="n"&gt;err&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+            &lt;span class="k"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="sa"&gt;f&lt;/span&gt;&lt;span class="s"&gt;"Unexpected &lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="n"&gt;err&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="s"&gt;, &lt;/span&gt;&lt;span class="si"&gt;{&lt;/span&gt;&lt;span class="nb"&gt;type&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;err&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="si"&gt;}&lt;/span&gt;&lt;span class="s"&gt;"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+&lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;fetch_and_analyze&lt;/span&gt;&lt;span class="p"&gt;():&lt;/span&gt;
+    &lt;span class="c1"&gt;# This is the SQL query we saw before
+&lt;/span&gt;    &lt;span class="c1"&gt;# We are looking for rows with no result yet
+&lt;/span&gt;    &lt;span class="c1"&gt;#  and we order by created_at to take older requests first
+&lt;/span&gt;    &lt;span class="n"&gt;to_be_analyzed&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;Analysis&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;query&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nb"&gt;filter&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Analysis&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;analysis_result&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;is_&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="bp"&gt;None&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt; \
+        &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;order_by&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Analysis&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;created_at&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; \
+        &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;with_for_update&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;skip_locked&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="bp"&gt;True&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; \
+        &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;limit&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; \
+        &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;first&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+
+    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="n"&gt;to_be_analyzed&lt;/span&gt; &lt;span class="ow"&gt;is&lt;/span&gt; &lt;span class="ow"&gt;not&lt;/span&gt; &lt;span class="bp"&gt;None&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+        &lt;span class="c1"&gt;# Use the function we created in our first post in this series
+&lt;/span&gt;        &lt;span class="n"&gt;to_be_analyzed&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;analysis_result&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;analyze_position&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+            &lt;span class="n"&gt;fen&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="n"&gt;to_be_analyzed&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;fen&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+            &lt;span class="n"&gt;num_moves_to_return&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="n"&gt;to_be_analyzed&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;num_moves_to_return&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+            &lt;span class="n"&gt;depth_limit&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="n"&gt;to_be_analyzed&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;depth_limit&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+            &lt;span class="n"&gt;time_limit&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="n"&gt;to_be_analyzed&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;time_limit&lt;/span&gt;
+        &lt;span class="p"&gt;)&lt;/span&gt;
+        &lt;span class="k"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Analyzed {}"&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nb"&gt;format&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;to_be_analyzed&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nb"&gt;id&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;
+    &lt;span class="k"&gt;else&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+        &lt;span class="k"&gt;print&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;"Nothing to analyze"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+    &lt;span class="c1"&gt;# Do not forget to commit the transaction!
+&lt;/span&gt;    &lt;span class="n"&gt;db&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;session&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;commit&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="n"&gt;to_be_analyzed&lt;/span&gt; &lt;span class="ow"&gt;is&lt;/span&gt; &lt;span class="ow"&gt;not&lt;/span&gt; &lt;span class="bp"&gt;None&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;And that's the full worker. Most of the heavy lifting is done by &lt;code&gt;analyze_position&lt;/code&gt; and you can use this &lt;br&gt;
+same structure to turn any synchronous API into an asynchronous one.&lt;/p&gt;
+
+&lt;p&gt;Let's test it by running our worker in a new terminal:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;&lt;span class="nb"&gt;source &lt;/span&gt;venv/bin/activate
+&lt;span class="o"&gt;(&lt;/span&gt;venv&lt;span class="o"&gt;)&lt;/span&gt; &lt;span class="nv"&gt;$ &lt;/span&gt;flask worker
+Analyzed c5b0a5d9-2427-438c-bd4a-6e9afe135763
+Nothing to analyze
+Nothing to analyze
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;It found the request we made earlier and analyzed it. Let's verify that by hitting our webserver with curl:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;curl &lt;span class="s2"&gt;"localhost:5000/analysis?id=c5b0a5d9-2427-438c-bd4a-6e9afe135763"&lt;/span&gt;
+&lt;span class="o"&gt;{&lt;/span&gt;&lt;span class="s2"&gt;"result"&lt;/span&gt;:[&lt;span class="o"&gt;{&lt;/span&gt;&lt;span class="s2"&gt;"centipawn_score"&lt;/span&gt;:null,&lt;span class="s2"&gt;"mate_score"&lt;/span&gt;:-2,&lt;span class="s2"&gt;"pv"&lt;/span&gt;:[&lt;span class="s2"&gt;"c2c1"&lt;/span&gt;,&lt;span class="s2"&gt;"e5e1"&lt;/span&gt;,&lt;span class="s2"&gt;"c1e1"&lt;/span&gt;&lt;span class="o"&gt;]}]&lt;/span&gt;,&lt;span class="s2"&gt;"status"&lt;/span&gt;:&lt;span class="s2"&gt;"done"&lt;/span&gt;&lt;span class="o"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;And we see the status is &lt;code&gt;done&lt;/code&gt; and our result is analysis that we expect.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#wrapping-up"&gt;
+  &lt;/a&gt;
+  Wrapping up
+&lt;/h2&gt;
+
+&lt;p&gt;We were able to take a clunky synchronous API and make it asynchronous, using Postgres as a work queue. Our users can now submit bursts of chess positions and our servers won't get overloaded.&lt;/p&gt;
+
+&lt;p&gt;In our next post, we'll use NextJS to build a UI for our application. See you then!&lt;/p&gt;
+
+</description>
+      <category>beginners</category>
+      <category>webdev</category>
+      <category>python</category>
+      <category>programming</category>
+    </item>
+    <item>
+      <title>Setter Method Return Values In Ruby</title>
+      <author>Kevin Murphy</author>
+      <pubDate>Thu, 18 Nov 2021 00:49:28 +0000</pubDate>
+      <link>https://dev.to/kevin_j_m/setter-method-return-values-in-ruby-g09</link>
+      <guid>https://dev.to/kevin_j_m/setter-method-return-values-in-ruby-g09</guid>
+      <description>&lt;h2&gt;
+  &lt;a href="#can-i-take-your-order"&gt;
+  &lt;/a&gt;
+  Can I Take Your Order?
+&lt;/h2&gt;
+
+&lt;p&gt;We're opening a brand new diner, and each customer can have their current order set, which will add to their list of orders.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight ruby"&gt;&lt;code&gt;&lt;span class="k"&gt;class&lt;/span&gt; &lt;span class="nc"&gt;Customer&lt;/span&gt;
+  &lt;span class="nb"&gt;attr_reader&lt;/span&gt; &lt;span class="ss"&gt;:orders&lt;/span&gt;
+
+  &lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;initialize&lt;/span&gt;
+    &lt;span class="vi"&gt;@orders&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[]&lt;/span&gt;
+  &lt;span class="k"&gt;end&lt;/span&gt;
+
+  &lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;current_order&lt;/span&gt;
+    &lt;span class="vi"&gt;@orders&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;last&lt;/span&gt;
+  &lt;span class="k"&gt;end&lt;/span&gt;
+
+  &lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;current_order&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;new_order&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="vi"&gt;@orders&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&amp;lt;&lt;/span&gt; &lt;span class="n"&gt;new_order&lt;/span&gt;
+
+    &lt;span class="s2"&gt;"thank you for being our valued customer"&lt;/span&gt;
+  &lt;span class="k"&gt;end&lt;/span&gt;
+&lt;span class="k"&gt;end&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Because customer service is our top priority, we provide a message whenever they place an order reminding them how lucky we feel to be serving them their meal.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#negative-reviews"&gt;
+  &lt;/a&gt;
+  Negative Reviews
+&lt;/h2&gt;
+
+&lt;p&gt;After our soft opening, we're excited to read everyone's favorable comments about their food. However, we're getting slammed with bad reviews about our curt interactions with customers when they place an order. We went out of our way to modify the setter's return value to give a special message; what's wrong?&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#mystery-shopper"&gt;
+  &lt;/a&gt;
+  Mystery Shopper
+&lt;/h2&gt;
+
+&lt;p&gt;In order to get to the bottom of this, we put on our fake mustache and glasses to go undercover at our own restaurant. What we find &lt;strong&gt;shocks us&lt;/strong&gt;.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight ruby"&gt;&lt;code&gt;&lt;span class="n"&gt;irb&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;main&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;&lt;span class="mo"&gt;001&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="n"&gt;definitely_not_the_owner&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="no"&gt;Customer&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;new&lt;/span&gt;
+&lt;span class="n"&gt;irb&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;main&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;&lt;span class="mo"&gt;002&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="n"&gt;definitely_not_the_owner&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;current_order&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s2"&gt;"pancakes"&lt;/span&gt;
+&lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="s2"&gt;"pancakes"&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;That's not the welcoming experience we explicitly developed! We shouldn't be barking back their order in a matter of fact way; we should be thanking them. Something surprising is happening here; now we need to find what it is.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#training-manual"&gt;
+  &lt;/a&gt;
+  Training Manual
+&lt;/h2&gt;
+
+&lt;p&gt;Our method is explicit about what the return value should be.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight ruby"&gt;&lt;code&gt;&lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;current_order&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;new_order&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="vi"&gt;@orders&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&amp;lt;&lt;/span&gt; &lt;span class="n"&gt;new_order&lt;/span&gt;
+
+  &lt;span class="s2"&gt;"thank you for being our valued customer"&lt;/span&gt;
+&lt;span class="k"&gt;end&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We expect the last thing evaluated in the method to be what's returned to the caller. And that's the case...most of the time. After consulting Ruby's&lt;br&gt;
+&lt;a href="https://ruby-doc.org/core-3.0.1/doc/syntax/methods_rdoc.html#label-Return+Values"&gt;documentation&lt;/a&gt;, we find an exception:&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;Note that for assignment methods the return value will be ignored when using the assignment syntax. Instead, the argument will be returned&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;This is our exact case! Our setter method to set the current order is returning the argument passed to it, and not the result of the last line. It's being completely ignored in favor of the argument.&lt;/p&gt;
+&lt;h2&gt;
+  &lt;a href="#demanding-exceptional-service"&gt;
+  &lt;/a&gt;
+  Demanding Exceptional Service
+&lt;/h2&gt;
+
+&lt;p&gt;The documentation does provide a way in which customers can see our nice message though:&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;The actual return value will be returned when invoking the method directly&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;So, while we cannot enforce it, if callers know the right way to ask, we'll thank them.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight ruby"&gt;&lt;code&gt;&lt;span class="n"&gt;irb&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;main&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;&lt;span class="mo"&gt;001&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="n"&gt;customer&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="no"&gt;Customer&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;new&lt;/span&gt;
+&lt;span class="n"&gt;irb&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;main&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;&lt;span class="mo"&gt;002&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="n"&gt;customer&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;current_order&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s2"&gt;"pancakes"&lt;/span&gt;
+&lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="s2"&gt;"pancakes"&lt;/span&gt;
+&lt;span class="n"&gt;irb&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;main&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;&lt;span class="mo"&gt;003&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="n"&gt;customer&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;public_send&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="ss"&gt;:current_order&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="s2"&gt;"french toast"&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="s2"&gt;"thank you for being our valued customer"&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#setting-the-table-for-next-time"&gt;
+  &lt;/a&gt;
+  Setting The Table For Next Time
+&lt;/h2&gt;
+
+&lt;p&gt;Ruby setter, or assignment, methods have a special understanding and expectation for what they'll return. This helps enforce a consistent API, but can lead to surprising results when writing your own setter method.&lt;/p&gt;
+
+&lt;p&gt;Setter methods will return the argument passed to it, regardless of what the last evaluated statement in the method is. Callers can receive the value of the last statement if they call the method in a particular way; however, it would be very unconventional to expect someone to do that.&lt;/p&gt;
+
+&lt;p&gt;In the case of our restaurant, that meant a pivoting in our branding. We started positioning ourselves as an outfit focused on intense efficiency and limited customer interaction - with a secret message any customer in the know can pass us to force a little more welcoming of a response with any new order.&lt;/p&gt;
+
+</description>
+      <category>ruby</category>
+    </item>
+    <item>
       <title>Essential Keyboard Shortcuts For Developers</title>
       <author>Amy Oulton</author>
       <pubDate>Thu, 18 Nov 2021 00:23:59 +0000</pubDate>
@@ -67,6 +639,79 @@
       <category>programming</category>
       <category>beginners</category>
       <category>codenewbie</category>
+    </item>
+    <item>
+      <title>26 Programming Concepts from A to Z</title>
+      <author>Edwin Torres</author>
+      <pubDate>Thu, 18 Nov 2021 00:16:12 +0000</pubDate>
+      <link>https://dev.to/realedwintorres/26-programming-concepts-from-a-to-z-56am</link>
+      <guid>https://dev.to/realedwintorres/26-programming-concepts-from-a-to-z-56am</guid>
+      <description>&lt;p&gt;I wrote this blog post to challenge myself to find a programming concept for each letter of the alphabet. It was surprisingly easy 😀.&lt;/p&gt;
+
+&lt;p&gt;Here they are:&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;A&lt;/strong&gt;rray - An array is like a group of variables that have the same name and type. Use the name and an integer index to access one of the variables. An array is very useful, especially when paired with a &lt;code&gt;for&lt;/code&gt; loop.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;B&lt;/strong&gt;inary - Computers speak &lt;em&gt;binary&lt;/em&gt;, or 0s and 1s, because of hardware. Computer &lt;a href="https://whatis.techtarget.com/definition/register"&gt;registers&lt;/a&gt; have gates that store either &lt;code&gt;0&lt;/code&gt; or &lt;code&gt;1&lt;/code&gt;. This is programming at the lowest level, and all programming languages build on this.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;C&lt;/strong&gt;ontinue - The &lt;code&gt;continue&lt;/code&gt; statement alters the flow of execution in a loop. It skips any remaining statements in the loop and immediately goes back to the top.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;D&lt;/strong&gt;ata - Programs process data. Data may come from the user, a file, variables, or other input source. And there are various types of data.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;E&lt;/strong&gt;quality - The equality operation checks if two operands are equal. The result is a Boolean true/false value. There are different ways to test for equality. One common equality operator is &lt;code&gt;==&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;F&lt;/strong&gt;or - The &lt;code&gt;for&lt;/code&gt; loop is a repetition structure that repeats statements. &lt;code&gt;for&lt;/code&gt; loops are useful when working with numeric sequences.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;G&lt;/strong&gt;oto - In BASIC programming, the &lt;code&gt;Goto&lt;/code&gt; statement jumps to another line in the program and continues execution from there. Using &lt;code&gt;Goto&lt;/code&gt; statements is considered a &lt;a href="https://en.wikipedia.org/wiki/Goto#Criticism"&gt;bad practice&lt;/a&gt;, because it makes code difficult to understand, modify, and debug.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;H&lt;/strong&gt;ashMap - In Java, the &lt;a href="https://www.w3schools.com/java/java_hashmap.asp"&gt;HashMap&lt;/a&gt; class is a data structure that stores key-value pairs. Each key is unique. There are convenient methods to view and manipulate &lt;code&gt;HashMap&lt;/code&gt; objects.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;I&lt;/strong&gt;nteger - The integer data type represents numbers that do not have decimal places. Integer values may be positive, negative, or &lt;code&gt;0&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;J&lt;/strong&gt;oin - In relational databases like MySQL or PostgreSQL, the &lt;code&gt;JOIN&lt;/code&gt; command joins records from two tables based on related columns.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;K&lt;/strong&gt;ill - Use the &lt;code&gt;bash&lt;/code&gt; &lt;code&gt;kill&lt;/code&gt; command to terminate a process. This is useful when you need to terminate a program that will not stop on its own.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;L&lt;/strong&gt;ist - In Python, the &lt;a href="https://docs.python.org/3/tutorial/datastructures.html?highlight=list"&gt;list&lt;/a&gt; data structure is the built-in version of an array. It has similar behaviors, with its own set of convenient methods.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;M&lt;/strong&gt;odulus - The modulus operation calculates the remainder when dividing two numbers. In many languages, the modulus operator is &lt;code&gt;%&lt;/code&gt;. For example, the result of &lt;code&gt;5 % 2&lt;/code&gt; is &lt;code&gt;1&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;N&lt;/strong&gt;ew - In Java, use the &lt;a href="https://www.w3schools.com/java/ref_keyword_new.asp"&gt;new&lt;/a&gt; keyword to create an object. In C++, &lt;code&gt;new&lt;/code&gt; dynamically allocates memory in general.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;O&lt;/strong&gt;perators - Operators operate on data to create new data. Some common arithmetic operators are &lt;em&gt;multiply&lt;/em&gt; &lt;code&gt;*&lt;/code&gt;, &lt;em&gt;divide&lt;/em&gt; &lt;code&gt;/&lt;/code&gt;, &lt;em&gt;add&lt;/em&gt; &lt;code&gt;+&lt;/code&gt;, and &lt;em&gt;subtract&lt;/em&gt; &lt;code&gt;-&lt;/code&gt;. There are operators for other data types and operations.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;P&lt;/strong&gt;rint - The Python &lt;code&gt;print()&lt;/code&gt; statement prints a string to &lt;code&gt;stdout&lt;/code&gt;, for example &lt;code&gt;print('Hello, world!')&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Q&lt;/strong&gt;ueue - A &lt;a href="https://en.m.wikipedia.org/wiki/Queue_(abstract_data_type)"&gt;queue&lt;/a&gt; is a data structure that stores elements sequentially. Queues are &lt;em&gt;first in, first out&lt;/em&gt; (FIFO). In other words, the first element added to the queue is the first element that is processed.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;R&lt;/strong&gt;eturn - The &lt;code&gt;return&lt;/code&gt; statement is a way to return from a procedure or function. A return statement can return a value.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;S&lt;/strong&gt;tack - The &lt;a href="https://en.m.wikipedia.org/wiki/Stack_(abstract_data_type)"&gt;stack&lt;/a&gt; is a cousin of the queue. But a stack stores elements in &lt;em&gt;last in, first out&lt;/em&gt; (LIFO) order. The last element added is the first one that is processed.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;T&lt;/strong&gt;esting - Testing is a phase of program development where you verify and validate the correctness of your program.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;U&lt;/strong&gt;nicode - Unicode is an international coding standard that assigns a numeric value to each character or symbol. Programs can leverage this encoding scheme. The Java programming language supports Unicode.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;V&lt;/strong&gt;ector - In Java, the &lt;code&gt;Vector&lt;/code&gt; class is like the array structure, except that it can increase in size dynamically.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;W&lt;/strong&gt;hile - The &lt;code&gt;while&lt;/code&gt; loop is a programming construct that repeats its statements while a condition is true. It has more flexibility than a &lt;code&gt;for&lt;/code&gt; loop, since its condition can implement a variety of scenarios.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;X&lt;/strong&gt;OR - Exclusive-OR, or XOR, is a logical operator that returns true if exactly one of its operands is true. Otherwise, it returns false. In Java, the XOR operator is &lt;code&gt;^&lt;/code&gt;. For example, &lt;code&gt;true ^ true&lt;/code&gt; returns &lt;code&gt;false&lt;/code&gt; and &lt;code&gt;false ^ true&lt;/code&gt; returns &lt;code&gt;true&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Y&lt;/strong&gt;ield - The &lt;code&gt;yield&lt;/code&gt; statement in Python lets you iterate over a sequence of values by returning a generator from a function. This avoids having to store the entire sequence in memory and returning it all at once.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Z&lt;/strong&gt;eros - The Python &lt;code&gt;numpy&lt;/code&gt; function &lt;code&gt;zeros&lt;/code&gt; returns a new array that is filled with zeros.&lt;/p&gt;
+
+&lt;p&gt;That is my &lt;em&gt;A to Z&lt;/em&gt; list. How about yours? 👍🏼&lt;/p&gt;
+
+&lt;p&gt;Thanks for reading. 😁&lt;/p&gt;
+
+&lt;p&gt;Follow me on Twitter &lt;a href="https://twitter.com/realEdwinTorres"&gt;&lt;code&gt;@realEdwinTorres&lt;/code&gt;&lt;/a&gt; for more programming tips.&lt;/p&gt;
+
+</description>
+      <category>programming</category>
+      <category>beginners</category>
+      <category>webdev</category>
     </item>
     <item>
       <title>Learn how to use Git and GitHub in a team like a pro</title>
@@ -1165,1022 +1810,6 @@ Link to the repository: &lt;a href="https://github.com/medpaf/hawk"&gt;https://
       <category>typescript</category>
       <category>webdev</category>
       <category>javascript</category>
-    </item>
-    <item>
-      <title>Abstract Syntax Trees: They're Actually Used Everywhere -- But What Are They?</title>
-      <author>aruna-x</author>
-      <pubDate>Wed, 17 Nov 2021 21:02:00 +0000</pubDate>
-      <link>https://dev.to/aruna/abstract-syntax-trees-theyre-used-everywhere-but-what-are-they-jh6</link>
-      <guid>https://dev.to/aruna/abstract-syntax-trees-theyre-used-everywhere-but-what-are-they-jh6</guid>
-      <description>&lt;p&gt;Isn't it wonderful how &lt;a href="https://code.visualstudio.com/"&gt;VS Code&lt;/a&gt; grays out obsolete lines of code? &lt;em&gt;Oops, my return statement is on line 3. Line 4 won't run...&lt;/em&gt; But I haven't called the function yet. So how in the world does VS Code know which lines of code won't be used in the future, when the code finally does run?&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--tApNn2G6--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/n37rbnd7xpc7iyf3kcxx.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--tApNn2G6--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/n37rbnd7xpc7iyf3kcxx.png" alt="Code snippet of a function in VS Code with line 4 grayed out" width="556" height="225"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;If we have a conditional statement, VS Code accurately evaluates the potential for us to hit the code outside of it:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--duocNN_X--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/5nmqkgsugr8stdumtd9v.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--duocNN_X--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/5nmqkgsugr8stdumtd9v.png" alt="Code snippet showing that VS Code knows that an if statement with an unknown conditional might not run" width="592" height="314"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;code&gt;bool&lt;/code&gt; could turn out to be false after all. But if we change the condition to &lt;code&gt;true&lt;/code&gt; VS Code knows we will &lt;em&gt;always&lt;/em&gt; run that block and (if there is an inevitable return inside) never reach the final line:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--TdGq6zDU--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/czrc9sgdf3ibbmgz9pxl.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--TdGq6zDU--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/czrc9sgdf3ibbmgz9pxl.png" alt="Code snippet showing that VS Code knows that an if statement with a true conditional will always run" width="586" height="315"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;It's almost as if VS Code has the ability to understand the &lt;em&gt;semantics&lt;/em&gt; of code. But under the hood VS Code uses &lt;strong&gt;code&lt;/strong&gt; to do this! How?&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#enter-abstract-syntax-trees-asts"&gt;
-  &lt;/a&gt;
-  Enter: Abstract Syntax Trees (ASTs)
-&lt;/h2&gt;
-
-&lt;p&gt;An AST is a data structure that encodes abstract information about a piece of code.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--RV5yTobJ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/99b0l2z3twokjltcegwa.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--RV5yTobJ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/99b0l2z3twokjltcegwa.png" alt="an AST object of the above code" width="880" height="485"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;em&gt;This one is specifically for the above sample code declaring &lt;code&gt;function foo(bool)&lt;/code&gt;.&lt;/em&gt;&lt;/p&gt;
-
-&lt;p&gt;An AST is a "tree", which is a kind of graph. And a graph is a very useful type of data structure, ubiquitous in software engineering. In order to understand ASTs we have to understand graphs. &lt;em&gt;(You can also skip ahead to learn more about &lt;a href="#ASTs"&gt;ASTs&lt;/a&gt; or look at these tools to &lt;a href="#tools"&gt;make and use an AST&lt;/a&gt; yourself.)&lt;/em&gt;&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#how-do-graphs-work"&gt;
-  &lt;/a&gt;
-  How Do Graphs Work?
-&lt;/h2&gt;
-
-&lt;p&gt;Graphs consist of "nodes" and "edges", and can be represented by (often nested) objects or arrays. A graph can mix objects and arrays as well, nesting one kind within the other to whatever degree of complexity.&lt;/p&gt;
-
-&lt;p&gt;Each node and edge can contain information. You can travel from one node to another via the edge between them. Edges have direction as well. Here's a simple graph connecting node A to node B:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--JJochMQz--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/jmek3jl2ome6q4u6di4w.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--JJochMQz--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/jmek3jl2ome6q4u6di4w.png" alt="Simple graph showing A to B" width="734" height="274"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;At a very basic level, if you were to write this in Javascript, it could look like this:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;[ ["A", ["B"] ], [ "B", [] ] ]
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;or&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;{ 
-   A: { value: data_set1, children: ["B"] }, 
-   B: { value: data_set2, children: [] }
-}
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;You can flip the direction&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--1bJ9WlaY--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/8h2ybtaok1zyly9arp8g.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--1bJ9WlaY--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/8h2ybtaok1zyly9arp8g.png" alt="Simple graph showing B to A" width="724" height="256"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Resulting in code like this:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;[ ["A", [] ], [ "B", ["A"] ] ]
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;or this&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;{ 
-   A: { value: data_set1, children: [] }, 
-   B: { value: data_set2, children: ["A"] }
-}
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;And you can make the edge bidirectional, usually represented with a plain line with no arrows.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--VCVfI_0J--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/eyfw9nvrc10ygznonowq.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--VCVfI_0J--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/eyfw9nvrc10ygznonowq.png" alt="Simple graph showing a bidirectional relationship between A and B" width="718" height="230"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;With code that does something like this&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;[ ["A", ["B"] ], [ "B", ["A"] ] ]
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;or this&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;{ 
-   A: { value: data_set1, children: ["B"] }, 
-   B: { value: data_set2, children: ["A"] }
-}
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;These are simple examples, and in practice graphs can encode large amounts of data. Google displays search results with the help of a &lt;a href="https://en.wikipedia.org/wiki/PageRank"&gt;page rank&lt;/a&gt; graph, for example. This is a simplified representation of one:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--aaWSE34i--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/d9hqfj7k3f4cw6dt6x3u.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--aaWSE34i--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/d9hqfj7k3f4cw6dt6x3u.png" alt="Simplified rank graph example" width="880" height="710"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Graphs can also have certain constraints. We can say: "The graph will start with exactly one node and every node except the first will have exactly one parent. Nodes can have multiple children though."&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--7FK5rZZi--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/d4gzvq8vsglgz9d5yw0q.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--7FK5rZZi--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/d4gzvq8vsglgz9d5yw0q.png" alt="image of a tree data structure" width="880" height="1003"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;This is an example of one kind of tree. In general, a tree branches out. Every node after the first (root node) has exactly one parent. Trees are hierarchical and do not contain loops. &lt;em&gt;(Graphs can have loops, and do not necessarily have a root node.)&lt;/em&gt;&lt;/p&gt;
-
-&lt;p&gt;But for now we'll focus on trees. Because when we build an AST, we take abstract syntactical data from code and encode it into a tree.&lt;br&gt;
-&lt;span id="ASTs"&gt;&lt;/span&gt;&lt;/p&gt;
-&lt;h2&gt;
-  &lt;a href="#ast-design-standards-amp-traversal-functions"&gt;
-  &lt;/a&gt;
-  AST Design Standards &amp;amp; Traversal Functions
-&lt;/h2&gt;
-
-&lt;p&gt;Because ASTs are often used in the process of compiling code (which happens &lt;em&gt;all&lt;/em&gt; the time - every time you try to run &lt;em&gt;any&lt;/em&gt; code), AST design standards are fairly robust. Compilers (and interpreters) essentially take the code we write (in Javascript, Python, Ruby, or C++) and turn it into machine-language instructions that a computer's CPU can run.&lt;/p&gt;
-
-&lt;p&gt;AST design standards include:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;variables (and their declaration locations in the source code) must be preserved&lt;/li&gt;
-&lt;li&gt;the order in which statements get executed is well defined and preserved&lt;/li&gt;
-&lt;li&gt;in the case of binary operations, left and right positioning is preserved&lt;/li&gt;
-&lt;li&gt;identifiers and their values are stored&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;It should be possible to &lt;em&gt;unparse&lt;/em&gt; an AST object into something very similar to its original code, using a code generator. And the resulting code should definitely &lt;em&gt;function&lt;/em&gt; exactly the same as the original code.&lt;/p&gt;
-
-&lt;p&gt;For example, using an AST like this ...&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--BMHJLBzd--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/uqij99vqzf9ww5193cks.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--BMHJLBzd--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/uqij99vqzf9ww5193cks.png" alt="representation of generalized AST as graph showing the kinds of information each node and edge contain" width="880" height="993"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;We could rebuild code that would look something like this:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;function euclid(a,b) {
-   while (b !== 0) {
-      if (a &amp;gt; b) { a = a - b; } 
-      else { b = b - a; }
-   } 
-   return a;
-}
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;So we can take a piece of code, turn it into an AST, and eventually turn that back into code. But wait ... there's more: The function we use to step through the AST (called an AST traversal function) is intelligent enough to make sense of the semantic encodings and help us do useful things with that information. &lt;/p&gt;
-
-&lt;p&gt;We can use an AST traversal function to walk along the structure to discover "dead branches" (pieces of code that will never run), syntax errors (e.g. missing curly braces), or untyped variables (as in TypeScript).&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#tree-shaking-amp-more"&gt;
-  &lt;/a&gt;
-  Tree Shaking &amp;amp; More
-&lt;/h2&gt;
-
-&lt;p&gt;Tree shaking refers to dead-code elimination in Javascript. In order to tree shake, we would combine the use of an AST and an AST traversal function to find which "branches" of code are "dead". This is how VS Code grays out unused lines of code. Tree shaking then eliminates those unused lines of code, for a cleaner, leaner code base.&lt;/p&gt;
-
-&lt;p&gt;When a code base is sufficiently large, dead-code elimination is necessary. Dead ends become dead weight, potentially causing worse performance if the product is shipped and bloated code in much need of pruning. &lt;em&gt;(Amusingly, that's not a pun. That's what they call it! I came across many articles on tree pruning in writing this post though.)&lt;/em&gt; &lt;/p&gt;
-
-&lt;p&gt;There's incentive on both ends, as &lt;em&gt;wet&lt;/em&gt; code is more confusing for developers as well.&lt;/p&gt;
-
-&lt;p&gt;The same traversal function can find and flag errors (e.g. missing close bracket, or missing function name) in code editors. It can also, interestingly, help us inject our own code into a given chunk of code according to preset rules if we wanted. (More about this in the follow up below.)&lt;br&gt;
-&lt;span id="tools"&gt;&lt;/span&gt;&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#tools-to-make-and-use-an-ast"&gt;
-  &lt;/a&gt;
-  Tools To Make And Use An AST
-&lt;/h2&gt;
-
-&lt;p&gt;Create an AST: &lt;a href="https://esprima.org/"&gt;Esprima&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Traverse that AST and replace or inject code: &lt;a href="https://github.com/estools/estraverse"&gt;Extraverse&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Unparse the modified AST back into Javascript: &lt;a href="https://github.com/estools/escodegen"&gt;Escodegen&lt;/a&gt;&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#asts-vs-cpts"&gt;
-  &lt;/a&gt;
-  ASTs vs CPTs
-&lt;/h2&gt;
-
-&lt;p&gt;I mentioned earlier that ASTs are used in the process of compiling or interpreting. There is an alternative: Concrete Parse Tree. Unlike ASTs, CPTs include much more granular (potentially unnecessary) information. ASTs can omit some syntactic information like grouping parentheses, because of the way in which the structure of an AST already encodes that information. &lt;/p&gt;
-
-&lt;p&gt;CSTs are much bigger than ASTs. But the tradeoff is that they can aid in more &lt;em&gt;efficient&lt;/em&gt; compiling. In practice, both are used.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#follow-up"&gt;
-  &lt;/a&gt;
-  Follow Up
-&lt;/h2&gt;
-
-&lt;p&gt;My fascination with ASTs was inspired by an app I'm working on: a Big O (time complexity) calculator.&lt;/p&gt;
-
-&lt;p&gt;In my research on Big O approximation, I found that most tools calculate the &lt;strong&gt;amount of time&lt;/strong&gt; a machine takes to run a function on different sized data sets. They use the resulting amounts of time to determine whether the rate of growth of time is sublinear, linear, exponential, etc.&lt;/p&gt;
-
-&lt;p&gt;I hope to create a tool that will count the &lt;strong&gt;number of actions&lt;/strong&gt; taken (rather than the amount of time for a specific machine), so that for any snippet of code I can point to the most costly lines and indicate how many times they ran. This can help students learn Big O with a more concrete understanding of what's happening with their code.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#the-halting-problem"&gt;
-  &lt;/a&gt;
-  The Halting Problem
-&lt;/h3&gt;
-
-&lt;p&gt;Slightly outside the scope of this article, but cool enough to include: In 1936, Alan Turing (pictured at age 16, below) proved that it is impossible to write code that can examine another piece of code and its input, and tell whether or not it will ever terminate. This is called the &lt;a href="https://en.wikipedia.org/wiki/Halting_problem"&gt;halting problem&lt;/a&gt;.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--uf47Y9jO--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ve3gu6l2mnpib5gsobex.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--uf47Y9jO--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ve3gu6l2mnpib5gsobex.png" alt="Alan Turing, age 16" width="880" height="753"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;For this reason, code entered into the Big O calculator can run too long in an infinite loop, and lock up a user's computer. I plan to bake in a fail-safe for that.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#well-see-whats-possible"&gt;
-  &lt;/a&gt;
-  We'll See What's Possible
-&lt;/h3&gt;
-
-&lt;p&gt;I'd eventually like to expand the project into a more comprehensive teaching tool. For now, I've scoped the project to the calculator to see if it's viable.&lt;/p&gt;
-
-</description>
-      <category>javascript</category>
-      <category>vscode</category>
-      <category>webdev</category>
-      <category>beginners</category>
-    </item>
-    <item>
-      <title> 🇧🇷 Guia de Estilos para TypeScript 🎨</title>
-      <author>Luís Von Muller</author>
-      <pubDate>Wed, 17 Nov 2021 20:58:22 +0000</pubDate>
-      <link>https://dev.to/luisvonmuller/guia-de-estilos-para-typescript-2ahb</link>
-      <guid>https://dev.to/luisvonmuller/guia-de-estilos-para-typescript-2ahb</guid>
-      <description>&lt;p&gt;🔥 Este é um &lt;strong&gt;Guia não oficial&lt;/strong&gt; e você pode opinar através do repositório de GitHub para juntos chegarmos a melhor definição do Ideal! &lt;strong&gt;Vamos colaborar? 💪&lt;/strong&gt;&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#navega%C3%A7%C3%A3o-por-t%C3%B3pico-facilitada"&gt;
-  &lt;/a&gt;
-  👉 Navegação por tópico facilitada!
-&lt;/h2&gt;
-
-&lt;ul&gt;
-&lt;li&gt;&lt;a href="//./#variaveis-e-funcoes"&gt;⭐️ Variáveis &amp;amp; Funções&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="//./#class"&gt;📦 Classes&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="//./#interfaces"&gt;🔌 Interfaces&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="//./#tipos"&gt;🌟 Tipos&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="//./#namespaces"&gt;😳 Namespaces&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="//./#enum"&gt;🔢 Enum&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;
-&lt;a href="//./#null-vs-undefined"&gt;📭 null vs  😱 undefined&lt;/a&gt;
-&lt;/li&gt;
-&lt;li&gt;&lt;a href="//./#formatacao"&gt;📑 Formatação&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="//./#sobre-aspas..."&gt;🤔 Aspas simples vs Aspas Duplas&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;
-&lt;a href="//./#ponto-and-virgula"&gt;⚙️ Uso de ponto e vírgula ao final de linhas &lt;strong&gt;" ; "&lt;/strong&gt;&lt;/a&gt;****&lt;/li&gt;
-&lt;li&gt;&lt;a href="//./#sugestao-para-boa-nomeacao-de-arquivos."&gt;📂 Uma sugestão para uma boa nomeação de Arquivos&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="//./#tipo-ou-interface"&gt;🤨 Tipo vs Interface&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="//./#anotacao-do-tipo-array"&gt;👯‍♀️ Anotação de Tipos para Array&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="//./#comparadores-e"&gt;⚠️ Comparadores, "==" vs "==="&lt;/a&gt;&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h2&gt;
-  &lt;a href="#%EF%B8%8F%E2%80%8B-vari%C3%A1veis-e-fun%C3%A7%C3%B5es"&gt;
-  &lt;/a&gt;
-  ⭐️​ Variáveis e Funções:
-&lt;/h2&gt;
-
-&lt;p&gt;Use &lt;em&gt;&lt;strong&gt;camelCase&lt;/strong&gt;&lt;/em&gt; para nomear variáveis e funções&lt;/p&gt;
-
-&lt;h4&gt;
-  &lt;a href="#m%C3%A1-nomenclatura"&gt;
-  &lt;/a&gt;
-   Má nomenclatura 🚫
-&lt;/h4&gt;
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;FulanoVariavel&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;string&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Aqui está errado.. ( ఠ ͟ʖ ఠ )&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;CiclanoFuncao&lt;/span&gt;&lt;span class="p"&gt;(){}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h4&gt;
-  &lt;a href="#boa-nomenclatura-%E2%80%8B"&gt;
-  &lt;/a&gt;
-  Boa nomenclatura ✅​ 
-&lt;/h4&gt;
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;fulanoVariavel&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;string&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Aqui está daora! (✿◠‿◠)&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;ciclanoFuncao&lt;/span&gt;&lt;span class="p"&gt;(){}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#class"&gt;
-  &lt;/a&gt;
-  📦 Class
-&lt;/h2&gt;
-
-&lt;p&gt;Use &lt;em&gt;&lt;strong&gt;PascalCase&lt;/strong&gt;&lt;/em&gt; para nomear suas classes! (Ou use programação funcional 👀)&lt;/p&gt;
-
-&lt;h4&gt;
-  &lt;a href="#m%C3%A1-nomenclatura"&gt;
-  &lt;/a&gt;
-   Má nomenclatura 🚫
-&lt;/h4&gt;
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="kd"&gt;class&lt;/span&gt; &lt;span class="nx"&gt;fulano&lt;/span&gt; &lt;span class="p"&gt;{}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h4&gt;
-  &lt;a href="#boa-nomenclatura-%E2%80%8B"&gt;
-  &lt;/a&gt;
-  Boa nomenclatura ✅​ 
-&lt;/h4&gt;
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="kd"&gt;class&lt;/span&gt; &lt;span class="nx"&gt;Fulano&lt;/span&gt; &lt;span class="p"&gt;{}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Use &lt;em&gt;&lt;strong&gt;camelCase&lt;/strong&gt;&lt;/em&gt; para as propriedades e métodos de suas classes! 🔥&lt;/p&gt;
-
-&lt;h4&gt;
-  &lt;a href="#m%C3%A1-nomenclatura"&gt;
-  &lt;/a&gt;
-  Má nomenclatura 🚫
-&lt;/h4&gt;
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="kd"&gt;class&lt;/span&gt; &lt;span class="nx"&gt;fulano&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;DeTal&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;string&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; 
-    &lt;span class="nx"&gt;Ciclano&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt; &lt;span class="p"&gt;){&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt; 
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h4&gt;
-  &lt;a href="#boa-nomenclatura-%E2%80%8B"&gt;
-  &lt;/a&gt;
-  Boa nomenclatura ✅​ 
-&lt;/h4&gt;
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="kd"&gt;class&lt;/span&gt; &lt;span class="nx"&gt;Fulano&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nl"&gt;deTal&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;string&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; 
-    &lt;span class="nx"&gt;ciclano&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt; &lt;span class="p"&gt;){&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt; 
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#%E2%80%8B-interfaces"&gt;
-  &lt;/a&gt;
-  🔌​ Interfaces:
-&lt;/h2&gt;
-
-&lt;p&gt;Use &lt;em&gt;&lt;strong&gt;PascalCase&lt;/strong&gt;&lt;/em&gt; para nomear a Interface ⚙️&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Use &lt;em&gt;&lt;strong&gt;camelCase&lt;/strong&gt;&lt;/em&gt; para nomear seus membros 🥰&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;Não use o Prefixo "I", exemplo: IfuncaoFulano... 😡 &lt;/p&gt;
-
-&lt;h4&gt;
-  &lt;a href="#m%C3%A1-nomenclatura"&gt;
-  &lt;/a&gt;
-   Má nomenclatura 🚫
-&lt;/h4&gt;
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="kr"&gt;interface&lt;/span&gt; &lt;span class="nx"&gt;IFulano&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; 
-    &lt;span class="nl"&gt;DeTal&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;string&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt; 
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h4&gt;
-  &lt;a href="#boa-nomenclatura-%E2%80%8B"&gt;
-  &lt;/a&gt;
-  Boa nomenclatura ✅​ 
-&lt;/h4&gt;
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="kr"&gt;interface&lt;/span&gt; &lt;span class="nx"&gt;Fulano&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; 
-    &lt;span class="nl"&gt;deTal&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;string&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt; 
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#tipos"&gt;
-  &lt;/a&gt;
-  🌟 Tipos 
-&lt;/h2&gt;
-
-&lt;p&gt;Use &lt;em&gt;&lt;strong&gt;PascalCase&lt;/strong&gt;&lt;/em&gt; para nomear o seu Tipo ⚙️&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Use &lt;em&gt;&lt;strong&gt;camelCase&lt;/strong&gt;&lt;/em&gt; para nomear as propriedades do seu tipo! 🥰&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h4&gt;
-  &lt;a href="#m%C3%A1-nomenclatura"&gt;
-  &lt;/a&gt;
-   Má nomenclatura 🚫
-&lt;/h4&gt;
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="kd"&gt;type&lt;/span&gt; &lt;span class="nx"&gt;fulano&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="na"&gt;DeTal&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;string&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h4&gt;
-  &lt;a href="#boa-nomenclatura-%E2%80%8B"&gt;
-  &lt;/a&gt;
-  Boa nomenclatura ✅​ 
-&lt;/h4&gt;
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="kd"&gt;type&lt;/span&gt; &lt;span class="nx"&gt;Fulano&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="na"&gt;deTal&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;string&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#namespaces"&gt;
-  &lt;/a&gt;
-  😳 Namespaces 
-&lt;/h2&gt;
-
-&lt;p&gt;Use*&lt;em&gt;&lt;code&gt;PascalCase&lt;/code&gt;&lt;/em&gt;*&lt;code&gt;para nomear os "Namespaces" - ⭐️ Padrão do time do TS.&lt;/code&gt;&lt;/p&gt;
-
-&lt;h4&gt;
-  &lt;a href="#m%C3%A1-nomenclatura"&gt;
-  &lt;/a&gt;
-  Má nomenclatura 🚫
-&lt;/h4&gt;
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="k"&gt;namespace&lt;/span&gt; &lt;span class="nx"&gt;fulanoDeTal&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h4&gt;
-  &lt;a href="#boa-nomenclatura-%E2%80%8B"&gt;
-  &lt;/a&gt;
-  Boa nomenclatura ✅​ 
-&lt;/h4&gt;
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="k"&gt;namespace&lt;/span&gt; &lt;span class="nx"&gt;FulanoDeTal&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#enum"&gt;
-  &lt;/a&gt;
-  🔢 Enum 
-&lt;/h2&gt;
-
-&lt;p&gt;Use_&lt;strong&gt;&lt;code&gt;PascalCase&lt;/code&gt;&lt;/strong&gt;_&lt;code&gt;para nomear os Enums.&lt;/code&gt;&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Use &lt;em&gt;&lt;strong&gt;&lt;code&gt;PascalCase&lt;/code&gt;&lt;/strong&gt;&lt;/em&gt;&lt;code&gt;para nomear seus subtipos/valores.&lt;/code&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h4&gt;
-  &lt;a href="#m%C3%A1-nomenclatura"&gt;
-  &lt;/a&gt;
-  Má nomenclatura 🚫
-&lt;/h4&gt;
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="kr"&gt;enum&lt;/span&gt; &lt;span class="nx"&gt;jogodoBicho&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nx"&gt;avestruz&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="nx"&gt;borboleta&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="nx"&gt;cachorro&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="c1"&gt;// Não há endosso do Jogo do Bicho. Apenas é algo contextual que todo Brasileiro entenderia.&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h4&gt;
-  &lt;a href="#boa-nomenclatura-%E2%80%8B"&gt;
-  &lt;/a&gt;
-  Boa nomenclatura ✅​ 
-&lt;/h4&gt;
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="kr"&gt;enum&lt;/span&gt; &lt;span class="nx"&gt;JogoDoBicho&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nx"&gt;Avestruz&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="nx"&gt;Borboleta&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="nx"&gt;Cachorro&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="c1"&gt;// Não há endosso do Jogo do Bicho. Apenas é algo contextual que todo Brasileiro entenderia.&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#null-vs-undefined"&gt;
-  &lt;/a&gt;
-  😅 Null vs Undefined 👀
-&lt;/h2&gt;
-
-&lt;p&gt;Tente não usar nenhum deles para indisponibilidade explícita! ⭐️&lt;/p&gt;
-
-&lt;h4&gt;
-  &lt;a href="#mal-caso-de-uso"&gt;
-  &lt;/a&gt;
-  Mal caso de uso 🚫
-&lt;/h4&gt;
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;pontos&lt;/span&gt; &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nl"&gt;x&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;number&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;y&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;number&lt;/span&gt; &lt;span class="o"&gt;|&lt;/span&gt; &lt;span class="kc"&gt;null&lt;/span&gt; &lt;span class="o"&gt;|&lt;/span&gt; &lt;span class="kc"&gt;undefined&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;  &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="na"&gt;x&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="na"&gt;y&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kc"&gt;undefined&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; 
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h4&gt;
-  &lt;a href="#bom-caso-de-uso-%E2%80%8B"&gt;
-  &lt;/a&gt;
-  Bom caso de uso  ✅​ 
-&lt;/h4&gt;
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;pontos&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nl"&gt;x&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;number&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;y&lt;/span&gt;&lt;span class="p"&gt;?:&lt;/span&gt; &lt;span class="kr"&gt;number&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;x&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="mi"&gt;777&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="c1"&gt;//  &lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Em suma: Precisa informar que uma propriedade é pode ser "indefinida"? Use o operador "?" antecedendo o seu tipo! 🥰&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#retorno-de-fun%C3%A7%C3%B5es"&gt;
-  &lt;/a&gt;
-  👉 Retorno de funções? 🤔
-&lt;/h3&gt;
-
-&lt;p&gt;Mal caso de uso 🚫&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="kc"&gt;null&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Bom caso de uso  ✅​ &lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="kc"&gt;undefined&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Por quê? Sugiro você consultar a página Sobre False, True, Truthy &amp;amp; Falsy. 🥰&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#%E2%80%8B-callbacks"&gt;
-  &lt;/a&gt;
-  🤨​ Callbacks?
-&lt;/h3&gt;
-
-&lt;p&gt;Use &lt;em&gt;&lt;strong&gt;null&lt;/strong&gt;&lt;/em&gt; quando for parte da API ou de sua convenção usar. &lt;/p&gt;
-
-&lt;p&gt;É quase em um consenso em Node.js, por exemplo: &lt;strong&gt;&lt;code&gt;error&lt;/code&gt;&lt;/strong&gt; é &lt;strong&gt;&lt;code&gt;null&lt;/code&gt;&lt;/strong&gt;&lt;code&gt;em chamadas do&lt;/code&gt; &lt;em&gt;&lt;strong&gt;NodeBack.&lt;/strong&gt;&lt;/em&gt;&lt;/p&gt;
-
-&lt;p&gt;Mal caso de uso 🚫&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="nx"&gt;callbackDeAlgo&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kc"&gt;undefined&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Bom caso de uso  ✅​ &lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="nx"&gt;callbackDeAlgo&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kc"&gt;null&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h3&gt;
-  &lt;a href="#e-como-verificar-isso-a%C3%AD"&gt;
-  &lt;/a&gt;
-  E como verificar isso aí? 😅
-&lt;/h3&gt;
-
-&lt;p&gt;Cheque por  "Truthy" em objetos sendo &lt;strong&gt;null&lt;/strong&gt; ou &lt;strong&gt;undefined&lt;/strong&gt;.&lt;/p&gt;
-
-&lt;p&gt;Mal caso de uso 🚫&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt; &lt;span class="o"&gt;===&lt;/span&gt; &lt;span class="kc"&gt;null&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;// e se for undefined? &lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Bom caso de uso  ✅​ &lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;// é Válido tanto para undefined quanto para o null&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h3&gt;
-  &lt;a href="#um-exemplo-um-pouco-mais-completo-sobre-verifica%C3%A7%C3%A3o"&gt;
-  &lt;/a&gt;
-  👉 Um exemplo um pouco mais completo sobre verificação 🔥
-&lt;/h3&gt;
-
-&lt;p&gt;Use "==" null ou "!=" null. Não use "===" ou "!==" para checar por null ou undefined quando querendo verificar tipos primitivos porque funciona apenas nos tipos primitivos supracitados e não para valores "Falseáveis", como por exemplo: 0, false, etc. &lt;/p&gt;
-
-&lt;p&gt;Mal caso de uso 🚫&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt; &lt;span class="o"&gt;!==&lt;/span&gt; &lt;span class="kc"&gt;null&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;// Não garante que seja apenas nullo. Pode ser um valor Falseável.&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Bom caso de uso  ✅​ &lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt; &lt;span class="o"&gt;!=&lt;/span&gt; &lt;span class="kc"&gt;null&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;// Garante que é um valor de tipo primitivo (ou seja, null ou undefined mas não falsy).&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#formata%C3%A7%C3%A3o"&gt;
-  &lt;/a&gt;
-  📑 Formatação
-&lt;/h2&gt;
-
-&lt;p&gt;O Compilador do &lt;em&gt;&lt;strong&gt;TypeScript&lt;/strong&gt;&lt;/em&gt; já fornece um bom serviço de formatação estrutural, o que já é bom o suficiente para diminuir o esforço mental do desenvolvedor (ou do time). Todavia, você também pode usar o &lt;strong&gt;tsfmt&lt;/strong&gt; no terminal (linha de comando para formatar seu código) - e também está disponível como plugin para várias &lt;strong&gt;IDES (vscode, etc).&lt;/strong&gt; &lt;/p&gt;
-
-&lt;p&gt;👉 Só um exemplo que eu acho pertinente, ou melhor, uma boa prática:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;fulano&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;string&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Ciclano&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;No caso, usamos um espaço depois da definição do tipo... &lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;
-let variavel:(espaço)tipo(espaço)=(espaço)valor(ponto e virgula)
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h2&gt;
-  &lt;a href="#sobre-aspas"&gt;
-  &lt;/a&gt;
-  💬 Sobre Aspas...
-&lt;/h2&gt;
-
-&lt;p&gt;Prefira usar aspas simples (single quotes) ao invés de aspas duplas.&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Times grandes que usam JS/TS o fazem. É uma convenção quasae que de mercado, também é o sugerido pelo time do "Prettier".
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;nomeDoSujeito&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;string&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Luís Von Müller&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Todavia, muita vezes em inglês precisamos usar o a single quote para conjugar um verbo: "I'm"&lt;/p&gt;
-
-&lt;p&gt;Se a aspas simples não lhe cabe. Use então "`" &lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Faça o uso do string template do JS ao invés de concatenar variáveis strings através var + "..."  + var2.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;&lt;code&gt;&lt;/code&gt;&lt;code&gt;typescript&lt;br&gt;
-let nomeDoSujeito: string = 'Luís Von Müller';&lt;br&gt;
-console.log(&lt;/code&gt;Quem escreveu? ${nomeDoSujeito}&lt;code&gt;)&lt;br&gt;
-&lt;/code&gt;&lt;code&gt;&lt;/code&gt;&lt;/p&gt;
-
-&lt;p&gt;Sobre outras coisas como usar "tabs" ou espaço. O sugerido para JS é 2 espaços (e muitas companias como Facebook, Airbnb, google seguem esse padrão. Mas o time do TS usa 4 e o do VScode também 😅. Isso é variável e de gosto muito mais pessoal ou convenção própria e do teu time 🥰&lt;/p&gt;
-
-&lt;p&gt;&lt;em&gt;(Mas eu uso tabs configuradas como 4 espaços)&lt;/em&gt; 🤗&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#%E2%80%8B-ponto-amp-v%C3%ADrgula"&gt;
-  &lt;/a&gt;
-  ⚙️​ Ponto &amp;amp; Vírgula;
-&lt;/h2&gt;
-
-&lt;p&gt;Use o ponto e vírgula, por quê? &lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Pontos e vírgulas explícitos ajudam os identadores (tsfmt/prettier) a identificar e "estruturar" seu código. &lt;/li&gt;
-&lt;li&gt;A falta de ponto e vírgula pode ser incômodo para novos desenvolvedores em TS. Já que a maioria das linguagens o implementa. (Houve um debate sobre como isso pode ser "incomodo" para novos desenvolvedores e outros. &lt;a href="https://github.com/tc39/ecma262/pull/1062"&gt;https://github.com/tc39/ecma262/pull/1062&lt;/a&gt;)&lt;/li&gt;
-&lt;li&gt;Empresas grandes usam em suas implementações, ex: Google/Angular - Facebook/React - Microsoft/VScode...&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h2&gt;
-  &lt;a href="#%F0%9F%97%82-sugest%C3%A3o-para-boa-nomea%C3%A7%C3%A3o-de-arquivos"&gt;
-  &lt;/a&gt;
-  🗂 Sugestão para boa nomeação de arquivos.
-&lt;/h2&gt;
-
-&lt;p&gt;Essa aqui é uma baita de uma discussão, depende muito do que ambiente você está e se você está seguindo o padrão de nomeação de um framework, ex: React para Componentes. Mas no geral o que a maioria dos times usa é o seguinte: &lt;/p&gt;
-
-&lt;p&gt;Use &lt;em&gt;&lt;strong&gt;camelCase para nomear seus arquivos, exemplo:&lt;/strong&gt;&lt;/em&gt;&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;utils.ts&lt;/li&gt;
-&lt;li&gt;helpersDaora.ts&lt;/li&gt;
-&lt;li&gt;mapeamentoEndPointsDaApi.ts&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h2&gt;
-  &lt;a href="#%E2%80%8B-tipo-ou-interface"&gt;
-  &lt;/a&gt;
-  🤨​ Tipo ou Interface?
-&lt;/h2&gt;
-
-&lt;p&gt;Tipos devem ser usados para definir, adivinha? Tipos. Ou seja, se você tem uma função, ela retorna um valor. E esse valor possui um tipo. Mas essa função, também recebe algo. E esse algo, também são valores, ou seja, também podem ser tipos. Mas a "meta" ideia é que interface forneça uma interface 😅.  Eu acho que esse exemplo clarifica...&lt;/p&gt;
-
-&lt;p&gt;Quando usar qual?&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Tipos: Precisa de União ou Interseção de tipos (e provavelmente você vai preferir Tipos também se quiser implementar alguns tipos de mapeamentos Genéricos de objetos).&lt;/li&gt;
-&lt;li&gt;Interfaces: quando você precisa dizer que algo "implements" ou "extends", como por exemplo uma classe, para receber argumentos em uma função, ou até mesmo para quando você tá querendo criar alguma função extremamente composta bem maneira 👏. &lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;😅 Ou do jeito que você se sentir mais confortável e seguro para a implementação que está fazendo! 👀&lt;/p&gt;
-
-&lt;p&gt;Aqui em baixo, eu poderia definir a função de outra maneira, optei por essa.&lt;/p&gt;
-
-&lt;p&gt;&lt;code&gt;&lt;/code&gt;`typescript&lt;br&gt;
-/** Definimos a interface (ou contrato) de uso da função */&lt;br&gt;
-interface DizerOi {&lt;br&gt;
-    nome: string;&lt;br&gt;
-    sobrenome?: string;&lt;br&gt;
-}&lt;/p&gt;
-
-&lt;p&gt;/**  Definimos que o tipo de retorno da função como uma Array de Strings */&lt;br&gt;
-type DisseOi = string[];&lt;/p&gt;
-
-&lt;p&gt;/** Vamos dizer oi 10x! e retornar um array! */&lt;br&gt;
-const dizerOi = ({nome, sobrenome}: DizerOi): DisseOi =&amp;gt; {&lt;br&gt;
-    return [...Array(10).keys()].map((key) =&amp;gt; {&lt;br&gt;
-        return &lt;code&gt;Olá ${nome} ${sobrenome ?? ''}&lt;/code&gt;;&lt;br&gt;
-    })&lt;br&gt;
-} &lt;/p&gt;
-
-&lt;p&gt;console.log(dizerOi({nome: 'Luís'}));&lt;br&gt;
-`&lt;code&gt;&lt;/code&gt;&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#anota%C3%A7%C3%A3o-do-tipo-array"&gt;
-  &lt;/a&gt;
-  👯‍♀️ Anotação do tipo Array 👯‍♂️
-&lt;/h2&gt;
-
-&lt;p&gt;Use tipo[] ao invés de Array&amp;lt;tipo&amp;gt;&lt;/p&gt;
-
-&lt;p&gt;Mal caso de uso 🚫&lt;/p&gt;
-
-&lt;p&gt;&lt;code&gt;&lt;/code&gt;&lt;code&gt;typescript&lt;br&gt;
-let variosNumeros: Array&amp;lt;number&amp;gt; = [1,2,3,4,5,6,7];&lt;br&gt;
-&lt;/code&gt;&lt;code&gt;&lt;/code&gt;&lt;/p&gt;
-
-&lt;h4&gt;
-  &lt;a href="#bom-caso-de-uso-%E2%80%8B"&gt;
-  &lt;/a&gt;
-  Bom caso de uso  ✅​ 
-&lt;/h4&gt;
-
-&lt;p&gt;&lt;code&gt;&lt;/code&gt;&lt;code&gt;typescript&lt;br&gt;
-let variosNumeros: number[] = [1,2,3,4,5,6,7];&lt;br&gt;
-&lt;/code&gt;&lt;code&gt;&lt;/code&gt;&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#%E2%80%8B-comparadores-e-"&gt;
-  &lt;/a&gt;
-  ⚠️​ Comparadores "===" e "=="
-&lt;/h2&gt;
-
-&lt;h4&gt;
-  &lt;a href="#%E2%80%8B-relaxa-amigo-voc%C3%AA-t%C3%A1-usando-typescript-pode-usar-tranquilamente"&gt;
-  &lt;/a&gt;
-  😴​  Relaxa amigo! Você tá usando TypeScript. Pode usar "===" tranquilamente!
-&lt;/h4&gt;
-
-&lt;h3&gt;
-  &lt;a href="#obrigado-por-ler-at%C3%A9-aqui"&gt;
-  &lt;/a&gt;
-  🥰 Obrigado por ler até aqui!
-&lt;/h3&gt;
-
-</description>
-      <category>javascript</category>
-      <category>webdev</category>
-      <category>typescript</category>
-      <category>braziliandevs</category>
-    </item>
-    <item>
-      <title>Hacktoberfest 2021: through the eyes of a beginner</title>
-      <author>aisha</author>
-      <pubDate>Wed, 17 Nov 2021 20:41:11 +0000</pubDate>
-      <link>https://dev.to/wasp_x/hacktoberfest-2021-through-the-eyes-of-a-beginner-16n4</link>
-      <guid>https://dev.to/wasp_x/hacktoberfest-2021-through-the-eyes-of-a-beginner-16n4</guid>
-      <description>&lt;p&gt;&lt;strong&gt;Hacktoberfest&lt;/strong&gt; is a month-long celebration of open source software run by DigitalOcean. It's a great opportunity for both beginners and professionals to get started with open-source contribution.&lt;/p&gt;
-
-&lt;p&gt;I feel extremely proud to have successfully completed Hacktoberfest 2021 with a total of 5 merged pull requests on GitHub under my belt. This was also my first time contributing to open-source and it was an amazing experience. In this article, I'll be briefly talking my personal journey throughout Hacktoberfest, how to make your first contribution and also some do's and don'ts for beginners who want to start with open-source.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#hacktoberfest-through-the-eyes-of-a-beginner"&gt;
-  &lt;/a&gt;
-  Hacktoberfest through the eyes of a beginner
-&lt;/h2&gt;
-
-&lt;p&gt;Believe me when I say this, I had absolutely no knowledge about open-source or even GitHub before participating in Hacktoberfest. And my techstack consisted of only HTML/CSS and a little bit of JavaScript. I think it's safe to say that it was all a little overwhelming for a complete beginner like me.&lt;br&gt;
-But with the guidance of the coordinators and the Hacktoberfest mentors and my peers, I was able to make my first contribution successfully.&lt;br&gt;
-The requirements to complete Hacktoberfest is to submit a minimum of 4 valid pull requests in the month of October. If all pull requests get approved by maintainer and are merged into the repository, you will be eligible to receive the swag kit!&lt;br&gt;
-I'd fixed 3 syntax errors and re-designed 2 contact forms as part of my contributions this year which is a total of 5 valid pr's and as promised, my limited edition t-shirt is on its way!&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#dos-and-donts-while-making-your-first-contribution"&gt;
-  &lt;/a&gt;
-  Do's and Don'ts while making your first contribution
-&lt;/h2&gt;
-
-&lt;p&gt;Contributing to open-source can be confusing as a beginner. I personally made a lot of mistakes during Hacktoberfest 2021 even after doing so much research. Guess some things can only be learned from experience haha.&lt;br&gt;
-Here is a list of some do's don'ts which might be helpful to future contributors:&lt;/p&gt;
-
-&lt;ul&gt;DO's
-&lt;li&gt; Search for good and active repositories. Look for issues to fix or add your own section of code.
-&lt;/li&gt;
-&lt;li&gt; Always go through the ReadMe file. Maintainers often explain the process of contribution to their repo in their readme.md file.
-&lt;/li&gt;
-&lt;li&gt; Search for repositories with the &lt;code&gt;Hacktoberfest-accepted&lt;/code&gt; tag. Henceforth, you can look for repositories labelled with &lt;code&gt;good-first-issue&lt;/code&gt; for some beginner-friendly projects to contribute to.
-&lt;/li&gt;
-&lt;li&gt;** Do not limit yourself to only 4 pull requests, and try to make as many contributions as you can **
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;ul&gt;DON'TS
-&lt;li&gt; Do not make contributions to repositories instructing to add simple one-line commits. These repositories often get rejected.
-&lt;/li&gt;
-&lt;li&gt; Do not make contributions to repositories accepting basic Data Structure codes. This goes against the rules of Hacktoberfest and your pull request will be marked invalid.
-&lt;/li&gt;
-&lt;li&gt; **Keep track of your profile on the official Hacktoberfest website. It's good practice to be updated about your progress.** 
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;And that was all about my experience in contributing to open-source as a complete beginner. Feel free to reach out if you want to discuss more Hactoberfest or open-source, I love to interact with more developers. &lt;br&gt;
-You can also find me on &lt;a href="https://twitter.com/wasp_404"&gt;Twitter&lt;/a&gt;&lt;br&gt;
-&lt;em&gt;See you at Hacktoberfest next year!&lt;/em&gt;&lt;/p&gt;
-
-</description>
-      <category>hacktoberfest</category>
-      <category>opensource</category>
-      <category>github</category>
     </item>
   </channel>
 </rss>
