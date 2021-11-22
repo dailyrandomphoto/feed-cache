@@ -801,6 +801,73 @@ be useless.&lt;/p&gt;
       <category>product</category>
     </item>
     <item>
+      <title>Use docker image tagging to speedup the builds.</title>
+      <author>Ivan Starkov</author>
+      <pubDate>Mon, 22 Nov 2021 12:19:15 +0000</pubDate>
+      <link>https://dev.to/istarkov/use-docker-image-tagging-to-speedup-the-builds-3n4m</link>
+      <guid>https://dev.to/istarkov/use-docker-image-tagging-to-speedup-the-builds-3n4m</guid>
+      <description>&lt;p&gt;From the beginning, we did a review deployment of each commit of each pull requst.&lt;br&gt;
+Initially it was two builds/deploys and accordingly you could not think about caching.&lt;br&gt;
+Over 4 years this has grown to 15+ builds/deploys and only the build time has become 20+ minutes.&lt;/p&gt;
+
+&lt;p&gt;After some reading we came across docker buildx and decided to use the features it provides,&lt;br&gt;
+namely &lt;a href="https://docs.docker.com/engine/reference/commandline/buildx_build/#cache-from"&gt;cache-from&lt;/a&gt; and &lt;a href="https://docs.docker.com/engine/reference/commandline/buildx_build/#cache-to"&gt;cache-to&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Idea was to create some checksum for every subproject, then use that checksum for cache-from, cache-to source/destination.&lt;br&gt;
+Like it's described &lt;a href="https://cloud.google.com/build/docs/speeding-up-builds"&gt;here&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;In our case it worked but did not give a very significant advantage. Given the number of different builds, we got that the time to download all the cache was comparable to the build time.&lt;/p&gt;
+
+&lt;p&gt;Also having that we use yarn based monorepo to reuse docker layering we created internal &lt;code&gt;prune&lt;/code&gt; util which is not that simple and adds additional steps to the build. &lt;em&gt;(about prune you can read at amazing &lt;a href="https://turborepo.com/docs/reference/command-line-reference#turbo-prune---scopetarget"&gt;turborepo&lt;/a&gt;)&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;Our builds are very simple, +-fast and consist of one step, there are a lot of them and so we did not get the significant advantage we expected.&lt;/p&gt;
+
+&lt;p&gt;We decided not to use the cache, but to take advantage of the fact that a developer only works on one or two projects in one pull request. So we don't need to rebuild everything, but only the projects that have changed.&lt;/p&gt;
+
+&lt;p&gt;And thanks to docker it allowed to do everything we need.&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Single docker image can have mutiple tags.&lt;/li&gt;
+&lt;li&gt;We can add tag to docker image without pulling it and gcloud even have ready command for this &lt;a href="https://cloud.google.com/sdk/gcloud/reference/container/images/add-tag"&gt;gcloud container images add-tag&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;We already had workspace checksum util from our previous work iteration with cache layers.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Now in pseudocode our build process for each subproject on every commit (yarn workspace) looks like.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;CHECKSUM&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="si"&gt;$(&lt;/span&gt;generate-workspace-checksum &lt;span class="k"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;WORSPACE_NAME&lt;/span&gt;&lt;span class="k"&gt;}&lt;/span&gt;&lt;span class="si"&gt;)&lt;/span&gt;
+&lt;span class="k"&gt;if &lt;/span&gt;gcloud container images describe &lt;span class="k"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;IMAGE_NAME&lt;/span&gt;&lt;span class="k"&gt;}&lt;/span&gt;:&lt;span class="k"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;CHECKSUM&lt;/span&gt;&lt;span class="k"&gt;}&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; &lt;span class="k"&gt;then
+  &lt;/span&gt;gcloud container images add-tag &lt;span class="nt"&gt;--quiet&lt;/span&gt; &lt;span class="k"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;IMAGE_NAME&lt;/span&gt;&lt;span class="k"&gt;}&lt;/span&gt;:&lt;span class="k"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;CHECKSUM&lt;/span&gt;&lt;span class="k"&gt;}&lt;/span&gt; &lt;span class="k"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;IMAGE_NAME&lt;/span&gt;&lt;span class="k"&gt;}&lt;/span&gt;:&lt;span class="k"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;SHORT_SHA&lt;/span&gt;&lt;span class="k"&gt;}&lt;/span&gt;
+&lt;span class="k"&gt;else
+  &lt;/span&gt;docker buildx build &lt;span class="nb"&gt;.&lt;/span&gt; &lt;span class="se"&gt;\&lt;/span&gt;
+    &lt;span class="nt"&gt;--file&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;universal.Dockerfile &lt;span class="se"&gt;\&lt;/span&gt;
+    &lt;span class="nt"&gt;--tag&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="k"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;IMAGE_NAME&lt;/span&gt;&lt;span class="k"&gt;}&lt;/span&gt;:&lt;span class="k"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;SHORT_SHA&lt;/span&gt;&lt;span class="k"&gt;}&lt;/span&gt; &lt;span class="se"&gt;\&lt;/span&gt;
+    &lt;span class="nt"&gt;--tag&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="k"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;IMAGE_NAME&lt;/span&gt;&lt;span class="k"&gt;}&lt;/span&gt;:&lt;span class="k"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;CHECKSUM&lt;/span&gt;&lt;span class="k"&gt;}&lt;/span&gt; &lt;span class="se"&gt;\&lt;/span&gt;
+    &lt;span class="nt"&gt;--progress&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;plain &lt;span class="k"&gt;${&lt;/span&gt;&lt;span class="nv"&gt;BUILD_ARGS&lt;/span&gt;&lt;span class="k"&gt;}&lt;/span&gt; &lt;span class="se"&gt;\&lt;/span&gt;
+    &lt;span class="nt"&gt;--push&lt;/span&gt;
+&lt;span class="k"&gt;fi&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We generate workspace checksum, check if image with tag equal to checksum exists, and if yes we add commit sha tag to existing image. This is really fast operation.&lt;br&gt;
+In case if image is not exits we just rebuild workspace and tag image with 2 tags - checksum and commit sha.&lt;/p&gt;
+
+&lt;p&gt;Deploys were already fast and executed in parallel so doing 2 or 15 deploys in our case doesnt matter a lot.&lt;/p&gt;
+
+&lt;p&gt;Trick above allowed us to significantly reduce build times, sometimes to seconds (like documentation has changed) instead of 20+ minutes for every commit.&lt;/p&gt;
+
+&lt;p&gt;For projects with mutibuild steps, various dependency installs etc above solution could not work, and caching would be the best solution. For us just image retagging works the best, removes the need of some external KV storage (sha =&amp;gt; checksum), significantly removed build times and simplified builds.&lt;/p&gt;
+
+</description>
+      <category>googlecloud</category>
+      <category>devops</category>
+    </item>
+    <item>
       <title>RxJS Library in Angular</title>
       <author>Tarun Gurang</author>
       <pubDate>Mon, 22 Nov 2021 12:12:39 +0000</pubDate>
@@ -1379,119 +1446,6 @@ There are various options available, so I hope you will try them out using this 
       <category>vue</category>
       <category>awsamplify</category>
       <category>maplibre</category>
-    </item>
-    <item>
-      <title>C# Collections - Intro</title>
-      <author>Grant</author>
-      <pubDate>Mon, 22 Nov 2021 11:48:33 +0000</pubDate>
-      <link>https://dev.to/gweaths/c-collections-intro-h0d</link>
-      <guid>https://dev.to/gweaths/c-collections-intro-h0d</guid>
-      <description>&lt;h2&gt;
-  &lt;a href="#intro"&gt;
-  &lt;/a&gt;
-  Intro
-&lt;/h2&gt;
-
-&lt;p&gt;So some of you who have been following this series since the beginning may remember in previous chapters, &lt;a href="https://dev.to/gweaths/c-loops-part-1-loop-types-for-loop-tutorial-5ec3"&gt;(Loops)&lt;/a&gt; we looped over a list of addresses using a &lt;code&gt;List&amp;lt;AddressBook&amp;gt;&lt;/code&gt; object. But we haven't really dove into how you collections are instantiated (created) or what kinds there are in much depth. Therefore the next couple of chapters, will be dedicated to doing just that.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#what-kinds-of-collections-does-c-offer-"&gt;
-  &lt;/a&gt;
-  What kinds of collections does C# offer ?
-&lt;/h3&gt;
-
-&lt;p&gt;There are different types of collections in C#, but these fall in predominantly 2 (two) categories, Generic and Non-Generic.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Generic Collections&lt;/strong&gt; -  A generic collection is strongly typed (you can store one type of objects into it) so that we can eliminate runtime type mismatches e.g:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight csharp"&gt;&lt;code&gt;&lt;span class="kt"&gt;var&lt;/span&gt; &lt;span class="n"&gt;phoneNumbers&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="n"&gt;List&lt;/span&gt;&lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="kt"&gt;int&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;();&lt;/span&gt;
-&lt;span class="c1"&gt;//or&lt;/span&gt;
-&lt;span class="kt"&gt;var&lt;/span&gt; &lt;span class="n"&gt;boysNames&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="n"&gt;List&lt;/span&gt;&lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="kt"&gt;string&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;();&lt;/span&gt;
-&lt;span class="c1"&gt;//or&lt;/span&gt;
-&lt;span class="kt"&gt;var&lt;/span&gt; &lt;span class="n"&gt;animals&lt;/span&gt; &lt;span class="p"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="n"&gt;List&lt;/span&gt;&lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;Animal&lt;/span&gt;&lt;span class="p"&gt;&amp;gt;();&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;This is most common form of collection.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Non-Generic Collections&lt;/strong&gt; - A non-generic collection is &lt;strong&gt;not&lt;/strong&gt; strongly typed (you can store more than one type of object into it). These types of objects tend to be slower in performance,&lt;br&gt;
-e.g they could hold an &lt;code&gt;Address&lt;/code&gt; object, a &lt;code&gt;bool&lt;/code&gt; value and a &lt;code&gt;Person&lt;/code&gt; object all the same array.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#why-are-generic-collections-called-generic-when-theyre-very-specific-in-what-they-hold"&gt;
-  &lt;/a&gt;
-  Why are generic collections called generic when they're very specific in what they hold?
-&lt;/h3&gt;
-
-&lt;p&gt;I've been asked this question before, and until you forget about English definition, and think of the word generic in more programming terms it won't make much sense. &lt;/p&gt;
-
-&lt;p&gt;We'll touch on &lt;em&gt;Generics&lt;/em&gt;* in C# a bit more in future chapters, but, generics in C# just really means that the object you're creating can be of any type.&lt;/p&gt;
-
-&lt;p&gt;If you take a look at the &lt;code&gt;List&lt;/code&gt; type, the documentation shows that the declaration is &lt;code&gt;List&amp;lt;T&amp;gt;&lt;/code&gt;, what is the T for ? This is a placeholder to let the code know that this object can hold any type of object, and it will be declared at time of instantiation, like we did&lt;/p&gt;
-
-&lt;p&gt;&lt;code&gt;var addressBook = new List&amp;lt;AddressBook&amp;gt;();&lt;/code&gt; so we replaced the &lt;code&gt;T&lt;/code&gt; with the type of objects we want the list to hold. This is why these collection types are classed as Generic collections, because they utilise c# generics under the sheets to function &lt;strong&gt;not&lt;/strong&gt; to be confused with &lt;em&gt;they're strongly typed so must be non-generic&lt;/em&gt;. Generics means your specifying the type of this collection.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#generic-vs-nongeneric-collections"&gt;
-  &lt;/a&gt;
-  Generic vs Non-Generic Collections
-&lt;/h2&gt;
-
-&lt;p&gt;Generic collections are the most popular, and the one you'll most likely come into contact with[. This is mainly because they are more performant, due to the compiler not having to perform &lt;strong&gt;boxing&lt;/strong&gt; and &lt;strong&gt;unboxing&lt;/strong&gt; (you can read more about that &lt;a href="https://docs.microsoft.com/en-us/dotnet/csharp/programming-guide/types/boxing-and-unboxing"&gt;here&lt;/a&gt;). Non-generic clases hold &lt;code&gt;Objects&lt;/code&gt; not types of objects, hence why you can put anything you want in them, the downside is it has to convert the &lt;code&gt;Object&lt;/code&gt; to the type of the value at the index within the collection.&lt;/p&gt;
-
-&lt;p&gt;I'd advise to never use Non-Generic collections, and always aim for Generic collections, not only for the ease of readability but they're much more performant for the reasons above, and it keeps your code strongly typed.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#generic-collections"&gt;
-  &lt;/a&gt;
-  Generic Collections
-&lt;/h2&gt;
-
-&lt;ul&gt;
-&lt;li&gt;List&lt;/li&gt;
-&lt;li&gt;Array&lt;/li&gt;
-&lt;li&gt;Dictionary&lt;/li&gt;
-&lt;li&gt;Stack&lt;/li&gt;
-&lt;li&gt;Hashset&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h2&gt;
-  &lt;a href="#nongeneric-collections"&gt;
-  &lt;/a&gt;
-  Non-Generic Collections
-&lt;/h2&gt;
-
-&lt;ul&gt;
-&lt;li&gt;ArrayList&lt;/li&gt;
-&lt;li&gt;SortedList&lt;/li&gt;
-&lt;li&gt;Stack&lt;/li&gt;
-&lt;li&gt;Queue&lt;/li&gt;
-&lt;li&gt;HashTable&lt;/li&gt;
-&lt;li&gt;BitArray&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h2&gt;
-  &lt;a href="#special-mention"&gt;
-  &lt;/a&gt;
-  Special Mention
-&lt;/h2&gt;
-
-&lt;p&gt;&lt;strong&gt;Array&lt;/strong&gt; - we can also use Arrays in C# however arrays aren't like collections in that they are of fixed size. When we instantiate an array we specify the size of the array upfront. Meaning we can't add to it at a later date (unlike a generic / non-generic collection). Arrays like generic collections are strongly typed and can only hold one type of object in them.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#summary"&gt;
-  &lt;/a&gt;
-  Summary
-&lt;/h2&gt;
-
-&lt;p&gt;Ok, so now I'm hoping you've got a better understanding of collections, lets take a look at them in more depth starting with &lt;em&gt;Generic Collections&lt;/em&gt; in our next chapter&lt;/p&gt;
-
-</description>
     </item>
   </channel>
 </rss>
