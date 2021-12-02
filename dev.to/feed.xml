@@ -7,6 +7,584 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>Building a GitHub Issue Recommendation Bot</title>
+      <author>Bryan Robinson</author>
+      <pubDate>Thu, 02 Dec 2021 18:21:18 +0000</pubDate>
+      <link>https://dev.to/algolia/building-a-github-issue-recommendation-bot-3foo</link>
+      <guid>https://dev.to/algolia/building-a-github-issue-recommendation-bot-3foo</guid>
+      <description>&lt;p&gt;GitHub Issues are static content. What if they didn't have to be?&lt;/p&gt;
+
+&lt;p&gt;&lt;iframe width="710" height="399" src="https://www.youtube.com/embed/zwJJ9FJXkCU"&gt;
+&lt;/iframe&gt;
+&lt;/p&gt;
+
+&lt;p&gt;When we (DevRels Chuck Meyer and Bryan Robinson) discovered that &lt;a href="https://dev.to/devteam/join-us-for-the-2021-github-actions-hackathon-on-dev-4hn4"&gt;Dev.to was hosting a GitHub Actions hackathon&lt;/a&gt;, we knew we needed to give it a try. &lt;/p&gt;
+
+&lt;p&gt;We knew we wanted to figure out a useful tool to integrate Algolia into an Action. There were obvious thoughts on what sort of project to undertake. We thought through the usual takes on indexing content, products, or markdown. They all would have been helpful for web creators. Would they have been helpful to open source maintainers, though? Probably?&lt;/p&gt;
+
+&lt;p&gt;How could we make their overall workflow better?&lt;/p&gt;
+
+&lt;p&gt;Then it struck us: What if we could give recommended Issues for frequently asked questions? Could we lessen the burden of maintainers answering similar questions? How many Issues get closed as "duplicate" in large repositories? Could Algolia provide Issue creators a list of related, helpful Issues?&lt;/p&gt;
+
+&lt;p&gt;Spoiler alert: Yeah, totally!&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#the-workflow-structure"&gt;
+  &lt;/a&gt;
+  The Workflow structure
+&lt;/h2&gt;
+
+&lt;p&gt;When a developer adds an Issue to a repository, we need to execute three steps.&lt;/p&gt;
+
+&lt;p&gt;First, we need to search an Algolia Index for related Issues. Then, we bundle those results into Markdown and pass it to an Action to create a comment on the initial Issue. Finally, we need to put the Issue into our Index for future searches.&lt;/p&gt;
+
+&lt;p&gt;Each of these steps requires an Action. The Algolia-specific Actions, we needed to create from scratch. The comment-writing Action, we decided to use the amazing Peter Evan's &lt;a href="https://github.com/marketplace/actions/create-or-update-comment"&gt;create-or-update-comment Action&lt;/a&gt; – which, as it turns out, GitHub uses in many of their docs about Actions.&lt;/p&gt;
+
+&lt;p&gt;Let's dive into the new Actions.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#performing-a-search-query"&gt;
+  &lt;/a&gt;
+  Performing a search query
+&lt;/h2&gt;
+
+&lt;p&gt;The first step of our Workflow is a search query sent to Algolia. We created a custom Action for this (&lt;a href="https://github.com/marketplace/actions/get-algolia-issue-records"&gt;Get Algolia Issue Records&lt;/a&gt;). &lt;/p&gt;
+
+&lt;p&gt;To use the Action, we need to send it four required inputs (and an optional fifth).&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;  &lt;code&gt;app_id&lt;/code&gt;: the ID of the application in your Algolia account. This is best stored as a Secret in your repository&lt;/li&gt;
+&lt;li&gt;  &lt;code&gt;api_key&lt;/code&gt;: An API key with search permissions to the Index in your Algolia App. This is best stored in a Secret in your repository.&lt;/li&gt;
+&lt;li&gt;  &lt;code&gt;index_name&lt;/code&gt;: The name of the Algolia Index to search. For consistency, we recommend the &lt;code&gt;github.event.repository.name&lt;/code&gt; variable.&lt;/li&gt;
+&lt;li&gt;  &lt;code&gt;issue_title&lt;/code&gt;: The title of the inciting Issue found with &lt;code&gt;github.event.issue.title&lt;/code&gt;.&lt;/li&gt;
+&lt;li&gt;  &lt;code&gt;max_results&lt;/code&gt;: (OPTIONAL) A number of results to return to the comment (defaults to 3)&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;We take these variables and perform a &lt;code&gt;similarQuery&lt;/code&gt; search based on the inciting Issue's title. We then create a comment body and a list of items in Markdown (the format needed for GitHub comments). This outputs are passed to &lt;a href="https://github.com/marketplace/actions/create-or-update-comment"&gt;Peter Evans' create-or-update-comment Action&lt;/a&gt;.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;inspect&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;require&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;util&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;core&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;require&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;@actions/core&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;algoliasearch&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;require&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;algoliasearch&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+
+&lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;run&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="k"&gt;try&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;inputs&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="na"&gt;appId&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;core&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;getInput&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;app_id&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+      &lt;span class="na"&gt;apiKey&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;core&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;getInput&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;api_key&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+      &lt;span class="na"&gt;indexName&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;core&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;getInput&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;index_name&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+      &lt;span class="na"&gt;issueTitle&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;core&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;getInput&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;issue_title&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+      &lt;span class="na"&gt;maxResults&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;core&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;getInput&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;max_results&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+    &lt;span class="p"&gt;};&lt;/span&gt;
+    &lt;span class="nx"&gt;core&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;info&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`Inputs: &lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;inspect&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;inputs&lt;/span&gt;&lt;span class="p"&gt;)}&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+
+    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="nx"&gt;inputs&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;appId&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; &lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="nx"&gt;inputs&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;apiKey&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; &lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="nx"&gt;inputs&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;indexName&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="nx"&gt;core&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;setFailed&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Missing one or more of Algolia app id, API key, or index name.&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+      &lt;span class="k"&gt;return&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+
+    &lt;span class="nx"&gt;inputs&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;maxResults&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;inputs&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;maxResults&lt;/span&gt; &lt;span class="o"&gt;||&lt;/span&gt; &lt;span class="mi"&gt;3&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;client&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;algoliasearch&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;inputs&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;appId&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;inputs&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;apiKey&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;index&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;client&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;initIndex&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;inputs&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;indexName&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+
+    &lt;span class="nx"&gt;index&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;search&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;''&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; 
+        &lt;span class="na"&gt;similarQuery&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;inputs&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;issueTitle&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+        &lt;span class="na"&gt;hitsPerPage&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;inputs&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;maxResults&lt;/span&gt;
+      &lt;span class="p"&gt;}).&lt;/span&gt;&lt;span class="nx"&gt;then&lt;/span&gt;&lt;span class="p"&gt;(({&lt;/span&gt;&lt;span class="nx"&gt;hits&lt;/span&gt;&lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="nx"&gt;core&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;info&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`Searching for record`&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+      &lt;span class="nx"&gt;core&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;info&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`Hits: &lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;inspect&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;hits&lt;/span&gt;&lt;span class="p"&gt;)}&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+      &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;message&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s2"&gt;`## Other issues similar to this one:\n&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;hits&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;map&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;hit&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="s2"&gt;`* [&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;hit&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;title&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;](&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;hit&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;url&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;)`&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;join&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="se"&gt;\n&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;)}&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;
+      &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;listItems&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;hits&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;map&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;hit&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="s2"&gt;`* [&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;hit&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;title&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;](&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;hit&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;url&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;)`&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;join&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="se"&gt;\n&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;)}&lt;/span&gt;&lt;span class="s2"&gt;\n`&lt;/span&gt;
+      &lt;span class="nx"&gt;core&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;info&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;message&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+      &lt;span class="nx"&gt;core&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;info&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;listItems&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+      &lt;span class="nx"&gt;core&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;setOutput&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;comment_body&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;message&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+      &lt;span class="nx"&gt;core&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;setOutput&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;issues_list&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;listItems&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="p"&gt;})&lt;/span&gt;
+      &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="k"&gt;catch&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="nx"&gt;core&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;setFailed&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;message&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+      &lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="p"&gt;);&lt;/span&gt;
+  &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;catch&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="nx"&gt;core&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;debug&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;inspect&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;));&lt;/span&gt;
+    &lt;span class="nx"&gt;core&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;setFailed&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;message&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;message&lt;/span&gt; &lt;span class="o"&gt;==&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Resource not accessible by integration&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="nx"&gt;core&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`See this action's readme for details about this error`&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+  &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="nx"&gt;run&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+&lt;h2&gt;
+  &lt;a href="#adding-the-issue-to-your-algolia-index"&gt;
+  &lt;/a&gt;
+  Adding the issue to your Algolia index
+&lt;/h2&gt;
+
+&lt;p&gt;For the final step of our workflow, we add this new issue to the Algolia index for future searches. We created another GitHub Action for this purpose: &lt;a href="https://github.com/marketplace/actions/create-or-update-algolia-index-record"&gt;Create or Update Algolia Index Record&lt;/a&gt;. This action atomically adds/updates a record directly to an index rather than writing/reading from a JSON file. This makes sense in situations where we are acting on metadata about the repo (issues, pull requests, comments) as opposed to building an index for the application itself.&lt;/p&gt;
+
+&lt;p&gt;To use this action, we'll need to &lt;a href="https://www.algolia.com/doc/guides/security/api-keys/#creating-and-managing-api-keys"&gt;create an Algolia API key&lt;/a&gt; with permissions to add/update records in our index. Additionally, we will need permission to create a new index for the repo. Otherwise, we must create it ahead of time and hard code the index name in our configuration.&lt;/p&gt;
+
+&lt;p&gt;Along with the new API key we'll need a few other inputs to use the action:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;  &lt;code&gt;app_id&lt;/code&gt;: You should already have this as a Secret in your repository from the action above&lt;/li&gt;
+&lt;li&gt;  &lt;code&gt;api_key&lt;/code&gt;: This is the new key with permission to save records to your index. This is best stored in a Secret in your repository.&lt;/li&gt;
+&lt;li&gt;  &lt;code&gt;index_name&lt;/code&gt;: The name of the Algolia index to add/update this record. For consistency, we recommend the &lt;code&gt;github.event.repository.name&lt;/code&gt; variable.&lt;/li&gt;
+&lt;li&gt;  &lt;code&gt;record&lt;/code&gt;: A string represneting the JSON record to add to the index.
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;If the API key has permission, the action creates an index for the repository. We'll add the issue title and URL (to link back) as the &lt;code&gt;record&lt;/code&gt;. It's a multi-line string in our workflow, but must_ be valid JSON for the action to work (see &lt;a href="https://www.algolia.com/doc/guides/sending-and-managing-data/prepare-your-data/#algolia-records"&gt;https://www.algolia.com/doc/guides/sending-and-managing-data/prepare-your-data/#algolia-records&lt;/a&gt; for details).&lt;/p&gt;
+
+&lt;p&gt;We take all of these inputs and execute a &lt;code&gt;saveObject&lt;/code&gt; call via the Algolia API. We use the &lt;code&gt;issue ID&lt;/code&gt; as the &lt;code&gt;objectID&lt;/code&gt; in the index. This makes it easy to tie the record back to this issue if we add workflows for update or delete events later.&lt;br&gt;
+&lt;br&gt;
+ &lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;inspect&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;require&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;util&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;core&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;require&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;@actions/core&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;algoliasearch&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;require&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;algoliasearch&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+
+&lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;run&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="k"&gt;try&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;inputs&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="na"&gt;appId&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;core&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;getInput&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;app_id&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+      &lt;span class="na"&gt;apiKey&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;core&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;getInput&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;api_key&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+      &lt;span class="na"&gt;indexName&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;core&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;getInput&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;index_name&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+      &lt;span class="na"&gt;record&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;core&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;getInput&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;record&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;
+    &lt;span class="p"&gt;};&lt;/span&gt;
+    &lt;span class="nx"&gt;core&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;debug&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`Inputs: &lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;inspect&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;inputs&lt;/span&gt;&lt;span class="p"&gt;)}&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+
+    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="nx"&gt;inputs&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;appId&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; &lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="nx"&gt;inputs&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;apiKey&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; &lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="nx"&gt;inputs&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;indexName&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="nx"&gt;core&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;setFailed&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Missing one or more of Algolia app id, API key, or index name.&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+      &lt;span class="k"&gt;return&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+
+    &lt;span class="nx"&gt;core&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;info&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`Writing record to index &lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;inputs&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;indexName&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;client&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;algoliasearch&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;inputs&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;appId&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;inputs&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;apiKey&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;index&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;client&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;initIndex&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;inputs&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;indexName&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+
+    &lt;span class="nx"&gt;index&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;saveObject&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;JSON&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;parse&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;inputs&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;record&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;autoGenerateObjectIDIfNotExist&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;})&lt;/span&gt;
+      &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;then&lt;/span&gt;&lt;span class="p"&gt;(({&lt;/span&gt; &lt;span class="nx"&gt;objectID&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="nx"&gt;core&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;setOutput&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;object_id&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;objectID&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+        &lt;span class="nx"&gt;core&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;info&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+          &lt;span class="s2"&gt;`Created record in index &lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;inputs&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;indexName&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt; with objectID &lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;objectID&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;.`&lt;/span&gt;
+        &lt;span class="p"&gt;);&lt;/span&gt;
+      &lt;span class="p"&gt;})&lt;/span&gt;
+      &lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="k"&gt;catch&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="nx"&gt;core&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;setFailed&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`Failed to save object: &lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+      &lt;span class="p"&gt;});&lt;/span&gt;
+
+  &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;catch&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="nx"&gt;core&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;debug&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;inspect&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;));&lt;/span&gt;
+    &lt;span class="nx"&gt;core&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;setFailed&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;message&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;message&lt;/span&gt; &lt;span class="o"&gt;==&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Resource not accessible by integration&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+      &lt;span class="nx"&gt;core&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;`See this action's readme for details about this error`&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+  &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="nx"&gt;run&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;Next, we piece the two new Actions together with the existing comment creation action to build our workflow.&lt;/p&gt;
+&lt;h2&gt;
+  &lt;a href="#the-full-workflow-file"&gt;
+  &lt;/a&gt;
+  The full workflow file
+&lt;/h2&gt;
+
+&lt;p&gt;To make this work, we need one &lt;code&gt;job&lt;/code&gt; with three &lt;code&gt;steps&lt;/code&gt;. Each step will use one of these Actions.&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;related-issues&lt;/span&gt;
+&lt;span class="na"&gt;on&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="c1"&gt;# Triggers the workflow on push or pull request events but only for the main branch&lt;/span&gt;
+  &lt;span class="na"&gt;issues&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;types&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; 
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;opened&lt;/span&gt;
+
+&lt;span class="na"&gt;jobs&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;get-related-issues&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;permissions&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; 
+      &lt;span class="c1"&gt;# Gives the workflow write permissions only in issues&lt;/span&gt;
+      &lt;span class="na"&gt;issues&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;write&lt;/span&gt;
+    &lt;span class="na"&gt;runs-on&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;ubuntu-latest&lt;/span&gt;
+    &lt;span class="na"&gt;steps&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="c1"&gt;# Performs a search in an Algolia Index based on Issue Title&lt;/span&gt;
+      &lt;span class="c1"&gt;# The Index should have historical Issues&lt;/span&gt;
+      &lt;span class="c1"&gt;# Returns two outputs:&lt;/span&gt;
+      &lt;span class="c1"&gt;# issues_list: a markdown list of issues&lt;/span&gt;
+      &lt;span class="c1"&gt;# comment_body: a generic comment body with the list of issues&lt;/span&gt;
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;id&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;search&lt;/span&gt;
+        &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Search based on issue title&lt;/span&gt;
+        &lt;span class="na"&gt;uses&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;brob/algolia-issue-search@v1.0&lt;/span&gt;
+        &lt;span class="na"&gt;with&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; 
+          &lt;span class="c1"&gt;# Requires an Algolia account with an App ID and write key&lt;/span&gt;
+          &lt;span class="na"&gt;app_id&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ secrets.ALGOLIA_APP_ID }}&lt;/span&gt;
+          &lt;span class="na"&gt;api_key&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ secrets.ALGOLIA_API_KEY }}&lt;/span&gt;
+          &lt;span class="na"&gt;index_name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ github.event.repository.name }}&lt;/span&gt;
+          &lt;span class="na"&gt;issue_title&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ github.event.issue.title }}&lt;/span&gt;
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Create or Update Comment&lt;/span&gt;
+        &lt;span class="na"&gt;uses&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;peter-evans/create-or-update-comment@v1.4.5&lt;/span&gt;
+        &lt;span class="na"&gt;with&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+          &lt;span class="c1"&gt;# GITHUB_TOKEN or a repo scoped PAT.&lt;/span&gt;
+          &lt;span class="na"&gt;token&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ github.token }}&lt;/span&gt;
+          &lt;span class="c1"&gt;# The number of the issue or pull request in which to create a comment.&lt;/span&gt;
+          &lt;span class="na"&gt;issue-number&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ github.event.issue.number }}&lt;/span&gt;
+          &lt;span class="c1"&gt;# The comment body. Can use either issues_list or comment_body&lt;/span&gt;
+          &lt;span class="na"&gt;body&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="pi"&gt;|&lt;/span&gt;
+            &lt;span class="s"&gt;# While you wait, here are related issues:&lt;/span&gt;
+            &lt;span class="s"&gt;${{ steps.search.outputs.issues_list }}&lt;/span&gt;
+            &lt;span class="s"&gt;Thank you so much! We'll be with you shortly!&lt;/span&gt;
+      &lt;span class="c1"&gt;# An Action to create a record in an Algolia Index&lt;/span&gt;
+      &lt;span class="c1"&gt;# This is a generic Action and can be used outside of this workflow&lt;/span&gt;
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Add Algolia Record&lt;/span&gt;
+        &lt;span class="na"&gt;id&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;ingest&lt;/span&gt;
+        &lt;span class="na"&gt;uses&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;chuckmeyer/add-algolia-record@v1&lt;/span&gt;
+        &lt;span class="na"&gt;with&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+          &lt;span class="na"&gt;app_id&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ secrets.ALGOLIA_APP_ID }}&lt;/span&gt;
+          &lt;span class="na"&gt;api_key&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ secrets.ALGOLIA_API_KEY }}&lt;/span&gt;
+          &lt;span class="na"&gt;index_name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ github.event.repository.name }}&lt;/span&gt;
+          &lt;span class="c1"&gt;# Record needs to be a string of JSON&lt;/span&gt;
+          &lt;span class="na"&gt;record&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="pi"&gt;|&lt;/span&gt;
+            &lt;span class="s"&gt;{&lt;/span&gt;
+              &lt;span class="s"&gt;"title": "${{ github.event.issue.title }}", &lt;/span&gt;
+              &lt;span class="s"&gt;"url": "${{ github.event.issue.html_url }}", &lt;/span&gt;
+              &lt;span class="s"&gt;"labels": "${{ github.event.issue.labels }}",&lt;/span&gt;
+              &lt;span class="s"&gt;"objectID": "${{ github.event.issue.number }}"&lt;/span&gt;
+            &lt;span class="s"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+&lt;h2&gt;
+  &lt;a href="#next-steps"&gt;
+  &lt;/a&gt;
+  Next steps
+&lt;/h2&gt;
+
+&lt;p&gt;We hope that this is helpful to maintainers, but we also hope it inspires others to find better and better ways to suggest content in static areas like GitHub Issues. &lt;/p&gt;
+
+&lt;p&gt;If you want to play around with the full workflow, you can check it out in &lt;a href="https://github.com/brob/github-issues-search-bot"&gt;this repository&lt;/a&gt;. Both the search and ingest Actions are available in the &lt;a href="https://github.com/marketplace?type=actions&amp;amp;query=Algolia"&gt;GitHub marketplace&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;Search and discovery can become an interesting part of your automated workflow in GitHub and beyond.&lt;/p&gt;
+
+&lt;p&gt;Post and Bot by:&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="ltag__user ltag__user__id__680058"&gt;
+  
+    .ltag__user__id__680058 .follow-action-button {
+      background-color: #000000 !important;
+      color: #ffffff !important;
+      border-color: #000000 !important;
+    }
+  
+    &lt;a href="/chuckm" class="ltag__user__link profile-image-link"&gt;
+      &lt;div class="ltag__user__pic"&gt;
+        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--uxW5yBDS--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://res.cloudinary.com/practicaldev/image/fetch/s--IY2LMpDB--/c_fill%2Cf_auto%2Cfl_progressive%2Ch_150%2Cq_auto%2Cw_150/https://dev-to-uploads.s3.amazonaws.com/uploads/user/profile_image/680058/3c47b4a5-be92-44c0-9237-c7ddb7d447de.jpeg" alt="chuckm image"&gt;
+      &lt;/div&gt;
+    &lt;/a&gt;
+  &lt;div class="ltag__user__content"&gt;
+    &lt;h2&gt;
+&lt;a class="ltag__user__link" href="/chuckm"&gt;Chuck Meyer&lt;/a&gt;Follow
+&lt;/h2&gt;
+    &lt;div class="ltag__user__summary"&gt;
+      &lt;a class="ltag__user__link" href="/chuckm"&gt;&lt;/a&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;div class="ltag__user ltag__user__id__173278"&gt;
+  
+    .ltag__user__id__173278 .follow-action-button {
+      background-color: #edffef !important;
+      color: #000000 !important;
+      border-color: #edffef !important;
+    }
+  
+    &lt;a href="/brob" class="ltag__user__link profile-image-link"&gt;
+      &lt;div class="ltag__user__pic"&gt;
+        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ISGTtYSc--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://res.cloudinary.com/practicaldev/image/fetch/s--iZvp8RyC--/c_fill%2Cf_auto%2Cfl_progressive%2Ch_150%2Cq_auto%2Cw_150/https://dev-to-uploads.s3.amazonaws.com/uploads/user/profile_image/173278/96678344-7d51-41ca-8ff4-78343d865e05.jpg" alt="brob image"&gt;
+      &lt;/div&gt;
+    &lt;/a&gt;
+  &lt;div class="ltag__user__content"&gt;
+    &lt;h2&gt;
+&lt;a class="ltag__user__link" href="/brob"&gt;Bryan Robinson&lt;/a&gt;Follow
+&lt;/h2&gt;
+    &lt;div class="ltag__user__summary"&gt;
+      &lt;a class="ltag__user__link" href="/brob"&gt;I'm a designer, developer, lover of static sites and CSS&lt;/a&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+&lt;/div&gt;
+
+
+
+</description>
+      <category>actionshackathon21</category>
+      <category>javascript</category>
+      <category>github</category>
+    </item>
+    <item>
+      <title>Issue Recommendations Bot Workflow</title>
+      <author>Bryan Robinson</author>
+      <pubDate>Thu, 02 Dec 2021 18:20:42 +0000</pubDate>
+      <link>https://dev.to/brob/issue-recommendations-bot-workflow-4k3c</link>
+      <guid>https://dev.to/brob/issue-recommendations-bot-workflow-4k3c</guid>
+      <description>&lt;h3&gt;
+  &lt;a href="#issue-recommendations-bot-workflow"&gt;
+  &lt;/a&gt;
+  &lt;a href="https://github.com/brob/github-issues-search-bot"&gt;Issue Recommendations Bot Workflow&lt;/a&gt;
+&lt;/h3&gt;
+
+&lt;p&gt;When a new Issue is added to a repository, this workflow performs a search against an Algolia Index populated with previous Issues, finds similar Issues by title and leaves them as a comment on the inciting Issue. Once that's done, it indexes the latest Issue for future searches.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#submission-category-maintainer-musthaves"&gt;
+  &lt;/a&gt;
+  Submission Category: Maintainer Must-Haves
+&lt;/h3&gt;
+
+&lt;h3&gt;
+  &lt;a href="#yaml-file-or-link-to-code"&gt;
+  &lt;/a&gt;
+  Yaml File or Link to Code
+&lt;/h3&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="https://github.com/brob/github-issues-search-bot"&gt;Main workflow repository&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://github.com/marketplace/actions/create-or-update-algolia-index-record"&gt;Ingest Action&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;
+&lt;a href="https://github.com/marketplace/actions/get-algolia-issue-records"&gt;Search Action&lt;/a&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;related-issues&lt;/span&gt;
+&lt;span class="na"&gt;on&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="c1"&gt;# Triggers the workflow on push or pull request events but only for the main branch&lt;/span&gt;
+  &lt;span class="na"&gt;issues&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;types&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; 
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;opened&lt;/span&gt;
+
+&lt;span class="na"&gt;jobs&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;get-related-issues&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;permissions&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; 
+      &lt;span class="c1"&gt;# Gives the workflow write permissions only in issues&lt;/span&gt;
+      &lt;span class="na"&gt;issues&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;write&lt;/span&gt;
+    &lt;span class="na"&gt;runs-on&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;ubuntu-latest&lt;/span&gt;
+    &lt;span class="na"&gt;steps&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="c1"&gt;# Performs a search in an Algolia Index based on Issue Title&lt;/span&gt;
+      &lt;span class="c1"&gt;# The Index should have historical Issues&lt;/span&gt;
+      &lt;span class="c1"&gt;# Returns two outputs:&lt;/span&gt;
+      &lt;span class="c1"&gt;# issues_list: a markdown list of issues&lt;/span&gt;
+      &lt;span class="c1"&gt;# comment_body: a generic comment body with the list of issues&lt;/span&gt;
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;id&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;search&lt;/span&gt;
+        &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Search based on issue title&lt;/span&gt;
+        &lt;span class="na"&gt;uses&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;brob/algolia-issue-search@v1.0&lt;/span&gt;
+        &lt;span class="na"&gt;with&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; 
+          &lt;span class="c1"&gt;# Requires an Algolia account with an App ID and write key&lt;/span&gt;
+          &lt;span class="na"&gt;app_id&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ secrets.ALGOLIA_APP_ID }}&lt;/span&gt;
+          &lt;span class="na"&gt;api_key&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ secrets.ALGOLIA_API_KEY }}&lt;/span&gt;
+          &lt;span class="na"&gt;index_name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ github.event.repository.name }}&lt;/span&gt;
+          &lt;span class="na"&gt;issue_title&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ github.event.issue.title }}&lt;/span&gt;
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Create or Update Comment&lt;/span&gt;
+        &lt;span class="na"&gt;uses&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;peter-evans/create-or-update-comment@v1.4.5&lt;/span&gt;
+        &lt;span class="na"&gt;with&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+          &lt;span class="c1"&gt;# GITHUB_TOKEN or a repo scoped PAT.&lt;/span&gt;
+          &lt;span class="na"&gt;token&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ github.token }}&lt;/span&gt;
+          &lt;span class="c1"&gt;# The number of the issue or pull request in which to create a comment.&lt;/span&gt;
+          &lt;span class="na"&gt;issue-number&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ github.event.issue.number }}&lt;/span&gt;
+          &lt;span class="c1"&gt;# The comment body. Can use either issues_list or comment_body&lt;/span&gt;
+          &lt;span class="na"&gt;body&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="pi"&gt;|&lt;/span&gt;
+            &lt;span class="s"&gt;# While you wait, here are related issues:&lt;/span&gt;
+            &lt;span class="s"&gt;${{ steps.search.outputs.issues_list }}&lt;/span&gt;
+            &lt;span class="s"&gt;Thank you so much! We'll be with you shortly!&lt;/span&gt;
+      &lt;span class="c1"&gt;# An Action to create a record in an Algolia Index&lt;/span&gt;
+      &lt;span class="c1"&gt;# This is a generic Action and can be used outside of this workflow&lt;/span&gt;
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Add Algolia Record&lt;/span&gt;
+        &lt;span class="na"&gt;id&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;ingest&lt;/span&gt;
+        &lt;span class="na"&gt;uses&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;chuckmeyer/add-algolia-record@v1&lt;/span&gt;
+        &lt;span class="na"&gt;with&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+          &lt;span class="na"&gt;app_id&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ secrets.ALGOLIA_APP_ID }}&lt;/span&gt;
+          &lt;span class="na"&gt;api_key&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ secrets.ALGOLIA_API_KEY }}&lt;/span&gt;
+          &lt;span class="na"&gt;index_name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ github.event.repository.name }}&lt;/span&gt;
+          &lt;span class="c1"&gt;# Record needs to be a string of JSON&lt;/span&gt;
+          &lt;span class="na"&gt;record&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="pi"&gt;|&lt;/span&gt;
+            &lt;span class="s"&gt;{&lt;/span&gt;
+              &lt;span class="s"&gt;"title": "${{ github.event.issue.title }}", &lt;/span&gt;
+              &lt;span class="s"&gt;"url": "${{ github.event.issue.html_url }}", &lt;/span&gt;
+              &lt;span class="s"&gt;"labels": "${{ github.event.issue.labels }}",&lt;/span&gt;
+              &lt;span class="s"&gt;"objectID": "${{ github.event.issue.number }}"&lt;/span&gt;
+            &lt;span class="s"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+&lt;h3&gt;
+  &lt;a href="#additional-resources-info"&gt;
+  &lt;/a&gt;
+  Additional Resources / Info
+&lt;/h3&gt;
+
+&lt;p&gt;Authors: &lt;br&gt;
+&lt;/p&gt;
+&lt;div class="ltag__user ltag__user__id__173278"&gt;
+  
+    .ltag__user__id__173278 .follow-action-button {
+      background-color: #edffef !important;
+      color: #000000 !important;
+      border-color: #edffef !important;
+    }
+  
+    &lt;a href="/brob" class="ltag__user__link profile-image-link"&gt;
+      &lt;div class="ltag__user__pic"&gt;
+        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ISGTtYSc--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://res.cloudinary.com/practicaldev/image/fetch/s--iZvp8RyC--/c_fill%2Cf_auto%2Cfl_progressive%2Ch_150%2Cq_auto%2Cw_150/https://dev-to-uploads.s3.amazonaws.com/uploads/user/profile_image/173278/96678344-7d51-41ca-8ff4-78343d865e05.jpg" alt="brob image"&gt;
+      &lt;/div&gt;
+    &lt;/a&gt;
+  &lt;div class="ltag__user__content"&gt;
+    &lt;h2&gt;
+&lt;a class="ltag__user__link" href="/brob"&gt;Bryan Robinson&lt;/a&gt;Follow
+&lt;/h2&gt;
+    &lt;div class="ltag__user__summary"&gt;
+      &lt;a class="ltag__user__link" href="/brob"&gt;I'm a designer, developer, lover of static sites and CSS&lt;/a&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;div class="ltag__user ltag__user__id__680058"&gt;
+  
+    .ltag__user__id__680058 .follow-action-button {
+      background-color: #000000 !important;
+      color: #ffffff !important;
+      border-color: #000000 !important;
+    }
+  
+    &lt;a href="/chuckm" class="ltag__user__link profile-image-link"&gt;
+      &lt;div class="ltag__user__pic"&gt;
+        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--uxW5yBDS--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://res.cloudinary.com/practicaldev/image/fetch/s--IY2LMpDB--/c_fill%2Cf_auto%2Cfl_progressive%2Ch_150%2Cq_auto%2Cw_150/https://dev-to-uploads.s3.amazonaws.com/uploads/user/profile_image/680058/3c47b4a5-be92-44c0-9237-c7ddb7d447de.jpeg" alt="chuckm image"&gt;
+      &lt;/div&gt;
+    &lt;/a&gt;
+  &lt;div class="ltag__user__content"&gt;
+    &lt;h2&gt;
+&lt;a class="ltag__user__link" href="/chuckm"&gt;Chuck Meyer&lt;/a&gt;Follow
+&lt;/h2&gt;
+    &lt;div class="ltag__user__summary"&gt;
+      &lt;a class="ltag__user__link" href="/chuckm"&gt;&lt;/a&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Blog post on authoring the bot:&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="ltag__link"&gt;
+  &lt;a href="/algolia" class="ltag__link__link"&gt;
+    &lt;div class="ltag__link__org__pic"&gt;
+      &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--4YE7Zx5D--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://res.cloudinary.com/practicaldev/image/fetch/s--7liYJQGe--/c_fill%2Cf_auto%2Cfl_progressive%2Ch_150%2Cq_auto%2Cw_150/https://dev-to-uploads.s3.amazonaws.com/uploads/organization/profile_image/167/6f34a035-a6b8-4fdd-93f2-08dd5fd3eb7f.png" alt="Algolia" width="150" height="150"&gt;
+      &lt;div class="ltag__link__user__pic"&gt;
+        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ISGTtYSc--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://res.cloudinary.com/practicaldev/image/fetch/s--iZvp8RyC--/c_fill%2Cf_auto%2Cfl_progressive%2Ch_150%2Cq_auto%2Cw_150/https://dev-to-uploads.s3.amazonaws.com/uploads/user/profile_image/173278/96678344-7d51-41ca-8ff4-78343d865e05.jpg" alt="" width="150" height="150"&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/a&gt;
+  &lt;a href="/algolia/building-a-github-issue-recommendation-bot-22gl-temp-slug-4562444" class="ltag__link__link"&gt;
+    &lt;div class="ltag__link__content"&gt;
+      &lt;h2&gt;Building a GitHub Issue Recommendation Bot&lt;/h2&gt;
+      &lt;h3&gt;Bryan Robinson for Algolia ・  ・ 6 min read&lt;/h3&gt;
+      &lt;div class="ltag__link__taglist"&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/a&gt;
+&lt;/div&gt;
+ 
+
+</description>
+      <category>actionshackathon21</category>
+    </item>
+    <item>
+      <title>Why AWS?</title>
+      <author>Ashutosh Singh</author>
+      <pubDate>Thu, 02 Dec 2021 18:13:52 +0000</pubDate>
+      <link>https://dev.to/aws-builders/why-aws-114</link>
+      <guid>https://dev.to/aws-builders/why-aws-114</guid>
+      <description>&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--ail79jdv--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/crqs3tlgea4xa8h7z77t.jpg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ail79jdv--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/crqs3tlgea4xa8h7z77t.jpg" alt="Image description" width="880" height="880"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;I&lt;/strong&gt;f You are here, then you are already hearing about the cloud, definitely known or at least heard about AWS or Amazon Web Services.&lt;/p&gt;
+
+&lt;p&gt;So What I'm trying to achieve is that I'll start writing these blog about AWS services, Guides, How to Guides, basically that will help the very beginner who have just started to learn about AWS (Cloud) in a very easy manner so that everyone can learn about the AWS&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#lets-come-to-the-question-why-aws-"&gt;
+  &lt;/a&gt;
+  Let's Come to the Question Why AWS ?
+&lt;/h2&gt;
+
+&lt;p&gt;Why there is always this same name come up every time we are talking about cloud, let's go back in the history when Amazon was expanding they come up with this very first service called EC2 or compute service, you can learn more about the history in &lt;a href="https://en.wikipedia.org/wiki/Amazon_Web_Services"&gt;here&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;From then it came a long way, whether it's about computing, storage developer tools, machine learning, big-data, development you name it &lt;strong&gt;AWS&lt;/strong&gt; have it.&lt;/p&gt;
+
+&lt;p&gt;When You First see the what AWS have to offer you it seems like they have it for unlimited amount, they are never out of storage, never out of resources. &lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#what-makes-aws-different-from-others-"&gt;
+  &lt;/a&gt;
+  What makes AWS different from others ?
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;strong&gt;Let's first talk about the dashboard&lt;/strong&gt;&lt;br&gt;
+&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--OmEoP9gA--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/dcf958n09b33exgxzerd.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--OmEoP9gA--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/dcf958n09b33exgxzerd.png" alt="Image description" width="880" height="455"&gt;&lt;/a&gt;&lt;br&gt;
+When I first saw it when I was learning AWS it seems very chaotic, very random to me, and I'm pretty much sure that you feel the same way.&lt;/p&gt;
+
+&lt;p&gt;Clicking on &lt;strong&gt;"All services"&lt;/strong&gt; opens a very long list of services.&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;Most of them I've never used, Trust me on this&lt;br&gt;
+Here We can access all the services, we can search the services, know about the categories and much more.&lt;br&gt;
+I love the dashboard, I hope you feel the same way about it😅.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;&lt;strong&gt;"Learning Curve"&lt;/strong&gt;&lt;br&gt;
+How soon I can start working with all these service by myself ?&lt;br&gt;
+Some of the services are pretty much very easy to understand and can be learned in a week or two. But to get the depth feel and knowledge about that it will be longer run.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;"The Best Things That I felt is the Support/Customer Chat "&lt;/strong&gt;&lt;br&gt;
+Whenever I have requested anything like to increase the limit for a particular service or about payment or anything they issue get solved in no time.&lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#free-tier"&gt;
+  &lt;/a&gt;
+  FREE TIER
+&lt;/h4&gt;
+
+&lt;p&gt;Who doesn't love FREE Things, I love them 😅🤩, and best part is that &lt;strong&gt;AWS&lt;/strong&gt; comes with &lt;strong&gt;1yr FREE TIER&lt;/strong&gt; for you to learn about AWS different services try them, get you hand feel the power of &lt;strong&gt;Cloud&lt;/strong&gt; and trust me this 1yr is enough for you to learn the cloud AWS ways. &lt;/p&gt;
+
+&lt;p&gt;Once you're in AWS you'll feel that none of the cloud provider is as good as AWS.😎😎 &lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#well-these-are-my-thoughts-about-the-aws-and-with-this-i-have-planned-to-write-a-whole-series-of-blog-about-aws-as-i-have-already-mentions-so-till-then-stay-safe-amp-stay-healthy"&gt;
+  &lt;/a&gt;
+  Well these are my thoughts about the AWS, and with this I have planned to write a whole series of blog about AWS as I have already mentions, so till then &lt;strong&gt;stay safe &amp;amp; stay healthy&lt;/strong&gt;.
+&lt;/h4&gt;
+
+</description>
+      <category>cloud</category>
+      <category>aws</category>
+      <category>beginners</category>
+    </item>
+    <item>
       <title>Acra. Features: Searchable encryption</title>
       <author>Cossack Labs</author>
       <pubDate>Thu, 02 Dec 2021 18:01:45 +0000</pubDate>
@@ -107,6 +685,482 @@
       <category>security</category>
       <category>encryption</category>
       <category>database</category>
+    </item>
+    <item>
+      <title>Introduction to Svelte Actions</title>
+      <author>Matt Angelosanto</author>
+      <pubDate>Thu, 02 Dec 2021 17:58:32 +0000</pubDate>
+      <link>https://dev.to/logrocket/introduction-to-svelte-actions-b6c</link>
+      <guid>https://dev.to/logrocket/introduction-to-svelte-actions-b6c</guid>
+      <description>&lt;p&gt;&lt;strong&gt;Written by &lt;a href="https://blog.logrocket.com/author/geoffrich/"&gt;Geoff Rich&lt;/a&gt;&lt;/strong&gt; ✏️&lt;/p&gt;
+
+&lt;p&gt;Actions are one of Svelte’s less commonly used features. An action allows you to run a function when an element is added to the DOM. While that sounds simple, an action used in the right way can greatly simplify your code and allow you to reuse bits of logic without creating an entirely separate component.&lt;/p&gt;
+
+&lt;p&gt;In this post, I’ll give two examples where a Svelte action would be useful and show why an action is the right tool for the job.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#using-svelte-actions-to-focus-an-input"&gt;
+  &lt;/a&gt;
+  Using Svelte actions to focus an input
+&lt;/h2&gt;
+
+&lt;p&gt;Let’s start with the following &lt;a href="https://blog.logrocket.com/build-your-own-component-library-svelte/"&gt;Svelte component&lt;/a&gt;. We have some static text with an edit button next to it. When the edit button is clicked, a text field is revealed. Typing in the field updates the text, and you can confirm to save your changes.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;script&amp;gt;&lt;/span&gt;
+    &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;name&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;world&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;    
+    &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;editing&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="kc"&gt;false&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+    &lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;toggleEdit&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="nx"&gt;editing&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="nx"&gt;editing&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="nt"&gt;&amp;lt;/script&amp;gt;&lt;/span&gt;
+
+&lt;span class="nt"&gt;&amp;lt;p&amp;gt;&lt;/span&gt;
+    Name: {name}
+&lt;span class="nt"&gt;&amp;lt;/p&amp;gt;&lt;/span&gt;
+
+{#if editing}
+&lt;span class="nt"&gt;&amp;lt;label&amp;gt;&lt;/span&gt;
+    Name
+    &lt;span class="nt"&gt;&amp;lt;input&lt;/span&gt; &lt;span class="na"&gt;type=&lt;/span&gt;&lt;span class="s"&gt;"text"&lt;/span&gt; &lt;span class="na"&gt;bind:value=&lt;/span&gt;&lt;span class="s"&gt;{name}&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
+&lt;span class="nt"&gt;&amp;lt;/label&amp;gt;&lt;/span&gt;
+{/if}
+
+&lt;span class="nt"&gt;&amp;lt;button&lt;/span&gt; &lt;span class="na"&gt;on:click=&lt;/span&gt;&lt;span class="s"&gt;{toggleEdit}&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
+    {editing ? 'Confirm' : 'Edit'}
+&lt;span class="nt"&gt;&amp;lt;/button&amp;gt;&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This UI is a little annoying, since you need to click (or tab into) the edit field after clicking the edit button. It would be a better experience if it was automatically focused, so you could start typing right away. How can we do that?&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#option-1-raw-bindthis-endraw-"&gt;
+  &lt;/a&gt;
+  Option 1: &lt;code&gt;bind:this&lt;/code&gt;
+&lt;/h3&gt;
+
+&lt;p&gt;If you’re familiar with &lt;a href="https://svelte.dev/docs#bind_element"&gt;binding to DOM elements&lt;/a&gt; in Svelte, you might think of doing something like this:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;script&amp;gt;&lt;/span&gt;
+    &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;name&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;world&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;    
+    &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;editing&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="kc"&gt;false&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+    &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;input&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+    &lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;toggleEdit&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="nx"&gt;editing&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="nx"&gt;editing&lt;/span&gt;
+            &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;editing&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+                    &lt;span class="nx"&gt;input&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;focus&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+            &lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="nt"&gt;&amp;lt;/script&amp;gt;&lt;/span&gt;
+
+&lt;span class="nt"&gt;&amp;lt;p&amp;gt;&lt;/span&gt;
+    Name: {name}
+&lt;span class="nt"&gt;&amp;lt;/p&amp;gt;&lt;/span&gt;
+
+{#if editing}
+&lt;span class="nt"&gt;&amp;lt;label&amp;gt;&lt;/span&gt;
+    Name
+    &lt;span class="nt"&gt;&amp;lt;input&lt;/span&gt; &lt;span class="na"&gt;bind:this=&lt;/span&gt;&lt;span class="s"&gt;{input}&lt;/span&gt; &lt;span class="na"&gt;type=&lt;/span&gt;&lt;span class="s"&gt;"text"&lt;/span&gt; &lt;span class="na"&gt;bind:value=&lt;/span&gt;&lt;span class="s"&gt;{name}&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
+&lt;span class="nt"&gt;&amp;lt;/label&amp;gt;&lt;/span&gt;
+{/if}
+
+&lt;span class="nt"&gt;&amp;lt;button&lt;/span&gt; &lt;span class="na"&gt;on:click=&lt;/span&gt;&lt;span class="s"&gt;{toggleEdit}&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
+    {editing ? 'Confirm' : 'Edit'}
+&lt;span class="nt"&gt;&amp;lt;/button&amp;gt;&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;However, if you try to run that code, you get an error in the console:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;Uncaught TypeError: input is undefined
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This is because the input is not added to the DOM yet, so you can’t focus it after setting &lt;code&gt;editing&lt;/code&gt; to &lt;code&gt;true&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;Instead, we need to call Svelte’s &lt;code&gt;[tick function](https://svelte.dev/docs#tick)&lt;/code&gt;, which returns a promise that resolves when Svelte has finished applying any pending state changes. Once &lt;code&gt;tick&lt;/code&gt; resolves, the DOM will be updated and we can focus the input.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;toggleEdit&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="nx"&gt;editing&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="nx"&gt;editing&lt;/span&gt;
+    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;editing&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="nx"&gt;tick&lt;/span&gt;&lt;span class="p"&gt;().&lt;/span&gt;&lt;span class="nx"&gt;then&lt;/span&gt;&lt;span class="p"&gt;(()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;input&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;focus&lt;/span&gt;&lt;span class="p"&gt;());&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;That works, but it doesn’t feel very intuitive. It’s also not very reusable — what if we want to apply this behavior to other inputs?&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#option-2-move-the-input-into-a-separate-component"&gt;
+  &lt;/a&gt;
+  Option 2: Move the input into a separate component
+&lt;/h3&gt;
+
+&lt;p&gt;Another option is to move the input into its own component, and focus the input when that component mounts. Here’s what that looks like:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;script&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+    &lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;value&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+    &lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;label&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+    &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;input&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+    &lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;onMount&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;svelte&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+    &lt;span class="nx"&gt;onMount&lt;/span&gt;&lt;span class="p"&gt;(()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="nx"&gt;input&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;focus&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+    &lt;span class="p"&gt;});&lt;/span&gt;
+&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/script&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;
+&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;label&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+    &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;label&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;input&lt;/span&gt; &lt;span class="nx"&gt;type&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;text&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt; &lt;span class="nx"&gt;bind&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;input&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="nl"&gt;bind&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="nx"&gt;value&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/label&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Then it can be used in the parent component, like so:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="err"&gt;#&lt;/span&gt;&lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="nx"&gt;editing&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Input&lt;/span&gt; &lt;span class="nx"&gt;bind&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="nx"&gt;value&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;name&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="nx"&gt;label&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;name&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt; &lt;span class="o"&gt;/&amp;gt;&lt;/span&gt;
+&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="o"&gt;/&lt;/span&gt;&lt;span class="k"&gt;if&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;However, with this approach you have to incur the cost of creating a new component, which you didn’t need to do otherwise. If you want to apply this behavior to another input element, you would need to make sure to expose props for every attribute that is different.&lt;/p&gt;
+
+&lt;p&gt;You are also limited to input elements with this method, and would need to reimplement this behavior if you wanted to apply it to another element.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#option-3-use-svelte-actions"&gt;
+  &lt;/a&gt;
+  Option 3: Use Svelte actions
+&lt;/h3&gt;
+
+&lt;p&gt;Though these are all viable solutions, it feels like you’re having to work around Svelte instead of with it. Thankfully, Svelte has an API to make this sort of thing easier: &lt;a href="https://svelte.dev/docs#use_action"&gt;actions&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;An action is just a function. It takes a reference to a DOM node as a parameter and runs some code when that element is added to the DOM.&lt;/p&gt;
+
+&lt;p&gt;Here’s a simple action that will call focus on the node. We don’t have to call &lt;code&gt;tick&lt;/code&gt; this time because this function will only run when the node already exists.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;focusOnMount&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;node&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="nx"&gt;node&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;focus&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We can then apply it to a node with the &lt;code&gt;use:&lt;/code&gt; directive.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="err"&gt;#&lt;/span&gt;&lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="nx"&gt;editing&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;label&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+&lt;span class="nx"&gt;Name&lt;/span&gt;
+&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;input&lt;/span&gt; &lt;span class="nx"&gt;use&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="nx"&gt;focusOnMount&lt;/span&gt; &lt;span class="nx"&gt;type&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;text&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt; &lt;span class="nx"&gt;bind&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="nx"&gt;value&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;name&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/label&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="sr"&gt;/if&lt;/span&gt;&lt;span class="err"&gt;}
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;That’s a lot cleaner! This is just a few lines of code to solve the same problem we were dealing with before, and it’s reusable without needing to create a separate component. It’s also more composable, since we can apply this behavior to any DOM element that has a &lt;code&gt;focus&lt;/code&gt; method.&lt;/p&gt;
+
+&lt;p&gt;You can &lt;a href="https://svelte.dev/repl/8808de159c4a410693122074b83fe0e4?version=3.43.2"&gt;see the final demo&lt;/a&gt; in this Svelte REPL.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#example-2-integrating-svelte-actions-with-tippy"&gt;
+  &lt;/a&gt;
+  Example 2: Integrating Svelte actions with Tippy
+&lt;/h2&gt;
+
+&lt;p&gt;Actions are also great when you want to integrate with a vanilla JavaScript library that needs a reference to a specific DOM node. This is another strength of Svelte — while the &lt;a href="https://blog.logrocket.com/whats-new-svelte-summer-2021/"&gt;Svelte-specific ecosystem&lt;/a&gt; is still growing, it’s still easy to integrate with the &lt;a href="https://blog.logrocket.com/tag/js-libraries"&gt;vast array of vanilla JS packages&lt;/a&gt;!&lt;/p&gt;
+
+&lt;p&gt;Let’s use the tooltip library &lt;a href="https://atomiks.github.io/tippyjs/"&gt;Tippy.js&lt;/a&gt; as an example. We can pass a DOM element to initialize Tippy on that node, and also pass an object of parameters.&lt;/p&gt;
+
+&lt;p&gt;For example, here’s how we can add a tooltip using vanilla JS:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="nx"&gt;tippy&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;tippy.js&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="nx"&gt;tippy&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nb"&gt;document&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;getElementById&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;tooltip&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;content&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Hello!&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt; &lt;span class="p"&gt;});&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;We can use a Svelte action to run this code so we have a reference to the node without calling &lt;code&gt;document.getElementById&lt;/code&gt;. Here’s what that might look like:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;tooltip&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;node&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;tip&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;tippy&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;node&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;content&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Hello!&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt; &lt;span class="p"&gt;});&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;And it can be used on an element like so:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;button&lt;/span&gt; &lt;span class="nx"&gt;use&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="nx"&gt;tooltip&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+    &lt;span class="nx"&gt;Hover&lt;/span&gt; &lt;span class="nx"&gt;me&lt;/span&gt;
+&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/button&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;But how do we customize the properties we use to initialize the tooltip? We don’t want it to be the same for every use of the action.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#passing-parameters-to-actions"&gt;
+  &lt;/a&gt;
+  Passing parameters to actions
+&lt;/h3&gt;
+
+&lt;p&gt;Actions can also take parameters as a second argument, which means we can easily customize the tooltip and allow consumers to pass in the parameters they want.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;tooltip&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;node&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;params&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;tip&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;tippy&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;node&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;params&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;And here’s how you use it on an element:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;button&lt;/span&gt; &lt;span class="na"&gt;use:tooltip=&lt;/span&gt;&lt;span class="s"&gt;{{&lt;/span&gt;
+    &lt;span class="na"&gt;content:&lt;/span&gt; &lt;span class="err"&gt;'&lt;/span&gt;&lt;span class="na"&gt;New&lt;/span&gt; &lt;span class="na"&gt;message&lt;/span&gt;&lt;span class="err"&gt;'&lt;/span&gt;
+&lt;span class="err"&gt;}}&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
+    Hover me
+&lt;span class="nt"&gt;&amp;lt;/button&amp;gt;&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Note the double curly brackets. You put the parameters you want to pass to the action inside the curly brackets. Since we’re passing an object to this action, there are two sets of curly brackets: one to wrap the parameters and one for the parameter object itself.&lt;/p&gt;
+
+&lt;p&gt;This works, but there’s a few problems:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt; There’s no way to update the parameters after the action runs&lt;/li&gt;
+&lt;li&gt; We aren’t &lt;a href="https://atomiks.github.io/tippyjs/v6/methods/#destroy"&gt;destroying the tooltip&lt;/a&gt; when the element is removed&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;Thankfully, actions can return an object with &lt;code&gt;update&lt;/code&gt; and &lt;code&gt;destroy&lt;/code&gt; methods that handle both these problems.&lt;/p&gt;
+
+&lt;p&gt;The &lt;code&gt;update&lt;/code&gt; method will run whenever the parameters you pass to the action change, and the &lt;code&gt;destroy&lt;/code&gt; method will run when the DOM element that the action is attached to is removed. We can use the Tippy &lt;code&gt;setProps&lt;/code&gt; function to update the parameters, and &lt;code&gt;destroy&lt;/code&gt; to remove the element when we’re done.&lt;/p&gt;
+
+&lt;p&gt;Here’s what the action looks like if we implement these methods:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;tooltip&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;node&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;params&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;tip&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;tippy&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;node&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;params&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="na"&gt;update&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;newParams&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="nx"&gt;tip&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;setProps&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;newParams&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+        &lt;span class="p"&gt;},&lt;/span&gt;
+        &lt;span class="na"&gt;destroy&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="nx"&gt;tip&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;destroy&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+        &lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This allows us to write a more complicated example that updates the placement and message of the tooltip after initial creation:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;script&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+    &lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="nx"&gt;tippy&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;tippy.js&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+    &lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;tooltip&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;node&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;params&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;tip&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;tippy&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;node&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;params&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="na"&gt;update&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;newParams&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+                &lt;span class="nx"&gt;tip&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;setProps&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;newParams&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+            &lt;span class="p"&gt;},&lt;/span&gt;
+            &lt;span class="na"&gt;destroy&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+                &lt;span class="nx"&gt;tip&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;destroy&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+            &lt;span class="p"&gt;}&lt;/span&gt;
+        &lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;placements&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;top&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;right&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;bottom&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;left&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;];&lt;/span&gt;
+    &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;selectedPlacement&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;placements&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;];&lt;/span&gt;
+    &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;message&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;I'm a tooltip!&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/script&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;
+&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;label&lt;/span&gt; &lt;span class="k"&gt;for&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;placement&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="nx"&gt;Placement&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/label&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;select&lt;/span&gt; &lt;span class="nx"&gt;bind&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="nx"&gt;value&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;selectedPlacement&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="nx"&gt;id&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;placement&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+    &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="err"&gt;#&lt;/span&gt;&lt;span class="nx"&gt;each&lt;/span&gt; &lt;span class="nx"&gt;placements&lt;/span&gt; &lt;span class="k"&gt;as&lt;/span&gt; &lt;span class="nx"&gt;placement&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;
+        &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;option&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;placement&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/option&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;    &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="sr"&gt;/each&lt;/span&gt;&lt;span class="err"&gt;}
+&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/select&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;
+&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;label&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="nx"&gt;Message&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;input&lt;/span&gt; &lt;span class="nx"&gt;bind&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="nx"&gt;value&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;message&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="nx"&gt;type&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;text&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/label&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;
+&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;button&lt;/span&gt; &lt;span class="nx"&gt;use&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="nx"&gt;tooltip&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{{&lt;/span&gt;
+    &lt;span class="na"&gt;content&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;message&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="na"&gt;placement&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;selectedPlacement&lt;/span&gt;
+&lt;span class="p"&gt;}}&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+    &lt;span class="nx"&gt;Hover&lt;/span&gt; &lt;span class="nx"&gt;me&lt;/span&gt;
+&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/button&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;You can find the final example in &lt;a href="https://svelte.dev/repl/59afe883e6d84533a612f137dc56c4b8?version=3.43.2"&gt;this Svelte REPL&lt;/a&gt;. &lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--963ZQe22--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://blog.logrocket.com/wp-content/uploads/2021/11/tooltip-example.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--963ZQe22--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://blog.logrocket.com/wp-content/uploads/2021/11/tooltip-example.png" alt="Our tooltip example" width="730" height="461"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#alternate-approaches-without-using-actions"&gt;
+  &lt;/a&gt;
+  Alternate approaches without using actions
+&lt;/h2&gt;
+
+&lt;p&gt;As with the example before, we didn’t &lt;em&gt;need&lt;/em&gt; actions to be able to do this. We could also attach the tooltip when the component mounts and update the parameters using reactive statements. Here’s what that might look like:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="o"&gt;&amp;gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;script&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+    &lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="nx"&gt;tippy&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;tippy.js&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+    &lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;onMount&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;onDestroy&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;svelte&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+    &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;button&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+    &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;tip&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+    &lt;span class="nx"&gt;onMount&lt;/span&gt;&lt;span class="p"&gt;(()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="nx"&gt;tip&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;tippy&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;button&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;content&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;message&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="na"&gt;placement&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;selectedPlacement&lt;/span&gt;&lt;span class="p"&gt;});&lt;/span&gt;
+    &lt;span class="p"&gt;});&lt;/span&gt;
+
+    &lt;span class="nl"&gt;$&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;tip&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="nx"&gt;tip&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;setProps&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="na"&gt;content&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;message&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="na"&gt;placement&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;selectedPlacement&lt;/span&gt; &lt;span class="p"&gt;});&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+
+    &lt;span class="nx"&gt;onDestroy&lt;/span&gt;&lt;span class="p"&gt;(()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="nx"&gt;tip&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;destroy&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+    &lt;span class="p"&gt;});&lt;/span&gt;
+
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;placements&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;top&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;right&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;bottom&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;left&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;];&lt;/span&gt;
+    &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;selectedPlacement&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;placements&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;];&lt;/span&gt;
+    &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;message&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;I'm a tooltip!&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/script&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;
+&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;label&lt;/span&gt; &lt;span class="k"&gt;for&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;placement&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="nx"&gt;Placement&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/label&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;select&lt;/span&gt; &lt;span class="nx"&gt;bind&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="nx"&gt;value&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;selectedPlacement&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="nx"&gt;id&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;placement&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+    &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="err"&gt;#&lt;/span&gt;&lt;span class="nx"&gt;each&lt;/span&gt; &lt;span class="nx"&gt;placements&lt;/span&gt; &lt;span class="k"&gt;as&lt;/span&gt; &lt;span class="nx"&gt;placement&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;
+        &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;option&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;placement&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/option&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;    &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="sr"&gt;/each&lt;/span&gt;&lt;span class="err"&gt;}
+&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/select&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;
+&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;label&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="nx"&gt;Message&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;input&lt;/span&gt; &lt;span class="nx"&gt;bind&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="nx"&gt;value&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;message&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="nx"&gt;type&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;text&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/label&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;
+&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;button&lt;/span&gt; &lt;span class="nx"&gt;bind&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;button&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+    &lt;span class="nx"&gt;Hover&lt;/span&gt; &lt;span class="nx"&gt;me&lt;/span&gt;
+&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="sr"&gt;/button&lt;/span&gt;&lt;span class="err"&gt;&amp;gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This approach is totally valid. However, it is less reusable across multiple components and becomes tricky if the tooltip element is conditionally rendered or in a loop.&lt;/p&gt;
+
+&lt;p&gt;You might also think of creating a component like &lt;code&gt;&amp;lt;TooltipButton&amp;gt;&lt;/code&gt; to encapsulate the logic. This will also work, though it limits you to one type of element. Implementing it as an action lets you apply the tooltip to any element, not just a button.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#wrapping-up"&gt;
+  &lt;/a&gt;
+  Wrapping up
+&lt;/h2&gt;
+
+&lt;p&gt;Actions are a very powerful Svelte feature. Now that you’re familiar with them, make sure you check out the &lt;a href="https://svelte.dev/tutorial/actions"&gt;official tutorial&lt;/a&gt; and &lt;a href="https://svelte.dev/docs#use_action"&gt;docs&lt;/a&gt; to see other ways to use actions. They aren’t always the right solution — many times, it is better to encapsulate the behavior in other ways, such as in a separate component or with a simple event handler. However, there are times like the examples above where they make your component code much cleaner and more reusable.&lt;/p&gt;
+
+&lt;p&gt;There is also an &lt;a href="https://github.com/sveltejs/rfcs/pull/24"&gt;open RFC&lt;/a&gt; to add inbuilt actions to Svelte, similar to how Svelte includes inbuilt transitions. As part of that RFC, the community created a &lt;a href="https://github.com/sw-yx/svelte-actions"&gt;POC library&lt;/a&gt; with some commonly-used actions such as &lt;code&gt;longpress&lt;/code&gt;, &lt;code&gt;clickOutside&lt;/code&gt;, and &lt;code&gt;lazyload&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;You may also be interested in a post I wrote last year on &lt;a href="https://geoffrich.net/posts/svelte-action-sticky/"&gt;using actions to detect when a sticky-positioned element becomes stuck to the viewport&lt;/a&gt;.&lt;/p&gt;
+
+
+
+
+&lt;h2&gt;
+  &lt;a href="#logrocket-full-visibility-into-your-web-apps"&gt;
+  &lt;/a&gt;
+  &lt;a href="https://logrocket.com/signup/"&gt;LogRocket&lt;/a&gt;: Full visibility into your web apps
+&lt;/h2&gt;
+
+&lt;p&gt;&lt;a href="https://logrocket.com/signup/"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--8FGBNR-I--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://blog.logrocket.com/wp-content/uploads/2017/03/1d0cd-1s_rmyo6nbrasp-xtvbaxfg.png" alt="LogRocket Dashboard Free Trial Banner" width="880" height="496"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://logrocket.com/signup/"&gt;LogRocket&lt;/a&gt; is a frontend application monitoring solution that lets you replay problems as if they happened in your own browser. Instead of guessing why errors happen, or asking users for screenshots and log dumps, LogRocket lets you replay the session to quickly understand what went wrong. It works perfectly with any app, regardless of framework, and has plugins to log additional context from Redux, Vuex, and @ngrx/store.&lt;/p&gt;
+
+&lt;p&gt;In addition to logging Redux actions and state, LogRocket records console logs, JavaScript errors, stacktraces, network requests/responses with headers + bodies, browser metadata, and custom logs. It also instruments the DOM to record the HTML and CSS on the page, recreating pixel-perfect videos of even the most complex single-page apps.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://logrocket.com/signup/"&gt;Try it for free&lt;/a&gt;.&lt;/p&gt;
+
+</description>
+      <category>svelte</category>
+      <category>webdev</category>
+      <category>tutorial</category>
+      <category>programming</category>
     </item>
     <item>
       <title>Loops in Javascript</title>
@@ -786,6 +1840,183 @@ There are two problems with this approach.&lt;/p&gt;
       <category>performance</category>
     </item>
     <item>
+      <title>How to Land an Interview at Google (and Other Top Tech Companies)</title>
+      <author>Shaheer</author>
+      <pubDate>Thu, 02 Dec 2021 17:29:24 +0000</pubDate>
+      <link>https://dev.to/shaheer912/how-to-land-an-interview-at-google-and-other-top-tech-companies-2cn5</link>
+      <guid>https://dev.to/shaheer912/how-to-land-an-interview-at-google-and-other-top-tech-companies-2cn5</guid>
+      <description>&lt;p&gt;Landing an interview with Google is no easy task. But what about companies like Facebook, Amazon, Microsoft, and Apple? If you want to work for any of these companies, you’ll need to land that interview.&lt;/p&gt;
+
+&lt;p&gt;The first step is identifying the right company to apply to. Once you find the company you want to work for, take a look at their website. What are they known for? What values do they have? How many people do they employ? Which department might be the best fit for you? After you figure out who your perfect target company is, it’s time to go about actually getting an interview with them.&lt;/p&gt;
+
+&lt;p&gt;There are three ways to get your resume in front of their hiring managers: &lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#1-apply-for-a-job-using-their-job-board"&gt;
+  &lt;/a&gt;
+  1) Apply for a job using their job board.
+&lt;/h2&gt;
+
+&lt;p&gt;Some companies have an online application or job board with openings that you can apply to. You can search through the available jobs and choose the one you want to apply for. But be warned, not every company has a job board and not all of them are easy to find. So before you go this route, make sure it’s worth your time.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#2-find-a-contact-or-recruiter-at-the-company"&gt;
+  &lt;/a&gt;
+  2) Find a contact or recruiter at the company.
+&lt;/h2&gt;
+
+&lt;p&gt;Applying to a company on their website is great if they have one, but some companies don't have an online application. If that's the case, then find someone who knows about the company and get in touch with them! This might be difficult because many companies don't have public contacts listed, but use your network – they'll probably know someone working there.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#3-connecting-during-a-hackathon-or-other-event"&gt;
+  &lt;/a&gt;
+  3) Connecting during a hackathon or other event.
+&lt;/h2&gt;
+
+&lt;p&gt;Some companies host hackathons or events where people can come in and present their ideas on how to improve their product or business. While these types of events are often low-interaction, sometimes the person organizing will remember you from your presentation and love what you're doing with tech!&lt;/p&gt;
+
+&lt;p&gt;Whichever route you choose, keep in mind that success comes from persistence. Sometimes, it takes 10-15 tries before someone responds back.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#find-the-perfect-company-for-you"&gt;
+  &lt;/a&gt;
+  Find the perfect company for you
+&lt;/h1&gt;
+
+&lt;p&gt;One of the best ways to find the perfect company for you is to identify who your ideal job would be at that company.&lt;/p&gt;
+
+&lt;p&gt;For example, if your ideal job would be working on Facebook’s Ads Team, you know that their ads team works in Menlo Park, California. You can narrow down your search by looking at their website to see which departments are hiring and figure out which one might be a good fit for yours.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#write-a-great-resume"&gt;
+  &lt;/a&gt;
+  Write a great resume
+&lt;/h1&gt;
+
+&lt;p&gt;Your resume is the first and most important step to getting an interview with a company. You should put your best foot forward, so make sure your resume is polished before you hit send.&lt;/p&gt;
+
+&lt;p&gt;Here are some tips for creating a successful resume that will help you land that interview:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Make sure your personal information doesn't stand out. It's easy for recruiters to spot resumes that don't match the company's standards. For example, if you're applying for an office job, don't list your previous experience as a stripper in Las Vegas or as a busboy at a restaurant when you were 12 years old.&lt;/li&gt;
+&lt;li&gt;Make sure the formatting is neat and professional looking—don't use Comic Sans!&lt;/li&gt;
+&lt;li&gt;Keep it concise; there's no need to go into too much detail about yourself on your resume. &lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;The most important information should be on the top of your resume.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#find-the-right-person-to-contact"&gt;
+  &lt;/a&gt;
+  Find the right person to contact
+&lt;/h1&gt;
+
+&lt;p&gt;In order for you to land an interview with a company, you'll have to contact someone who can place an interview for you. This person should be someone who is directly related to the hiring department--for example, if you are applying for an engineering job, find out if there is a recruiter for that specific department.&lt;/p&gt;
+
+&lt;p&gt;The best way to get started is by looking on the company's website to see which departments might be interested in your qualification and skill set. If there is no hiring manager listed on their website, look around their social media accounts or check out their annual report to see who is involved with hiring.&lt;/p&gt;
+
+&lt;p&gt;If you're still not getting any response, keep trying different people at the company until one of them helps you out. When they do help you out and give feedback, leave them a thank-you note or tweet that appreciation back!&lt;/p&gt;
+
+&lt;p&gt;For more information about how important it is to target the right company and how finding this person will make all the difference in landing your dream job, read this article: &lt;a href="https://www.flexjobs.com/blog/post/choose-a-company-then-a-job/"&gt;https://www.flexjobs.com/blog/post/choose-a-company-then-a-job/&lt;/a&gt;&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#apply-for-jobs-online"&gt;
+  &lt;/a&gt;
+  Apply for jobs online
+&lt;/h1&gt;
+
+&lt;p&gt;There are many job boards out there, but what company should you apply to?&lt;/p&gt;
+
+&lt;p&gt;That depends on your qualifications and the company that you want to work for. If you're applying for a job at Google, Amazon, Facebook, or Apple, then you'll need to apply to their job boards. &lt;br&gt;
+Here are some of the job boards for tech companies:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="https://angel.co"&gt;Angel.co&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://dice.com"&gt;Dice.com&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://stackoverflow.com/jobs"&gt;StackOverflow Jobs&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://weworkremotely.com/"&gt;We Work Remotely&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;&lt;em&gt;If you have more, be sure to mention it in the comments!&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;Before you start trying to find the right company for your resume, create a copy of your resume that is tailored specifically for each company. That way when you go on their site and see which jobs they have available, you can quickly filter through them based on what the company is looking for.&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#network-by-attending-events-and-conferences"&gt;
+  &lt;/a&gt;
+  Network by attending events and conferences
+&lt;/h1&gt;
+
+&lt;p&gt;If you really want to land an interview with your target company, it helps to attend events and conferences that they are in attendance at. To find out what events may be coming up, try searching the company's website or social media pages. Once you have a list of events, start contacting event organizers to see if you can get a chance at the interviews that will be held there.&lt;/p&gt;
+
+&lt;p&gt;Once you get an interview, another important thing is to make sure that during the interview process, you build that personal connection with your interviewer. If you build a good personal connection with them, they’ll remember your name and might make sure your resume has a second look from someone else in their department.&lt;/p&gt;
+
+&lt;p&gt;Here are some of the resources hackathons and events that you can attend, show off your skills and make your connections!&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="https://mhacks.org/"&gt;M Hacks&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://hackmit.org/"&gt;Hack MIT&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://developers.google.com/events"&gt;Google Developer Events&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://codingcompetitions.withgoogle.com/hashcode/"&gt;Google Hashcode&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;&lt;em&gt;If you think I missed something that should be added here, be sure to mention it in the comments&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;As long as you do all of these things correctly, it should not be too hard for you to land an interview with Google! (or any other company for that matter!)&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#what-should-you-prepare-for-your-interview"&gt;
+  &lt;/a&gt;
+  What should you prepare for your interview?
+&lt;/h1&gt;
+
+&lt;p&gt;If you are interviewing with a large company, it is important to prepare for the interview. You want to make sure that you present yourself in the best possible light and make the best impression on your interviewer.&lt;/p&gt;
+
+&lt;p&gt;Here are some things to keep in mind:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Know what questions they might ask - Practice answering them - Research their company - Prepare a list of questions you want to ask them.&lt;/li&gt;
+&lt;li&gt;Know data structures and algorithms, they are the most important part of the interview, if you do not know data structures and algorithms you will not be able to answer their technical questions. So it's best that you are prepared!&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h2&gt;
+  &lt;a href="#here-are-a-few-data-structure-and-algorithm-questions-asked-by-google-themselves"&gt;
+  &lt;/a&gt;
+  Here are a few data structure and algorithm questions (asked by Google themselves!)
+&lt;/h2&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;p&gt;There is a list of numbers and a number k given. You have to return whether any two numbers from the list add up to make it equal to k &lt;a href="https://judocoder.com/try/challenge/Add-up-to-make-equal"&gt;practice online&lt;/a&gt;&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Two arrays and an element x is given. Find the element that would be at the xth position of the final sorted array &lt;a href="https://judocoder.com/try/challenge/X-th-Element"&gt;practice online&lt;/a&gt;&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;An array of integers and a number k are given, where 1 &amp;lt;= k &amp;lt;= length of the array. You have to return the maximum values of each subarray of length k &lt;a href="https://judocoder.com/try/challenge/return-the-maximum-values-of-subarray"&gt;practice online&lt;/a&gt;&lt;/p&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h1&gt;
+  &lt;a href="#conclusion"&gt;
+  &lt;/a&gt;
+  Conclusion
+&lt;/h1&gt;
+
+&lt;p&gt;The tech industry is booming and pays well. It's also a hub for innovation and entrepreneurship. If you're considering the tech industry, you should know that there are many ways to make good money in this field, especially if you work for one of the companies listed above.&lt;/p&gt;
+
+&lt;p&gt;You can make anywhere from $80,000 to $180,000 in the tech industry even if you are just starting out (and not to mention the perks and stock options that come along with it!).&lt;/p&gt;
+
+&lt;p&gt;So if you are interested in working at top tech, make sure you are prepared for a technical interview.&lt;/p&gt;
+
+&lt;p&gt;The good news is, &lt;a href="https://judocoder.com"&gt;JudoCoder.com&lt;/a&gt; provides handpicked selection of all sorts of &lt;a href="https://judocoder.com"&gt;data structures and algorithm questions&lt;/a&gt;, most of these questions have been asked in a real interview!.&lt;/p&gt;
+
+&lt;p&gt;I would suggest you create a free account at judocoder.com and start practicing your skills. You will be prepared in no time!..&lt;br&gt;
+No matter what you do, make sure you practice! You'll be happy you  did when it's time for your interview.&lt;/p&gt;
+
+&lt;p&gt;Let me know what you think? Can you land an interview at top tech companies using these tactics? Let me know your comments. I would love to hear what you have to say!&lt;/p&gt;
+
+</description>
+      <category>career</category>
+      <category>programming</category>
+      <category>beginners</category>
+      <category>codenewbie</category>
+    </item>
+    <item>
       <title>Add flying emoji reactions to a React video chat app</title>
       <author>Kimberlee Johnson </author>
       <pubDate>Thu, 02 Dec 2021 17:26:38 +0000</pubDate>
@@ -1151,278 +2382,6 @@ There are two problems with this approach.&lt;/p&gt;
       <category>react</category>
       <category>javascript</category>
       <category>saas</category>
-    </item>
-    <item>
-      <title>1 line of code: How to create a range array</title>
-      <author>martin krause</author>
-      <pubDate>Thu, 02 Dec 2021 17:13:24 +0000</pubDate>
-      <link>https://dev.to/martinkr/1-line-of-code-how-to-create-a-range-array-3i3k</link>
-      <guid>https://dev.to/martinkr/1-line-of-code-how-to-create-a-range-array-3i3k</guid>
-      <description>&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;createRange&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="k"&gt;from&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;to&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nb"&gt;Array&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="k"&gt;from&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="na"&gt;length&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;to&lt;/span&gt; &lt;span class="o"&gt;-&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt; &lt;span class="p"&gt;},&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;_&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;i&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="nx"&gt;i&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Returns a new array with numeric items in the given range.&lt;/p&gt;
-
-
-
-
-&lt;h2&gt;
-  &lt;a href="#the-repository-amp-npm-package"&gt;
-  &lt;/a&gt;
-  The repository &amp;amp; npm package
-&lt;/h2&gt;
-
-&lt;p&gt;You can find the all the utility functions from this series at &lt;a href="https://github.com/martinkr/onelinecode"&gt;github.com/martinkr/onelinecode&lt;/a&gt;&lt;br&gt;
-The library is also published to &lt;a href="https://www.npmjs.com/package/@onelinecode/onelinecode"&gt;npm as @onelinecode&lt;/a&gt; for your convenience.&lt;/p&gt;
-
-&lt;p&gt;The code and the npm package will be updated every time I publish a new article.&lt;/p&gt;
-
-
-
-
-&lt;p&gt;Follow me on &lt;a href="http://twitter.com/_martinkr"&gt;Twitter: @martinkr&lt;/a&gt; and consider to &lt;a href="https://www.buymeacoffee.com/martinkr"&gt;buy me a coffee&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Photo by &lt;a href="https://unsplash.com/@zoo_monkey"&gt;zoo_monkey&lt;/a&gt; on &lt;a href="https://unsplash.com/s/photos/fuji"&gt;Unsplash&lt;/a&gt;&lt;/p&gt;
-
-
-
-
-</description>
-      <category>javascript</category>
-      <category>webdev</category>
-      <category>performance</category>
-      <category>codequality</category>
-    </item>
-    <item>
-      <title>Debugging Multer and other middle-wares</title>
-      <author>bacloud14</author>
-      <pubDate>Thu, 02 Dec 2021 17:11:43 +0000</pubDate>
-      <link>https://dev.to/bacloud14/debugging-multer-and-other-middle-wares-3d2</link>
-      <guid>https://dev.to/bacloud14/debugging-multer-and-other-middle-wares-3d2</guid>
-      <description>&lt;p&gt;I've been sipping coffee, rolling cigarettes,  and pulling my hair since the day before yesterday.&lt;/p&gt;
-
-&lt;p&gt;I have trouble setting what I thought a useful dynamic middle-ware for later implementations. (Post request with so much constraints, now and surely in future).&lt;/p&gt;
-
-&lt;p&gt;The issue is with Multer (or &lt;code&gt;connect-sequence&lt;/code&gt; see later). If you know, Multer is a Node.js middleware for handling (including parsing) &lt;code&gt;multipart/form-data&lt;/code&gt;. &lt;/p&gt;
-
-&lt;p&gt;What I expect could differ though and this is why I'm setting this super intelligent middle-ware. &lt;/p&gt;
-
-&lt;p&gt;I found how to chain middle-wares on runtime, which is not a very usual task, but possible and very useful for my case: &lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://github.com/sirap-group/connect-sequence/"&gt;connect-sequence&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;The solution dates a bit as you can see. Anyway, here is a slice of my middle-ware code (that constructs and runs other middle-wares in return).&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;async function magicMiddleware(req, res, next) {
-    const contentType = req.get('content-type')
-    const form = formidable({})
-
-    if (contentType.indexOf('multipart/form-data') &amp;gt; -1) {
-        await form.parse(req, function (err, fields, files) {
-            if (err) {
-                console.log(String(err));
-                return;
-            }
-            magicMiddleware_(fields)
-        })
-    } else {
-        magicMiddleware_(req)
-    }
-
-    const section = req.params[0]
-    const method = req.method
-
-    const magicMiddleware_ = (body) =&amp;gt; {
-        const {
-            secured,
-            upload,
-            geolocation,
-            illustrations,
-            schema
-        } = constraints[process.env.NODE_ENV][method][section]
-        singletonSchema = schema()
-
-        // Third party middlewares
-        var seq = new ConnectSequence(req, res, next)
-        debugger;
-        const validating = celebrate({
-            [Segments.BODY]: singletonSchema,
-        })
-        if (upload) { 
-            console.log('attaching multer')
-            seq.append(ops.multer) 
-        }
-        if (!singletonSchema.called) {
-            seq.append(validating)
-        }
-        seq.append(errors())
-        if (secured) { 
-            console.log('attaching multer')
-            seq.append(ops.auth0) 
-        }
-        seq.run()
-        console.log(req.body)
-    }
-}
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-&lt;p&gt;It is to know that third party middle-wares could mismatch. One adds something to req and one remove the same thing for instance.&lt;/p&gt;
-
-&lt;p&gt;I run debugger and couldn't find out but I think &lt;code&gt;multer&lt;/code&gt; specifically is not running &lt;em&gt;well&lt;/em&gt;, It is running but not well; &lt;code&gt;req.body&lt;/code&gt; is &lt;code&gt;{}&lt;/code&gt;, not undefined and not anything else.&lt;/p&gt;
-
-&lt;p&gt;I put &lt;code&gt;multer&lt;/code&gt; at first in the sequence to be able to parse &lt;code&gt;multipart/form-data&lt;/code&gt; data I'm testing right now, then there is &lt;code&gt;celebrate&lt;/code&gt; (Joi based validation middle-ware). Then there is &lt;code&gt;auth0&lt;/code&gt; too (for passwordless authentication).&lt;/p&gt;
-
-&lt;p&gt;Of course there are multiple application middle-ware attached when the app starts. But none is susceptible of causing harm as if I push &lt;code&gt;multer&lt;/code&gt;, &lt;code&gt;celebrate&lt;/code&gt; and &lt;code&gt;auth0&lt;/code&gt; as middle-wares directly (as usual), all works fine.&lt;/p&gt;
-
-&lt;p&gt;So data is parsed, &lt;code&gt;req.body&lt;/code&gt; is there with the uploaded file and input text fields.&lt;/p&gt;
-
-&lt;p&gt;I'm pulling my hair, really. As I don't want to cancel all this and start from zero pushing middle-wares directly on multiple post requests (with different constraints: like one runs without authentication, the other expects &lt;code&gt;text/plain&lt;/code&gt; all combinations might behave differently on different environments, like no upload when testing with Postman).&lt;/p&gt;
-
-&lt;p&gt;If you have a hint, I will follow up with test. If you want to jump on code, here is the &lt;a href="https://github.com/bacloud14/Classified-ads-48/blob/hacktoberfest_only_branch/lib/services/middlewares.js"&gt;file&lt;/a&gt; and here is the &lt;a href="https://github.com/bacloud14/Classified-ads-48"&gt;repo&lt;/a&gt;.&lt;/p&gt;
-
-&lt;p&gt;Note: there is a bug in &lt;code&gt;connect-sequence&lt;/code&gt;. It is expecting &lt;code&gt;err&lt;/code&gt; (passed through next(err)) to be different that &lt;code&gt;undefined&lt;/code&gt;. But Multer appears to push &lt;code&gt;null&lt;/code&gt; when there is no error. So there is this, I modified code accordingly.&lt;/p&gt;
-
-&lt;p&gt;From this:&lt;br&gt;
-&lt;a href="https://github.com/sirap-group/connect-sequence/blob/dacd6d992545de8b2332912672d2dc810b0fc194/lib/ConnectSequence.js#L81"&gt;&lt;code&gt;if (err !== undefined) {&lt;/code&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;To this:&lt;br&gt;
-&lt;code&gt;if(err)&lt;/code&gt;&lt;/p&gt;
-
-&lt;p&gt;Final note: I want to believe in in &lt;code&gt;connect-sequence&lt;/code&gt; as I couldn't find my way adding middle-wares at runtime. I went through code (not debugging) and all seems well to my eyes.&lt;/p&gt;
-
-&lt;p&gt;Thanks a lot !!!&lt;/p&gt;
-
-</description>
-      <category>help</category>
-      <category>javascript</category>
-      <category>node</category>
-    </item>
-    <item>
-      <title>Developer Portfolio with React.js</title>
-      <author>Ashik Ahamed</author>
-      <pubDate>Thu, 02 Dec 2021 17:01:38 +0000</pubDate>
-      <link>https://dev.to/ahamedashik01/developer-portfolio-with-reactjs-2la4</link>
-      <guid>https://dev.to/ahamedashik01/developer-portfolio-with-reactjs-2la4</guid>
-      <description>&lt;p&gt;I build my developer portfolio using react.js and I would like to have it reviewed by our awesome community.🤍🖤&lt;br&gt;
-I have tried to keep the UI design minimalistic and modern and I'm loving it. &lt;br&gt;
-Any feedback, suggestions, or comments are welcome. If you like the website please leave a mail from the contact page. I promise it won't take long.&lt;br&gt;
-Thank You!&lt;br&gt;
-Website Link:- &lt;a href="https://personal-portfolio-30590.web.app/"&gt;https://personal-portfolio-30590.web.app/&lt;/a&gt;&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--en450Os4--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/zmgu6fru1o0y794ugicn.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--en450Os4--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/zmgu6fru1o0y794ugicn.png" alt="Image description" width="880" height="550"&gt;&lt;/a&gt;&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--VjQBZZBM--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/6jmncxqmzuywty6gayc2.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--VjQBZZBM--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/6jmncxqmzuywty6gayc2.png" alt="Image description" width="880" height="1147"&gt;&lt;/a&gt;&lt;/p&gt;
-
-</description>
-      <category>html</category>
-      <category>css</category>
-      <category>javascript</category>
-      <category>react</category>
-    </item>
-    <item>
-      <title>Can Anyone help me with my journey?</title>
-      <author>Abdinajib Junior</author>
-      <pubDate>Thu, 02 Dec 2021 16:42:28 +0000</pubDate>
-      <link>https://dev.to/juniori_1/can-anyone-help-me-with-my-journey-19f9</link>
-      <guid>https://dev.to/juniori_1/can-anyone-help-me-with-my-journey-19f9</guid>
-      <description>&lt;p&gt;&lt;em&gt;Hey, Dev community&lt;/em&gt;, I hope everyone is reading my post is well.&lt;br&gt;
-As we know the main purpose we joined this community is to help each other!&lt;br&gt;
-Recently I joined developer community And I have 2-3 month experience about programming languages Such as HTML, Css, Media Quary and basic of java and the Concept of Web developer, So I want to work fast to gain more experience about programming languages to get remotely jobs ASAP. Although  I met many challenges like 'English problem' but it seems that I tackle it.&lt;br&gt;
-I started to learn at Udemy and Coursera and they helped me a lot. &lt;br&gt;
-Can anyone help me learning Node.js or recommended me the best Course of Node.js.because I'm looking for Full-Stack Engineer.&lt;/p&gt;
-
-&lt;p&gt;Finally I would to drop your advice.&lt;br&gt;
-If something wrong with my post, please click comment below.&lt;br&gt;
-Thank you 😊&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#nodejs"&gt;
-  &lt;/a&gt;
-  Node.js
-&lt;/h1&gt;
-
-&lt;h1&gt;
-  &lt;a href="#java"&gt;
-  &lt;/a&gt;
-  Java
-&lt;/h1&gt;
-
-</description>
-      <category>javascript</category>
-      <category>webdev</category>
-      <category>programming</category>
-      <category>beginners</category>
-    </item>
-    <item>
-      <title>Coop : An App for Students</title>
-      <author>param-19</author>
-      <pubDate>Thu, 02 Dec 2021 16:39:44 +0000</pubDate>
-      <link>https://dev.to/parambhatt/coop-an-app-for-students-14jb</link>
-      <guid>https://dev.to/parambhatt/coop-an-app-for-students-14jb</guid>
-      <description>&lt;p&gt;//Include all the motivation here&lt;br&gt;
-With the corona pandemic, a lot of the work that was generally done offline or via certified institutions has shifted online. This has resulted in massive amounts of information and numerous courses available online,that we as teenagers, college students cannot verify it nor completely rely on them. There are forums like reddit and quora, but the issue of trustable information or guidelines is still missing. Hence, we present coop, an application that can be used by a closed community to interact and share knowledge. The issue of trust is resolved simply because of the closed community, for example, we as BITSians will trust any information given to us by a fellow BITSian, who has not only any motivation to cheat with us, but also is an alumni and a part of the culture. &lt;/p&gt;
-
-&lt;p&gt;//Choice of technology&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;&lt;p&gt;Kotlin : One of the open source languages recognised by google for android development, it has extensive support across platforms and communities, and is completely interoperable with java. It is very easy to learn, and reduces the boiler plate code ( or the extra code that we need to write ), for example, in java. It has a byte code structure, which enhances the performance of our apps. In addition, it allows both inline and lambda functions making the execution speed even lower than the same code in java!&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;Firebase : We went for the firebase firestore ( cloud db ), since our app is yet on the beginning stage, and doesnt have such a userbase that needs a real time database. Provided by google, it reduces the need to work with several third party environments and also allows server code if the need ever comes to that. For an app like ours, a no sql database is preferred because of the dexterity and flexibility that is offered by the entire data structure making firebase just the ideal choice.&lt;/p&gt;&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;//Sign in page&lt;br&gt;
-When a user first opens our app, the first thing he sees is a splash screen of our app icon, and our app then checks if the user has signed in or not. In the case that the user hasnt signed in, hes given an option to sign in with google. Firebase handles the signing in and storing of the user on our application. Simultaneously, we also add the name and user details to our custom user database for our purposes. Once the sign in is verified, he is redirected to his home page.&lt;/p&gt;
-
-&lt;p&gt;//General layout&lt;br&gt;
-All our application activities have an additional sidepanel and topbar. The topbar is a search bar, that can be used for searching through all the topics that our application has so far. The sidepanel is used for navigating through the application, and moving through the various activities. Currently, the sidepanel has the user information ( the user name, the user email and the user profile photo ), the home page, the user profile page and the facility to navigate through to any of his followed topics within the application.&lt;/p&gt;
-
-&lt;p&gt;//Home page &lt;br&gt;
-The home page is, as the name suggests, the home page for the user. This is where he can see all the posts of the respective topics to which he has subscribed, including both the old and the new posts. The user can also see the topic to which the post belongs to, and can click on it and navigate to the individual post view if he wishes to. &lt;/p&gt;
-
-&lt;p&gt;//Sidepanel&lt;br&gt;
-The sidepanel has 3 main subparts : &lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;&lt;p&gt;The profile part : This part contains the user name, email and profile photo. On clicking on this part, the user is directed to profile page&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;The home part : This is a home tab, with the help of which the user can navigate back to his home page of the application anytime he wishes to. &lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;The following topic part : The following tab, is a scrollable list of all the topics that the user has been following at that point of time. He can navigate to any of the topics from the tabs, and go see all the posts within the respective topic as and when he wishes to.&lt;/p&gt;&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;//Search bar&lt;br&gt;
-The search bar is present across the application, which you can use to search for topics that are present in the application, whether the user is already following it or wishes to explore a new topic.&lt;/p&gt;
-
-&lt;p&gt;//Profile page&lt;br&gt;
-The profile page is the page that contains all the information that we as developers have for each individual user. The layout has been segmented into 3 different tabs : &lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;&lt;p&gt;The user-info tab :&lt;br&gt;
-This tab displays the user based information like user name, their email, their profile picture etc. In the future, we also aim to include more information for users and customization options for them. Additionally, this also contains the sign out functionality from which a user can signout. &lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;The posts tab :&lt;br&gt;
-This tab contains the various posts that a user has made, be it whichever topic he has contributed to. He can see the post title, the post body as well as the topic name so that he has complete information about his content, and can navigate to see the entire post properly in the post view from there.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;The comments tab :&lt;br&gt;
-This tab contains all the comments that the user has made across various posts and topics. In effect, this is all the content contributed by the user and he can once more, navigate across the app to the respective post on which he commented on clicking on the comments.&lt;/p&gt;&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;//Topic view&lt;br&gt;
-The topic view has the heading with the topic name, referring to the respective topic which you are viewing. You can reach here either by searching for it, or going to it from the user sidepanel. This also shows the number of followers the topic currently has, and gives the user option to follow the topic or unfollow it if he is already following it.&lt;br&gt;
-Below the header, the posts within the topics are shown to the user, and he can navigate to the respective posts by clicking on them. &lt;br&gt;
-Finally, there is also a floating action button, that can be used by the user to make a post within the respective topic. If he wishes to make a post under a different topic, he will have to search up the topic, go within it and then click on the make post button there.  &lt;/p&gt;
-
-&lt;p&gt;//Post view&lt;br&gt;
-The post view has the post title as its header, and the post body below it. The post body currently allowed is text only, we plan to add media support to the body very soon. The view also has the number of upvotes/downvotes that are given by the other users of the community. The user can also choose to upvote/downvote the post depending on how useful he found the content, and help the community. In addition, he also gets the option to comment his opinion,findings,inferences etc about the post in a textview below, and other users can also read them to gain valuable insights about it. &lt;/p&gt;
-
-&lt;p&gt;//Make a post&lt;br&gt;
-Coming to contributing to the community, the users can make posts within respective topics. The process is relatively very simple : All they have to do is enter the topic title, and the topic body ( blanks are not allowed ), and press the floating tick button to post it. Once he makes a post, he is redirected back to the topic view, where he can see that his post has been posted successfully.&lt;/p&gt;
-
-</description>
-      <category>kotlin</category>
-      <category>android</category>
-      <category>firebase</category>
     </item>
   </channel>
 </rss>
