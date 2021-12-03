@@ -7,6 +7,247 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>PUSHARD Progressively deploy commits between AWS Amplify environments</title>
+      <author>Alessandro Annini</author>
+      <pubDate>Fri, 03 Dec 2021 17:07:22 +0000</pubDate>
+      <link>https://dev.to/ale_annini/pushard-progressively-deploy-commits-between-aws-amplify-environments-4mjj</link>
+      <guid>https://dev.to/ale_annini/pushard-progressively-deploy-commits-between-aws-amplify-environments-4mjj</guid>
+      <description>&lt;h3&gt;
+  &lt;a href="#my-workflow"&gt;
+  &lt;/a&gt;
+  My Workflow
+&lt;/h3&gt;
+
+&lt;p&gt;When creating a new project with AWS Amplify life is good: you have a lot of different AWS services handy and ready to be used in a integrated way. If you ever used Amplify you know what we are talking about.&lt;br&gt;
+Everything is fine until you begin to use &lt;a href="https://docs.amplify.aws/cli/teams/overview/"&gt;Amplify environments&lt;/a&gt;. This is because Amplify creates a copy of every service you are using for every environment you are creating. When it comes to Appsync there is no exception.&lt;/p&gt;
+
+&lt;p&gt;If you need different environment like &lt;code&gt;development&lt;/code&gt;, &lt;code&gt;test&lt;/code&gt; and &lt;code&gt;production&lt;/code&gt; (maybe you even have &lt;code&gt;demo&lt;/code&gt;!) you will find yourself with three times your cognito pools (if you have authentication), three times your lambdas and three times your graphql tables. Often times when you are developing, you will have to make changes to your &lt;code&gt;schema.graphql&lt;/code&gt; but you don't want to reflect those changes in other environments right away because maybe the UI is still not updated or simply because your work isn't completly done yet and you don't want to deploy a broken version.&lt;br&gt;
+The problem you can incur into is a known Amplify problem, in fact AWS even has a section on their docs about it: &lt;a href="https://docs.amplify.aws/cli-legacy/graphql-transformer/key/#deploying-multiple-secondary-indices-gsi"&gt;Deploying multiple secondary indices (GSI)&lt;/a&gt;, and their github repository has a lot of issues about this.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;Attempting to mutate more than 1 global secondary index at the same time on the &amp;lt;table_name&amp;gt; table in the stack.
+An error occurred during the push operation: Attempting to mutate more than 1 global secondary index at the same time on the &amp;lt;table_name&amp;gt; table in the  stack.
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;If you try to modify 2 or more connections on the same table, when you try to push your changes to Cloud Formation with the command &lt;code&gt;amplify push&lt;/code&gt;, you will get this error. When you're working on the development branch is not a big deal because you only have to make multiple "amplify push" in order to gradually change the connections state.&lt;/p&gt;
+
+&lt;p&gt;The REAL problem comes after you have made a number of amplify push on your development environment and you want to replicate the final schema.graphql to the test or production environment. Suppose you made 10 amplify push on your development environment but your production environment has never been updated after push number 3: now if you try to move your current schema.graphql (let's call it version 10) over your schema.graphql version 3 on production, you will have a big problem. Amplify won't be able to make multiple updates on the secondary indexes of your production tables just like it wasn't before, when you was trying to make only two updates together on the same table.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;You would have to replicate the exact sequence of successful updates you made on you development environment to you production one.&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;Here comes into play PUSHARD!&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--EB12C46d--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/nautes-tech/pushard/main/images/flow.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--EB12C46d--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/nautes-tech/pushard/main/images/flow.png" alt="git-action flwo" title="git-action flow" width="490" height="817"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;First of all &lt;strong&gt;you have to&lt;/strong&gt; make a commit on git after &lt;strong&gt;every&lt;/strong&gt; &lt;code&gt;amplify push&lt;/code&gt; on your environment.&lt;br&gt;
+This Git Action will then take care to grab your commit hisory from development branch, detect the exact slice of commits you need to fully replicate the development verison of schema.graphql to your target environment. In order to deploy every update it will try to merge the current development commit into target branch, launch &lt;code&gt;amplify push&lt;/code&gt; command and finally &lt;code&gt;git commit&lt;/code&gt; the result after every successful operation on the target branch.&lt;br&gt;
+If something shoud go south during the process, it will push to git everything is committed at the time, the next time it will try to pick up the process where it left off.&lt;/p&gt;
+
+&lt;p&gt;Now, this flow is correct from a AWS standpoint because DynamoDB will be able to update step by step its tables. But at the same time, when asking many consecutive Cloud Formation updates, especially if you created or updated a lambda in your stack too, will take longer than the time of the simple &lt;code&gt;amplify push&lt;/code&gt; command, so, at the next iteragion of updates loop, you could have another error:&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;Resource is not in the state stackUpdateComplete
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;This means that Cloud Formation has not yet completely update your lambda resources and, because of this, it won't be able to make further updates.&lt;br&gt;
+Because of this you &lt;strong&gt;have to&lt;/strong&gt; make a commit after every time you create or modify a lambda function. This way our Git Action will be able to successfully push the change to amplify and during the next loop iteration it will wait for Cloud Formation to be in the &lt;code&gt;UPDATE_COMPLETE&lt;/code&gt; state before trying to update the stack again.&lt;/p&gt;
+
+&lt;p&gt;When the git action is starting it can send you a Telegram message writing how many commits it will take from development to the target branch; it will message you after every successful &lt;code&gt;amplify push&lt;/code&gt; operation and if something goes wrong.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://github.com/nautes-tech/pushard/blob/main/LICENSE"&gt;LICENSE&lt;/a&gt;&lt;br&gt;
+&lt;a href="https://github.com/nautes-tech/pushard/blob/main/README.md"&gt;README&lt;/a&gt;&lt;br&gt;
+&lt;/p&gt;
+&lt;div class="ltag-github-readme-tag"&gt;
+  &lt;div class="readme-overview"&gt;
+    &lt;h2&gt;
+      &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--566lAguM--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/github-logo-5a155e1f9a670af7944dd5e12375bc76ed542ea80224905ecaf878b9157cdefc.svg" alt="GitHub logo"&gt;
+      &lt;a href="https://github.com/nautes-tech"&gt;
+        nautes-tech
+      &lt;/a&gt; / &lt;a href="https://github.com/nautes-tech/pushard"&gt;
+        pushard
+      &lt;/a&gt;
+    &lt;/h2&gt;
+    &lt;h3&gt;
+      Progressively deploy commits between AWS Amplify environments
+    &lt;/h3&gt;
+  &lt;/div&gt;
+  &lt;div class="ltag-github-body"&gt;
+    
+&lt;div id="readme" class="md"&gt;
+&lt;h1&gt;
+PUSHARD Progressively deploy commits between AWS Amplify environments&lt;/h1&gt;
+&lt;br&gt;
+&lt;h2&gt;
+Description&lt;/h2&gt;
+&lt;p&gt;When creating a new project with AWS Amplify life is good: you have a lot of different AWS services handy and ready to be used in a integrated way. If you ever used Amplify you know what we are talking about
+Everything is fine until you begin to use &lt;a href="https://docs.amplify.aws/cli/teams/overview/" rel="nofollow"&gt;Amplify environments&lt;/a&gt;. This is because Amplify creates a copy of every service you are using for every environment you are creating. When it comes to Appsync there is no exception.&lt;/p&gt;
+&lt;p&gt;If you need different environment like &lt;code&gt;development&lt;/code&gt;, &lt;code&gt;test&lt;/code&gt; and &lt;code&gt;production&lt;/code&gt; (maybe you even have &lt;code&gt;demo&lt;/code&gt;!) you will find yourself with three times your cognito pools (if you have authentication), three times your lambdas and three times your graphql tables. Often times when you are developing, you will have to make changes to your &lt;code&gt;schema.graphql&lt;/code&gt; but you don't want to…&lt;/p&gt;
+&lt;/div&gt;
+  &lt;/div&gt;
+  &lt;div class="gh-btn-container"&gt;&lt;a class="gh-btn" href="https://github.com/nautes-tech/pushard"&gt;View on GitHub&lt;/a&gt;&lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#submission-category"&gt;
+  &lt;/a&gt;
+  Submission Category:
+&lt;/h3&gt;
+
+&lt;p&gt;DIY Deployments, Maintainer Must-Haves.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#yaml-file-or-link-to-code"&gt;
+  &lt;/a&gt;
+  Yaml File or Link to Code
+&lt;/h3&gt;
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;pushard&lt;/span&gt;
+
+&lt;span class="na"&gt;on&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;workflow_dispatch&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;inputs&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;deployHash&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="na"&gt;description&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;Target&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;deploy&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;hash'&lt;/span&gt;
+        &lt;span class="na"&gt;required&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="no"&gt;true&lt;/span&gt;
+      &lt;span class="na"&gt;skipHashes&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="na"&gt;description&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;Deploys&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;to&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;skip'&lt;/span&gt;
+        &lt;span class="na"&gt;required&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="no"&gt;false&lt;/span&gt;
+      &lt;span class="na"&gt;dstBranch&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="na"&gt;description&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;Destination&lt;/span&gt;&lt;span class="nv"&gt; &lt;/span&gt;&lt;span class="s"&gt;branch'&lt;/span&gt;
+        &lt;span class="na"&gt;required&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="no"&gt;true&lt;/span&gt;
+
+&lt;span class="na"&gt;jobs&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;run_pushard&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Run PUSHARD&lt;/span&gt;
+    &lt;span class="na"&gt;runs-on&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;ubuntu-18.04&lt;/span&gt;
+    &lt;span class="na"&gt;steps&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Checkout&lt;/span&gt;
+        &lt;span class="na"&gt;uses&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;actions/checkout@v2&lt;/span&gt;
+
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Setup Node.js environment&lt;/span&gt;
+        &lt;span class="na"&gt;uses&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;actions/setup-node@v2.1.5&lt;/span&gt;
+        &lt;span class="na"&gt;with&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+          &lt;span class="na"&gt;node-version&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;14'&lt;/span&gt;
+
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Create working dir&lt;/span&gt;
+        &lt;span class="na"&gt;shell&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;bash&lt;/span&gt;
+        &lt;span class="na"&gt;run&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;mkdir tempdir&lt;/span&gt;
+
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Install AWS CLI version &lt;/span&gt;&lt;span class="m"&gt;2&lt;/span&gt;
+        &lt;span class="na"&gt;run&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="pi"&gt;|&lt;/span&gt;
+          &lt;span class="s"&gt;curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"&lt;/span&gt;
+          &lt;span class="s"&gt;sudo unzip awscliv2.zip&lt;/span&gt;
+          &lt;span class="s"&gt;sudo ./aws/install&lt;/span&gt;
+          &lt;span class="s"&gt;sudo rm -rf awscliv2.zip&lt;/span&gt;
+          &lt;span class="s"&gt;sudo rm -rf aws&lt;/span&gt;
+          &lt;span class="s"&gt;aws --version&lt;/span&gt;
+
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Install @aws-amplify/cli node package&lt;/span&gt;
+        &lt;span class="na"&gt;run&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;npm install -g @aws-amplify/cli@7.3.2&lt;/span&gt;
+
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;PUSHARD&lt;/span&gt;
+        &lt;span class="na"&gt;run&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="pi"&gt;|&lt;/span&gt;
+          &lt;span class="s"&gt;echo "Target deploy hash: ${{ github.event.inputs.deployHash }}"&lt;/span&gt;
+          &lt;span class="s"&gt;echo "Deploys to skip: ${{ github.event.inputs.skipHashes }}"&lt;/span&gt;
+          &lt;span class="s"&gt;echo "Destination branch: ${{ github.event.inputs.dstBranch }}"&lt;/span&gt;
+          &lt;span class="s"&gt;cd builder&lt;/span&gt;
+          &lt;span class="s"&gt;npm install&lt;/span&gt;
+          &lt;span class="s"&gt;npm start&lt;/span&gt;
+        &lt;span class="na"&gt;env&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+          &lt;span class="na"&gt;DEPLOY_HASH&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ github.event.inputs.deployHash }}&lt;/span&gt;
+          &lt;span class="na"&gt;SKIP_HASHES&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ github.event.inputs.skipHashes }}&lt;/span&gt;
+          &lt;span class="na"&gt;DST_BRANCH&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ github.event.inputs.dstBranch }}&lt;/span&gt;
+          &lt;span class="na"&gt;AMPLIFY_PROJECT_REPO&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ secrets.AMPLIFY_PROJECT_REPO }}&lt;/span&gt;
+          &lt;span class="na"&gt;AWS_ACCESS_KEY_ID&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ secrets.ACCESS_KEY_ID }}&lt;/span&gt;
+          &lt;span class="na"&gt;AWS_SECRET_ACCESS_KEY&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ secrets.SECRET_ACCESS_KEY }}&lt;/span&gt;
+          &lt;span class="na"&gt;AWS_PROFILE&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ secrets.AWS_PROFILE }}&lt;/span&gt;
+          &lt;span class="na"&gt;GH_USERNAME&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ secrets.GH_USERNAME }}&lt;/span&gt;
+          &lt;span class="na"&gt;GH_USER_PAT&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ secrets.GH_USER_PAT }}&lt;/span&gt;
+          &lt;span class="na"&gt;TELEGRAM_BOT_TOKEN&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ secrets.TELEGRAM_BOT_TOKEN }}&lt;/span&gt;
+          &lt;span class="na"&gt;TELEGRAM_CHAT_ID&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;${{ secrets.TELEGRAM_CHAT_ID }}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+&lt;p&gt;&lt;a href="https://github.com/nautes-tech/pushard/blob/main/action.yml"&gt;action.yml&lt;/a&gt;&lt;/p&gt;
+&lt;h3&gt;
+  &lt;a href="#additional-resources-info"&gt;
+  &lt;/a&gt;
+  Additional Resources / Info
+&lt;/h3&gt;
+
+&lt;p&gt;Made by &lt;br&gt;
+&lt;/p&gt;
+&lt;div class="ltag__user ltag__user__id__767320"&gt;
+  
+    .ltag__user__id__767320 .follow-action-button {
+      background-color: #000000 !important;
+      color: #ffffff !important;
+      border-color: #000000 !important;
+    }
+  
+    &lt;a href="/simoneagostinelli" class="ltag__user__link profile-image-link"&gt;
+      &lt;div class="ltag__user__pic"&gt;
+        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--jUxUtWZc--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://res.cloudinary.com/practicaldev/image/fetch/s--Fjm9Z056--/c_fill%2Cf_auto%2Cfl_progressive%2Ch_150%2Cq_auto%2Cw_150/https://dev-to-uploads.s3.amazonaws.com/uploads/user/profile_image/767320/62e2eda5-1b42-492a-8121-b67852bcd260.jpg" alt="simoneagostinelli image"&gt;
+      &lt;/div&gt;
+    &lt;/a&gt;
+  &lt;div class="ltag__user__content"&gt;
+    &lt;h2&gt;
+&lt;a class="ltag__user__link" href="/simoneagostinelli"&gt;Simone Agostinelli&lt;/a&gt;Follow
+&lt;/h2&gt;
+    &lt;div class="ltag__user__summary"&gt;
+      &lt;a class="ltag__user__link" href="/simoneagostinelli"&gt;&lt;/a&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+&lt;/div&gt;
+
+
+
+&lt;div class="ltag__user ltag__user__id__104337"&gt;
+  
+    .ltag__user__id__104337 .follow-action-button {
+      background-color: #0030b3 !important;
+      color: #ffffff !important;
+      border-color: #0030b3 !important;
+    }
+  
+    &lt;a href="/ale_annini" class="ltag__user__link profile-image-link"&gt;
+      &lt;div class="ltag__user__pic"&gt;
+        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ZwbYTTEi--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://res.cloudinary.com/practicaldev/image/fetch/s--L5SWM70W--/c_fill%2Cf_auto%2Cfl_progressive%2Ch_150%2Cq_auto%2Cw_150/https://dev-to-uploads.s3.amazonaws.com/uploads/user/profile_image/104337/8e900359-1888-4968-8973-95472187f1f8.jpg" alt="ale_annini image"&gt;
+      &lt;/div&gt;
+    &lt;/a&gt;
+  &lt;div class="ltag__user__content"&gt;
+    &lt;h2&gt;
+&lt;a class="ltag__user__link" href="/ale_annini"&gt;Alessandro Annini&lt;/a&gt;Follow
+&lt;/h2&gt;
+    &lt;div class="ltag__user__summary"&gt;
+      &lt;a class="ltag__user__link" href="/ale_annini"&gt;Side projects will save the world. Or at least the day.&lt;/a&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+&lt;/div&gt;
+
+&lt;p&gt;&lt;br&gt;&lt;br&gt;
+&lt;a href="https://www.nautes.com/"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ajMRrw1r--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://www.i-labs.it/sites/default/files/2021-02/Nautes_meccatronica_logo.png" alt="Nautes Spa" width="880" height="250"&gt;&lt;/a&gt;&lt;/p&gt;
+
+</description>
+      <category>actionshackathon21</category>
+      <category>aws</category>
+      <category>github</category>
+    </item>
+    <item>
       <title>How to Get Glassmorphism Effect in Flutter</title>
       <author>rrtutors</author>
       <pubDate>Fri, 03 Dec 2021 17:02:14 +0000</pubDate>
@@ -1908,100 +2149,6 @@ To prevent Google and other search engines from indexing 404 error pages of your
       <category>html</category>
       <category>css</category>
       <category>beginners</category>
-    </item>
-    <item>
-      <title>5 Articles every WebDev should read this week (#48)</title>
-      <author>martin krause</author>
-      <pubDate>Fri, 03 Dec 2021 15:51:20 +0000</pubDate>
-      <link>https://dev.to/martinkr/5-articles-every-webdev-should-read-this-week-48-40kh</link>
-      <guid>https://dev.to/martinkr/5-articles-every-webdev-should-read-this-week-48-40kh</guid>
-      <description>&lt;h2&gt;
-  &lt;a href="#advent-of-javascript"&gt;
-  &lt;/a&gt;
-  Advent of JavaScript
-&lt;/h2&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;24 JavaScript Challenges for the Season&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;&lt;a href="https://www.adventofjs.com/"&gt;https://www.adventofjs.com/&lt;/a&gt;&lt;/p&gt;
-
-
-
-
-&lt;h2&gt;
-  &lt;a href="#accessibility-myths"&gt;
-  &lt;/a&gt;
-  Accessibility Myths
-&lt;/h2&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;A small project debunking common accessibility myths.&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;&lt;a href="https://a11ymyths.com"&gt;https://a11ymyths.com&lt;/a&gt;&lt;/p&gt;
-
-
-
-
-&lt;h2&gt;
-  &lt;a href="#the-html-raw-video-endraw-element-needs-to-go-back-on-the-drawing-board"&gt;
-  &lt;/a&gt;
-  The HTML &lt;code&gt;video&lt;/code&gt; element needs to go back on the drawing board
-&lt;/h2&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;We’ve had the HTML &lt;code&gt;video&lt;/code&gt; element for over a decade. Yet, everyone still defaults to embedding YouTube frames instead of hosting their own videos. The underlying problem is that the &lt;code&gt;video&lt;/code&gt; element isn’t suitable for embedding short video files on webpages.&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;&lt;a href="https://www.ctrl.blog/entry/html-responsive-video.html"&gt;https://www.ctrl.blog/entry/html-responsive-video.html&lt;/a&gt;&lt;/p&gt;
-
-
-
-
-&lt;h2&gt;
-  &lt;a href="#how-to-maintain-a-large-nextjs-application"&gt;
-  &lt;/a&gt;
-  How To Maintain A Large Next.js Application
-&lt;/h2&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;In this article, Nirmalya discusses some of the complex problems that he faced while building and maintaining large Next.js applications. He always explains how these problems can be solved by using various tools.&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;&lt;a href="https://www.smashingmagazine.com/2021/11/maintain-large-nextjs-application/"&gt;https://www.smashingmagazine.com/2021/11/maintain-large-nextjs-application/&lt;/a&gt;&lt;/p&gt;
-
-
-
-
-&lt;h2&gt;
-  &lt;a href="#how-javascript-engines-achieve-great-performance"&gt;
-  &lt;/a&gt;
-  How JavaScript engines achieve great performance
-&lt;/h2&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;In this article, we’re going to look closer at a few techniques that different JavaScript engines use to achieve good runtime performance.&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;&lt;a href="https://blogg.bekk.no/how-javascript-engines-achieve-great-performance-fb0b36601557"&gt;https://blogg.bekk.no/how-javascript-engines-achieve-great-performance-fb0b36601557&lt;/a&gt;&lt;/p&gt;
-
-
-
-
-&lt;p&gt;Follow me on &lt;a href="http://twitter.com/_martinkr"&gt;Twitter: @martinkr&lt;/a&gt;.&lt;/p&gt;
-
-&lt;p&gt;Photo by &lt;a href="https://unsplash.com/@burntime"&gt;Alex Kulikov&lt;/a&gt; on &lt;a href="https://unsplash.com"&gt;Unsplash&lt;/a&gt;&lt;/p&gt;
-
-
-
-
-</description>
-      <category>webdev</category>
-      <category>tutorial</category>
-      <category>javascript</category>
-      <category>programming</category>
     </item>
   </channel>
 </rss>
