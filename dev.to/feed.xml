@@ -7,6 +7,449 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>NEW: DynamoDB Streams Filtering in Serverless Framework</title>
+      <author>Pawel Zubkiewicz</author>
+      <pubDate>Mon, 06 Dec 2021 14:19:12 +0000</pubDate>
+      <link>https://dev.to/aws-builders/new-dynamodb-streams-filtering-in-serverless-framework-3lc5</link>
+      <guid>https://dev.to/aws-builders/new-dynamodb-streams-filtering-in-serverless-framework-3lc5</guid>
+      <description>&lt;p&gt;From this article, you will learn how to utilize recently released functionality of Streams Filtering with DynamoDB and Lambda. &lt;/p&gt;
+
+&lt;p&gt;We will move deeper than a basic sample of DynamoDB event action filtering. You will learn how to combine it with your business logic. I will be using DynamoDB &lt;em&gt;single-table&lt;/em&gt; design setup for that.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#whats-new"&gt;
+  &lt;/a&gt;
+  What's new?
+&lt;/h2&gt;
+
+&lt;p&gt;If you haven't heard, just before #reInvent2021 AWS dropped &lt;a href="https://aws.amazon.com/about-aws/whats-new/2021/11/aws-lambda-event-filtering-amazon-sqs-dynamodb-kinesis-sources/"&gt;this huge update&lt;/a&gt;.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#whats-changed"&gt;
+  &lt;/a&gt;
+  What's changed?
+&lt;/h2&gt;
+
+&lt;h3&gt;
+  &lt;a href="#before-the-update"&gt;
+  &lt;/a&gt;
+  Before the update
+&lt;/h3&gt;
+
+&lt;p&gt;Every action made in a DynamoDB table (&lt;code&gt;INSERT&lt;/code&gt;, &lt;code&gt;MODIFY&lt;/code&gt;, &lt;code&gt;REMOVE&lt;/code&gt;) triggered an event that was sent over DynamoDB Streams to a Lambda function. Regardless of the action type, a Lambda function was always invoked. That had two repercussions:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;You had to implement filter logic inside your Lambda code (&lt;code&gt;if&lt;/code&gt; conditions) before executing your business logic (i.e. filter &lt;code&gt;INSERT&lt;/code&gt; actions to send welcome email whenever new &lt;code&gt;User&lt;/code&gt; was added into the table). &lt;/li&gt;
+&lt;li&gt;You paid for every Lambda run, even though in most cases you were interested only in &lt;em&gt;some&lt;/em&gt; events.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;That situation was multiplied in &lt;em&gt;single-table&lt;/em&gt; design, where you store multiple types in a single table, so in reality you have many &lt;code&gt;INSERT&lt;/code&gt;s with subtypes (ie. new user, new address, new order etc.)&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#after-the-update"&gt;
+  &lt;/a&gt;
+  After the update
+&lt;/h3&gt;
+
+&lt;p&gt;Now, &lt;strong&gt;you can filter out events that are not relevant to your business logic&lt;/strong&gt;. By defining &lt;em&gt;filter criteria&lt;/em&gt;, you control which events can invoke a Lambda function. Filtering evaluates events based on values that are in the message.&lt;/p&gt;
+
+&lt;p&gt;This solves above-mentioned problems: &lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Logic evaluation is pushed on AWS (no more &lt;code&gt;if&lt;/code&gt;s in Lambda code)&lt;/li&gt;
+&lt;li&gt;No more needless Lambda execution.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;All of that thanks to the small JSON snippet defining &lt;em&gt;filter criteria&lt;/em&gt;.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#refactoring-to-the-streams-filtering"&gt;
+  &lt;/a&gt;
+  Refactoring to the Streams Filtering
+&lt;/h2&gt;
+
+&lt;p&gt;Since you're reading this article, it's safe to assume you're like me, already using DynamoDB Streams to invoke your Lambda functions.&lt;/p&gt;
+
+&lt;p&gt;Therefor, let me take you through the refactoring process. It's a simplified version of the code that I use on production. &lt;/p&gt;
+
+&lt;p&gt;In my DynamoDB table, I store two types of entities: &lt;code&gt;Order&lt;/code&gt; and &lt;code&gt;Invoice&lt;/code&gt;. My &lt;em&gt;business logic&lt;/em&gt; requires me to &lt;em&gt;do something&lt;/em&gt; only when &lt;code&gt;Invoice&lt;/code&gt; is modified. &lt;br&gt;
+&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--nQhVBrok--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/yj72f9jku4yw9r5rppu4.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--nQhVBrok--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/yj72f9jku4yw9r5rppu4.png" alt="Business logic conditions" width="570" height="131"&gt;&lt;/a&gt;&lt;br&gt;
+As you can see, it's just the single case out of six. Imagine what happens when you have more types in your table, and your business logic requires you to perform other actions as well.&lt;/p&gt;
+&lt;h3&gt;
+  &lt;a href="#old-event-filtering"&gt;
+  &lt;/a&gt;
+  Old event filtering
+&lt;/h3&gt;
+
+&lt;p&gt;Let's start from those ugly &lt;code&gt;if&lt;/code&gt; statements that I had before the update because I had to manually filter events. &lt;/p&gt;
+
+&lt;p&gt;My Lambda's handler started with execution of &lt;code&gt;parseEvent&lt;/code&gt; method:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;parseEvent&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;event&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;e&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;event&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Records&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt; &lt;span class="c1"&gt;// batch size = 1&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;isInsert&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;e&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;eventName&lt;/span&gt; &lt;span class="o"&gt;===&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;INSERT&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;isModify&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;e&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;eventName&lt;/span&gt; &lt;span class="o"&gt;===&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;MODIFY&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;isOrder&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;e&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;dynamodb&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;NewImage&lt;/span&gt;&lt;span class="p"&gt;?.&lt;/span&gt;&lt;span class="nx"&gt;Type&lt;/span&gt;&lt;span class="p"&gt;?.&lt;/span&gt;&lt;span class="nx"&gt;S&lt;/span&gt; &lt;span class="o"&gt;===&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Order&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;isInvoice&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;e&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;dynamodb&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;NewImage&lt;/span&gt;&lt;span class="p"&gt;?.&lt;/span&gt;&lt;span class="nx"&gt;Type&lt;/span&gt;&lt;span class="p"&gt;?.&lt;/span&gt;&lt;span class="nx"&gt;S&lt;/span&gt; &lt;span class="o"&gt;===&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Invoice&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;newItemData&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;e&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;dynamodb&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;NewImage&lt;/span&gt;
+  &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;oldItemData&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;e&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;dynamodb&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;OldImage&lt;/span&gt;
+
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="nx"&gt;isInsert&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;isModify&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;isOrder&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;isInvoice&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;newItemData&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;oldItemData&lt;/span&gt;
+  &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Next step, I had to evaluate the condition in my handler:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="nx"&gt;isInsert&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;isModify&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;isOrder&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;isInvoice&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;newItemData&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;oldItemData&lt;/span&gt;
+  &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;parseEvent&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;event&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+
+
+&lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;isModify&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; &lt;span class="nx"&gt;isInvoice&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="c1"&gt;// perform business logic&lt;/span&gt;
+  &lt;span class="c1"&gt;// uses newItemData &amp;amp; oldItemData values&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#new-event-filtering"&gt;
+  &lt;/a&gt;
+  New event filtering
+&lt;/h3&gt;
+
+&lt;p&gt;New functionality allows us to significantly simplify that code by pushing condition evaluation on AWS.&lt;/p&gt;
+
+&lt;p&gt;Just to recap, my business logic requires me to let in only &lt;code&gt;MODIFY&lt;/code&gt; events that was performed on &lt;code&gt;Invoice&lt;/code&gt; entities. Fortunately, I keep &lt;code&gt;Type&lt;/code&gt; value on my entities in DynamoDB Table (thanks Alex 🤝).&lt;/p&gt;
+
+&lt;p&gt;The DynamoDB event structure is well-defined, so basically what I need to do is make sure that:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;
+&lt;code&gt;eventName&lt;/code&gt; equals to &lt;code&gt;MODIFY&lt;/code&gt;, and&lt;/li&gt;
+&lt;li&gt;
+&lt;code&gt;dynamodb.NewImage.Type.S&lt;/code&gt; equals to &lt;code&gt;Invoice&lt;/code&gt;.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;All of that is defined in &lt;code&gt;filterPatterns&lt;/code&gt; section of Lambda configuration. Below is a snippet from Serverless Framework &lt;code&gt;serverless.yml&lt;/code&gt; config file. Support for &lt;code&gt;filterPatterns&lt;/code&gt; was introduced in version 2.68.0 - make sure you are using it  or newer.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;    &lt;span class="na"&gt;functionName&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;handler&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;src/functionName/function.handler&lt;/span&gt;
+      &lt;span class="c1"&gt;# other properties&lt;/span&gt;
+      &lt;span class="na"&gt;events&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;stream&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+          &lt;span class="na"&gt;type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;dynamodb&lt;/span&gt;
+          &lt;span class="na"&gt;arn&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!GetAtt&lt;/span&gt; &lt;span class="s"&gt;DynamoDbTable.StreamArn&lt;/span&gt;
+          &lt;span class="na"&gt;maximumRetryAttempts&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;1&lt;/span&gt;
+          &lt;span class="na"&gt;batchSize&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;1&lt;/span&gt;
+          &lt;span class="na"&gt;filterPatterns&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+            &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;eventName&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="pi"&gt;[&lt;/span&gt;&lt;span class="nv"&gt;MODIFY&lt;/span&gt;&lt;span class="pi"&gt;]&lt;/span&gt;
+              &lt;span class="na"&gt;dynamodb&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+                 &lt;span class="na"&gt;NewImage&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+                   &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+                     &lt;span class="na"&gt;S&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="pi"&gt;[&lt;/span&gt;&lt;span class="nv"&gt;Invoice&lt;/span&gt;&lt;span class="pi"&gt;]&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;And that's all you need to do to filter your DynamoDB Stream.&lt;/p&gt;
+
+&lt;p&gt;Amazing, isn't it?&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#gotchas"&gt;
+  &lt;/a&gt;
+  Gotchas
+&lt;/h2&gt;
+
+&lt;p&gt;Bear in mind that there can be several filters on a single source. In such case, each filter works independently of the other. Simply put, there is &lt;code&gt;OR&lt;/code&gt; not &lt;code&gt;AND&lt;/code&gt; logic between them.&lt;/p&gt;
+
+&lt;p&gt;I learned that the hard way by mistakenly creating two filters:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;          &lt;span class="na"&gt;filterPatterns&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+            &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;eventName&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="pi"&gt;[&lt;/span&gt;&lt;span class="nv"&gt;MODIFY&lt;/span&gt;&lt;span class="pi"&gt;]&lt;/span&gt;
+            &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;dynamodb&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+                 &lt;span class="na"&gt;NewImage&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+                   &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+                     &lt;span class="na"&gt;S&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="pi"&gt;[&lt;/span&gt;&lt;span class="nv"&gt;Invoice&lt;/span&gt;&lt;span class="pi"&gt;]&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;by adding &lt;code&gt;-&lt;/code&gt; in front of &lt;code&gt;dynamodb:&lt;/code&gt;. It resulted in the wrong filter:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight json"&gt;&lt;code&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+  &lt;/span&gt;&lt;span class="nl"&gt;"filters"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+      &lt;/span&gt;&lt;span class="nl"&gt;"pattern"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"{&lt;/span&gt;&lt;span class="se"&gt;\"&lt;/span&gt;&lt;span class="s2"&gt;eventName&lt;/span&gt;&lt;span class="se"&gt;\"&lt;/span&gt;&lt;span class="s2"&gt;:[&lt;/span&gt;&lt;span class="se"&gt;\"&lt;/span&gt;&lt;span class="s2"&gt;MODIFY&lt;/span&gt;&lt;span class="se"&gt;\"&lt;/span&gt;&lt;span class="s2"&gt;]}"&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="p"&gt;},&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+      &lt;/span&gt;&lt;span class="nl"&gt;"pattern"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"{&lt;/span&gt;&lt;span class="se"&gt;\"&lt;/span&gt;&lt;span class="s2"&gt;dynamodb&lt;/span&gt;&lt;span class="se"&gt;\"&lt;/span&gt;&lt;span class="s2"&gt;:{&lt;/span&gt;&lt;span class="se"&gt;\"&lt;/span&gt;&lt;span class="s2"&gt;NewImage&lt;/span&gt;&lt;span class="se"&gt;\"&lt;/span&gt;&lt;span class="s2"&gt;:{&lt;/span&gt;&lt;span class="se"&gt;\"&lt;/span&gt;&lt;span class="s2"&gt;Type&lt;/span&gt;&lt;span class="se"&gt;\"&lt;/span&gt;&lt;span class="s2"&gt;:{&lt;/span&gt;&lt;span class="se"&gt;\"&lt;/span&gt;&lt;span class="s2"&gt;S&lt;/span&gt;&lt;span class="se"&gt;\"&lt;/span&gt;&lt;span class="s2"&gt;:[&lt;/span&gt;&lt;span class="se"&gt;\"&lt;/span&gt;&lt;span class="s2"&gt;Invoice&lt;/span&gt;&lt;span class="se"&gt;\"&lt;/span&gt;&lt;span class="s2"&gt;]}}}}"&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+  &lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;That one catches all &lt;code&gt;MODIFY&lt;/code&gt; actions OR anything that has &lt;code&gt;Invoice&lt;/code&gt; as &lt;code&gt;Type&lt;/code&gt; in &lt;code&gt;NewImage&lt;/code&gt; object, so DynamoDB &lt;code&gt;INSERT&lt;/code&gt; actions as well!&lt;/p&gt;
+
+&lt;p&gt;Correct filter:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight json"&gt;&lt;code&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+  &lt;/span&gt;&lt;span class="nl"&gt;"filters"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+      &lt;/span&gt;&lt;span class="nl"&gt;"pattern"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"{&lt;/span&gt;&lt;span class="se"&gt;\"&lt;/span&gt;&lt;span class="s2"&gt;eventName&lt;/span&gt;&lt;span class="se"&gt;\"&lt;/span&gt;&lt;span class="s2"&gt;:[&lt;/span&gt;&lt;span class="se"&gt;\"&lt;/span&gt;&lt;span class="s2"&gt;MODIFY&lt;/span&gt;&lt;span class="se"&gt;\"&lt;/span&gt;&lt;span class="s2"&gt;],&lt;/span&gt;&lt;span class="se"&gt;\"&lt;/span&gt;&lt;span class="s2"&gt;dynamodb&lt;/span&gt;&lt;span class="se"&gt;\"&lt;/span&gt;&lt;span class="s2"&gt;:{&lt;/span&gt;&lt;span class="se"&gt;\"&lt;/span&gt;&lt;span class="s2"&gt;NewImage&lt;/span&gt;&lt;span class="se"&gt;\"&lt;/span&gt;&lt;span class="s2"&gt;:{&lt;/span&gt;&lt;span class="se"&gt;\"&lt;/span&gt;&lt;span class="s2"&gt;Type&lt;/span&gt;&lt;span class="se"&gt;\"&lt;/span&gt;&lt;span class="s2"&gt;:{&lt;/span&gt;&lt;span class="se"&gt;\"&lt;/span&gt;&lt;span class="s2"&gt;S&lt;/span&gt;&lt;span class="se"&gt;\"&lt;/span&gt;&lt;span class="s2"&gt;:[&lt;/span&gt;&lt;span class="se"&gt;\"&lt;/span&gt;&lt;span class="s2"&gt;Invoice&lt;/span&gt;&lt;span class="se"&gt;\"&lt;/span&gt;&lt;span class="s2"&gt;]}}}}"&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+  &lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;You can view filter in Lambda console, under &lt;em&gt;Configuration-&amp;gt;Triggers&lt;/em&gt; section.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#how-much-does-it-cost"&gt;
+  &lt;/a&gt;
+  How much does it cost?
+&lt;/h2&gt;
+
+&lt;p&gt;Nothing. &lt;/p&gt;
+
+&lt;p&gt;There is no information about any additional pricing. Also, Jeremy Daly confirmed that during re:Invent 2021.&lt;/p&gt;
+
+
+&lt;blockquote class="ltag__twitter-tweet"&gt;
+
+  &lt;div class="ltag__twitter-tweet__main"&gt;
+    &lt;div class="ltag__twitter-tweet__header"&gt;
+      &lt;img class="ltag__twitter-tweet__profile-image" src="https://res.cloudinary.com/practicaldev/image/fetch/s--8N8eEBfw--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://pbs.twimg.com/profile_images/1130500247753506816/r7DrtNlg_normal.png" alt="Jeremy Daly profile image"&gt;
+      &lt;div class="ltag__twitter-tweet__full-name"&gt;
+        Jeremy Daly
+      &lt;/div&gt;
+      &lt;div class="ltag__twitter-tweet__username"&gt;
+        &lt;a class="mentioned-user" href="https://dev.to/jeremy_daly"&gt;@jeremy_daly&lt;/a&gt;
+
+      &lt;/div&gt;
+      &lt;div class="ltag__twitter-tweet__twitter-logo"&gt;
+        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ir1kO05j--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/twitter-f95605061196010f91e64806688390eb1a4dbc9e913682e043eb8b1e06ca484f.svg" alt="twitter logo"&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+    &lt;div class="ltag__twitter-tweet__body"&gt;
+      &lt;a href="https://twitter.com/NoSQLKnowHow"&gt;@NoSQLKnowHow&lt;/a&gt; Do you know how the pricing will work for this? The Lambda PMs told me that each function needs to consume the stream in order to do the filtering, so do we get charged DynamoDB Streams read request units for everything pulled off the stream, or just what gets filtered?
+    &lt;/div&gt;
+    &lt;div class="ltag__twitter-tweet__date"&gt;
+      20:09 PM - 01 Dec 2021
+    &lt;/div&gt;
+
+
+    &lt;div class="ltag__twitter-tweet__actions"&gt;
+      &lt;a href="https://twitter.com/intent/tweet?in_reply_to=1466137340565278721" class="ltag__twitter-tweet__actions__button"&gt;
+        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--fFnoeFxk--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/twitter-reply-action-238fe0a37991706a6880ed13941c3efd6b371e4aefe288fe8e0db85250708bc4.svg" alt="Twitter reply action"&gt;
+      &lt;/a&gt;
+      &lt;a href="https://twitter.com/intent/retweet?tweet_id=1466137340565278721" class="ltag__twitter-tweet__actions__button"&gt;
+        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--k6dcrOn8--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/twitter-retweet-action-632c83532a4e7de573c5c08dbb090ee18b348b13e2793175fea914827bc42046.svg" alt="Twitter retweet action"&gt;
+      &lt;/a&gt;
+      &lt;a href="https://twitter.com/intent/like?tweet_id=1466137340565278721" class="ltag__twitter-tweet__actions__button"&gt;
+        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--SRQc9lOp--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/twitter-like-action-1ea89f4b87c7d37465b0eb78d51fcb7fe6c03a089805d7ea014ba71365be5171.svg" alt="Twitter like action"&gt;
+      &lt;/a&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+&lt;/blockquote&gt;
+
+
+
+&lt;blockquote class="ltag__twitter-tweet"&gt;
+
+  &lt;div class="ltag__twitter-tweet__main"&gt;
+    &lt;div class="ltag__twitter-tweet__header"&gt;
+      &lt;img class="ltag__twitter-tweet__profile-image" src="https://res.cloudinary.com/practicaldev/image/fetch/s--8N8eEBfw--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://pbs.twimg.com/profile_images/1130500247753506816/r7DrtNlg_normal.png" alt="Jeremy Daly profile image"&gt;
+      &lt;div class="ltag__twitter-tweet__full-name"&gt;
+        Jeremy Daly
+      &lt;/div&gt;
+      &lt;div class="ltag__twitter-tweet__username"&gt;
+        &lt;a class="mentioned-user" href="https://dev.to/jeremy_daly"&gt;@jeremy_daly&lt;/a&gt;
+
+      &lt;/div&gt;
+      &lt;div class="ltag__twitter-tweet__twitter-logo"&gt;
+        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ir1kO05j--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/twitter-f95605061196010f91e64806688390eb1a4dbc9e913682e043eb8b1e06ca484f.svg" alt="twitter logo"&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+    &lt;div class="ltag__twitter-tweet__body"&gt;
+      &lt;a href="https://twitter.com/NoSQLKnowHow"&gt;@NoSQLKnowHow&lt;/a&gt; Confirmed with &lt;a href="https://twitter.com/ajaynairthinks"&gt;@ajaynairthinks&lt;/a&gt; that the Lambda Service eats the polling cost, so you only get charged for what makes it into your function.
+    &lt;/div&gt;
+    &lt;div class="ltag__twitter-tweet__date"&gt;
+      22:24 PM - 01 Dec 2021
+    &lt;/div&gt;
+
+
+    &lt;div class="ltag__twitter-tweet__actions"&gt;
+      &lt;a href="https://twitter.com/intent/tweet?in_reply_to=1466171465733062657" class="ltag__twitter-tweet__actions__button"&gt;
+        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--fFnoeFxk--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/twitter-reply-action-238fe0a37991706a6880ed13941c3efd6b371e4aefe288fe8e0db85250708bc4.svg" alt="Twitter reply action"&gt;
+      &lt;/a&gt;
+      &lt;a href="https://twitter.com/intent/retweet?tweet_id=1466171465733062657" class="ltag__twitter-tweet__actions__button"&gt;
+        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--k6dcrOn8--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/twitter-retweet-action-632c83532a4e7de573c5c08dbb090ee18b348b13e2793175fea914827bc42046.svg" alt="Twitter retweet action"&gt;
+      &lt;/a&gt;
+      &lt;a href="https://twitter.com/intent/like?tweet_id=1466171465733062657" class="ltag__twitter-tweet__actions__button"&gt;
+        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--SRQc9lOp--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/twitter-like-action-1ea89f4b87c7d37465b0eb78d51fcb7fe6c03a089805d7ea014ba71365be5171.svg" alt="Twitter like action"&gt;
+      &lt;/a&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+&lt;/blockquote&gt;
+
+
+&lt;p&gt;In reality, &lt;strong&gt;this functionality saves you money on maintenance because it's easier to write &amp;amp; debug Lambda code, and on operations, as functions are executed only responding to business relevant events&lt;/strong&gt;.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#low-coupling"&gt;
+  &lt;/a&gt;
+  Low coupling
+&lt;/h2&gt;
+
+&lt;p&gt;Before the update, people implemented event filtering logic in a single Lambda function. Thus, struggling from high coupling (unless they utilized some kind of dispatcher pattern).&lt;/p&gt;
+
+&lt;p&gt;Now, we can have several independent Lambda functions, each with its &lt;em&gt;filter criteria&lt;/em&gt;, attached to the same DynamoDB Stream. That results in lower coupling between code that handles different event types. This will be very much appreciated by all &lt;em&gt;single-table&lt;/em&gt; design practitioners.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#summary"&gt;
+  &lt;/a&gt;
+  Summary
+&lt;/h2&gt;
+
+&lt;p&gt;I hope this short article convinced you to refactor your Lambda functions that are invoked by DynamoDB Streams. It's really simple and makes a huge difference in terms of code clarity and costs. &lt;/p&gt;
+
+</description>
+      <category>aws</category>
+      <category>cloudnative</category>
+      <category>dynamodb</category>
+      <category>serverless</category>
+    </item>
+    <item>
+      <title>3 Ways to Backup Your Code (Even If You Don’t Know Git)</title>
+      <author>Rizèl Scarlett</author>
+      <pubDate>Mon, 06 Dec 2021 14:17:35 +0000</pubDate>
+      <link>https://dev.to/github/3-ways-to-backup-your-code-even-if-you-dont-know-git-1o5l</link>
+      <guid>https://dev.to/github/3-ways-to-backup-your-code-even-if-you-dont-know-git-1o5l</guid>
+      <description>&lt;p&gt;Today, over 73 million software engineers around the globe use GitHub. While GitHub provides many benefits, including project management, open source collaboration, and automation, early career developers often sign up to host their code and visualize the changes they make over time. Personally, I choose to upload my code to GitHub because:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;It reduces the risk of losing my code. If I only stored my code on a local computer and that computer stopped working, I’d lose my work forever.  My code is always accessible to me with GitHub regardless of what computer I’m using.&lt;/li&gt;
+&lt;li&gt;It helps me land jobs. GitHub serves as my portfolio for hiring managers and talent sources to gauge my technical expertise better. After graduating from my coding boot camp, GitHub was especially conducive to my job search because I lacked professional software engineering experience.&lt;/li&gt;
+&lt;li&gt;It helps me collaborate on projects. Back in the day, before Git and version control (a.k.a. the process of saving different files or ‘versions’ throughout the various stages of a project) existed, people shared their code via email, floppy disk, and other tedious mediums. Today, with tools like GitHub, you can share your code and visually track changes made by each collaborator. I can also communicate with collaborators through comments and GitHub Discussions. &lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;A common way to interface with GitHub is through Git and the terminal. Because Git and the terminal have such a steep learning curve, some developers, especially early career developers, avoid using GitHub. &lt;strong&gt;But what if I told you, you could use GitHub to store your programming projects without the command line?&lt;/strong&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#the-difference-between-git-and-github"&gt;
+  &lt;/a&gt;
+  The Difference Between Git and GitHub
+&lt;/h2&gt;
+
+&lt;p&gt;Before I describe the various techniques for leveraging GitHub without Git, I want to clarify the difference between the two tools.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#git"&gt;
+  &lt;/a&gt;
+  Git
+&lt;/h3&gt;
+
+&lt;p&gt;In layman’s terms, Git records snapshots of your projects as you save the changes you make throughout history. This allows developers to confidently return to a past version of a project if they make a mistake or discover a problem. To use it, people install Git on their local computers, and in their terminals, they type commands such as &lt;code&gt;git add&lt;/code&gt;, &lt;code&gt;git commit&lt;/code&gt;, and &lt;code&gt;git push&lt;/code&gt; to save their latest changes. &lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#github"&gt;
+  &lt;/a&gt;
+  GitHub
+&lt;/h3&gt;
+
+&lt;p&gt;At its core, GitHub is a web-based platform for developers to store code on the cloud. It is also available as a mobile app and desktop app.Through the graphical user interface, developers can use GitHub to work with developers worldwide. Over the years, GitHub expanded its offerings to include project management, automation, deployment, security, and more.&lt;/p&gt;
+
+&lt;p&gt;&lt;em&gt;GitHub incorporates Git’s version control features to make collaboration easier.&lt;/em&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#backup-your-code-without-the-command-line"&gt;
+  &lt;/a&gt;
+  Backup Your Code Without The Command Line
+&lt;/h2&gt;
+
+&lt;h3&gt;
+  &lt;a href="#1-github-desktop"&gt;
+  &lt;/a&gt;
+  1. GitHub Desktop
+&lt;/h3&gt;
+
+&lt;p&gt;GitHub Desktop is a desktop application with a graphical user interface that allows you to retrieve, edit, and save code to GitHub without touching your terminal. Read the official &lt;a href="https://docs.github.com/en/desktop"&gt;documentation&lt;/a&gt; to learn more about installing, configuring, and using GitHub Desktop.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#2-githubs-web-user-interface"&gt;
+  &lt;/a&gt;
+  2. GitHub’s Web User Interface
+&lt;/h3&gt;
+
+&lt;p&gt;You can upload, edit, and find files directly from GitHub.com without downloading the files or navigating the terminal. &lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;
+&lt;strong&gt;Option 1&lt;/strong&gt;:  You can edit the files directly at GitHub.com after uploading them.&lt;/li&gt;
+&lt;li&gt;
+&lt;strong&gt;Option 2&lt;/strong&gt;: You can edit your files on your local computer, drag and drop your entire folder, and GitHub will “auto-magically” determine which files were changed and only upload the edited files.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--_KnBnBHF--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://github.blog/wp-content/uploads/2016/02/a888b59e-d004-11e5-80a6-e9f32f17c4d5.gif%3Fresize%3D2640%252C1594" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--_KnBnBHF--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://github.blog/wp-content/uploads/2016/02/a888b59e-d004-11e5-80a6-e9f32f17c4d5.gif%3Fresize%3D2640%252C1594" alt="Image of managing source control in web based editor" width="880" height="531"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#3-githubdev"&gt;
+  &lt;/a&gt;
+  3. GitHub.dev
+&lt;/h3&gt;
+
+&lt;p&gt;You can find GitHub’s free, web-based editor at &lt;a href="https://github.dev"&gt;https://github.dev&lt;/a&gt;. The web-based editor introduces a lightweight editing experience that runs entirely in your browser. With the web-based editor, you can navigate files and source code repositories from GitHub, and make and commit code changes. You can open any repository, fork, or pull request in the editor. Read the official &lt;a href="https://docs.github.com/en/codespaces/the-githubdev-web-based-editor"&gt;documentation&lt;/a&gt; editing and saving files via github.dev. &lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--I77nLq1G--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://docs.github.com/assets/images/help/codespaces/codespaces-commit-commit-message.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--I77nLq1G--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://docs.github.com/assets/images/help/codespaces/codespaces-commit-commit-message.png" alt="Image description" width="880" height="417"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Even if you don’t know Git or feel intimidated by the terminal, you can still use GitHub to back up your code, track changes, and build your portfolio. Of course, as your skills grow and you land a new role, your employer may prefer that you use Git. &lt;/p&gt;
+
+&lt;p&gt;&lt;em&gt;Over the next few weeks, I’ll share tips about Git and GitHub that I’ve learned and continue to learn throughout my career in tech. Give me a follow to avoid missing my upcoming blog posts!! Let’s grow together and become version control pros!&lt;/em&gt;&lt;/p&gt;
+
+</description>
+      <category>beginners</category>
+      <category>github</category>
+      <category>git</category>
+      <category>codenewbie</category>
+    </item>
+    <item>
       <title>Poetry vs pip: Or How to Forget Forever "requirements.txt"      Cheat Sheet for Beginners</title>
       <author>Vadim Kolobanov</author>
       <pubDate>Mon, 06 Dec 2021 13:43:45 +0000</pubDate>
@@ -690,6 +1133,24 @@ build-backend = "poetry.core.masonry.api"
       <category>womenintech</category>
     </item>
     <item>
+      <title>Upgrade to Angular13 and Spring boot 2.6.1</title>
+      <author>Vesin Dusko</author>
+      <pubDate>Mon, 06 Dec 2021 12:13:40 +0000</pubDate>
+      <link>https://dev.to/vesindusko/upgrade-to-angular13-and-spring-boot-261-4a56</link>
+      <guid>https://dev.to/vesindusko/upgrade-to-angular13-and-spring-boot-261-4a56</guid>
+      <description>&lt;p&gt;In the last few weeks, we have been busy migrating our product to #angular 13 and #springboot 2.6.1.&lt;/p&gt;
+
+&lt;p&gt;I can't share with you our product code, so we also upgrade our &lt;a href="https://github.com/alchemycloud/todo"&gt;TODO&lt;/a&gt; and &lt;a href="https://github.com/alchemycloud/petclinic"&gt;PetClinic&lt;/a&gt; apps.&lt;/p&gt;
+
+&lt;p&gt;Check it out!&lt;/p&gt;
+
+</description>
+      <category>angular</category>
+      <category>typescript</category>
+      <category>java</category>
+      <category>springboot</category>
+    </item>
+    <item>
       <title>Day 9 - CSS Grid | #100DaysOfCode</title>
       <author>MD Jannatin Naim</author>
       <pubDate>Mon, 06 Dec 2021 12:12:16 +0000</pubDate>
@@ -742,427 +1203,6 @@ build-backend = "poetry.core.masonry.api"
       <category>100daysofcode</category>
       <category>webdev</category>
       <category>beginners</category>
-    </item>
-    <item>
-      <title>Kicad Helper Workflow</title>
-      <author>boredom101</author>
-      <pubDate>Mon, 06 Dec 2021 12:08:35 +0000</pubDate>
-      <link>https://dev.to/boredom101/kicad-helper-workflow-fb</link>
-      <guid>https://dev.to/boredom101/kicad-helper-workflow-fb</guid>
-      <description>&lt;h3&gt;
-  &lt;a href="#my-workflow"&gt;
-  &lt;/a&gt;
-  My Workflow
-&lt;/h3&gt;
-
-&lt;p&gt;A workflow for KiCAD that adds images of the back and front, as well as a bill of materials, of the design for easier viewing and collaboration.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#how-to-use"&gt;
-  &lt;/a&gt;
-  How to use:
-&lt;/h2&gt;
-
-&lt;ol&gt;
-&lt;li&gt;Copy the workflow to your repository.&lt;/li&gt;
-&lt;li&gt;Replace the environment variables at the top.
-
-&lt;ul&gt;
-&lt;li&gt;
-&lt;code&gt;PUSH_NAME&lt;/code&gt; - name of the user that pushes the additions&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;PUSH_USER&lt;/code&gt; - username of the user that pushes the additions&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;PUSH_MESSAGE&lt;/code&gt; - the commit message&lt;/li&gt;
-&lt;/ul&gt;
-&lt;/li&gt;
-&lt;li&gt;Profit&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;p&gt;Ran action:&lt;/p&gt;
-
-&lt;p&gt;Image:&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--5wthCKZ8--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/tsbvhg5tc9se9dqh7s6z.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--5wthCKZ8--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/tsbvhg5tc9se9dqh7s6z.png" alt="View of the diff" width="880" height="984"&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;h3&gt;
-  &lt;a href="#submission-category"&gt;
-  &lt;/a&gt;
-  Submission Category:
-&lt;/h3&gt;
-
-&lt;p&gt;Wacky Wildcards&lt;/p&gt;
-&lt;h3&gt;
-  &lt;a href="#yaml-file-or-link-to-code"&gt;
-  &lt;/a&gt;
-  Yaml File or Link to Code
-&lt;/h3&gt;
-
-
-&lt;div class="ltag-github-readme-tag"&gt;
-  &lt;div class="readme-overview"&gt;
-    &lt;h2&gt;
-      &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--566lAguM--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/github-logo-5a155e1f9a670af7944dd5e12375bc76ed542ea80224905ecaf878b9157cdefc.svg" alt="GitHub logo"&gt;
-      &lt;a href="https://github.com/boredom101"&gt;
-        boredom101
-      &lt;/a&gt; / &lt;a href="https://github.com/boredom101/kicad-test"&gt;
-        kicad-test
-      &lt;/a&gt;
-    &lt;/h2&gt;
-    &lt;h3&gt;
-      A test of the KiCad GitHub Action
-    &lt;/h3&gt;
-  &lt;/div&gt;
-  &lt;div class="ltag-github-body"&gt;
-    
-&lt;div id="readme" class="md"&gt;
-&lt;h1&gt;
-Kicad Workflow&lt;/h1&gt;
-&lt;p&gt;A workflow that adds images of the back and front, as well as a bill of materials, of the design for easier viewing and collaboration.&lt;/p&gt;
-&lt;h2&gt;
-How to use:&lt;/h2&gt;
-&lt;ol&gt;
-&lt;li&gt;Copy the workflow to your repository.&lt;/li&gt;
-&lt;li&gt;Replace the environment variables at the top.
-&lt;ul&gt;
-&lt;li&gt;
-&lt;code&gt;PUSH_NAME&lt;/code&gt; - name of the user that pushes the additions&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;PUSH_USER&lt;/code&gt; - username of the user that pushes the additions&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;PUSH_MESSAGE&lt;/code&gt; - the commit message&lt;/li&gt;
-&lt;/ul&gt;
-&lt;/li&gt;
-&lt;li&gt;Profit&lt;/li&gt;
-&lt;/ol&gt;
-&lt;/div&gt;
-
-
-
-&lt;/div&gt;
-&lt;br&gt;
-  &lt;div class="gh-btn-container"&gt;&lt;a class="gh-btn" href="https://github.com/boredom101/kicad-test"&gt;View on GitHub&lt;/a&gt;&lt;/div&gt;
-&lt;br&gt;
-&lt;/div&gt;
-&lt;br&gt;
-
-
-&lt;h3&gt;
-  &lt;a href="#additional-resources-info"&gt;
-  &lt;/a&gt;
-  Additional Resources / Info
-&lt;/h3&gt;
-
-&lt;p&gt;This mainly uses the KiBot action (&lt;a href="https://github.com/INTI-CMNB/KiBot"&gt;https://github.com/INTI-CMNB/KiBot&lt;/a&gt;)&lt;/p&gt;
-
-</description>
-      <category>actionshackathon21</category>
-      <category>github</category>
-      <category>git</category>
-      <category>kicad</category>
-    </item>
-    <item>
-      <title>What is Automation Testing? Why You Should Use Automated Tests?</title>
-      <author>Abhiraj Bhowmick</author>
-      <pubDate>Mon, 06 Dec 2021 12:06:07 +0000</pubDate>
-      <link>https://dev.to/uilicious/what-is-automation-testing-why-you-should-use-automated-tests-4edp</link>
-      <guid>https://dev.to/uilicious/what-is-automation-testing-why-you-should-use-automated-tests-4edp</guid>
-      <description>&lt;p&gt;We've long believed that automation testing is a wonderful formula for improving the quality of apps right from the start. However, it is only when we begin automating that we grasp the true reality. We frequently confront issues such as deciding when to start automating tests, what tests to automate, how to choose the correct technology, and how to write automation test scripts that follow the best practices.&lt;/p&gt;
-
-&lt;p&gt;So let’s discuss all this in detail in this article.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#what-is-test-automation-and-how-does-it-work"&gt;
-  &lt;/a&gt;
-  What is Test Automation and how does it work?
-&lt;/h2&gt;
-
-&lt;p&gt;It is a method in which automation tools run a test suite, perform predetermined actions on a software application, report on the results, compare them, and generate detailed test reports.&lt;/p&gt;
-
-&lt;p&gt;Test automation requires financial and human resources, long development cycles, and repeated executions. However, before we begin automating tests, we must first determine the best time for automation, the breadth of automation, and the best tool for automation. It might lead your project to unexpected additional costs if this process is not done properly from the beginning.&lt;/p&gt;
-
-&lt;p&gt;Automated tests can be done across several servers during off-peak hours (midnight) and consume a fraction of the time that manual testing takes. This implies that the developer and tester’s time is used in the most efficient way possible, and the team receives faster feedback on code quality.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#criteria-for-automation"&gt;
-  &lt;/a&gt;
-  Criteria for Automation
-&lt;/h2&gt;
-
-&lt;p&gt;To be automated, a test must match certain conditions; otherwise, it may wind up costing more than it saves. After all, saving time, effort, and money is a fundamental purpose of automation.&lt;/p&gt;
-
-&lt;p&gt;Here are some general test automation criteria. Keep in mind that these are only suggestions. Depending on your circumstances, your criteria may differ.&lt;/p&gt;
-
-&lt;p&gt;Repeatable: The test must be able to be repeated. Automating a test that can only be run once makes no sense. The following three steps comprise a repeatable test:&lt;/p&gt;
-
-&lt;p&gt;Configure the test, including the data and the environment.&lt;br&gt;
-Execute the function and determine the outcome.&lt;br&gt;
-Clean up the data as well as the surroundings..&lt;br&gt;
-We want to be able to make the environment consistent in the initial phase.&lt;/p&gt;
-
-&lt;p&gt;Determinant: When a function is determinant, the result is the same each time it is performed with the same input. The same may be said for automated tests. Let's imagine we wish to put an additional function to the test. We now know that 1+1=2, and that 394.19 + 5.81 = 400.00. The function of addition is determinant. Software, on the other hand, may have such a large number of varied inputs that getting the same result over time is challenging. Some variables may be completely random, making it difficult to predict a specific outcome.&lt;/p&gt;
-
-&lt;p&gt;Unopinionated: You cannot automate matters of opinion. This is where usability testing, beta testing, and so forth really shine. User feedback is important, but it just can’t be automated … sorry!&lt;/p&gt;
-
-&lt;p&gt;Most devs say software test automation demands considerable investments of money and resources. But UI-licious makes it easy to implement and maintain. We created this all-in-one automation tool with the desire to deliver better web experiences for everyone in mind.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#testing-at-different-levels"&gt;
-  &lt;/a&gt;
-  Testing at different levels
-&lt;/h3&gt;
-
-&lt;p&gt;A strategy to decide the number of tests to automate is the test automation pyramid. This strategy suggests writing three types of tests with different levels of granularity. The higher the level, the fewer tests there are to write.&lt;/p&gt;
-
-&lt;p&gt;Unit testing offers software products with robustness as a firm base. It's simple to write and execute tests when you test particular pieces of the code.&lt;br&gt;
-The service layer refers to evaluating an application's services separately from its user interface; these services include everything that the application does in response to a single or multiple inputs.&lt;br&gt;
-We have UI testing at the top level, which has fewer tests due to many attributes that make them more difficult to run, such as the fragility of the tests, where a tiny change in the user interface can break a large number of tests, requiring additional maintenance effort.&lt;br&gt;
-Type of automated tests&lt;br&gt;
-Knowing what are the different forms of automated testing is critical when it comes to integrating test automation in your QA department. This will give you a good idea of how comprehensive a test automation program is, and if you can integrate it into your present quality assurance procedures or not. Furthermore, understanding the various sorts of tests allows you to make informed decisions about which types of testing would produce the best results for your organization.&lt;/p&gt;
-
-&lt;p&gt;There are many different types of test automation. The following is a comprehensive list of the most common ones:&lt;/p&gt;
-
-&lt;p&gt;Code Analysis: Static and dynamic code analysis tools are just two of the numerous types of code analysis tools available. Some of these checks are for security issues, while others are for style and form. When a developer checks in code, these tests are run. There isn't much test writing to perform with these automated tests other than configuring rules and keeping the tools up to date.&lt;br&gt;
-Unit Testing: Unit testing is doing tests on individual components in isolation to ensure that they function properly. It is commonly the first type of automated testing performed on an application because it is usually done during the development phase.&lt;br&gt;
-Integration Testing: Integration testing entails testing the application's various elements as a whole. When it comes to automation, integration tests are a unique kind. Integration tests, often known as end-to-end tests, are more difficult to put up since they must interface with external dependencies. When working with resources that aren't under your control, it's often beneficial to construct false external resources.&lt;br&gt;
-Performance Testing: Performance testing is putting a piece of software through its paces, stability, and responsiveness while under load. The fundamental goal of performance testing is to detect and eliminate any potential performance bottlenecks so that the program can offer the best results to the end-user. Performance testing is an important part of assuring a product's market success since it helps uncover potential issues that consumers may encounter, such as slow software functioning under a heavy workload.&lt;br&gt;
-Regression Testing: Regression testing is a sort of maintenance testing. It entails running functional and non-functional tests again to see if the software behaves the same way it did previously after a code or program change. The software is said to have regressed if the performance is no longer the same. The primary goal of regression testing is to guarantee that existing functionality is not harmed as a result of code changes.&lt;br&gt;
-Smoke Testing: Smoke testing, also known as "Build Verification Testing" and "Confidence Testing," is a series of tests designed to evaluate the stability and viability of the software's delivered build. Smoke testing is used to determine whether an application should be shelved due to lack of functioning or moved on to the next stage of testing. Once the generated software functions have been merged with the software build, smoke testing is performed. Any failures in testing at this stage will almost always result in the application being sent back to the development team for changes.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#why-use-automated-tests"&gt;
-  &lt;/a&gt;
-  Why use automated tests?
-&lt;/h2&gt;
-
-&lt;p&gt;Pocket-friendly&lt;br&gt;
-Contrary to popular belief, automated testing can be less expensive than manual testing. You can't conduct repeating tests with manual testing. In reality, the cost of manually testing your application increases over time. Automated testing, on the other hand, is less expensive in the long run since once you've built your test scripts, you can reuse them at any time without incurring additional costs. True, automation adoption is initially costly, but it will quickly pay for itself.&lt;/p&gt;
-
-&lt;p&gt;It's important to remember that the amount of the automated testing ROI is determined by the extent of automation adoption. The bigger the return on investment is, the more automated test cases you create and use.&lt;/p&gt;
-
-&lt;p&gt;Time-Saving&lt;br&gt;
-You can save time by automating your tests. Automated tests are quick to complete and can be repeated. To put it another way, you won't have to wait weeks to do the tests again — only a few hours will be enough.&lt;/p&gt;
-
-&lt;p&gt;Automated testing accelerates development by taking advantage of their quick execution and repeatability. Transitioning from manual testing to automation will shorten your development time and increase your productivity.&lt;/p&gt;
-
-&lt;p&gt;Better Accuracy&lt;br&gt;
-You're more likely to have error-free releases if you use test automation. Automated testing is more accurate than manual testing because it requires less human intervention. The problem is that a human tester can make mistakes at any stage of the review process. The machine, on the other hand, will not cooperate. Because generated test cases are more precise than human testers, you can lower the likelihood of failure by removing human errors.&lt;/p&gt;
-
-&lt;p&gt;Immediate Feedback&lt;br&gt;
-Another advantage of automated testing is that it provides immediate feedback. Developers receive testing reports instantaneously with fast test execution, so they can react swiftly if a problem happens. Forget about deciphering the code that was written three weeks ago.&lt;/p&gt;
-
-&lt;p&gt;When your app is already on the market, immediate feedback is very useful. Manual testing can simply slow down the process if you need to fix some errors immediately. Test automation, on the other hand, will allow you to make quick changes to your application. As a result, automated testing leads to increased team responsiveness, improved user experience, and increased customer satisfaction.&lt;/p&gt;
-
-&lt;p&gt;DevOps Implementation&lt;br&gt;
-Every developer's commit to the source code must be tested as part of the CI/CD pipeline, and there's no other way to accomplish it fast and efficiently than with test automation. As a result, once you've deployed automated testing, transitioning to Continuous Testing and Delivery will be simple. When the complexity of the code and the number of test cases increases, it becomes increasingly difficult to manage.&lt;/p&gt;
-
-&lt;p&gt;The good news is that we created a solution called UI-licious which is an all-in-one automation tool that helps anyone automate tests in minutes, not in hours. With our flexible testing solution, experienced testers, as well as non-coding beginners, can ensure that crucial error scenarios are quickly identified, so users do not encounter any unexpected failures when browsing your website or web app.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#when-to-use-automated-testing"&gt;
-  &lt;/a&gt;
-  When to use automated testing?
-&lt;/h3&gt;
-
-&lt;p&gt;If you're running the same test again and again without altering it, it's likely that automating it would save you a lot of time. That's because having a manual task done on a frequent basis wastes your team's time and is likely to result in additional errors due to inattention.&lt;/p&gt;
-
-&lt;p&gt;Human error is no longer a possibility thanks to automation. As a result, the adoption of automated testing can drastically increase quality in particular cases.&lt;/p&gt;
-
-&lt;p&gt;The bottom line is that if you can save money while still delivering a high-quality product, do so. This is where automation really shines. Most automation technologies aren't cheap, so the project must be large enough to justify the investment. However, UI-licious has plans starting from $12 a month, which happen to be very cost-effective and pocket-friendly.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#common-misconceptions-about-automation-testing"&gt;
-  &lt;/a&gt;
-  Common Misconceptions about Automation testing
-&lt;/h3&gt;
-
-&lt;p&gt;It is both true and incorrect that test automation will allow you to have more free time. The majority of manual testing time is spent on exploratory and functional testing, which involves manually searching for faults. Once that process is finished, the manual tester must perform the identical actions over and over again. That time is greatly reduced with automated testing. Instead of writing tests, automation testers spend their time coding them and improving them as needed. However, after the test is completed, automated testing enables for the reuse of tests, eliminating the need to repeat the entire procedure.&lt;/p&gt;
-
-&lt;p&gt;Automated testing allows you to concentrate on more important topics like client needs, functionality, and enhancements. Furthermore, the software tests can be run each time the source code is amended. Manually performing these tests is time-consuming and expensive, whereas automated tests can be done repeatedly at no additional cost.&lt;/p&gt;
-
-&lt;p&gt;Investing in automated testing may appear to be prohibitively expensive at first, especially if you're a small business. But that's not the case with UI-licious, our pricing is cost-effective because you can create tests fast. Indeed, you don't need to hire an expert who is proficient in a particular coding language to write your tests. Moreover, the monthly fee is derisory compared to most of the similar solutions.&lt;/p&gt;
-
-&lt;p&gt;Another prevalent misunderstanding concerning automated testing is that it eliminates the need for human involvement. In all honesty, automated testing is more precise and faster than what people can accomplish without incurring significant human error, thus this misunderstanding is acceptable. This does not replace the need for face-to-face communication in software development. Instead, it increases that aspect by giving an additional communication route.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#what-to-and-not-to-automate"&gt;
-  &lt;/a&gt;
-  What to and not to automate
-&lt;/h3&gt;
-
-&lt;p&gt;Without necessarily automating tests end-to-end, testing tools can assist with tasks such as product installation, test data creation, GUI interaction, problem detection (think parsing or polling agents equipped with test oracles), defect tracking, and so on.&lt;/p&gt;
-
-&lt;p&gt;We shouldn't try to automate negative or failover tests since they need testers to think analytically, and negative tests aren't always easy to offer a pass or fail result that can help us.&lt;/p&gt;
-
-&lt;p&gt;Who should be involved with test automation?&lt;br&gt;
-With short Agile iterations, testing frequently needs a "shift left" strategy. Because of the shift to the left in the agile development process, testing can begin considerably earlier in the application lifetime. As a result of this strategy, developers with strong technical skills are increasingly being held responsible for testing, and they frequently collaborate with testers to design test automation frameworks. When assessing a testing solution, it's critical to find one that meets the requirements of all team members who will be involved in the testing process. Manual testers, automation engineers, and developers are among them.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#how-to-automate-your-tests"&gt;
-  &lt;/a&gt;
-  How to automate your tests?
-&lt;/h3&gt;
-
-&lt;p&gt;If you are wondering how to start with automation testing, you can follow this easy 5 step process.&lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;&lt;p&gt;Select software or tools for testing.&lt;br&gt;
-After you've decided which test to automate, you may look at the various testing tools accessible. Consider how a tool will operate with your present software platform before selecting one, as certain tools are better suited to a specific platform. Like UI-licious is a great choice because of its framework-agnostic character and cheaper solutions than most other products out there. Not only is it easy to start, but you also don’t need to master a coding language to implement your automated testing strategy.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;Determine which tests should be automated.&lt;br&gt;
-Choose which test you wish to automate first. Manual and automated testing are used by many software engineers. Certain functionality may need to be manually tested. With UI-licious, you can get started with 0 coding knowledge.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;Plans, Designs, and Scripts&lt;br&gt;
-After you have chosen your tools for automation, plan the design of the framework and its features. Then you can plan automation things that are in-scope and out-of-scope. Next, you can start scripting and execution of schedules and timelines&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;Execute your automated tests&lt;br&gt;
-During this phase, automation scripts are run. Before they may be set to run, some scripts require input test data. Once they’ve been run, they generate extensive test reports you can easily analyze and share with your team.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;Maintain your test scripts&lt;br&gt;
-The Test Automation Maintenance Approach is a phase of automation testing that is used to see if the new features added to the software are working properly. When new automation scripts are added, they must be reviewed and maintained in order to improve the effectiveness of automation scripts with each release cycle. UI-licious makes the maintenance easier because the scripting language relies less on CSS and XPATH selectors and more on user behaviors. Indeed, with our testing solution, you are actually creating scripts that are following the user journey you want to verify.&lt;/p&gt;&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;p&gt;Conclusion&lt;br&gt;
-Test automation allows testers to devote more time to exploratory tests, which often uncover more flaws than any automated test. Because of these and other factors, test automation can make you save time and money on all your projects.&lt;/p&gt;
-
-&lt;p&gt;And so, UI-licious is there to help you out in this world of automation testing.&lt;/p&gt;
-
-&lt;p&gt;Apart from being a flexible and accessible way to start test automation, UI-licious provides precise results after testing, and the reports are also very informative and helpful, especially when looking up the history of past tests. It also provides a monitoring tab where we can see how our automation is progressing. It has a very user-friendly interface, and even non-technical individuals can understand the process.&lt;/p&gt;
-
-</description>
-      <category>testing</category>
-      <category>beginners</category>
-      <category>javascript</category>
-      <category>devops</category>
-    </item>
-    <item>
-      <title>Learn How to Boost Productivity with Strapi</title>
-      <author>Shada </author>
-      <pubDate>Mon, 06 Dec 2021 11:44:20 +0000</pubDate>
-      <link>https://dev.to/strapi/learn-how-to-boost-productivity-with-strapi-kd9</link>
-      <guid>https://dev.to/strapi/learn-how-to-boost-productivity-with-strapi-kd9</guid>
-      <description>&lt;p&gt;When we talk about boosting productivity in application management, we are talking about the ability to produce greater output with the same amount of input to reduce human labor, capital, and development time. &lt;/p&gt;
-
-&lt;p&gt;Strapi is a tool that can be used in boosting productivity in any application.&lt;br&gt;
-Boosting productivity helps meet the primary goals of the application. It will encourage each team member to improve their skills, and also it will help in rendering better services to the application users in an effective way. &lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;What is Strapi&lt;/strong&gt;? &lt;br&gt;
-Strapi is an open-source Node.js headless CMS based on Nodejs to build fast, dynamic, and easily manageable APIs written in JavaScript. strapi makes it easier to build applications using jamstack technology, which separates the backend from the frontend and enables dynamic applications.&lt;/p&gt;
-&lt;h2&gt;
-  &lt;a href="#the-benefit-of-effective-productivity"&gt;
-  &lt;/a&gt;
-  The benefit of effective productivity
-&lt;/h2&gt;
-
-&lt;p&gt;There are many benefits of boosting productivity which vary from one application to another. Here are some of the major benefits of effective productivity of using strapi:&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Enhanced team relationship&lt;/strong&gt; - effective productivity enables good communication between each team member as they work together to offer the best services. Each team will deliberate on improving the application and how they can work together to achieve their common goals.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Setting and meeting goals&lt;/strong&gt; - it helps set and meet the application goals, In the sense that each member of the team knows how they can improve the application on their own using appropriate tools and work to achieve these common goals.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Enhance better concentration&lt;/strong&gt; - it enables team members to focus on their part without depending on one another. While the backend team is working, the frontend team can be working on their part simultaneously. This enables each team member to be productive on their part. &lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;It saves development time&lt;/strong&gt; - application build using jamstack technology always saves application development time. It allows the backend team to work on the application while the frontend team is working on the same application simultaneously without negatively affecting the application.&lt;/p&gt;
-&lt;h2&gt;
-  &lt;a href="#strapi-installation-prerequisite"&gt;
-  &lt;/a&gt;
-  Strapi installation prerequisite
-&lt;/h2&gt;
-
-&lt;p&gt;Before installing strapi, the following software should have the following application installed on your computer:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Npm&lt;/li&gt;
-&lt;li&gt;Node.js&lt;/li&gt;
-&lt;/ul&gt;
-&lt;h2&gt;
-  &lt;a href="#installation-of-strapi"&gt;
-  &lt;/a&gt;
-  Installation of strapi
-&lt;/h2&gt;
-
-&lt;p&gt;Installing the Strap is pretty straightforward. Use the following cmd code to create a new strapi project:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;    npx create-strapi-app applicationname &lt;span class="nt"&gt;--quickstart&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Make sure that the folder to install the strapi is empty.&lt;/p&gt;
-
-&lt;p&gt;This will install all the needed packages for this project. After the installation, our Strapi app will automatically be launched in our browser, then register for super admin users to manage the database.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#strapi-increases-productivity"&gt;
-  &lt;/a&gt;
-  Strapi increases productivity
-&lt;/h2&gt;
-
-&lt;p&gt;Strapi is used to increase application productivity because it has all the tools required to boost application productivity. Because of these tools, many applications are built using strapi.&lt;/p&gt;
-
-&lt;p&gt;Strapi increase productivity through the following ways:&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;User-Friendly Interface&lt;/strong&gt;: &lt;br&gt;
-Strapi has a very good user interface that enables the admin user to navigate and manage their resources and other team members. These features make it easy to learn how to interact with the Interface and make it simple to manage any team member.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Scalability&lt;/strong&gt;: &lt;br&gt;
-Strapi makes the applications scalable in the sense that whenever the frontend is having performance issues, it does not affect the backend because they are separated using jamstack technology. &lt;/p&gt;
-
-&lt;p&gt;This helps increase productivity in the applications because the backend team does not have to wait for the frontend team to resolve the issue before working on their side. strapi enable independent components.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Plugin:&lt;/strong&gt; &lt;br&gt;
-Strapi enables the admin to install any plugin needed for effective management of the application. A plugin can be installed from the strapi marketplace. Examples of plugins are content manager, content type builder, media library, international plugin e.t.c. All these plugins help to boost productivity in one way or the other.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Jamstack technology:&lt;/strong&gt; &lt;br&gt;
-Strapi supports jamstack, which allows the frontend team to share content with the backend team via a RESTFUL API call. This allows dynamic delivery of content across many platforms. This helps boost productivity because it allows the application to load faster and makes SEO optimization very effective.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#content-creators-focus-on-content"&gt;
-  &lt;/a&gt;
-  &lt;strong&gt;Content creators focus on content&lt;/strong&gt;.
-&lt;/h2&gt;
-
-&lt;p&gt;Strapi allows different users with specific roles and permission on the dashboard. This helps to determine what type of actions each team member can perform on the dashboard.&lt;/p&gt;
-
-&lt;p&gt;A team member with the &lt;strong&gt;author's&lt;/strong&gt; role will only be permitted to post content into the application, which will need the approval of the &lt;strong&gt;Editor&lt;/strong&gt; user or &lt;strong&gt;Super-admin&lt;/strong&gt; user after the review of the content. In contrast, a team member with an Editor role can create content without the super-admin user's approval and manage the content of the &lt;strong&gt;author&lt;/strong&gt; group.&lt;/p&gt;
-
-&lt;p&gt;Strapi enables different team members to work on the application simultaneously without affecting the system. Content creators only have to focus on creating good, dynamic content and how to optimize this content effectively using the available tools provided by strapi in the dashboard.&lt;/p&gt;
-
-&lt;p&gt;These tools include the following:&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Target users:&lt;/strong&gt; it helps to deliver different content for different users in different areas. This enables you to render content for your users in their local language by translating them.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Content modeling&lt;/strong&gt; allows you to document all types of content that you'll need now and in the future to ensure it is effectively configured for multiple channels.&lt;br&gt;
-It's possible to serve your user the content that they are looking for whenever they need it.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;The editor interface&lt;/strong&gt; enables restricted content access and automates workflows with webhooks to communicate with your team when content has been changed and is ready for editor review. With the editor interface creating content is made easy by strapi. It allows a content creator to add a description to content.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#devs-focus-on-dev-work"&gt;
-  &lt;/a&gt;
-  Devs focus on dev work
-&lt;/h2&gt;
-
-&lt;p&gt;With strapi used as a backend, developers only have to focus on the frontend because strapi is easy to set up, manage and connect to the frontend using jamstack technology. &lt;/p&gt;
-
-&lt;p&gt;Developers do not have to worry about the security of the content. Strapi has them back up. The content exchange between strapi (backend) and the frontend is done via a RESTFUL API call, and these API calls have many functions that developers can use to suit their own needs.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Multi-Medium Sharing:&lt;/strong&gt; Strapi allows developers to share content across different mediums. The same content can be shared with web applications, mobile applications, desktop applications simultaneously. This helps developers to focus on the content that will be displayed on each of the mediums used.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Cross-Platform Technology:&lt;/strong&gt; Strapi allows developers to use any programming language for their application as long as the language supports RESTFUL API. This tool is very useful because it enables different developers to work on one application using different programming languages. The have to do to get content is to make a RESTFUL API call to strap endpoint.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#conclusion"&gt;
-  &lt;/a&gt;
-  Conclusion
-&lt;/h2&gt;
-
-&lt;p&gt;In this article, we discussed boosting production with strapi, installing strapi as a tool for boosting productivity, the benefit of boosting productivity, and most importantly, looking at how strapi boosts productivity because of developers, tools, and content creators.&lt;/p&gt;
-
-&lt;p&gt;Strapi is easy to learn and use. If you are looking for the best Headless CMS for your application to boost productivity and work with your team, you can get started with strapi checking their documentation page.&lt;/p&gt;
-
-</description>
-      <category>strapi</category>
-      <category>cms</category>
-      <category>headlesscms</category>
     </item>
   </channel>
 </rss>
