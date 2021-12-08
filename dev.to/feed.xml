@@ -795,6 +795,779 @@ The Messaging part should focus on a particular set of high-quality users and co
       <category>testing</category>
     </item>
     <item>
+      <title>Using CloudFormation to Automate Build, Test, and Deploy with CodePipeline</title>
+      <author>Jenna Pederson</author>
+      <pubDate>Wed, 08 Dec 2021 15:54:51 +0000</pubDate>
+      <link>https://dev.to/aws/using-cloudformation-to-automate-build-test-and-deploy-with-codepipeline-l71</link>
+      <guid>https://dev.to/aws/using-cloudformation-to-automate-build-test-and-deploy-with-codepipeline-l71</guid>
+      <description>&lt;p&gt;In &lt;a href="https://jennapederson.com/blog/2021/6/21/provisioning-an-ec2-instance-with-cloudformation-part-1/"&gt;part 1&lt;/a&gt;, we automated the provisioning of an Amazon EC2 instance using AWS CloudFormation. In &lt;a href="https://jennapederson.com/blog/2021/6/28/provisioning-an-rds-database-with-cloudformation-part-2/"&gt;part 2&lt;/a&gt;, we added an Amazon RDS Postgresql database to the CloudFormation template from &lt;a href="https://jennapederson.com/blog/2021/6/21/provisioning-an-ec2-instance-with-cloudformation-part-1/"&gt;part 1&lt;/a&gt; so both the EC2 instance and the database can be provisioned together as a set of resources. Today in part 3, we will introduce a continuous integration/continuous deployment (CI/CD) pipeline to automate the build, test, and deploy phases of your release process. To do this, we’ll use AWS CodeDeploy and CodePipeline.&lt;/p&gt;
+
+&lt;p&gt;As a reminder, here's what we've covered and where we're going:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;automate the provisioning of your EC2 instance using CloudFormation (&lt;a href="https://jennapederson.com/blog/2021/6/21/provisioning-an-ec2-instance-with-cloudformation-part-1/"&gt;part 1&lt;/a&gt;),&lt;/li&gt;
+&lt;li&gt;add an RDS Postgresql database to your stack with CloudFormation (&lt;a href="https://jennapederson.com/blog/2021/6/28/provisioning-an-rds-database-with-cloudformation-part-2/"&gt;part 2&lt;/a&gt;), and&lt;/li&gt;
+&lt;li&gt;create a CodePipeline with CloudFormation (this post, part 3).&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h2&gt;
+  &lt;a href="#prerequisites"&gt;
+  &lt;/a&gt;
+  Prerequisites
+&lt;/h2&gt;
+
+&lt;p&gt;To work through the examples in this post, you’ll need:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;an AWS account (you can create your account &lt;a href="https://aws.amazon.com/premiumsupport/knowledge-center/create-and-activate-aws-account/"&gt;here&lt;/a&gt; if you don’t already have one),&lt;/li&gt;
+&lt;li&gt;the AWS CLI installed (you can find instructions for installing the AWS CLI &lt;a href="https://aws.amazon.com/cli/"&gt;here&lt;/a&gt;), and&lt;/li&gt;
+&lt;li&gt;a key-pair to use for SSH (you can create a key-pair following &lt;a href="https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-key-pairs.html#having-ec2-create-your-key-pair"&gt;these instructions&lt;/a&gt;).&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Unfamiliar with CloudFormation or feeling a little rusty? Check out &lt;a href="https://jennapederson.com/blog/2021/6/21/provisioning-an-ec2-instance-with-cloudformation-part-1/"&gt;part 1&lt;/a&gt; or my &lt;a href="https://jennapederson.com/blog/2021/5/10/introduction-to-aws-cloudformation/"&gt;Intro to CloudFormation post&lt;/a&gt; before getting started.&lt;/p&gt;
+
+&lt;p&gt;Just want the code? Grab it &lt;a href="https://github.com/jennapederson/cloudformation-examples"&gt;here&lt;/a&gt; and then check out the buildspec, appspec, and scripts &lt;a href="https://github.com/jennapederson/hello-express"&gt;here&lt;/a&gt;.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#prepare-ec2-instance"&gt;
+  &lt;/a&gt;
+  Prepare EC2 Instance
+&lt;/h2&gt;
+
+&lt;p&gt;First, we’ll need to prepare the EC2 instance so that we can deploy our app to it. We’ll create an EC2 instance role and a CodeDeploy trust role, install the CodeDeploy agent, and tag the instance or instance we want to deploy to.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#1-create-ec2-instance-role"&gt;
+  &lt;/a&gt;
+  1. Create EC2 Instance Role
+&lt;/h3&gt;
+
+&lt;p&gt;In the CloudFormation template that creates your EC2 instance, create the following new resources, &lt;code&gt;InstanceRole&lt;/code&gt;, &lt;code&gt;InstanceRolePolicies&lt;/code&gt;, and &lt;code&gt;InstanceRoleInstanceProfile&lt;/code&gt;:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;InstanceRole&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;AWS::IAM::Role&lt;/span&gt;
+  &lt;span class="na"&gt;Properties&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;AssumeRolePolicyDocument&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;Statement&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;Effect&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Allow&lt;/span&gt;
+          &lt;span class="na"&gt;Principal&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+            &lt;span class="na"&gt;Service&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+              &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;ec2.amazonaws.com&lt;/span&gt;
+          &lt;span class="na"&gt;Action&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+            &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;sts:AssumeRole&lt;/span&gt;
+    &lt;span class="na"&gt;Path&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;/&lt;/span&gt;
+
+&lt;span class="na"&gt;InstanceRolePolicies&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;AWS::IAM::Policy&lt;/span&gt;
+  &lt;span class="na"&gt;Properties&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;PolicyName&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;InstanceRole&lt;/span&gt;
+    &lt;span class="na"&gt;PolicyDocument&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;Statement&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;Effect&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Allow&lt;/span&gt;
+          &lt;span class="na"&gt;Action&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+            &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;autoscaling:Describe*&lt;/span&gt;
+            &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;cloudformation:Describe*&lt;/span&gt;
+            &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;cloudformation:GetTemplate&lt;/span&gt;
+            &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;s3:Get*&lt;/span&gt;
+          &lt;span class="na"&gt;Resource&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;*'&lt;/span&gt;
+    &lt;span class="na"&gt;Roles&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;InstanceRole'&lt;/span&gt;
+
+&lt;span class="na"&gt;InstanceRoleInstanceProfile&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;AWS::IAM::InstanceProfile&lt;/span&gt;
+  &lt;span class="na"&gt;Properties&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Path&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;/&lt;/span&gt;
+    &lt;span class="na"&gt;Roles&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;InstanceRole'&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;These resources create an instance profile to pass an IAM role to an EC2 instance. This allows the EC2 instance to do things like get the CodeDeploy agent from S3.&lt;/p&gt;
+
+&lt;p&gt;Next, we’ll add the &lt;code&gt;IamInstanceProfile&lt;/code&gt; property to the EC2 instance:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;WebAppInstance&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;Properties&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="s"&gt;...&lt;/span&gt;
+    &lt;span class="s"&gt;IamInstanceProfile&lt;/span&gt;&lt;span class="err"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;InstanceRoleInstanceProfile'&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#2-install-codedeploy-agent"&gt;
+  &lt;/a&gt;
+  2. Install CodeDeploy Agent
+&lt;/h3&gt;
+
+&lt;p&gt;The CodeDeploy agent will be installed on each EC2 instance you want to deploy your app to and helps CodeDeploy communicate with your EC2 instance for deployments. First, you’ll include metadata in the &lt;code&gt;AWS::CloudFormation::Init&lt;/code&gt; key, which will be used by the &lt;code&gt;cfn-init&lt;/code&gt; helper script.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;WebAppInstance&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="s"&gt;...&lt;/span&gt;
+  &lt;span class="s"&gt;Metadata&lt;/span&gt;&lt;span class="err"&gt;:&lt;/span&gt;
+    &lt;span class="s"&gt;AWS::CloudFormation::Init:&lt;/span&gt;
+      &lt;span class="s"&gt;services&lt;/span&gt;&lt;span class="err"&gt;:&lt;/span&gt;
+        &lt;span class="na"&gt;sysvint&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+          &lt;span class="na"&gt;codedeploy-agent&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+            &lt;span class="na"&gt;enabled&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;true'&lt;/span&gt;
+            &lt;span class="na"&gt;ensureRunning&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;true'&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Then, we’ll add the &lt;code&gt;UserData&lt;/code&gt; key, which allows us to pass user data to the EC2 instance to perform automated configuration tasks and run scripts after the instance starts up.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;WebAppInstance&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Properties&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="s"&gt;...&lt;/span&gt;
+        &lt;span class="s"&gt;UserData&lt;/span&gt;&lt;span class="err"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Base64&lt;/span&gt;
+          &lt;span class="s"&gt;Fn::Join:&lt;/span&gt;
+            &lt;span class="s"&gt;- ''&lt;/span&gt;
+            &lt;span class="s"&gt;- - "#!/bin/bash -ex\n"&lt;/span&gt;
+              &lt;span class="s"&gt;- "yum update -y aws-cfn-bootstrap\n"&lt;/span&gt;
+              &lt;span class="s"&gt;- "yum install -y aws-cli\n"&lt;/span&gt;
+              &lt;span class="s"&gt;- "yum install -y ruby\n"&lt;/span&gt;
+              &lt;span class="s"&gt;- "iptables -t nat -A PREROUTING -i eth0 -p tcp --dport 80 -j REDIRECT --to-port 3000\n"&lt;/span&gt;
+              &lt;span class="s"&gt;- "echo 'iptables -t nat -A PREROUTING -i eth0 -p tcp --dport 80 -j REDIRECT --to-port 3000' &amp;gt;&amp;gt; /etc/rc.local\n"&lt;/span&gt;
+              &lt;span class="s"&gt;- "# Helper function.\n"&lt;/span&gt;
+              &lt;span class="s"&gt;- "function error_exit\n"&lt;/span&gt;
+              &lt;span class="s"&gt;- "{\n"&lt;/span&gt;
+              &lt;span class="s"&gt;- '  /opt/aws/bin/cfn-signal -e 1 -r "$1" '''&lt;/span&gt;
+              &lt;span class="s"&gt;- !Ref 'WaitHandle'&lt;/span&gt;
+              &lt;span class="s"&gt;- "'\n"&lt;/span&gt;
+              &lt;span class="s"&gt;- "  exit 1\n"&lt;/span&gt;
+              &lt;span class="s"&gt;- "}\n"&lt;/span&gt;
+              &lt;span class="s"&gt;- "# Install the AWS CodeDeploy Agent.\n"&lt;/span&gt;
+              &lt;span class="s"&gt;- "cd /home/ec2-user/\n"&lt;/span&gt;
+              &lt;span class="s"&gt;- "aws s3 cp 's3://aws-codedeploy-us-east-1/latest/codedeploy-agent.noarch.rpm'\&lt;/span&gt;
+                &lt;span class="s"&gt;\ . || error_exit 'Failed to download AWS CodeDeploy Agent.'\n"&lt;/span&gt;
+              &lt;span class="s"&gt;- "yum -y install codedeploy-agent.noarch.rpm || error_exit 'Failed to\&lt;/span&gt;
+                &lt;span class="s"&gt;\ install AWS CodeDeploy Agent.' \n"&lt;/span&gt;
+              &lt;span class="s"&gt;- '/opt/aws/bin/cfn-init -s '&lt;/span&gt;
+              &lt;span class="s"&gt;- !Ref 'AWS::StackId'&lt;/span&gt;
+              &lt;span class="s"&gt;- ' -r WebAppInstance --region '&lt;/span&gt;
+              &lt;span class="s"&gt;- !Ref 'AWS::Region'&lt;/span&gt;
+              &lt;span class="s"&gt;- " || error_exit 'Failed to run cfn-init.'\n"&lt;/span&gt;
+              &lt;span class="s"&gt;- "# All is well, so signal success.\n"&lt;/span&gt;
+              &lt;span class="s"&gt;- /opt/aws/bin/cfn-signal -e 0 -r "AWS CodeDeploy Agent setup complete."&lt;/span&gt;
+                &lt;span class="s"&gt;'&lt;/span&gt;
+              &lt;span class="s"&gt;- !Ref 'WaitHandle'&lt;/span&gt;
+              &lt;span class="s"&gt;- "'\n"&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This installs a few helper packages like the &lt;code&gt;aws-cli&lt;/code&gt; and &lt;code&gt;aws-cfn-bootstrap&lt;/code&gt;, and then installs the CodeDeploy agent (by copying it from S3). The &lt;code&gt;cfn-init&lt;/code&gt; script grabs the metadata we added earlier and ensures those services are enabled and running. The &lt;code&gt;cfn-signal&lt;/code&gt; helper script signals to CloudFormation that the instance had been successfully created or updated.&lt;/p&gt;
+
+&lt;p&gt;Finally, add the following two resources that are used in the &lt;code&gt;UserData&lt;/code&gt; we just added so that CloudFormation waits until the &lt;code&gt;UserData&lt;/code&gt; scripts are finished running.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;WaitHandle&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;AWS::CloudFormation::WaitConditionHandle&lt;/span&gt;
+&lt;span class="na"&gt;WaitCondition&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;AWS::CloudFormation::WaitCondition&lt;/span&gt;
+  &lt;span class="na"&gt;Properties&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Handle&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;WaitHandle'&lt;/span&gt;
+    &lt;span class="na"&gt;Timeout&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;900'&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#3-tag-the-instances"&gt;
+  &lt;/a&gt;
+  3. Tag the Instances
+&lt;/h3&gt;
+
+&lt;p&gt;Next, we need to tag the EC2 instances. CodeDeploy will use these tags to identify which instances to deploy to.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;WebAppInstance&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;Properties&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="s"&gt;...&lt;/span&gt;
+    &lt;span class="s"&gt;Tags&lt;/span&gt;&lt;span class="err"&gt;:&lt;/span&gt;
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;Key&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;CodeDeployTag'&lt;/span&gt;
+        &lt;span class="na"&gt;Value&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;CodeDeployDemo'&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#4-create-codedeploy-trust-role"&gt;
+  &lt;/a&gt;
+  4. Create CodeDeploy Trust Role
+&lt;/h3&gt;
+
+&lt;p&gt;We also need to add a CodeDeploy trust role so that CodeDeploy has access to work with the EC2 instance. Add the following two resources:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;CodeDeployTrustRole&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;AWS::IAM::Role&lt;/span&gt;
+  &lt;span class="na"&gt;Properties&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;AssumeRolePolicyDocument&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;Statement&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;Sid&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;1'&lt;/span&gt;
+          &lt;span class="na"&gt;Effect&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Allow&lt;/span&gt;
+          &lt;span class="na"&gt;Principal&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+            &lt;span class="na"&gt;Service&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+              &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;codedeploy.us-east-1.amazonaws.com&lt;/span&gt;
+              &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;codedeploy.us-west-2.amazonaws.com&lt;/span&gt;
+          &lt;span class="na"&gt;Action&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;sts:AssumeRole&lt;/span&gt;
+    &lt;span class="na"&gt;Path&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;/&lt;/span&gt;
+&lt;span class="na"&gt;CodeDeployRolePolicies&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;AWS::IAM::Policy&lt;/span&gt;
+  &lt;span class="na"&gt;Properties&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;PolicyName&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;CodeDeployPolicy&lt;/span&gt;
+    &lt;span class="na"&gt;PolicyDocument&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;Statement&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;Effect&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Allow&lt;/span&gt;
+          &lt;span class="na"&gt;Resource&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+            &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;*'&lt;/span&gt;
+          &lt;span class="na"&gt;Action&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+            &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;ec2:Describe*&lt;/span&gt;
+        &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;Effect&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Allow&lt;/span&gt;
+          &lt;span class="na"&gt;Resource&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+            &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;*'&lt;/span&gt;
+          &lt;span class="na"&gt;Action&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+            &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;autoscaling:CompleteLifecycleAction&lt;/span&gt;
+            &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;autoscaling:DeleteLifecycleHook&lt;/span&gt;
+            &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;autoscaling:DescribeLifecycleHooks&lt;/span&gt;
+            &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;autoscaling:DescribeAutoScalingGroups&lt;/span&gt;
+            &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;autoscaling:PutLifecycleHook&lt;/span&gt;
+            &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;autoscaling:RecordLifecycleActionHeartbeat&lt;/span&gt;
+    &lt;span class="na"&gt;Roles&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;CodeDeployTrustRole'&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This trust role will be used in the next section when we configure the CodePipeline. We’ll pass the ARN of this trust role to that CloudFormation template, so let’s add this as an &lt;code&gt;Output&lt;/code&gt;:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;Outputs&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="s"&gt;...&lt;/span&gt;
+  &lt;span class="s"&gt;CodeDeployTrustRoleARN&lt;/span&gt;&lt;span class="err"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Value&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!GetAtt&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;CodeDeployTrustRole.Arn'&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#5-create-the-stack"&gt;
+  &lt;/a&gt;
+  5. Create the stack
+&lt;/h3&gt;
+
+&lt;p&gt;And finally, we’ll need to create the stack:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;aws cloudformation create-stack &lt;span class="nt"&gt;--stack-name&lt;/span&gt; CloudFormationEc2Example &lt;span class="nt"&gt;--template-body&lt;/span&gt; file://07_ec2_codedeploy.yaml &lt;span class="se"&gt;\&lt;/span&gt;
+&lt;span class="nt"&gt;--parameters&lt;/span&gt; &lt;span class="nv"&gt;ParameterKey&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;AvailabilityZone,ParameterValue&lt;span class="o"&gt;=&lt;/span&gt;us-east-1a &lt;span class="se"&gt;\&lt;/span&gt;
+&lt;span class="nv"&gt;ParameterKey&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;EnvironmentType,ParameterValue&lt;span class="o"&gt;=&lt;/span&gt;dev &lt;span class="se"&gt;\&lt;/span&gt;
+&lt;span class="nv"&gt;ParameterKey&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;KeyPairName,ParameterValue&lt;span class="o"&gt;=&lt;/span&gt;jenna &lt;span class="se"&gt;\&lt;/span&gt;
+&lt;span class="nv"&gt;ParameterKey&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;DBPassword,ParameterValue&lt;span class="o"&gt;=&lt;/span&gt;Abcd1234 &lt;span class="se"&gt;\&lt;/span&gt;
+&lt;span class="nt"&gt;--capabilities&lt;/span&gt; CAPABILITY_IAM
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Or, if you’re updating the stack you created in &lt;a href="https://jennapederson.com/blog/2021/6/28/provisioning-an-rds-database-with-cloudformation-part-2/"&gt;part 2&lt;/a&gt;, you can use the &lt;code&gt;update-stack&lt;/code&gt; command instead.&lt;/p&gt;
+
+&lt;p&gt;Once we’ve created the EC2 instance set up for CodeDeploy, we’ll be ready to create the CodePipeline pipeline.&lt;/p&gt;
+
+&lt;p&gt;To view the full version of this template, check it out &lt;a href="https://github.com/jennapederson/cloudformation-examples/blob/main/07_ec2_codedeploy.yaml"&gt;here&lt;/a&gt;.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#create-codepipeline-pipeline"&gt;
+  &lt;/a&gt;
+  Create CodePipeline pipeline
+&lt;/h2&gt;
+
+&lt;p&gt;The pipeline we are building will have three stages:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;p&gt;A Source stage to pull our code from the GitHub repository. The Source stage will use a CodeStarConnection and an S3 bucket.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;A Build stage to build the source code into an artifact. The Build stage will use a CodeBuild Project and the same S3 bucket.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;A Deploy stage to deploy the artifact to the EC2 instance. The Deploy stage will use a CodeDeploy Application and a CodeDeploy DeploymentGroup.&lt;/p&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;First, we’ll need an app to deploy.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#1-prepare-the-app-to-deploy"&gt;
+  &lt;/a&gt;
+  1. Prepare the App to Deploy
+&lt;/h3&gt;
+
+&lt;p&gt;You can fork the &lt;a href="https://github.com/jennapederson/hello-express"&gt;hello-express&lt;/a&gt; repo into your own github account. This is a simple Node/Express web app. For the purposes of this demo, the most interesting parts are the &lt;code&gt;buildspec.yml&lt;/code&gt; and &lt;code&gt;appspec.yml&lt;/code&gt; files, and scripts in the &lt;code&gt;bin&lt;/code&gt; directory:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;The &lt;a href="https://github.com/jennapederson/hello-express/blob/main/buildspec.yml"&gt;buildspec.yml&lt;/a&gt; file is a specification file that contains build commands and configuration that are used to build a CodeBuild project.&lt;/li&gt;
+&lt;li&gt;The &lt;a href="https://github.com/jennapederson/hello-express/blob/main/appspec.yml"&gt;appspec.yml&lt;/a&gt; file is a specification file that defines a series of lifecycle hooks for a CodeDeploy deployment.&lt;/li&gt;
+&lt;li&gt;The &lt;a href="https://github.com/jennapederson/hello-express/tree/main/bin"&gt;bin&lt;/a&gt; directory contains the &lt;code&gt;www&lt;/code&gt; start script for the app, and the scripts for each of the lifecycle hooks. You can read more about the lifecycle hooks &lt;a href="https://docs.aws.amazon.com/codedeploy/latest/userguide/reference-appspec-file-structure-hooks.html"&gt;here&lt;/a&gt;.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3&gt;
+  &lt;a href="#2-add-parameters"&gt;
+  &lt;/a&gt;
+  2. Add Parameters
+&lt;/h3&gt;
+
+&lt;p&gt;Then, we’ll need the following input Parameters for our template:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;Parameters&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;GitHubRepo&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;String&lt;/span&gt;
+
+  &lt;span class="na"&gt;GitHubBranch&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;String&lt;/span&gt;
+    &lt;span class="na"&gt;Default&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;main&lt;/span&gt;
+
+  &lt;span class="na"&gt;GitHubUser&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;String&lt;/span&gt;
+
+  &lt;span class="na"&gt;CodeDeployServiceRole&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;String&lt;/span&gt;
+    &lt;span class="na"&gt;Description&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;A service role ARN granting CodeDeploy permission to make calls to EC2 instances with CodeDeploy agent installed.&lt;/span&gt;
+
+  &lt;span class="na"&gt;TagKey&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Description&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;The EC2 tag key that identifies this as a target for deployments.&lt;/span&gt;
+    &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;String&lt;/span&gt;
+    &lt;span class="na"&gt;Default&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;CodeDeployTag&lt;/span&gt;
+    &lt;span class="na"&gt;AllowedPattern&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;[\x20-\x7E]*'&lt;/span&gt;
+    &lt;span class="na"&gt;ConstraintDescription&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Can contain only ASCII characters.&lt;/span&gt;
+  &lt;span class="na"&gt;TagValue&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Description&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;The EC2 tag value that identifies this as a target for deployments.&lt;/span&gt;
+    &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;String&lt;/span&gt;
+    &lt;span class="na"&gt;Default&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;CodeDeployDemo&lt;/span&gt;
+    &lt;span class="na"&gt;AllowedPattern&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;[\x20-\x7E]*'&lt;/span&gt;
+    &lt;span class="na"&gt;ConstraintDescription&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Can contain only ASCII characters.&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#3-create-service-roles"&gt;
+  &lt;/a&gt;
+  3. Create Service Roles
+&lt;/h3&gt;
+
+&lt;p&gt;In order for CodeBuild to access S3 to put the built artifact into the bucket, we'll need to create a service role, &lt;code&gt;CodeBuildServiceRole&lt;/code&gt;. We’ll need a second service role, &lt;code&gt;CodePipelineServiceRole&lt;/code&gt;, which allows CodePipeline to get the source code from the GitHub connection, to start builds, to get the artifact from the bucket, and to create and deploy the app. Add these two IAM resources:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;CodeBuildServiceRole&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;AWS::IAM::Role&lt;/span&gt;
+    &lt;span class="na"&gt;Properties&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;Path&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;/&lt;/span&gt;
+      &lt;span class="na"&gt;AssumeRolePolicyDocument&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="na"&gt;Version&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;2012-10-17&lt;/span&gt;
+        &lt;span class="na"&gt;Statement&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+          &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;Effect&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Allow&lt;/span&gt;
+            &lt;span class="na"&gt;Principal&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+              &lt;span class="na"&gt;Service&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;codebuild.amazonaws.com&lt;/span&gt;
+            &lt;span class="na"&gt;Action&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;sts:AssumeRole&lt;/span&gt;
+      &lt;span class="na"&gt;Policies&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;PolicyName&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;logs"&lt;/span&gt;
+          &lt;span class="na"&gt;PolicyDocument&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+            &lt;span class="na"&gt;Version&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;2012-10-17"&lt;/span&gt;
+            &lt;span class="na"&gt;Statement&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+                &lt;span class="pi"&gt;-&lt;/span&gt;
+                  &lt;span class="na"&gt;Effect&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;Allow"&lt;/span&gt;
+                  &lt;span class="na"&gt;Action&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+                      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;logs:CreateLogGroup&lt;/span&gt;
+                      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;logs:CreateLogStream&lt;/span&gt;
+                      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;logs:PutLogEvents&lt;/span&gt;
+                      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;ecr:GetAuthorizationToken&lt;/span&gt;
+                      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;ssm:GetParameters&lt;/span&gt;
+                  &lt;span class="na"&gt;Resource&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;*"&lt;/span&gt;
+        &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;PolicyName&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;S3"&lt;/span&gt;
+          &lt;span class="na"&gt;PolicyDocument&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+            &lt;span class="na"&gt;Version&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;2012-10-17"&lt;/span&gt;
+            &lt;span class="na"&gt;Statement&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+                &lt;span class="pi"&gt;-&lt;/span&gt;
+                  &lt;span class="na"&gt;Effect&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;Allow"&lt;/span&gt;
+                  &lt;span class="na"&gt;Action&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+                      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;s3:GetObject&lt;/span&gt;
+                      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;s3:PutObject&lt;/span&gt;
+                      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;s3:GetObjectVersion&lt;/span&gt;
+                  &lt;span class="na"&gt;Resource&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Sub&lt;/span&gt; &lt;span class="s"&gt;arn:aws:s3:::${ArtifactBucket}/*&lt;/span&gt;
+
+  &lt;span class="na"&gt;CodePipelineServiceRole&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;AWS::IAM::Role&lt;/span&gt;
+    &lt;span class="na"&gt;Properties&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;Path&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;/&lt;/span&gt;
+      &lt;span class="na"&gt;AssumeRolePolicyDocument&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="na"&gt;Version&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;2012-10-17&lt;/span&gt;
+        &lt;span class="na"&gt;Statement&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+          &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;Effect&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Allow&lt;/span&gt;
+            &lt;span class="na"&gt;Principal&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+              &lt;span class="na"&gt;Service&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;codepipeline.amazonaws.com&lt;/span&gt;
+            &lt;span class="na"&gt;Action&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;sts:AssumeRole&lt;/span&gt;
+      &lt;span class="na"&gt;Policies&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;PolicyName&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;root&lt;/span&gt;
+          &lt;span class="na"&gt;PolicyDocument&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+            &lt;span class="na"&gt;Version&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;2012-10-17&lt;/span&gt;
+            &lt;span class="na"&gt;Statement&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+              &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;Resource&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+                  &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="kt"&gt;!Sub&lt;/span&gt; &lt;span class="s"&gt;arn:aws:s3:::${ArtifactBucket}/*&lt;/span&gt;
+                  &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="kt"&gt;!Sub&lt;/span&gt; &lt;span class="s"&gt;arn:aws:s3:::${ArtifactBucket}&lt;/span&gt;
+                &lt;span class="na"&gt;Effect&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Allow&lt;/span&gt;
+                &lt;span class="na"&gt;Action&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+                  &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;s3:*&lt;/span&gt;
+              &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;Resource&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;*"&lt;/span&gt;
+                &lt;span class="na"&gt;Effect&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Allow&lt;/span&gt;
+                &lt;span class="na"&gt;Action&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+                  &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;codebuild:StartBuild&lt;/span&gt;
+                  &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;codebuild:BatchGetBuilds&lt;/span&gt;
+                  &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;iam:PassRole&lt;/span&gt;
+              &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;Resource&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+                  &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="s"&gt;CodeStarConnection&lt;/span&gt;
+                &lt;span class="na"&gt;Effect&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Allow&lt;/span&gt;
+                &lt;span class="na"&gt;Action&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+                  &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;codestar-connections:UseConnection&lt;/span&gt;
+              &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;Resource&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;*"&lt;/span&gt;
+                &lt;span class="na"&gt;Effect&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Allow&lt;/span&gt;
+                &lt;span class="na"&gt;Action&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+                  &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;codedeploy:CreateDeployment&lt;/span&gt;
+                  &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;codedeploy:CreateDeploymentGroup&lt;/span&gt;
+                  &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;codedeploy:GetApplication&lt;/span&gt;
+                  &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;codedeploy:GetApplicationRevision&lt;/span&gt;
+                  &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;codedeploy:GetDeployment&lt;/span&gt;
+                  &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;codedeploy:GetDeploymentConfig&lt;/span&gt;
+                  &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;codedeploy:RegisterApplicationRevision&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#4-create-the-source-stage"&gt;
+  &lt;/a&gt;
+  4. Create the Source Stage
+&lt;/h3&gt;
+
+&lt;p&gt;For the Source stage, we’ll create a CodeStar Connection and an S3 Bucket.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;1. Create a CodeStarConnection&lt;/strong&gt;&lt;br&gt;&lt;br&gt;
+When we set up the pipeline, we’ll have a Source stage the pulls our source code from GitHub. To do this, we’ll need to create a CodeStarConnection for GitHub. This will give our pipeline access to a GitHub repository. We’ll use CloudFormation to create this by adding the resource to our template, but there will be a manual step to change the connection from Pending to Available after the first time we apply the template.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;CodeStarConnection&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;AWS::CodeStarConnections::Connection'&lt;/span&gt;
+    &lt;span class="na"&gt;Properties&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;ConnectionName&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;CfnExamplesGitHubConnection&lt;/span&gt;
+      &lt;span class="na"&gt;ProviderType&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;GitHub&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;strong&gt;2. Create S3 Bucket to Hold Artifacts&lt;/strong&gt;&lt;br&gt;&lt;br&gt;
+We’ll need a place to store the build artifacts so we’ll create an S3 bucket. Add the following S3 resource to your template:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;ArtifactBucket&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;AWS::S3::Bucket&lt;/span&gt;
+    &lt;span class="na"&gt;DeletionPolicy&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Delete&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;strong&gt;3. Create the Stage&lt;/strong&gt;&lt;br&gt;&lt;br&gt;
+Then we’ll create the first stage of the pipeline.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;Pipeline&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;AWS::CodePipeline::Pipeline&lt;/span&gt;
+  &lt;span class="na"&gt;Properties&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;RoleArn&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!GetAtt&lt;/span&gt; &lt;span class="s"&gt;CodePipelineServiceRole.Arn&lt;/span&gt;
+    &lt;span class="na"&gt;ArtifactStore&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;S3&lt;/span&gt;
+      &lt;span class="na"&gt;Location&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="s"&gt;ArtifactBucket&lt;/span&gt;
+    &lt;span class="na"&gt;Stages&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;Name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Source&lt;/span&gt;
+        &lt;span class="na"&gt;Actions&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+          &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;Name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;App&lt;/span&gt;
+            &lt;span class="na"&gt;ActionTypeId&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+              &lt;span class="na"&gt;Category&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Source&lt;/span&gt;
+              &lt;span class="na"&gt;Owner&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;AWS&lt;/span&gt;
+              &lt;span class="na"&gt;Version&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;1'&lt;/span&gt;
+              &lt;span class="na"&gt;Provider&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;CodeStarSourceConnection&lt;/span&gt;
+            &lt;span class="na"&gt;Configuration&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+              &lt;span class="na"&gt;ConnectionArn&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="s"&gt;CodeStarConnection&lt;/span&gt;
+              &lt;span class="na"&gt;BranchName&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="s"&gt;GitHubBranch&lt;/span&gt;
+              &lt;span class="na"&gt;FullRepositoryId&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Sub&lt;/span&gt; &lt;span class="s"&gt;${GitHubUser}/${GitHubRepo}&lt;/span&gt;
+            &lt;span class="na"&gt;OutputArtifacts&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+              &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;Name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;AppArtifact&lt;/span&gt;
+            &lt;span class="na"&gt;RunOrder&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;1&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Using the CodeStarSourceConnection resource we created above, this will configure it to use the branch, GitHub user, and repository name based on the input parameters.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#5-create-build-stage"&gt;
+  &lt;/a&gt;
+  5. Create Build Stage
+&lt;/h3&gt;
+
+&lt;p&gt;For the Build stage, we’ll create a CodeBuild Project that indicates what kind of environment to build the code in. Here, we’re using a Docker Linux container. We’ll also set the service role to the service role we created earlier.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;CodeBuildProject&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;AWS::CodeBuild::Project&lt;/span&gt;
+  &lt;span class="na"&gt;Properties&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Artifacts&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;CODEPIPELINE&lt;/span&gt;
+    &lt;span class="na"&gt;Source&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;CODEPIPELINE&lt;/span&gt;
+      &lt;span class="na"&gt;BuildSpec&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;buildspec.yml&lt;/span&gt;
+    &lt;span class="na"&gt;Environment&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;ComputeType&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;BUILD_GENERAL1_SMALL&lt;/span&gt;
+      &lt;span class="na"&gt;Image&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;aws/codebuild/docker:17.09.0&lt;/span&gt;
+      &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;LINUX_CONTAINER&lt;/span&gt;
+    &lt;span class="na"&gt;Name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="s"&gt;AWS::StackName&lt;/span&gt;
+    &lt;span class="na"&gt;ServiceRole&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="s"&gt;CodeBuildServiceRole&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Then we need to add the Build stage to the pipeline we started in the last step.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;Name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Build&lt;/span&gt;
+  &lt;span class="na"&gt;Actions&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;Name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Build&lt;/span&gt;
+      &lt;span class="na"&gt;ActionTypeId&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="na"&gt;Category&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Build&lt;/span&gt;
+        &lt;span class="na"&gt;Owner&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;AWS&lt;/span&gt;
+        &lt;span class="na"&gt;Version&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;1'&lt;/span&gt;
+        &lt;span class="na"&gt;Provider&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;CodeBuild&lt;/span&gt;
+      &lt;span class="na"&gt;Configuration&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="na"&gt;ProjectName&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="s"&gt;CodeBuildProject&lt;/span&gt;
+      &lt;span class="na"&gt;InputArtifacts&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;Name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;AppArtifact&lt;/span&gt;
+      &lt;span class="na"&gt;OutputArtifacts&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;Name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;BuildOutput&lt;/span&gt;
+      &lt;span class="na"&gt;RunOrder&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;1&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This will also use the same S3 bucket from a the previous step to store the build output.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#6-create-deploy-stage"&gt;
+  &lt;/a&gt;
+  6. Create Deploy Stage
+&lt;/h3&gt;
+
+&lt;p&gt;In the last stage, Deploy, we’ll need a CodeDeploy Application and a CodeDeploy DeploymentGroup.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;CodeDeployApplication&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;AWS::CodeDeploy::Application&lt;/span&gt;
+
+&lt;span class="na"&gt;CodeDeployGroup&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;AWS::CodeDeploy::DeploymentGroup&lt;/span&gt;
+  &lt;span class="na"&gt;Properties&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;ApplicationName&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="s"&gt;CodeDeployApplication&lt;/span&gt;
+    &lt;span class="na"&gt;Ec2TagFilters&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;Key&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;TagKey'&lt;/span&gt;
+        &lt;span class="na"&gt;Value&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;TagValue'&lt;/span&gt;
+        &lt;span class="na"&gt;Type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;KEY_AND_VALUE&lt;/span&gt;
+    &lt;span class="na"&gt;ServiceRoleArn&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;CodeDeployServiceRole'&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The DeploymentGroup uses the &lt;code&gt;EC2TagFilters&lt;/code&gt; to specify which group of EC2 instances to deploy to. When we setup the EC2 instance above, we tagged it with a tag/value that is used here. We also set the service role to the one we created earlier.&lt;/p&gt;
+
+&lt;p&gt;Then we add the final stage to the pipeline.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;Name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Deploy&lt;/span&gt;
+  &lt;span class="na"&gt;Actions&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;Name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Deploy&lt;/span&gt;
+      &lt;span class="na"&gt;ActionTypeId&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="na"&gt;Category&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Deploy&lt;/span&gt;
+        &lt;span class="na"&gt;Owner&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;AWS&lt;/span&gt;
+        &lt;span class="na"&gt;Version&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s1"&gt;'&lt;/span&gt;&lt;span class="s"&gt;1'&lt;/span&gt;
+        &lt;span class="na"&gt;Provider&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;CodeDeploy&lt;/span&gt;
+      &lt;span class="na"&gt;Configuration&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="na"&gt;ApplicationName&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="s"&gt;CodeDeployApplication&lt;/span&gt;
+        &lt;span class="na"&gt;DeploymentGroupName&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Ref&lt;/span&gt; &lt;span class="s"&gt;CodeDeployGroup&lt;/span&gt;
+      &lt;span class="na"&gt;InputArtifacts&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;Name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;BuildOutput&lt;/span&gt;
+      &lt;span class="na"&gt;RunOrder&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;1&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#7-add-outputs"&gt;
+  &lt;/a&gt;
+  7. Add Outputs
+&lt;/h3&gt;
+
+&lt;p&gt;Last, we need to add an Output to our template to give us the fully URL to view our pipeline in the AWS Console.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;Outputs&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;PipelineUrl&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;Value&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="kt"&gt;!Sub&lt;/span&gt; &lt;span class="s"&gt;https://console.aws.amazon.com/codepipeline/home?region=${AWS::Region}#/view/${Pipeline}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;To view the full version of this template, check it out &lt;a href="https://github.com/jennapederson/cloudformation-examples/blob/main/08_pipeline.yaml"&gt;here&lt;/a&gt;.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#8-create-the-stack"&gt;
+  &lt;/a&gt;
+  8. Create the Stack
+&lt;/h3&gt;
+
+&lt;p&gt;Now that we have the pipeline template created, we can create the stack. We’ll need to copy CodeDeployTrustRoleARN Output from previous EC2 stack, which you can grab from the Outputs tab in the AWS Console.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Zh5kZfEP--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/goxguzvkj0mz2fgzamba.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Zh5kZfEP--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/goxguzvkj0mz2fgzamba.png" alt="CloudFormation Stack Outputs tab in the AWS Console" width="880" height="462"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Then, run &lt;code&gt;create-stack&lt;/code&gt; at the command line, replacing &lt;code&gt;CODE_DEPLOY_SERVICE_ROLE_ARN&lt;/code&gt; below with the ARN you just copied.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;aws cloudformation create-stack &lt;span class="nt"&gt;--stack-name&lt;/span&gt; CloudFormationPipelineExample &lt;span class="nt"&gt;--template-body&lt;/span&gt; file://08_pipeline.yaml &lt;span class="se"&gt;\&lt;/span&gt;
+&lt;span class="nt"&gt;--parameters&lt;/span&gt; &lt;span class="nv"&gt;ParameterKey&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;GitHubRepo,ParameterValue&lt;span class="o"&gt;=&lt;/span&gt;hello-express &lt;span class="se"&gt;\&lt;/span&gt;
+&lt;span class="nv"&gt;ParameterKey&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;GitHubUser,ParameterValue&lt;span class="o"&gt;=&lt;/span&gt;jennapederson &lt;span class="se"&gt;\&lt;/span&gt;
+&lt;span class="nv"&gt;ParameterKey&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;CodeDeployServiceRole,ParameterValue&lt;span class="o"&gt;=&lt;/span&gt;CODE_DEPLOY_SERVICE_ROLE_ARN &lt;span class="se"&gt;\&lt;/span&gt;
+&lt;span class="nt"&gt;--capabilities&lt;/span&gt; CAPABILITY_IAM
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Because this template creates IAM roles, we also need to tell CloudFormation that this capability (creating IAM resources) is allowed to be used by specifying the &lt;code&gt;--capabilities&lt;/code&gt; option.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#9-make-codestarconnection-available"&gt;
+  &lt;/a&gt;
+  9. Make CodeStarConnection Available
+&lt;/h3&gt;
+
+&lt;p&gt;Once the stack is created successfully, you'll need to change the CodeStarConnection from Pending to Available. To do this, head over to the AWS Console and find your newly created stack. On the Outputs tab, click the link to go to your new pipeline.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--EqKIlAX5--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/nchd3p4dasrjsqq778n2.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--EqKIlAX5--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/nchd3p4dasrjsqq778n2.png" alt="CloudFormation Stack Outputs tab in the AWS Console" width="880" height="363"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;In the left-hand menu under Settings, click Connections. Select the new connection and click the "Update pending connection" button.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--YvcMpCWM--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/iqj016wdj0k36bu1awll.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--YvcMpCWM--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/iqj016wdj0k36bu1awll.png" alt="CodeStar Connection Settings" width="880" height="217"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;You'll need to give GitHub access to your account and the repository before the connection will become available. You can read more about that &lt;a href="https://docs.aws.amazon.com/dtconsole/latest/userguide/connections-create-github.html"&gt;here&lt;/a&gt; in the section "To create a connection to GitHub."&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#10-retry-the-source-stage"&gt;
+  &lt;/a&gt;
+  10. Retry the Source Stage
+&lt;/h3&gt;
+
+&lt;p&gt;Now that your CodeStarConnection is Available, head back to your pipeline and note that the Source stage has failed because of the Pending CodeStarConnection.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--HlI_EcJs--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/vu54emdkrihxmh3o0lx0.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--HlI_EcJs--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/vu54emdkrihxmh3o0lx0.png" alt="CodePipeline pipeline showing a Source stage failure" width="880" height="534"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Click the "Retry" button next to the Source stage to restart it.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--BFr4CN4w--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/tqhcbqf5y4kp86udz153.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--BFr4CN4w--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/tqhcbqf5y4kp86udz153.png" alt="CodePipeline pipeline showing the Retry button for the failed Source stage" width="880" height="523"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Your pipeline will restart by pulling the source code from GitHub, build the app, and then deploy the artifact to your EC2 instance! When complete, you can grab the &lt;code&gt;WebServerPublicDNS&lt;/code&gt; URL from your EC2 stack and open it in a browser:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--j21YmDmu--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/fg50e0pwq5jjgxu1b3b1.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--j21YmDmu--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/fg50e0pwq5jjgxu1b3b1.png" alt="CloudFormation Stack Outputs tab in the AWS Console" width="880" height="471"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;And you will see Hello, Express show in your browser!&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--GjYOVmWl--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/xjek6fszct6gwp18snce.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--GjYOVmWl--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/xjek6fszct6gwp18snce.png" alt="The Express app running in the browser" width="877" height="319"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#what-you-learned"&gt;
+  &lt;/a&gt;
+  What you learned
+&lt;/h2&gt;
+
+&lt;p&gt;In this post, we enhanced the CloudFormation template from &lt;a href="https://jennapederson.com/blog/2021/6/28/provisioning-an-rds-database-with-cloudformation-part-2/"&gt;part 2&lt;/a&gt; to install CodeDeploy agent and tag the EC2 instances you want to deploy to. Then we created a new template that sets up a Source, Build, and Deploy stage for a CodePipeline complete with a CodeStarConnection, CodeBuild project, and a CodeDeploy application. Now you have a pipeline that will pull source code, build your app, and deploy it to EC2 when there are changes to a specific branch in a GitHub repository.&lt;/p&gt;
+
+&lt;p&gt;You can grab the final CloudFormation template we created &lt;a href="https://github.com/jennapederson/cloudformation-examples"&gt;here&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;&lt;em&gt;Like what you read? Follow me here on &lt;a href="https://dev.to/jennapederson"&gt;Dev.to&lt;/a&gt; or on &lt;a href="https://twitter.com/jennapederson"&gt;Twitter&lt;/a&gt; to stay updated!&lt;/em&gt;&lt;/p&gt;
+
+</description>
+      <category>aws</category>
+      <category>cloudformation</category>
+      <category>codepipeline</category>
+      <category>devops</category>
+    </item>
+    <item>
       <title>Dockerize your Node.js application in a few simple steps.</title>
       <author>DhiWise</author>
       <pubDate>Wed, 08 Dec 2021 15:52:36 +0000</pubDate>
@@ -1111,255 +1884,6 @@ Hello world
       <category>javascript</category>
       <category>showdev</category>
       <category>node</category>
-    </item>
-    <item>
-      <title>Basics of Networking | Networking in Docker #2</title>
-      <author>Farhim Ferdous</author>
-      <pubDate>Wed, 08 Dec 2021 15:51:01 +0000</pubDate>
-      <link>https://dev.to/alubhorta/basics-of-networking-networking-in-docker-2-2jl9</link>
-      <guid>https://dev.to/alubhorta/basics-of-networking-networking-in-docker-2-2jl9</guid>
-      <description>&lt;blockquote&gt;
-&lt;p&gt;Understand the core IP network concepts useful for container networking&lt;/p&gt;
-&lt;/blockquote&gt;
-
-
-
-
-&lt;p&gt;What is an IP address or a network port? How do they relate to a network interface? 🤔&lt;/p&gt;
-
-&lt;p&gt;If you've ever struggled with networking concepts, this blog is for you.&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#introduction"&gt;
-  &lt;/a&gt;
-  Introduction
-&lt;/h1&gt;
-
-&lt;p&gt;The purpose of this blog is to go over some basic networking topics, which will be specially useful to master networking for Docker containers.&lt;/p&gt;
-
-&lt;p&gt;If you're confident with your networking know-how, you can skip this blog and go directly to the next one.&lt;/p&gt;
-
-&lt;p&gt;But if you have no or very limited networking knowledge, or want to revise the core concepts, read on!&lt;/p&gt;
-
-&lt;p&gt;Here's what we will discuss:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Network Interfaces,&lt;/li&gt;
-&lt;li&gt;Internet Protocol (IP),&lt;/li&gt;
-&lt;li&gt;Public vs Private networks,&lt;/li&gt;
-&lt;li&gt;IP addressing,&lt;/li&gt;
-&lt;li&gt;Subnet mask and CIDR,&lt;/li&gt;
-&lt;li&gt;Network Ports,&lt;/li&gt;
-&lt;li&gt;DNS&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;NOTE: We will refer to computers/devices in a network as hosts.&lt;/p&gt;
-
-&lt;p&gt;To recap from &lt;a href="https://www.techmormo.com/posts/docker-networking-1-why-is-networking-important/"&gt;part 1&lt;/a&gt;...&lt;/p&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;A network is formed when a group of devices is connected over a medium to share data.&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;But how do hosts connect to a network?&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#network-interfaces"&gt;
-  &lt;/a&gt;
-  Network Interfaces
-&lt;/h1&gt;
-
-&lt;p&gt;A &lt;em&gt;network interface&lt;/em&gt; is the point of interconnection between a host and a network.&lt;/p&gt;
-
-&lt;p&gt;It can either be physical (like the &lt;a href="https://en.wikipedia.org/wiki/Network_interface_controller"&gt;one&lt;/a&gt; below) or virtual (emulated using software).&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--yMkec5Mb--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/rc7o64tfntnvi8ztf7aw.jpg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--yMkec5Mb--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/rc7o64tfntnvi8ztf7aw.jpg" alt="network-interface-card by Michael Schwarzenberger from pixabay" width="880" height="587"&gt;&lt;/a&gt;&lt;/p&gt;
-
-
-
-
-&lt;p&gt;A local network (e.g. &lt;a href="https://en.wikipedia.org/wiki/Local_area_network"&gt;LAN&lt;/a&gt;) can be formed merely by connecting multiple hosts together (generally by using hardware devices like switches or hubs).&lt;/p&gt;
-
-&lt;p&gt;This eventually results in many local networks where communication between hosts is possible but only within that local network.&lt;/p&gt;
-
-&lt;p&gt;But how would one transmit data across networks?&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#internet-protocol-ip"&gt;
-  &lt;/a&gt;
-  Internet Protocol (IP)
-&lt;/h1&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;IP (or &lt;a href="https://en.wikipedia.org/wiki/Internet_Protocol"&gt;Internet protocol&lt;/a&gt;) is a standard protocol for transmitting packets of data between hosts across networks, connected to form an IP network.&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;A host can send data to another one by specifying the destination host's IP address on the data packet. The packet of data can then be routed to the correct host via one or more routers.&lt;/p&gt;
-
-&lt;p&gt;A router is a special-purpose device with two or more network interfaces, connecting two or more networks, which allows it to forward data packets from one network to another.&lt;/p&gt;
-
-&lt;p&gt;Thus, IP allows us to form a network of networks i.e. internetwork.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#public-vs-private-networks"&gt;
-  &lt;/a&gt;
-  Public vs private networks
-&lt;/h2&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--5JLK6qFX--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/6mmkjwvqd8krh6p3jdo6.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--5JLK6qFX--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/6mmkjwvqd8krh6p3jdo6.png" alt="public-vs-private-network-representation" width="880" height="495"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;A network is said to be &lt;em&gt;public&lt;/em&gt; if anyone can access it from outside. The Internet is the best and probably the only pure example of such a network.&lt;/p&gt;
-
-&lt;p&gt;A &lt;em&gt;private network&lt;/em&gt; is one to which access is restricted. Local networks like those in a company or school are examples of private networks.&lt;/p&gt;
-
-&lt;p&gt;Private networks offer security by not exposing hosts directly to the Internet.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#ip-addresses"&gt;
-  &lt;/a&gt;
-  IP addresses
-&lt;/h2&gt;
-
-&lt;p&gt;Each host in an IP network can have one or more IP addresses, depending on how many network interfaces it has.&lt;/p&gt;
-
-&lt;p&gt;An IP Address is a numeric expression for identifying a particular host on a particular network.&lt;/p&gt;
-
-&lt;p&gt;&lt;code&gt;10.2.0.10&lt;/code&gt; is an example of an IP address.&lt;/p&gt;
-
-&lt;p&gt;32 bits are used to represent the address, so both addresses below are equivalent - the top one being decimal while the bottom one is binary.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;   10   &lt;span class="nb"&gt;.&lt;/span&gt;   2    &lt;span class="nb"&gt;.&lt;/span&gt;   0    &lt;span class="nb"&gt;.&lt;/span&gt;  10
-00001010.00000010.00000000.00001010
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Since 8 bits are used to create each of the four-dot (&lt;code&gt;.&lt;/code&gt;) separated segments, the value of each segment can range from 0 to 255.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#subnets-masks-amp-cidr"&gt;
-  &lt;/a&gt;
-  Subnets masks &amp;amp; CIDR
-&lt;/h2&gt;
-
-&lt;p&gt;Since an IP network can span multiple smaller networks (subnets), there needs to be a way to specify the network a host belongs to in order to route data packets to it.&lt;/p&gt;
-
-&lt;p&gt;The IP address of a host is often specified as &lt;code&gt;10.2.0.10/24&lt;/code&gt;, where &lt;code&gt;/24&lt;/code&gt; specifies the part of the address that belongs to the subnet i.e. the subnet mask. This is also called the &lt;a href="https://en.wikipedia.org/wiki/Classless_Inter-Domain_Routing"&gt;CIDR notation&lt;/a&gt;.&lt;/p&gt;
-
-&lt;p&gt;For example, the IP &lt;code&gt;10.2.0.10/24&lt;/code&gt; uses the first 24 bits to identify the network, whereas the rest of the 8 bits are used to identify hosts within that network. This allows 2^8 or 256 different IP addresses (practically fewer as some IPs are reserved).&lt;/p&gt;
-
-&lt;p&gt;The following shows the minimum and maximum IP address values for this subnet.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;min: 00001010.00000010.00000000.00000000
-max: 00001010.00000010.00000000.11111111
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Therefore, the larger the subnet mask (i.e. the bigger the number after &lt;code&gt;/&lt;/code&gt;), the fewer the hosts that subnet can accommodate.&lt;/p&gt;
-
-
-
-
-&lt;p&gt;Okay, we now know how data is transmitted to the correct network and host using IP.&lt;/p&gt;
-
-&lt;p&gt;But a host could be running many different applications. How can one host reach a particular application on a destination host?&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#network-ports"&gt;
-  &lt;/a&gt;
-  Network Ports
-&lt;/h1&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;&lt;em&gt;A &lt;strong&gt;network port&lt;/strong&gt; is a logical endpoint for specifying the correct host application/process being communicated with.&lt;/em&gt;&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;A port is &lt;em&gt;identified for each &lt;a href="https://en.wikipedia.org/wiki/Transport_layer"&gt;Transport Layer&lt;/a&gt; protocol and IP address combination by a 16-bit unsigned number.&lt;/em&gt; The two most prominent Transport Layer protocols are &lt;a href="https://en.wikipedia.org/wiki/User_Datagram_Protocol"&gt;User Datagram Protocol&lt;/a&gt; (UDP) and &lt;a href="https://en.wikipedia.org/wiki/Transmission_Control_Protocol"&gt;Transmission Control Protocol&lt;/a&gt; (TCP).&lt;/p&gt;
-
-&lt;p&gt;This means, for a host with a given IP address, there can be up to 65535 ports available for TCP and UDP each. Each application (or networked service) running on the host could then use zero or more of the ports that are available.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--DMqjkWKC--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/hx3fbkjgumz8var1rklk.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--DMqjkWKC--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/hx3fbkjgumz8var1rklk.png" alt="analogy-of-ports" width="880" height="495"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Port numbers from 0 to 1023 are called well-known or system ports and are reserved for standard networked services, like TCP port 80 for HTTP, TCP port 443 HTTPS, etc.&lt;/p&gt;
-
-
-
-
-&lt;p&gt;Just one more networking concept to remember...&lt;/p&gt;
-
-&lt;h1&gt;
-  &lt;a href="#domain-name-system"&gt;
-  &lt;/a&gt;
-  Domain name system
-&lt;/h1&gt;
-
-&lt;p&gt;The &lt;a href="https://en.wikipedia.org/wiki/Domain_Name_System"&gt;Domain name system&lt;/a&gt; (DNS) was invented to translate domain names to IP addresses (and vice versa), as it is difficult for us humans to remember IP addresses.&lt;/p&gt;
-
-&lt;p&gt;At the simplest level, DNS records are domain name to IP address mappings, like:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;google.com    172.217.194.100
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Records like these (and more complex ones) are distributed across multiple levels of &lt;em&gt;name servers&lt;/em&gt;, which serve to provide this domain name to IP address translation.&lt;/p&gt;
-
-&lt;p&gt;Your host machine keeps a local cache of recently queried DNS records and asks name servers when it doesn't find the requested domain record locally.&lt;/p&gt;
-
-&lt;p&gt;You can check the IP addresses for &lt;code&gt;google.com&lt;/code&gt; by typing this in your terminal:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;nslookup google.com
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-
-
-&lt;h1&gt;
-  &lt;a href="#conclusion"&gt;
-  &lt;/a&gt;
-  Conclusion
-&lt;/h1&gt;
-
-&lt;p&gt;In this blog, we briefly discussed - network interfaces, the Internet Protocol, public vs private networks, IP addresses, subnets, network ports, and DNS.&lt;/p&gt;
-
-&lt;p&gt;If we keep these concepts in mind, Docker container networking will be much easier to understand and apply.&lt;/p&gt;
-
-&lt;p&gt;Thanks for making it so far! 🎉&lt;/p&gt;
-
-&lt;p&gt;See you on the next one.&lt;/p&gt;
-
-&lt;p&gt;Till then…&lt;/p&gt;
-
-&lt;p&gt;Be bold and keep learning.&lt;/p&gt;
-
-&lt;p&gt;But most importantly,&lt;/p&gt;
-
-&lt;p&gt;Tech care!&lt;/p&gt;
-
-</description>
-      <category>docker</category>
-      <category>networking</category>
-      <category>devops</category>
-      <category>cloud</category>
     </item>
   </channel>
 </rss>
