@@ -7,6 +7,135 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>Good News and Bad News, Pivot and Turn - Building DDTJ Day 6</title>
+      <author>Shai Almog</author>
+      <pubDate>Mon, 27 Dec 2021 10:52:41 +0000</pubDate>
+      <link>https://dev.to/codenameone/good-news-and-bad-news-pivot-and-turn-building-ddtj-day-6-1pl4</link>
+      <guid>https://dev.to/codenameone/good-news-and-bad-news-pivot-and-turn-building-ddtj-day-6-1pl4</guid>
+      <description>&lt;p&gt;Last week I &lt;a href="https://dev.to/codenameone/series/15971"&gt;spent 5 days building and designing&lt;/a&gt; the &lt;a href="https://github.com/ddtj/ddtj"&gt;DDTJ project&lt;/a&gt;. Hopefully, I’ll complete the MVP by this weekend. As we left the series last week, I was stuck. This week there’s a bit of an improvement…&lt;/p&gt;
+
+&lt;p&gt;There are a lot of variations on the good news/bad news joke. I’m sure you all know some form of it… Here’s a programming oriented one: &lt;/p&gt;
+
+
+&lt;blockquote&gt;
+&lt;p&gt;developer: so i have good news and bad news&lt;br&gt;&lt;br&gt;manager: what's the good news?&lt;br&gt;&lt;br&gt;developer: i've discovered that the "5 second rule" only applies to food&lt;br&gt;&lt;br&gt;manager: and the bad news?&lt;br&gt;&lt;br&gt;developer: i dropped our tables&lt;/p&gt;— Kat Maddox (&lt;a class="mentioned-user" href="https://dev.to/ctrlshifti"&gt;@ctrlshifti&lt;/a&gt;) &lt;a href="https://twitter.com/ctrlshifti/status/1352103674030432257?ref_src=twsrc%5Etfw"&gt;January 21, 2021&lt;/a&gt;
+&lt;/blockquote&gt;  
+
+&lt;p&gt;In that spirit, I’ve made some progress and we are now collecting some data… The bad news: I had to throw away a lot of concepts and performance is roughly 700x worse than without our instrumentation. Ugh.&lt;/p&gt;
+&lt;h2&gt;
+  &lt;a href="#how-did-i-get-here"&gt;
+  &lt;/a&gt;
+  How did I get Here?
+&lt;/h2&gt;
+
+&lt;p&gt;Last week I was still modeling the objects stored locally when debugging the remote VM. As you may recall, the debug API needs to copy objects locally so we can later on analyze them. We can’t leave this in the target VM as the data will get lost as the VM continues.&lt;/p&gt;
+
+&lt;p&gt;I created a data model and implemented a debugger of sorts that effectively automatically debugs the application and stores all the data. Unfortunately, this isn’t as simple as one would hope.&lt;/p&gt;
+
+&lt;p&gt;Initially, I thought I’d use the step over API to review individual lines. This includes some problems:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;I don’t know what a line contains without looking at the source/bytecode and I don’t want to get into that complexity&lt;/li&gt;
+&lt;li&gt;I can’t have two instances of a step over monitor at the same time. This is something I’ll need for nested method calls, threads, etc.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;So using the approach of stepping over code isn’t practical for this tool…&lt;/p&gt;
+&lt;h3&gt;
+  &lt;a href="#method-enterexit"&gt;
+  &lt;/a&gt;
+  Method Enter/Exit
+&lt;/h3&gt;
+
+&lt;p&gt;Luckily, pretty much any debugging API supports setting a method enter/exit event. This lets us monitor all the important points and log all the relevant information. Perfect… Almost…&lt;/p&gt;
+
+&lt;p&gt;Here’s the problem, say we have code like:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight java"&gt;&lt;code&gt;&lt;span class="kd"&gt;public&lt;/span&gt; &lt;span class="kt"&gt;void&lt;/span&gt; &lt;span class="nf"&gt;myMethod&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="kt"&gt;int&lt;/span&gt; &lt;span class="n"&gt;x&lt;/span&gt;&lt;span class="o"&gt;)&lt;/span&gt; &lt;span class="o"&gt;{&lt;/span&gt;
+    &lt;span class="n"&gt;otherObject&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="na"&gt;otherMethod&lt;/span&gt;&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="n"&gt;x&lt;/span&gt;&lt;span class="o"&gt;,&lt;/span&gt; &lt;span class="n"&gt;y&lt;/span&gt;&lt;span class="o"&gt;);&lt;/span&gt;
+&lt;span class="o"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;I’ll get 4 events for this sequence:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;Method enter to myMethod
+Method enter to otherMethod
+Method exit on otherMethod
+Method exit on myMethod
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;So far, so good. But here’s the thing. I need to log the invocation of &lt;code&gt;otherMethod&lt;/code&gt; inside &lt;code&gt;myMethod&lt;/code&gt; so I can mock that later on. &lt;/p&gt;
+
+&lt;p&gt;How would I do that?&lt;/p&gt;
+
+&lt;p&gt;We need to analyze the data and see the data related to &lt;code&gt;myMethod&lt;/code&gt;’s call hierarchy. &lt;/p&gt;
+
+&lt;p&gt;The solution is to somehow know that the enter event and the exit events are related. Initially, I tried to create the exit event dynamically and restrict it to a specific object instance. But that fails with recursion.&lt;/p&gt;
+
+&lt;p&gt;I’ve tried several approaches. I now have one that works, but it isn’t ideal…&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#the-current-approach"&gt;
+  &lt;/a&gt;
+  The Current Approach
+&lt;/h3&gt;
+
+&lt;p&gt;I create a uniquely repeatable string when method entry occurs. It’s built with roughly this formula:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;threadId + object instance id (if not static) + frame count + callstack
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This is a relatively long string, but it’s unique. We place an object in the map with this as a key when entering a method. Then, when exiting the method, we find the object using an identical key. &lt;/p&gt;
+
+&lt;p&gt;We can now connect the method entry/exit and as a result log all the data we need. &lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#performance"&gt;
+  &lt;/a&gt;
+  Performance
+&lt;/h3&gt;
+
+&lt;p&gt;Unfortunately, that isn’t enough. &lt;code&gt;700x&lt;/code&gt; is way above a reasonable &lt;code&gt;10x&lt;/code&gt; or bearable &lt;code&gt;20x&lt;/code&gt; reduction in performance for a debugging environment. Normally we need to stay away from premature optimizations, but if there’s a conceptual flaw in the architecture, we need to understand it. &lt;code&gt;700x&lt;/code&gt; isn’t something we can realistically work with.&lt;/p&gt;
+
+&lt;p&gt;So my next focus is to get the current code in shape for a pull request and then move on to understand the performance implications and what exactly causes this overhead.&lt;/p&gt;
+
+&lt;p&gt;I have a lot of theories on the subject, but experience taught me to ignore them. A lot of times, the things we think are “expensive” turn out to be a tiny bump. The things we discounted end up being the big penalty. A profiler will tell us where time is wasted and I can evaluate based on facts. Right now I don’t want to look. If I do, I won’t be able to stop and it’s important to stop, synchronize with the trunk and move iteratively.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#tomorrow"&gt;
+  &lt;/a&gt;
+  Tomorrow
+&lt;/h2&gt;
+
+&lt;p&gt;This has been a short post since I’m still pretty busy getting the PR out and bringing the tests up to speed. Once it’s done, I hope to get to the profiling session.&lt;br&gt;
+At the current rate, I think my initial goal of having a tool that can generate tests for spring boot might be high for this week. I’ll lower the expectations to debugging a hello world application and generating a simple test case. After everything I’ve been through with this API, it seems like a pretty ambitious goal too.&lt;/p&gt;
+
+&lt;p&gt;If you want to keep up with the latest updates on this series and the many other things I work on then &lt;a href="https://twitter.com/debugagent"&gt;follow me on twitter&lt;/a&gt;.&lt;/p&gt;
+
+</description>
+      <category>startup</category>
+      <category>programming</category>
+      <category>architecture</category>
+      <category>opensource</category>
+    </item>
+    <item>
       <title>How to Root LG Stylo 2 Device With PC?</title>
       <author>Safe Box Guide</author>
       <pubDate>Mon, 27 Dec 2021 10:34:29 +0000</pubDate>
@@ -720,6 +849,950 @@ Docker images can be considered as the blueprint of the entire application envir
 </description>
     </item>
     <item>
+      <title>Introduction to the AWS CLI</title>
+      <author>Donald Sebastian Leung</author>
+      <pubDate>Mon, 27 Dec 2021 09:14:38 +0000</pubDate>
+      <link>https://dev.to/donaldsebleung/introduction-to-the-aws-cli-e6o</link>
+      <guid>https://dev.to/donaldsebleung/introduction-to-the-aws-cli-e6o</guid>
+      <description>&lt;p&gt;This post will walk you through setting up AWS CLI, an IAM administrator account for use with AWS CLI, and creating an AWS EC2 Ubuntu instance plus associated resources from the CLI.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#prerequisites"&gt;
+  &lt;/a&gt;
+  Prerequisites
+&lt;/h2&gt;
+
+&lt;p&gt;It is assumed that you:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Possess a working familiarity with the Linux command line and able to perform troubleshooting tasks&lt;/li&gt;
+&lt;li&gt;Have an AWS account&lt;/li&gt;
+&lt;li&gt;Know the basics of AWS services. At the very least, you should be able to provision an AWS EC2 instance through the web interface and connect to it&lt;/li&gt;
+&lt;li&gt;Are aware that following this hands-on session may incur monetary costs and you are solely responsible for any such costs&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Introductory knowledge of cloud computing and the underlying technology (hypervisors, hardware virtualization, OS virtualization) would be beneficial.&lt;/p&gt;
+
+&lt;p&gt;With the prerequisites addressed, let's get started!&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#preparation"&gt;
+  &lt;/a&gt;
+  Preparation
+&lt;/h2&gt;
+
+&lt;p&gt;&lt;em&gt;Reference: &lt;a href="https://docs.aws.amazon.com/cli/latest/userguide/getting-started-prereqs.html"&gt;Prerequisites to use the AWS CLI version 2&lt;/a&gt;&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;Log in to your AWS account. To use the AWS CLI securely, we need to set up an IAM(1) administrator account and associated access key(s) which will be used for authenticating against AWS and performing tasks through the CLI. Technically, you could set up access key(s) for your root account(2) and configure AWS CLI to use them, but AWS strongly recommends against it, for reasons similar to why you shouldn't log in to a Linux system directly as root and perform everyday tasks that way.&lt;/p&gt;
+
+&lt;p&gt;(1) &lt;em&gt;Identity Access Management&lt;/em&gt;&lt;br&gt;
+(2) &lt;em&gt;This is the account with an associated email address and password that you likely used to log in to the AWS web console&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;Visit the IAM console at &lt;a href="https://console.aws.amazon.com/iam/"&gt;https://console.aws.amazon.com/iam/&lt;/a&gt; which should bring you to the dashboard. To the left of the dashboard under "Access management", click "Users":&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--5ZyR1ouH--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/t0h1fub5la2yjgubv1yl.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--5ZyR1ouH--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/t0h1fub5la2yjgubv1yl.png" alt="IAM users" width="271" height="208"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;This brings you to a page where you can view and manage IAM users. Near the top right hand corner is an "Add users" button:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--HeZ8bfr_--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/1owyvn4669rrhuzsj6p8.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--HeZ8bfr_--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/1owyvn4669rrhuzsj6p8.png" alt="Add IAM user" width="880" height="215"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Now you should see a form with two sections, "Set user details" and "Select AWS access type" (in that order). Under the first section, fill in "Administrator" as the username:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--cLqm91iV--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/zoyelhv09q5xb6tnjk4t.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--cLqm91iV--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/zoyelhv09q5xb6tnjk4t.png" alt="IAM administrator" width="880" height="146"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;In the next section, make sure "Access key - Programmatic access" is checked. Depending on your preferences, you may also wish to enable password access for logging in (as the IAM administrator) through the web console:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--MjvURLLj--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/q9avsgwi8xlqfjfqtqt1.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--MjvURLLj--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/q9avsgwi8xlqfjfqtqt1.png" alt="Enable programmatic access" width="762" height="75"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Now click "Next: Permissions" near the bottom right hand corner:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--QNY0neqF--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ofhpz35ueehyu7aqa4zw.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--QNY0neqF--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ofhpz35ueehyu7aqa4zw.png" alt="Next: Permissions" width="155" height="39"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;This brings you to a page where you can "Set permissions" and "Set permissions boundary". The latter can be used to fine-tune the permissions of the IAM user which we will not cover here. For the former, ensure "Add user to group" is selected:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--skYa0p2S--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/x813zzv3zun8wlydg4yj.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--skYa0p2S--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/x813zzv3zun8wlydg4yj.png" alt="Add user to group" width="726" height="115"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;If you have not dealt with IAM before, you should have no IAM groups. Click "Create group" under "Get started with groups":&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--mL8xaPO2--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/cqh33hmf48r6wbl11mij.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--mL8xaPO2--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/cqh33hmf48r6wbl11mij.png" alt="Create group" width="880" height="145"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Now name your group "Administrators":&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--_UcqZpV3--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/dn15diftu5u7hbzemlgg.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--_UcqZpV3--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/dn15diftu5u7hbzemlgg.png" alt="Group name: Administrators" width="510" height="42"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;And ensure the "AdministratorAccess" policy is checked:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--YPlN-RrL--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/0zwl9h4wmf45khi8fl78.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--YPlN-RrL--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/0zwl9h4wmf45khi8fl78.png" alt="AdministratorAccess" width="880" height="107"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Click "Create group":&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--m02eIFgN--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/hopwpo7no28qlvv1x63h.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--m02eIFgN--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/hopwpo7no28qlvv1x63h.png" alt="Create group" width="126" height="39"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Back in "Add user to group", ensure your newly created group is checked:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--AAyzeVIa--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/oai2r4zuhm1qvkdr7nkf.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--AAyzeVIa--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/oai2r4zuhm1qvkdr7nkf.png" alt="Administrators" width="880" height="209"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;If you can't see your created group, you may need to click "Refresh" until it appears. Now click "Next: Tags":&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--d3MHXsU3--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/cws6488ty0fiy1r6yw0r.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--d3MHXsU3--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/cws6488ty0fiy1r6yw0r.png" alt="Next: Tags" width="109" height="41"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;The following page allows you to associate &lt;em&gt;tags&lt;/em&gt; (key-value pairs) with your IAM user. Since the IAM administrator is a general-purpose account that can perform &lt;em&gt;almost&lt;/em&gt; all AWS tasks, there probably isn't much point associating it with tags, though a full discussion of tagging AWS resources and their uses can be found in &lt;a href="https://docs.aws.amazon.com/general/latest/gr/aws_tagging.html"&gt;https://docs.aws.amazon.com/general/latest/gr/aws_tagging.html&lt;/a&gt; .&lt;/p&gt;
+
+&lt;p&gt;Click "Next: Review":&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--nDvW3OMz--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/pymvhs48maeg244hr4qr.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--nDvW3OMz--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/pymvhs48maeg244hr4qr.png" alt="Next: Review" width="126" height="40"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Confirm that everything looks fine, then click "Create user" to confirm the action:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--aWKtqX0J--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/g9w4za2qrqlt17oeuziz.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--aWKtqX0J--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/g9w4za2qrqlt17oeuziz.png" alt="Create user" width="117" height="43"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Now the IAM administrator is created. Notice that you have not yet returned to the dashboard. Instead, you are shown the access key ID and secret access key of the IAM administrator, and &lt;strong&gt;this is the only time they will be shown&lt;/strong&gt;. Therefore, &lt;strong&gt;it is imperative that you take note of these values and store them in a safe place&lt;/strong&gt;, such as by downloading the associated CSV file:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--se26RCPC--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/qqnp5kjvfu53ukgnzdhi.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--se26RCPC--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/qqnp5kjvfu53ukgnzdhi.png" alt="Download access key ID and secret access key as CSV file" width="880" height="215"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Now click "Close":&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--xIvf_2EE--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/g9shc5e6gjh296phlq18.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--xIvf_2EE--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/g9shc5e6gjh296phlq18.png" alt="Close" width="76" height="40"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Congratulations! You have successfully created an IAM administrator account with access key ID and secret access key which can be used with AWS CLI in a later section.&lt;/p&gt;
+
+&lt;p&gt;At this point, if you weren't simply following the instructions blindly, you might be wondering what security benefits using an IAM administrator provides over using the root account directly, if the former has (almost) all of the permissions of the latter anyway. In fact, if an attacker gains access to your IAM administrator account, they can perform &lt;em&gt;almost&lt;/em&gt; any action on your account, except for a few privileged actions restricted to the root account as documented in &lt;a href="https://docs.aws.amazon.com/accounts/latest/reference/root-user-tasks.html"&gt;https://docs.aws.amazon.com/accounts/latest/reference/root-user-tasks.html&lt;/a&gt; , such as:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Changing your account settings&lt;/li&gt;
+&lt;li&gt;Allowing IAM users to view your billing details&lt;/li&gt;
+&lt;li&gt;Closing your AWS account&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;So it's &lt;em&gt;nearly&lt;/em&gt; as bad as having your root account compromised, but not quite. Either way, you should take great care not to leak your IAM administrator credentials, and definitely not your root account credentials! If it happens anyway, you should delete and recreate your IAM administrator account ASAP, with a new set of credentials.&lt;/p&gt;
+
+&lt;p&gt;Of course, if you know precisely what permissions are required for accessing a particular AWS service through the AWS CLI, you could (should) create a new IAM user with just those permissions to minimize the potential impact of leaking your IAM credentials to an attacker, but that is beyond the scope of this article.&lt;/p&gt;
+&lt;h2&gt;
+  &lt;a href="#installing-aws-cli"&gt;
+  &lt;/a&gt;
+  Installing AWS CLI
+&lt;/h2&gt;
+
+&lt;p&gt;&lt;em&gt;Reference: &lt;a href="https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"&gt;Installing or updating the latest version of the AWS CLI&lt;/a&gt;&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;At the time of writing (December 2021), the latest version of AWS CLI is 2.x.x, though AWS CLI 1.x.x is still supported, with the former containing breaking changes that are not backward compatible with the latter. Here, we will install the newer version 2.x.x, and subsequent mentions of AWS CLI should be taken to imply 2.x.x unless otherwise noted.&lt;/p&gt;
+
+&lt;p&gt;AWS CLI is available on Linux, macOS and Windows. We'll assume here that you are installing AWS CLI onto a Linux environment:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Linux: just follow the instructions directly in the terminal&lt;/li&gt;
+&lt;li&gt;macOS: Spin up a Linux VM using your hypervisor of choice, e.g. VirtualBox, VMware Fusion or Parallels, and follow the instructions in the VM&lt;/li&gt;
+&lt;li&gt;Windows: use WSL2, or follow a similar approach as on macOS&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;If you plan to follow this article in another environment, you may have to adapt the instructions accordingly.&lt;/p&gt;
+
+&lt;p&gt;On Linux, you can install AWS CLI by following the instructions on the official website, or on most mainstream distributions through the system package manager. However, depending on the nature of your distribution, the version of AWS CLI provided by your system package manager may be outdated, possibly up to a full major version behind. For example, running &lt;code&gt;apt-cache show awscli | grep -i version&lt;/code&gt; on Ubuntu 20.04 LTS gives:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;Version: 1.18.69-1ubuntu0.20.04.1
+Version: 1.17.14-1
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Therefore, in order to access the latest features of AWS CLI, it is highly recommended to install directly from the official website.&lt;/p&gt;
+
+&lt;p&gt;The installation is a simple 3-step process: fetching the zip archive from upstream, unpacking it, and executing the install script as root:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;curl &lt;span class="s2"&gt;"https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"&lt;/span&gt; &lt;span class="nt"&gt;-o&lt;/span&gt; &lt;span class="s2"&gt;"awscliv2.zip"&lt;/span&gt;
+&lt;span class="nv"&gt;$ &lt;/span&gt;unzip awscliv2.zip
+&lt;span class="nv"&gt;$ &lt;/span&gt;&lt;span class="nb"&gt;sudo&lt;/span&gt; ./aws/install
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;If your machine uses ARM architecture, simply replace &lt;code&gt;x86_64&lt;/code&gt; in the first command with &lt;code&gt;aarch64&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;Updating AWS CLI is equally simple: follow the instructions above as with first install, but pass the &lt;code&gt;--update&lt;/code&gt; flag to the last command, as follows:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;&lt;span class="nb"&gt;sudo&lt;/span&gt; ./aws/install &lt;span class="nt"&gt;--update&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Unfortunately, there is no uninstall script so if you wish to uninstall AWS CLI (assuming you did so through the official website) and know exactly what you are doing, you'll have to manually find and remove the &lt;code&gt;aws&lt;/code&gt; binary and associated resources. By default, the binary is located under &lt;code&gt;/usr/local/bin&lt;/code&gt; and resources under &lt;code&gt;/usr/local/aws-cli&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;Check which version of AWS CLI is installed:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;aws &lt;span class="nt"&gt;--version&lt;/span&gt;
+aws-cli/2.4.7 Python/3.8.8 Linux/5.11.0-43-generic exe/x86_64.ubuntu.20 prompt/off
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;In my case, AWS CLI v2.4.7 is installed.&lt;/p&gt;
+
+&lt;p&gt;Print a help message (not very useful, unfortunately):&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;aws &lt;span class="nt"&gt;--help&lt;/span&gt;
+usage: aws &lt;span class="o"&gt;[&lt;/span&gt;&lt;span class="nt"&gt;-h&lt;/span&gt;&lt;span class="o"&gt;]&lt;/span&gt; &lt;span class="o"&gt;[&lt;/span&gt;&lt;span class="nt"&gt;--profile&lt;/span&gt; PROFILE] &lt;span class="o"&gt;[&lt;/span&gt;&lt;span class="nt"&gt;--debug&lt;/span&gt;&lt;span class="o"&gt;]&lt;/span&gt;
+
+optional arguments:
+  &lt;span class="nt"&gt;-h&lt;/span&gt;, &lt;span class="nt"&gt;--help&lt;/span&gt;         show this &lt;span class="nb"&gt;help &lt;/span&gt;message and &lt;span class="nb"&gt;exit&lt;/span&gt;
+  &lt;span class="nt"&gt;--profile&lt;/span&gt; PROFILE
+  &lt;span class="nt"&gt;--debug&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;To learn more about the subcommands provided by AWS CLI, refer to the online documentation: &lt;a href="https://awscli.amazonaws.com/v2/documentation/api/latest/index.html"&gt;https://awscli.amazonaws.com/v2/documentation/api/latest/index.html&lt;/a&gt; . Alternatively, as mentioned in online documentation, the proper way of obtaining useful help information directly from the AWS CLI is &lt;code&gt;aws help&lt;/code&gt; or &lt;code&gt;aws &amp;lt;command&amp;gt; help&lt;/code&gt;, which opens the top-level man page and an appropriate man page for the AWS command respectively.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#configuring-aws-cli-to-use-our-iam-administrator"&gt;
+  &lt;/a&gt;
+  Configuring AWS CLI to use our IAM administrator
+&lt;/h2&gt;
+
+&lt;p&gt;&lt;em&gt;Reference: &lt;a href="https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-quickstart.html"&gt;Configuration basics - AWS Command Line Interface&lt;/a&gt;&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;The command to configure AWS CLI is (unsurprisingly) &lt;code&gt;configure&lt;/code&gt;:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;aws configure
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This prompts you to enter 4 pieces of information:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;AWS Access Key ID: this is the access key ID of your IAM administrator. You should have saved this information in a CSV file when creating your IAM user&lt;/li&gt;
+&lt;li&gt;AWS Secret Access Key: this is the secret access key of your IAM administrator. Again, refer to the CSV file you downloaded&lt;/li&gt;
+&lt;li&gt;Default region name: recall that AWS resources are divided into regions and availability zones. Enter the name of the region you would like to use by default, if no region is explicitly specified. For example, I live in Hong Kong so I might set it to &lt;code&gt;ap-east-1&lt;/code&gt;. You can get a list of region names through the web interface, and later through the &lt;code&gt;aws ec2 describe-regions&lt;/code&gt; command&lt;/li&gt;
+&lt;li&gt;Default output format: what type of output the AWS CLI should generate by default when most commands are run. For example, setting this to &lt;code&gt;json&lt;/code&gt; or &lt;code&gt;yaml&lt;/code&gt; causes AWS CLI to generate JSON and YAML output by default respectively which could be piped to another program or redirected to an output file for further processing. In this tutorial we will be using the AWS CLI interactively so we could set it to &lt;code&gt;table&lt;/code&gt; for human-friendly output, though you can set it to whatever value you see fit&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;When the command completes, the information is saved in a &lt;code&gt;default&lt;/code&gt; &lt;em&gt;profile&lt;/em&gt; that AWS CLI uses for authentication, if no profile is explicitly specified. You can think of a profile as a particular named account, though there is nothing stopping you from creating two different named profiles with the same user credentials.&lt;/p&gt;
+
+&lt;p&gt;The information you entered is saved in two separate files, &lt;code&gt;$HOME/.aws/config&lt;/code&gt; and &lt;code&gt;$HOME/.aws/credentials&lt;/code&gt;, where the former stores non-sensitive values and the latter sensitive ones:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;&lt;span class="nb"&gt;cat&lt;/span&gt; &lt;span class="nv"&gt;$HOME&lt;/span&gt;/.aws/config
+&lt;span class="o"&gt;[&lt;/span&gt;default]
+region &lt;span class="o"&gt;=&lt;/span&gt; ap-east-1
+output &lt;span class="o"&gt;=&lt;/span&gt; table
+&lt;span class="nv"&gt;$ &lt;/span&gt;&lt;span class="nb"&gt;cat&lt;/span&gt; &lt;span class="nv"&gt;$HOME&lt;/span&gt;/.aws/credentials
+&lt;span class="o"&gt;[&lt;/span&gt;default]
+aws_access_key_id &lt;span class="o"&gt;=&lt;/span&gt; XXXXXXXXXXXXXXXXXXXX
+aws_secret_access_key &lt;span class="o"&gt;=&lt;/span&gt; XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;To configure a profile other than &lt;code&gt;default&lt;/code&gt;, pass the &lt;code&gt;--profile&lt;/code&gt; flag followed by the profile name, as follows:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;aws configure &lt;span class="nt"&gt;--profile&lt;/span&gt; &amp;lt;profile&amp;gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;To learn more about the &lt;code&gt;configure&lt;/code&gt; command, run:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;aws configure &lt;span class="nb"&gt;help&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;or refer to the online documentation.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#provisioning-an-aws-ec2-ubuntu-instance-with-aws-cli"&gt;
+  &lt;/a&gt;
+  Provisioning an AWS EC2 Ubuntu instance with AWS CLI
+&lt;/h2&gt;
+
+&lt;p&gt;&lt;em&gt;Reference: &lt;a href="https://docs.aws.amazon.com/cli/latest/userguide/cli-services-ec2.html"&gt;Using Amazon EC2 with the AWS CLI&lt;/a&gt;&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;The command for managing EC2-related services is &lt;code&gt;ec2&lt;/code&gt;. Skim through the man page:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;aws ec2 &lt;span class="nb"&gt;help&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;For example, we can view a list of available regions and their associated information:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;aws ec2 describe-regions
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;View the output in YAML:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;aws ec2 describe-regions &lt;span class="nt"&gt;--output&lt;/span&gt; yaml
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Get the output in JSON and redirect to an output file, for use with another program at a later date:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;aws ec2 describe-regions &lt;span class="nt"&gt;--output&lt;/span&gt; json &lt;span class="o"&gt;&amp;gt;&lt;/span&gt; regions.json
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;View the availability zones in the default region:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;aws ec2 describe-availability-zones
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;View the availability zones in the &lt;code&gt;us-west-1&lt;/code&gt; region:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;aws ec2 describe-availability-zones &lt;span class="nt"&gt;--region&lt;/span&gt; us-west-1
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;View information on EC2 instances in the default region:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;aws ec2 describe-instances
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;View information on security groups in the default region:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;aws ec2 describe-security-groups
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;View information on key pairs in the default region:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;aws ec2 describe-key-pairs
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;View information on instance types available in the default region:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;aws ec2 describe-instance-types
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Now that we've taken a look at the man page and tried out some commands for viewing EC2-related information, let's move on and provision a new instance with the AWS CLI. But before we continue, I've realized that I actually find &lt;code&gt;table&lt;/code&gt; output difficult to parse and would prefer reading JSON output instead. Let's also change our default region to &lt;code&gt;us-west-1&lt;/code&gt; for performing experiments, as I have a production web server running in the &lt;code&gt;ap-east-1&lt;/code&gt; region (actually just my personal website) and want to minimize the chances of messing that up by accident.&lt;/p&gt;
+
+&lt;p&gt;To change the settings in the default profile, we just have to run &lt;code&gt;configure&lt;/code&gt; again:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;aws configure
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;For fields that you do not intend to change, simply leave it blank and press Enter. Here, I skip through access key ID and secret access key since they haven't changed, but enter &lt;code&gt;us-west-1&lt;/code&gt; for the default region name and &lt;code&gt;json&lt;/code&gt; for the output format when prompted.&lt;/p&gt;
+
+&lt;p&gt;Now let's see what Ubuntu AMIs are available in our new default region. With the web interface, we can just search for the term "Ubuntu" and look at the results, and we can usually expect the first few results to contain what we are looking for. However, with the AWS CLI, if we just list all images without filtering them beforehand, it will take at least a few dozen seconds fetching all of the detailed information on all types of images (not just AMIs) and it would be infeasible to skim through the entire list to find what we are looking for. Therefore, take a look at the associated man page and I encourage you to try out various filtering options on your own:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;aws ec2 describe-images &lt;span class="nb"&gt;help&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;After some experimentation on my own, here's what worked for me:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;The name of the AMI should contain "ubuntu" (with lowercase "u")&lt;/li&gt;
+&lt;li&gt;The description should contain "20.04 LTS", so Ubuntu Bionic (18.04 LTS) images are not returned&lt;/li&gt;
+&lt;li&gt;The image architecture should be &lt;code&gt;x86_64&lt;/code&gt;
+&lt;/li&gt;
+&lt;li&gt;The image type should be &lt;code&gt;machine&lt;/code&gt;, so I don't get results for other non-AMI image types such as kernel and ramdisk images&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Here's the command I used:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;aws ec2 describe-images &lt;span class="nt"&gt;--filters&lt;/span&gt; &lt;span class="se"&gt;\&lt;/span&gt;
+  &lt;span class="s2"&gt;"Name=name,Values=*ubuntu*"&lt;/span&gt; &lt;span class="se"&gt;\&lt;/span&gt;
+  &lt;span class="s2"&gt;"Name=description,Values=*20.04 LTS*"&lt;/span&gt; &lt;span class="se"&gt;\&lt;/span&gt;
+  &lt;span class="s2"&gt;"Name=architecture,Values=x86_64"&lt;/span&gt; &lt;span class="se"&gt;\&lt;/span&gt;
+  &lt;span class="s2"&gt;"Name=image-type,Values=machine"&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;And here's the first result that I get:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight json"&gt;&lt;code&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"Architecture"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"x86_64"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"CreationDate"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"2021-04-16T06:48:46.000Z"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"ImageId"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"ami-000773770ac55efb2"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"ImageLocation"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"aws-marketplace/ubuntu-minimal/images/hvm-ssd/ubuntu-focal-20.04-amd64-minimal-20210416-d5944ad4-5199-4cf3-ab4c-c2c4598f880b"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"ImageType"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"machine"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"Public"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"OwnerId"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"679593333241"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"PlatformDetails"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"Linux/UNIX"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"UsageOperation"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"RunInstances"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"ProductCodes"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"ProductCodeId"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"cn75kij0iclp333uyrx6uqp6z"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"ProductCodeType"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"marketplace"&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"State"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"available"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"BlockDeviceMappings"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"DeviceName"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"/dev/sda1"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"Ebs"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+                &lt;/span&gt;&lt;span class="nl"&gt;"DeleteOnTermination"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+                &lt;/span&gt;&lt;span class="nl"&gt;"SnapshotId"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"snap-01325cd2ee26537f0"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+                &lt;/span&gt;&lt;span class="nl"&gt;"VolumeSize"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;8&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+                &lt;/span&gt;&lt;span class="nl"&gt;"VolumeType"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"gp2"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+                &lt;/span&gt;&lt;span class="nl"&gt;"Encrypted"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;false&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="p"&gt;},&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"DeviceName"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"/dev/sdb"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"VirtualName"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"ephemeral0"&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="p"&gt;},&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"DeviceName"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"/dev/sdc"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"VirtualName"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"ephemeral1"&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"Description"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"Canonical, Ubuntu Minimal, 20.04 LTS, amd64 focal image build on 2021-04-16"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"EnaSupport"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"Hypervisor"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"xen"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"ImageOwnerAlias"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"aws-marketplace"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"Name"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"ubuntu-minimal/images/hvm-ssd/ubuntu-focal-20.04-amd64-minimal-20210416-d5944ad4-5199-4cf3-ab4c-c2c4598f880b"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"RootDeviceName"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"/dev/sda1"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"RootDeviceType"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"ebs"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"SriovNetSupport"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"simple"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"VirtualizationType"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"hvm"&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This looks about right. Take a note of the image ID, that is, &lt;code&gt;ami-000773770ac55efb2&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;Now let's see what VPCs we have. This will be useful for creating an appropriate security group to be attached to our instance later.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;aws ec2 describe-vpcs
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;In my case, I only have a default VPC with ID &lt;code&gt;vpc-6d7aaf0b&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;Even though we will create a new security group, let's see what security groups we already have anyway:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;aws ec2 describe-security-groups
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;In my case, I only have a default security group, as follows:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight json"&gt;&lt;code&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"Description"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"default VPC security group"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"GroupName"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"default"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"IpPermissions"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"IpProtocol"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"-1"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"IpRanges"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[],&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"Ipv6Ranges"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[],&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"PrefixListIds"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[],&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"UserIdGroupPairs"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="w"&gt;
+                &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+                    &lt;/span&gt;&lt;span class="nl"&gt;"GroupId"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"sg-bc3d9df5"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+                    &lt;/span&gt;&lt;span class="nl"&gt;"UserId"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"477657529190"&lt;/span&gt;&lt;span class="w"&gt;
+                &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"OwnerId"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"477657529190"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"GroupId"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"sg-bc3d9df5"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"IpPermissionsEgress"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"IpProtocol"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"-1"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"IpRanges"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="w"&gt;
+                &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+                    &lt;/span&gt;&lt;span class="nl"&gt;"CidrIp"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"0.0.0.0/0"&lt;/span&gt;&lt;span class="w"&gt;
+                &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"Ipv6Ranges"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[],&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"PrefixListIds"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[],&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"UserIdGroupPairs"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[]&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"VpcId"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"vpc-6d7aaf0b"&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This security group blocks all inbound traffic (&lt;code&gt;IpPermissions&lt;/code&gt;), so we won't be able to connect to our instance if we attach this security group to it, hence the need to create a new security group.&lt;/p&gt;
+
+&lt;p&gt;Skim through the man page:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;aws ec2 create-security-group &lt;span class="nb"&gt;help&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Now let's create a new security group "UbuntuSG", with the VPC ID we obtained earlier:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;aws ec2 create-security-group &lt;span class="se"&gt;\&lt;/span&gt;
+  &lt;span class="nt"&gt;--group-name&lt;/span&gt; UbuntuSG &lt;span class="se"&gt;\&lt;/span&gt;
+  &lt;span class="nt"&gt;--description&lt;/span&gt; &lt;span class="s2"&gt;"Security group for Ubuntu 20.04"&lt;/span&gt; &lt;span class="se"&gt;\&lt;/span&gt;
+  &lt;span class="nt"&gt;--vpc-id&lt;/span&gt; vpc-6d7aaf0b
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This prints a group ID on success. Take note of the group ID:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight json"&gt;&lt;code&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"GroupId"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"sg-047de2bb619edd924"&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;If we obtain information on our newly created security group with &lt;code&gt;ec2 describe-security-groups&lt;/code&gt;, we notice that no inbound traffic is allowed:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight json"&gt;&lt;code&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"Description"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"Security group for Ubuntu 20.04"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"GroupName"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"UbuntuSG"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"IpPermissions"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[],&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"OwnerId"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"477657529190"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"GroupId"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"sg-047de2bb619edd924"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"IpPermissionsEgress"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"IpProtocol"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"-1"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"IpRanges"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="w"&gt;
+                &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+                    &lt;/span&gt;&lt;span class="nl"&gt;"CidrIp"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"0.0.0.0/0"&lt;/span&gt;&lt;span class="w"&gt;
+                &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"Ipv6Ranges"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[],&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"PrefixListIds"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[],&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"UserIdGroupPairs"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[]&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"VpcId"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"vpc-6d7aaf0b"&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;So we need to add inbound rules with &lt;code&gt;ec2 authorize-security-group-ingress&lt;/code&gt;. Skim through the man page:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;aws ec2 authorize-security-group-ingress &lt;span class="nb"&gt;help&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Now add an inbound rule for SSH (&lt;code&gt;22/tcp&lt;/code&gt;) from anywhere. For optimal security, you can discover your public IP address and only allow SSH from that IP instead:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;aws ec2 authorize-security-group-ingress &lt;span class="se"&gt;\&lt;/span&gt;
+  &lt;span class="nt"&gt;--group-id&lt;/span&gt; sg-047de2bb619edd924 &lt;span class="se"&gt;\&lt;/span&gt;
+  &lt;span class="nt"&gt;--protocol&lt;/span&gt; tcp &lt;span class="se"&gt;\&lt;/span&gt;
+  &lt;span class="nt"&gt;--port&lt;/span&gt; 22 &lt;span class="se"&gt;\&lt;/span&gt;
+  &lt;span class="nt"&gt;--cidr&lt;/span&gt; 0.0.0.0/0
+&lt;span class="o"&gt;{&lt;/span&gt;
+    &lt;span class="s2"&gt;"Return"&lt;/span&gt;: &lt;span class="nb"&gt;true&lt;/span&gt;,
+    &lt;span class="s2"&gt;"SecurityGroupRules"&lt;/span&gt;: &lt;span class="o"&gt;[&lt;/span&gt;
+        &lt;span class="o"&gt;{&lt;/span&gt;
+            &lt;span class="s2"&gt;"SecurityGroupRuleId"&lt;/span&gt;: &lt;span class="s2"&gt;"sgr-04c28eddbcd8b598a"&lt;/span&gt;,
+            &lt;span class="s2"&gt;"GroupId"&lt;/span&gt;: &lt;span class="s2"&gt;"sg-047de2bb619edd924"&lt;/span&gt;,
+            &lt;span class="s2"&gt;"GroupOwnerId"&lt;/span&gt;: &lt;span class="s2"&gt;"477657529190"&lt;/span&gt;,
+            &lt;span class="s2"&gt;"IsEgress"&lt;/span&gt;: &lt;span class="nb"&gt;false&lt;/span&gt;,
+            &lt;span class="s2"&gt;"IpProtocol"&lt;/span&gt;: &lt;span class="s2"&gt;"tcp"&lt;/span&gt;,
+            &lt;span class="s2"&gt;"FromPort"&lt;/span&gt;: 22,
+            &lt;span class="s2"&gt;"ToPort"&lt;/span&gt;: 22,
+            &lt;span class="s2"&gt;"CidrIpv4"&lt;/span&gt;: &lt;span class="s2"&gt;"0.0.0.0/0"&lt;/span&gt;
+        &lt;span class="o"&gt;}&lt;/span&gt;
+    &lt;span class="o"&gt;]&lt;/span&gt;
+&lt;span class="o"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Note that we used the group ID here. You can also specify the group name instead if that's easier.&lt;/p&gt;
+
+&lt;p&gt;Now our security group looks like this:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight json"&gt;&lt;code&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"Description"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"Security group for Ubuntu 20.04"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"GroupName"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"UbuntuSG"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"IpPermissions"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"FromPort"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;22&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"IpProtocol"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"tcp"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"IpRanges"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="w"&gt;
+                &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+                    &lt;/span&gt;&lt;span class="nl"&gt;"CidrIp"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"0.0.0.0/0"&lt;/span&gt;&lt;span class="w"&gt;
+                &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"Ipv6Ranges"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[],&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"PrefixListIds"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[],&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"ToPort"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;22&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"UserIdGroupPairs"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[]&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"OwnerId"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"477657529190"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"GroupId"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"sg-047de2bb619edd924"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"IpPermissionsEgress"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"IpProtocol"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"-1"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"IpRanges"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="w"&gt;
+                &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+                    &lt;/span&gt;&lt;span class="nl"&gt;"CidrIp"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"0.0.0.0/0"&lt;/span&gt;&lt;span class="w"&gt;
+                &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"Ipv6Ranges"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[],&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"PrefixListIds"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[],&lt;/span&gt;&lt;span class="w"&gt;
+            &lt;/span&gt;&lt;span class="nl"&gt;"UserIdGroupPairs"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[]&lt;/span&gt;&lt;span class="w"&gt;
+        &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"VpcId"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"vpc-6d7aaf0b"&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Another thing we need to connect to an instance is a key pair. Currently, I do not have any key pairs:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;aws ec2 describe-key-pairs
+&lt;span class="o"&gt;{&lt;/span&gt;
+    &lt;span class="s2"&gt;"KeyPairs"&lt;/span&gt;: &lt;span class="o"&gt;[]&lt;/span&gt;
+&lt;span class="o"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;In my case, I have to create or import a key pair. If you do not already have a key pair, generate one with &lt;code&gt;ssh-keygen&lt;/code&gt;. Since I already have a key pair, with my public key at &lt;code&gt;$HOME/.ssh/id_rsa.pub&lt;/code&gt;, I can import it into AWS using &lt;code&gt;ec2 import-key-pair&lt;/code&gt;. Skim through the man page:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;aws ec2 import-key-pair &lt;span class="nb"&gt;help&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Now let's actually import the key:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;aws ec2 import-key-pair &lt;span class="se"&gt;\&lt;/span&gt;
+  &lt;span class="nt"&gt;--key-name&lt;/span&gt; &lt;span class="s2"&gt;"MacBook Air Ubuntu 20.04"&lt;/span&gt; &lt;span class="se"&gt;\&lt;/span&gt;
+  &lt;span class="nt"&gt;--public-key-material&lt;/span&gt; fileb://&lt;span class="nv"&gt;$HOME&lt;/span&gt;/.ssh/id_rsa.pub
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Remember the key name.&lt;/p&gt;
+
+&lt;p&gt;With a security group and key pair, we can finally provision our AWS EC2 Ubuntu instance and connect to it. The subcommand for creating and starting an instance is &lt;code&gt;ec2 run-instances&lt;/code&gt;:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;aws ec2 run-instances &lt;span class="nb"&gt;help&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Let's use the following information:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;AMI ID: &lt;code&gt;ami-000773770ac55efb2&lt;/code&gt;
+&lt;/li&gt;
+&lt;li&gt;Instance type: &lt;code&gt;t2.micro&lt;/code&gt;
+&lt;/li&gt;
+&lt;li&gt;Security group ID: &lt;code&gt;sg-047de2bb619edd924&lt;/code&gt;
+&lt;/li&gt;
+&lt;li&gt;Key name: &lt;code&gt;MacBook Air Ubuntu 20.04&lt;/code&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;aws ec2 run-instances &lt;span class="se"&gt;\&lt;/span&gt;
+  &lt;span class="nt"&gt;--image-id&lt;/span&gt; ami-000773770ac55efb2 &lt;span class="se"&gt;\&lt;/span&gt;
+  &lt;span class="nt"&gt;--instance-type&lt;/span&gt; t2.micro &lt;span class="se"&gt;\&lt;/span&gt;
+  &lt;span class="nt"&gt;--security-group-ids&lt;/span&gt; sg-047de2bb619edd924 &lt;span class="se"&gt;\&lt;/span&gt;
+  &lt;span class="nt"&gt;--key-name&lt;/span&gt; &lt;span class="s2"&gt;"MacBook Air Ubuntu 20.04"&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Chances are you will receive an &lt;code&gt;OptInRequired&lt;/code&gt; error like I did:&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;An error occurred (OptInRequired) when calling the RunInstances operation: In order to use this AWS Marketplace product you need to accept terms and subscribe. To do so please visit &lt;a href="https://aws.amazon.com/marketplace/pp?sku=cn75kij0iclp333uyrx6uqp6z"&gt;https://aws.amazon.com/marketplace/pp?sku=cn75kij0iclp333uyrx6uqp6z&lt;/a&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;To the best of my knowledge, it is not possible to subscribe to an AWS Marketplace product programmatically, possibly to force the user to read the terms and conditions properly before accepting it. Follow the link shown in the error message, subscribe to the product and retry the same command.&lt;/p&gt;
+
+&lt;p&gt;On success, you should see relevant JSON info printed to the console, such as the instance ID.&lt;/p&gt;
+
+&lt;p&gt;Now check that the instance is running:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;aws ec2 describe-instances
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;For example, the state of my instance is:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight json"&gt;&lt;code&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"Code"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;16&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
+    &lt;/span&gt;&lt;span class="nl"&gt;"Name"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"running"&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;I also learn that the public IP address of my instance is &lt;code&gt;52.53.151.210&lt;/code&gt;, from the &lt;code&gt;PublicIpAddress&lt;/code&gt; field.&lt;/p&gt;
+
+&lt;p&gt;Now connect to the instance via SSH (replace &lt;code&gt;52.53.151.210&lt;/code&gt; with the public IP of your instance):&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;ssh ubuntu@52.53.151.210
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Congratulations! You have successfully provisioned an EC2 instance through the AWS CLI and connected to it.&lt;/p&gt;
+
+&lt;p&gt;Some additional subcommands for managing EC2 instances:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;
+&lt;code&gt;ec2 stop-instances&lt;/code&gt; for stopping instances&lt;/li&gt;
+&lt;li&gt;
+&lt;code&gt;ec2 start-instances&lt;/code&gt; for starting existing instances that have been stopped&lt;/li&gt;
+&lt;li&gt;
+&lt;code&gt;ec2 reboot-instances&lt;/code&gt; for requesting a reboot on existing instances&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h2&gt;
+  &lt;a href="#cleaning-up"&gt;
+  &lt;/a&gt;
+  Cleaning up
+&lt;/h2&gt;
+
+&lt;p&gt;Unless you plan to continue using the instance, terminate it, replacing the instance ID below as appropriate:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;aws ec2 terminate-instances &lt;span class="nt"&gt;--instance-ids&lt;/span&gt; i-02eb9bb3b0989c57e
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Remember that we also created a security group and imported a key pair. You might want to keep them for use with future instances, but in my case, I will delete them as well:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ &lt;/span&gt;aws ec2 delete-security-group &lt;span class="nt"&gt;--group-id&lt;/span&gt; sg-047de2bb619edd924
+&lt;span class="nv"&gt;$ &lt;/span&gt;aws ec2 delete-key-pair &lt;span class="nt"&gt;--key-name&lt;/span&gt; &lt;span class="s2"&gt;"MacBook Air Ubuntu 20.04"&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#conclusion"&gt;
+  &lt;/a&gt;
+  Conclusion
+&lt;/h2&gt;
+
+&lt;p&gt;We learned what the AWS CLI is, how to install it on Linux, how to configure an IAM administrator for use with the AWS CLI (and why it is important to do so), how to get help with the AWS CLI, the &lt;code&gt;ec2&lt;/code&gt; command and its various subcommands, and how we can combine those commands to manage EC2 instances &lt;em&gt;almost&lt;/em&gt; entirely from the CLI. But that is just the tip of the iceberg. AWS is so much more than just EC2, and I encourage you to take the time to explore other AWS services and how they can be manipulated through the AWS CLI.&lt;/p&gt;
+
+&lt;p&gt;I hope you enjoyed this hands-on session and found it useful. Stay tuned ;-) Until then, happy holidays!&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#references"&gt;
+  &lt;/a&gt;
+  References
+&lt;/h2&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Prerequisites to use the AWS CLI version 2: &lt;a href="https://docs.aws.amazon.com/cli/latest/userguide/getting-started-prereqs.html"&gt;https://docs.aws.amazon.com/cli/latest/userguide/getting-started-prereqs.html&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;Tagging AWS resources: &lt;a href="https://docs.aws.amazon.com/general/latest/gr/aws_tagging.html"&gt;https://docs.aws.amazon.com/general/latest/gr/aws_tagging.html&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;Tasks that require root user credentials: &lt;a href="https://docs.aws.amazon.com/accounts/latest/reference/root-user-tasks.html"&gt;https://docs.aws.amazon.com/accounts/latest/reference/root-user-tasks.html&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;Installing or updating the latest version of the AWS CLI: &lt;a href="https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"&gt;https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;AWS CLI Command Reference: &lt;a href="https://awscli.amazonaws.com/v2/documentation/api/latest/index.html"&gt;https://awscli.amazonaws.com/v2/documentation/api/latest/index.html&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;Using Amazon EC2 with the AWS CLI: &lt;a href="https://docs.aws.amazon.com/cli/latest/userguide/cli-services-ec2.html"&gt;https://docs.aws.amazon.com/cli/latest/userguide/cli-services-ec2.html&lt;/a&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+
+</description>
+      <category>aws</category>
+      <category>cloudcomputing</category>
+      <category>linux</category>
+      <category>ubuntu</category>
+    </item>
+    <item>
       <title>My 2021 Recap</title>
       <author>Yehezkiel Gunawan</author>
       <pubDate>Mon, 27 Dec 2021 09:09:57 +0000</pubDate>
@@ -1305,397 +2378,6 @@ Within the &lt;code&gt;App.tsx&lt;/code&gt;&lt;br&gt;
       <category>react</category>
       <category>typescript</category>
       <category>tutorial</category>
-    </item>
-    <item>
-      <title>Handling Opaque Responses in a Service Worker</title>
-      <author>Kevin Basset</author>
-      <pubDate>Mon, 27 Dec 2021 08:47:12 +0000</pubDate>
-      <link>https://dev.to/progressier/handling-opaque-responses-in-a-service-worker-fgd</link>
-      <guid>https://dev.to/progressier/handling-opaque-responses-in-a-service-worker-fgd</guid>
-      <description>&lt;p&gt;&lt;a href="https://progressier.com"&gt;Progressier&lt;/a&gt; handles opaque responses automatically so that you don't have worry about them. But if you're interested in learning more about opaque responses, why they're a problem and how you should deal with them in your service worker, please continue reading.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#whats-an-opaque-response"&gt;
-  &lt;/a&gt;
-  What's an opaque response?
-&lt;/h2&gt;
-
-&lt;p&gt;When a website requests an asset, e.g. a JPG image or a JavaScript file, it sends a request to a server. This server then responds with the requested image or JavaScript contents.&lt;/p&gt;
-
-&lt;p&gt;Problems start when the asset is hosted on a different domain than the requesting site. Browsers follow a mechanism called &lt;a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS"&gt;Cross-Origin Resource Sharing&lt;/a&gt; (or CORS). In a nutshell, it greatly limits what you can do with a resource located on a different domain.&lt;/p&gt;
-
-&lt;p&gt;One way to prevent issues is for the owner of the resource to add a &lt;code&gt;access-control-allow-origin: *&lt;/code&gt; header to the response (also works with your specific domain instead of &lt;code&gt;*&lt;/code&gt;). It essentially tells the browser &lt;em&gt;hey Chrome, just let anyone freely use that resource on their site&lt;/em&gt;. &lt;/p&gt;
-
-&lt;p&gt;Here is where it gets interesting — even without this header, &lt;code&gt;&amp;lt;script&amp;gt;&lt;/code&gt;, &lt;code&gt;&amp;lt;style&amp;gt;&lt;/code&gt; or &lt;code&gt;&amp;lt;img&amp;gt;&lt;/code&gt; tags will still be able to request and use these resources. But your Javascript code or service worker won't be allowed to read or otherwise modify them. Responses that the browser can use but that you as a developer cannot are called &lt;em&gt;opaque responses&lt;/em&gt;.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#so-whats-the-problem-with-opaque-responses-exactly"&gt;
-  &lt;/a&gt;
-  So... what's the problem with opaque responses, exactly?
-&lt;/h2&gt;
-
-&lt;p&gt;When a server sends a response to a browser, it also sends a HTTP &lt;a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Status"&gt;response status code&lt;/a&gt;, which tells the browser whether the request was successful or not.&lt;/p&gt;
-
-&lt;p&gt;Anything starting with &lt;code&gt;2xx&lt;/code&gt; usually means success. &lt;code&gt;5xx&lt;/code&gt; means there was an error with the server. And &lt;code&gt;4xx&lt;/code&gt; an error with the request.&lt;/p&gt;
-
-&lt;p&gt;For opaque responses, the response status code is always &lt;code&gt;0&lt;/code&gt;.&lt;/p&gt;
-
-&lt;p&gt;Your service worker has no way to know whether a request was successful or whether it resulted in an error. And because the request is made completely opaque, it does not contain any other clues that can tell you which way it went. &lt;/p&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;&lt;em&gt;Editor's Note: I understand why opaque responses are necessary, but I honestly have no idea why 'opaque' also has to mean hiding the request status code. If anyone knows, I'm genuinely interested in learning more about the reasoning behind this choice.&lt;/em&gt;&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;The problem is that most apps and websites do receive quite a few opaque responses. And if you choose not to cache them, these resources won't be accessible offline at all when the network fails to send a successful response.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#approach-1-the-last-resort-approach"&gt;
-  &lt;/a&gt;
-  Approach 1: The Last Resort Approach
-&lt;/h2&gt;
-
-&lt;p&gt;The approach we use at &lt;a href="https://progressier.com"&gt;Progressier&lt;/a&gt; is to cache resources that have opaque responses but only serve them as a last resort — when there is no other response available in cache and the network couldn't provide a response (because that server is down or the user is offline for example).&lt;/p&gt;
-
-&lt;p&gt;In that case, the choice is between showing an error (100% probability of error) versus showing an opaque response that may or not have been a successful response (unknown probability of error but by definition less than 100%).&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#approach-2-the-nocache-approach"&gt;
-  &lt;/a&gt;
-  Approach 2: The No-Cache Approach
-&lt;/h2&gt;
-
-&lt;p&gt;The default behavior in &lt;a href="https://developers.google.com/web/tools/workbox"&gt;Workbox&lt;/a&gt; is to not cache opaque responses at all. This is another valid approach. It eliminates the uncertainty described above and it also ensures that the resource will NOT be available offline. &lt;/p&gt;
-
-&lt;p&gt;In cases where your front-end actually need to know what the error is (not just know that there is an error), this approach provides consistency and may be a better alternative.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#recognizing-and-caching-opaque-responses"&gt;
-  &lt;/a&gt;
-  Recognizing and caching opaque responses
-&lt;/h2&gt;
-
-&lt;p&gt;An opaque response can be identified by the status code in the &lt;a href="https://developer.mozilla.org/en-US/docs/Web/API/Response"&gt;Response&lt;/a&gt; object. If it contains &lt;code&gt;response.status === 0&lt;/code&gt;, then you're dealing with an opaque response. &lt;/p&gt;
-
-&lt;p&gt;Note that what you can do with opaque responses caching-wise is limited. You'll necessarily have to call &lt;a href="https://developer.mozilla.org/en-US/docs/Web/API/Response/clone"&gt;response.clone()&lt;/a&gt; before putting it in cache. If you don't, the body of the response will be consumed when you put in cache and it will fail when you also return it as a response to the &lt;a href="https://developer.mozilla.org/en-US/docs/Web/API/FetchEvent"&gt;fetch&lt;/a&gt; event.&lt;/p&gt;
-
-&lt;p&gt;Response.clone() sometimes isn't enough, i.e. if you need to alter the response before putting in cache. That's why you can usually make a copy of the headers and body of the request, and recreate a response from scratch using the &lt;a href="https://developer.mozilla.org/en-US/docs/Web/API/Response/Response"&gt;Response&lt;/a&gt; constructor. &lt;/p&gt;
-
-&lt;p&gt;Well, with opaque responses... you can't do that. The constructor simply doesn't allow to create opaque responses.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#conclusion"&gt;
-  &lt;/a&gt;
-  Conclusion
-&lt;/h2&gt;
-
-&lt;p&gt;When building &lt;a href="https://progressier.com"&gt;Progressier&lt;/a&gt;'s caching strategy builder, I had quite a bit of fun figuring out the inner workings of service workers. And opaque responses were definitely one of the highlights! Their quirks can be hard to grasp at first, but once you understand how they behave, dealing with them becomes a lot easier.&lt;/p&gt;
-
-&lt;p&gt;If that article helped you understand anything about opaque responses, leave a comment. And if you have any questions, feel free to reach out to me 💪🎉😜&lt;/p&gt;
-
-</description>
-      <category>javascript</category>
-      <category>pwa</category>
-      <category>webdev</category>
-      <category>programming</category>
-    </item>
-    <item>
-      <title>Migrate from Jasmine to Jest and Testing Library in Angular</title>
-      <author>Dany Paredes</author>
-      <pubDate>Mon, 27 Dec 2021 08:16:52 +0000</pubDate>
-      <link>https://dev.to/this-is-angular/migrate-from-jasmine-to-jest-and-testing-in-angular-286i</link>
-      <guid>https://dev.to/this-is-angular/migrate-from-jasmine-to-jest-and-testing-in-angular-286i</guid>
-      <description>&lt;p&gt;Angular, by default, comes with Jasmine; it is a great testing framework. I spent one year and a half running and writing tests with Jasmine, it works, but the market is moving to Jest and Testing library.&lt;/p&gt;
-
-&lt;p&gt;Don't get scared because Jest is more straightforward and compatible with your Jasmine test.&lt;/p&gt;
-
-&lt;p&gt;This post aims to guide how to get rid of Jasmine and Karma and set up Jest and testing library.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#why-move-to-jest-and-testing-library"&gt;
-  &lt;/a&gt;
-  Why move to Jest and Testing library?
-&lt;/h2&gt;
-
-&lt;p&gt;I decided to move all my Angular projects to Jest and testing library for a few reasons.&lt;/p&gt;
-
-&lt;p&gt;Jest is:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Faster than Karma. &lt;/li&gt;
-&lt;li&gt;Easy to read test reports. &lt;/li&gt;
-&lt;li&gt;Code Coverage out of the box&lt;/li&gt;
-&lt;li&gt;Great command-line interface to interact with the tests.&lt;/li&gt;
-&lt;li&gt;Great community support.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;The Testing library is:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Focus user test&lt;/li&gt;
-&lt;li&gt;So fast and easy.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;If you are looking to the easy way use jest schematic &lt;a href="https://github.com/briebug/jest-schematic"&gt;https://github.com/briebug/jest-schematic&lt;/a&gt;&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;h2&gt;
-  &lt;a href="#remove-jasmine-and-karma"&gt;
-  &lt;/a&gt;
-  Remove Jasmine and Karma
-&lt;/h2&gt;
-
-&lt;p&gt;To remove the package, delete them from the package.json and save it.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight json"&gt;&lt;code&gt;&lt;span class="nl"&gt;"@types/jasmine"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"~3.10.0"&lt;/span&gt;&lt;span class="err"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="nl"&gt;"jasmine-core"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"~3.10.0"&lt;/span&gt;&lt;span class="err"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="nl"&gt;"karma"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"~6.3.0"&lt;/span&gt;&lt;span class="err"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
- &lt;/span&gt;&lt;span class="nl"&gt;"karma-chrome-launcher"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"~3.1.0"&lt;/span&gt;&lt;span class="err"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
- &lt;/span&gt;&lt;span class="nl"&gt;"karma-coverage"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"~2.1.0"&lt;/span&gt;&lt;span class="err"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
- &lt;/span&gt;&lt;span class="nl"&gt;"karma-jasmine"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"~4.0.0"&lt;/span&gt;&lt;span class="err"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
- &lt;/span&gt;&lt;span class="nl"&gt;"karma-jasmine-html-reporter"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"~1.7.0"&lt;/span&gt;&lt;span class="err"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;And run the &lt;code&gt;npm install&lt;/code&gt; command from the terminal again to npm remove not used packages.&lt;/p&gt;
-
-&lt;p&gt;Next, delete karma.conf.js and src/test.ts files.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;    &lt;span class="nb"&gt;rm &lt;/span&gt;karma.conf.js 
-     &lt;span class="nb"&gt;rm &lt;/span&gt;src/test.ts 
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Remove the test area from angular.json.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight json"&gt;&lt;code&gt;&lt;span class="nl"&gt;"test"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
-          &lt;/span&gt;&lt;span class="nl"&gt;"builder"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"@angular-devkit/build-angular:karma"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-          &lt;/span&gt;&lt;span class="nl"&gt;"options"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
-            &lt;/span&gt;&lt;span class="nl"&gt;"main"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"src/test.ts"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-            &lt;/span&gt;&lt;span class="nl"&gt;"polyfills"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"src/polyfills.ts"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-            &lt;/span&gt;&lt;span class="nl"&gt;"tsConfig"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"tsconfig.spec.json"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-            &lt;/span&gt;&lt;span class="nl"&gt;"karmaConfig"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"karma.conf.js"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-            &lt;/span&gt;&lt;span class="nl"&gt;"assets"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s2"&gt;"src/favicon.ico"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"src/assets"&lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt;&lt;span class="w"&gt;
-            &lt;/span&gt;&lt;span class="nl"&gt;"styles"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s2"&gt;"src/styles.css"&lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt;&lt;span class="w"&gt;
-            &lt;/span&gt;&lt;span class="nl"&gt;"scripts"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[]&lt;/span&gt;&lt;span class="w"&gt;
-          &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Next, install and configure Jest for our angular app.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#install-and-configure-jest"&gt;
-  &lt;/a&gt;
-  Install and configure Jest
-&lt;/h2&gt;
-
-&lt;p&gt;We will run the following command in our terminal to install jest library, Jest preset for angular, and jest types for typescript.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;npm &lt;span class="nb"&gt;install&lt;/span&gt; &lt;span class="nt"&gt;--save-dev&lt;/span&gt; jest jest-preset-angular @types/jest
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;In your project root, create the setup-jest.ts file and import the angular preset.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;jest-preset-angular/setup-jest&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Into the  package.json file edit the script&lt;code&gt;test: "ng test"&lt;/code&gt; to &lt;code&gt;test: "jest"&lt;/code&gt;&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight json"&gt;&lt;code&gt;&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="nl"&gt;"scripts"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"ng"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"ng"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"start"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"ng serve"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"build"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"ng build"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"watch"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"ng build --watch --configuration development"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"test"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"jest"&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="err"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Add a Jest area to load &lt;code&gt;jest-preset-angular&lt;/code&gt; and use the jest configuration file.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight json"&gt;&lt;code&gt;&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="nl"&gt;"jest"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"preset"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"jest-preset-angular"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"setupFilesAfterEnv"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s2"&gt;"&amp;lt;rootDir&amp;gt;/setup-jest.ts"&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Edit tsconfig.json into the compiler option :&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight json"&gt;&lt;code&gt;&lt;span class="nl"&gt;"esModuleInterop"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="err"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Edit tsconfig.spec.json, remove node and Jasmine to Jest, close similar to my example:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight json"&gt;&lt;code&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="nl"&gt;"extends"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"./tsconfig.json"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="nl"&gt;"compilerOptions"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"outDir"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"./out-tsc/spec"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nl"&gt;"types"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s2"&gt;"jest"&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="p"&gt;},&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="nl"&gt;"include"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s2"&gt;"src/**/*.spec.ts"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"src/**/*.d.ts"&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Because jasmine tests are compatible, we run our existing test running the test script from the terminal.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;npm run &lt;span class="nb"&gt;test&lt;/span&gt;
-
-&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; lab@0.0.0 &lt;span class="nb"&gt;test&lt;/span&gt;
-&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; Jest
-
- PASS  src/app/app.component.spec.ts
-  AppComponent
-    ✓ should create the app &lt;span class="o"&gt;(&lt;/span&gt;169 ms&lt;span class="o"&gt;)&lt;/span&gt;
-    ✓ should have as title &lt;span class="s1"&gt;'lab'&lt;/span&gt; &lt;span class="o"&gt;(&lt;/span&gt;43 ms&lt;span class="o"&gt;)&lt;/span&gt;
-    ✓ should render title &lt;span class="o"&gt;(&lt;/span&gt;47 ms&lt;span class="o"&gt;)&lt;/span&gt;
-
-Test Suites: 1 passed, one total
-Tests:       3 passed, 3 total
-Snapshots:   0 total
-Time:        1.635 s, estimated 4 s
-Ran all &lt;span class="nb"&gt;test &lt;/span&gt;suites.
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#install-the-testing-library"&gt;
-  &lt;/a&gt;
-  Install the testing library
-&lt;/h2&gt;
-
-&lt;p&gt;The @testing-library helps test UI components in the user way.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;npm &lt;span class="nb"&gt;install&lt;/span&gt; &lt;span class="nt"&gt;--save-dev&lt;/span&gt; @testing-library/angular
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Create an app.component.ui.spect.ts file, and we use the testing library to play with the UI.&lt;/p&gt;
-
-&lt;p&gt;First, import &lt;code&gt;render&lt;/code&gt; and &lt;code&gt;screen&lt;/code&gt; from @testing-library/angular,  &lt;code&gt;render&lt;/code&gt; help us to load the component, and &lt;code&gt;screen&lt;/code&gt; provide an extensive list o ways to find elements in the browser.&lt;/p&gt;
-
-&lt;p&gt;In our quick example, we find the "Next steps" text to learn more about using the testing library &lt;a href="https://testing-library.com/docs/"&gt;https://testing-library.com/docs/&lt;/a&gt;.&lt;/p&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;We use the await keyword to wait for render and screen results.&lt;br&gt;
-&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;render&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;screen&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;@testing-library/angular&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;AppComponent&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;./app.component&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-
-&lt;span class="nx"&gt;describe&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;AppComponent&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="nx"&gt;it&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;should render Welcome&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;render&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;AppComponent&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-    &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;screen&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;getByText&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;Welcome&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-  &lt;span class="p"&gt;});&lt;/span&gt;
-&lt;span class="p"&gt;});&lt;/span&gt;
-
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Run your test again&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;npm run &lt;span class="nb"&gt;test&lt;/span&gt;
-
-&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; lab@0.0.0 &lt;span class="nb"&gt;test&lt;/span&gt;
-&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; Jest
-
- PASS  src/app/app.component.spec.ts
- PASS  src/app/app.ui.component.spec.ts
-
-Test Suites: 2 passed, 2 total
-Tests:       4 passed, 4 total
-Snapshots:   0 total
-Time:        4.631 s
-Ran all &lt;span class="nb"&gt;test &lt;/span&gt;suites.
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;h2&gt;
-  &lt;a href="#summary"&gt;
-  &lt;/a&gt;
-  Summary
-&lt;/h2&gt;
-
-&lt;p&gt;Well, in short, we learned how to remove karma and Jasmine, install and configure Jest running our existing test, and add the testing library in our angular projects.&lt;/p&gt;
-
-&lt;p&gt;Hopefully, that will give you a bit of help with the Jest and Testing library. If you enjoyed this post, share it!&lt;/p&gt;
-
-</description>
-      <category>angular</category>
-      <category>testing</category>
-      <category>frontend</category>
-      <category>javascript</category>
     </item>
   </channel>
 </rss>
