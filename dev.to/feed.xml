@@ -7,6 +7,133 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>Streaming data from AWS S3 using NodeJS Stream API and Typescript</title>
+      <author>Austin Burger</author>
+      <pubDate>Sun, 02 Jan 2022 20:35:31 +0000</pubDate>
+      <link>https://dev.to/about14sheep/streaming-data-from-aws-s3-using-nodejs-stream-api-and-typescript-3dj0</link>
+      <guid>https://dev.to/about14sheep/streaming-data-from-aws-s3-using-nodejs-stream-api-and-typescript-3dj0</guid>
+      <description>&lt;p&gt;AWS s3 SDK and NodeJS read/write streams makes it easy to download files from an AWS bucket, however what if you wanted to stream the files instead? &lt;/p&gt;
+
+&lt;p&gt;There is a timeout on connecting to the AWS instance set to 120000ms (2 minutes). Unless you have very small files, this just won't cut it. &lt;/p&gt;
+
+&lt;p&gt;One option is to simply raise that timeout, but then how much should you raise it? Since the timeout is for the total time a connection can last; you would have to either make the timeout some ridiculous amount, or guess how long it will take to stream the file and update the timeout accordingly. This is also not taking into account the stream closing due to HTTP(S)'s own timeout reasons as well.&lt;/p&gt;
+
+&lt;p&gt;Instead of making guesses and fighting random bugs, we can make use of the NodeJS Stream API and create our very own custom readable "smart stream".&lt;/p&gt;
+
+&lt;p&gt;The idea is to create a stream that uses the power of AWS s3 &lt;br&gt;
+ ability to grab a range of data, close the connection, then grab another range of data. This stream will pause when its buffer is full, only requesting new data on an as needed basis.&lt;/p&gt;
+
+&lt;p&gt;Before we begin, I am assuming you have used AWS s3 SDK to download files successfully and are now wanting to convert that functionality to a proper stream. As such, I will omit the AWS implementation and instead show a simple example of how, and where, to instantiate this "smart stream" class&lt;/p&gt;
+
+&lt;p&gt;We will start by creating the "smart stream" class:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;Readable&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;ReadableOptions&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;stream&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="kd"&gt;type&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;S3&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;aws-sdk&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;class&lt;/span&gt; &lt;span class="nx"&gt;SmartStream&lt;/span&gt; &lt;span class="kd"&gt;extends&lt;/span&gt; &lt;span class="nx"&gt;Readable&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="nx"&gt;_currentCursorPosition&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; &lt;span class="c1"&gt;// Holds the current starting position for our range queries&lt;/span&gt;
+    &lt;span class="nx"&gt;_s3DataRange&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="mi"&gt;64&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt; &lt;span class="mi"&gt;1024&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; &lt;span class="c1"&gt;// Amount of bytes to grab&lt;/span&gt;
+    &lt;span class="nl"&gt;_maxContentLength&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;number&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; &lt;span class="c1"&gt;// Total number of bites in the file&lt;/span&gt;
+    &lt;span class="nl"&gt;_s3&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;S3&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; &lt;span class="c1"&gt;// AWS.S3 instance&lt;/span&gt;
+    &lt;span class="nl"&gt;_s3StreamParams&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;S3&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;GetObjectRequest&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt; &lt;span class="c1"&gt;// Parameters passed into s3.getObject method&lt;/span&gt;
+
+    &lt;span class="kd"&gt;constructor&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+        &lt;span class="nx"&gt;parameters&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;S3&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;GetObjectRequest&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+        &lt;span class="nx"&gt;s3&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;S3&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+        &lt;span class="nx"&gt;maxLength&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;number&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+        &lt;span class="nx"&gt;nodeReadableStreamOptions&lt;/span&gt;&lt;span class="p"&gt;?:&lt;/span&gt; &lt;span class="nx"&gt;ReadableOptions&lt;/span&gt;
+    &lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="k"&gt;super&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;options&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+        &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;_maxContentLength&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;maxLength&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+        &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;_s3&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;s3&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+        &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;_s3StreamParams&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;parameters&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+
+    &lt;span class="nx"&gt;_read&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;_currentCursorPosition&lt;/span&gt; &lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;_maxContentLength&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="c1"&gt;// If the current position is greater than the amount of bytes in the file&lt;/span&gt;
+            &lt;span class="c1"&gt;// We push null into the buffer, NodeJS ReadableStream will see this as the end of file (EOF) and emit the 'end' event&lt;/span&gt;
+            &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;push&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kc"&gt;null&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+        &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;else&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="c1"&gt;// Calculate the range of bytes we want to grab&lt;/span&gt;
+            &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;range&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;_currentCursorPosition&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;_s3DataRange&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+            &lt;span class="c1"&gt;// If the range is greater than the total number of bytes in the file&lt;/span&gt;
+            &lt;span class="c1"&gt;// We adjust the range to grab the remaining bytes of data&lt;/span&gt;
+            &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;adjustedRange&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;range&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt; &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;_maxContentLength&lt;/span&gt; &lt;span class="p"&gt;?&lt;/span&gt; &lt;span class="nx"&gt;rangeEnd&lt;/span&gt; &lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;_maxContentLength&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+            &lt;span class="c1"&gt;// Set the Range property on our s3 stream parameters&lt;/span&gt;
+            &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;_s3StreamParams&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Range&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s2"&gt;`bytes=&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;_currentCursorPosition&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;-&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;adjustedRange&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+            &lt;span class="c1"&gt;// Update the current range beginning for the next go &lt;/span&gt;
+            &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;_currentCursorPosition&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;adjustedRange&lt;/span&gt; &lt;span class="o"&gt;+&lt;/span&gt; &lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+            &lt;span class="c1"&gt;// Grab the range of bytes from the file&lt;/span&gt;
+            &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;_s3&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;getObject&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;_s3StreamParams&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+                &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+                    &lt;span class="c1"&gt;// If we encounter an error grabbing the bytes&lt;/span&gt;
+                    &lt;span class="c1"&gt;// We destroy the stream, NodeJS ReadableStream will emit the 'error' event&lt;/span&gt;
+                    &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;destroy&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+                &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;else&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+                    &lt;span class="c1"&gt;// We push the data into the stream buffer&lt;/span&gt;
+                    &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;push&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Body&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+                &lt;span class="p"&gt;}&lt;/span&gt;
+            &lt;span class="p"&gt;});&lt;/span&gt;
+        &lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Now that we have the SmartStream class coded, we are ready to wire it into our program. You can even pipe this stream into a 'gzip' stream for zipped files!&lt;/p&gt;
+
+&lt;p&gt;For this next part, as I am assuming you understand the AWS s3 SDK, I am simply going to offer an example of how to establish the stream.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;SmartStream&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Path&lt;/span&gt; &lt;span class="nx"&gt;to&lt;/span&gt; &lt;span class="nx"&gt;SmartStream&lt;/span&gt; &lt;span class="nx"&gt;file&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;createAWSStream&lt;/span&gt;&lt;span class="p"&gt;():&lt;/span&gt; &lt;span class="nb"&gt;Promise&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;SmartStream&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nb"&gt;Promise&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;resolve&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;reject&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;bucketParams&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="na"&gt;Bucket&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Your&lt;/span&gt; &lt;span class="nx"&gt;Bucket&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+            &lt;span class="na"&gt;Key&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Your&lt;/span&gt; &lt;span class="nx"&gt;Key&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+        &lt;span class="p"&gt;}&lt;/span&gt;
+
+        &lt;span class="k"&gt;try&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;s3&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;resolveS3Instance&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+
+            &lt;span class="nx"&gt;s3&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;headObject&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;bucketParams&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+                &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+                    &lt;span class="k"&gt;throw&lt;/span&gt; &lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+                &lt;span class="p"&gt;}&lt;/span&gt;
+                &lt;span class="c1"&gt;// After getting the data we want from the call to s3.headObject&lt;/span&gt;
+                &lt;span class="c1"&gt;// We have everything we need to instantiate our SmartStream class&lt;/span&gt;
+                &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;stream&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;SmartStream&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;bucketParams&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;s3&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;ContentLength&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+
+                &lt;span class="nx"&gt;resolve&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;stream&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+            &lt;span class="p"&gt;});&lt;/span&gt;
+        &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;catch&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="nx"&gt;reject&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+        &lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="p"&gt;});&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;This is only one example of the amazing things you can do with the NodeJS standard Stream API. For further reading checkout the &lt;a href="https://nodejs.org/api/stream.html"&gt;NodeJS Stream API docs&lt;/a&gt;!&lt;/p&gt;
+
+</description>
+      <category>aws</category>
+      <category>typescript</category>
+      <category>javascript</category>
+      <category>tutorial</category>
+    </item>
+    <item>
       <title>After 1 YEAR of hard work my NEW Ultimate Web Desktop Environment is ready for launch!!!!! 🎉🎉</title>
       <author>Dustin Brett</author>
       <pubDate>Sun, 02 Jan 2022 20:01:03 +0000</pubDate>
@@ -588,6 +715,132 @@
       <category>challenge</category>
     </item>
     <item>
+      <title>Use an object instead of a switch</title>
+      <author>guiga</author>
+      <pubDate>Sun, 02 Jan 2022 19:18:47 +0000</pubDate>
+      <link>https://dev.to/guigacodes/use-an-object-instead-of-a-switch-1e55</link>
+      <guid>https://dev.to/guigacodes/use-an-object-instead-of-a-switch-1e55</guid>
+      <description>&lt;p&gt;Sometimes we can do a simple refactor and achieve a lot with it! The example that I'm gonna show was taken from a real project that has been working just fine for a long time.&lt;/p&gt;
+
+&lt;p&gt;Still, that doesn't mean we shouldn't take the initiative to improve simply because it's already working! However, we also need to be pragmatic and not fall into &lt;a href="https://www.youtube.com/watch?v=BY6bGhcnDDs"&gt;the perfectionism trap&lt;/a&gt;. basically, We should find the sweet spot where the effort necessary is paid by its own results. 🕵️&lt;/p&gt;
+
+&lt;p&gt;I was working on a module that had a &lt;code&gt;getMonth&lt;/code&gt; function which would return the translation key according to the given month:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;getMonth&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;month&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kr"&gt;string&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;translationKey&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;''&lt;/span&gt;
+  &lt;span class="k"&gt;switch&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;month&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="k"&gt;case&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;January&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+      &lt;span class="nx"&gt;translationKey&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;JANUARY_TRANSLATION_KEY&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+      &lt;span class="k"&gt;break&lt;/span&gt;
+    &lt;span class="k"&gt;case&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;February&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+      &lt;span class="nx"&gt;translationKey&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;FEBRUARY_TRANSLATION_KEY&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+      &lt;span class="k"&gt;break&lt;/span&gt;
+    &lt;span class="k"&gt;case&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;March&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+      &lt;span class="nx"&gt;translationKey&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;MARCH_TRANSLATION_KEY&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+      &lt;span class="k"&gt;break&lt;/span&gt;
+    &lt;span class="k"&gt;case&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;April&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+      &lt;span class="nx"&gt;translationKey&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;APRIL_TRANSLATION_KEY&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+      &lt;span class="k"&gt;break&lt;/span&gt;
+    &lt;span class="k"&gt;case&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;May&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+      &lt;span class="nx"&gt;translationKey&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;MAY_TRANSLATION_KEY&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+      &lt;span class="k"&gt;break&lt;/span&gt;
+    &lt;span class="k"&gt;case&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;June&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+      &lt;span class="nx"&gt;translationKey&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;JUNE_TRANSLATION_KEY&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+      &lt;span class="k"&gt;break&lt;/span&gt;
+    &lt;span class="k"&gt;case&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;July&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+      &lt;span class="nx"&gt;translationKey&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;JULY_TRANSLATION_KEY&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+      &lt;span class="k"&gt;break&lt;/span&gt;
+    &lt;span class="k"&gt;case&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;August&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+      &lt;span class="nx"&gt;translationKey&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;AUGUST_TRANSLATION_KEY&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+      &lt;span class="k"&gt;break&lt;/span&gt;
+    &lt;span class="k"&gt;case&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;September&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+      &lt;span class="nx"&gt;translationKey&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;SEPTEMBER_TRANSLATION_KEY&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+      &lt;span class="k"&gt;break&lt;/span&gt;
+    &lt;span class="k"&gt;case&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;October&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+      &lt;span class="nx"&gt;translationKey&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;OCTOBER_TRANSLATION_KEY&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+      &lt;span class="k"&gt;break&lt;/span&gt;
+    &lt;span class="k"&gt;case&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;November&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+      &lt;span class="nx"&gt;translationKey&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;NOVEMBER_TRANSLATION_KEY&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+      &lt;span class="k"&gt;break&lt;/span&gt;
+    &lt;span class="k"&gt;case&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;December&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+      &lt;span class="nx"&gt;translationKey&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;DECEMBER_TRANSLATION_KEY&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+  &lt;span class="p"&gt;}&lt;/span&gt;
+  &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;translationKey&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;In this case, it was clear to me what I would accomplish using an object instead of a switch statement:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;readability&lt;/li&gt;
+&lt;li&gt;cognitive complexity (you can read more about it &lt;a href="https://www.sonarsource.com/resources/white-papers/cognitive-complexity/"&gt;here&lt;/a&gt;)&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Why an object? Well, if you take a closer look at what the &lt;code&gt;getMonth&lt;/code&gt; function is doing, you realize that it's doing nothing but mapping keys to values, which is exactly what an object does! ✨&lt;/p&gt;
+
+&lt;p&gt;Therefore, a switch statement isn't needed at all. actually, it just makes the code less readable and increases its cognitive complexity. So, after refactoring:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="kd"&gt;type&lt;/span&gt; &lt;span class="nx"&gt;Month&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt;
+  &lt;span class="o"&gt;|&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;January&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+  &lt;span class="o"&gt;|&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;February&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+  &lt;span class="o"&gt;|&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;March&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+  &lt;span class="o"&gt;|&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;April&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+  &lt;span class="o"&gt;|&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;May&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+  &lt;span class="o"&gt;|&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;June&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+  &lt;span class="o"&gt;|&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;July&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+  &lt;span class="o"&gt;|&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;August&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+  &lt;span class="o"&gt;|&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;September&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+  &lt;span class="o"&gt;|&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;October&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+  &lt;span class="o"&gt;|&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;November&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+  &lt;span class="o"&gt;|&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;December&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
+
+&lt;span class="kd"&gt;type&lt;/span&gt; &lt;span class="nx"&gt;Mapping&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nb"&gt;Record&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="nx"&gt;Month&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="kr"&gt;string&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;MONTH_TO_TRANSLATION_KEY&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;Mapping&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="na"&gt;January&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;JANUARY_TRANSLATION_KEY&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="na"&gt;February&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;FEBRUARY_TRANSLATION_KEY&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="na"&gt;March&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;MARCH_TRANSLATION_KEY&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="na"&gt;April&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;APRIL_TRANSLATION_KEY&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="na"&gt;May&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;MAY_TRANSLATION_KEY&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="na"&gt;June&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;JUNE_TRANSLATION_KEY&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="na"&gt;July&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;JULY_TRANSLATION_KEY&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="na"&gt;August&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;AUGUST_TRANSLATION_KEY&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="na"&gt;September&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;SEPTEMBER_TRANSLATION_KEY&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="na"&gt;October&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;OCTOBER_TRANSLATION_KEY&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="na"&gt;November&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;NOVEMBER_TRANSLATION_KEY&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="na"&gt;December&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;DECEMBER_TRANSLATION_KEY&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;getMonth&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;month&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;Month&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="nx"&gt;MONTH_TO_TRANSLATION_KEY&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;month&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;I created a &lt;a href="https://github.com/guilhermedeandrade/switch-vs-object"&gt;repository with both versions&lt;/a&gt; and used the &lt;a href="https://github.com/Deskbot/Cognitive-Complexity-TS"&gt;cognitive-complexity-ts&lt;/a&gt; package to have numbers to compare (a higher score means a more complex code):&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--RdCKJAer--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/az5jj61gjdy0y520u0be.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--RdCKJAer--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/az5jj61gjdy0y520u0be.png" alt="the image shows that the switch version has score 1 while the object version has score 0" width="880" height="417"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;As expected, the usage of an object makes this code less complex and also more readable, since it's less verbose than the switch statement.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;tl;dr:&lt;/strong&gt; whenever we notice that the switch is doing nothing more than mapping keys to values, we should use an object instead 👌&lt;/p&gt;
+
+</description>
+      <category>javascript</category>
+      <category>typescript</category>
+      <category>webdev</category>
+      <category>100daysofcode</category>
+    </item>
+    <item>
       <title>My 2021 Unwrapped</title>
       <author>Anamika</author>
       <pubDate>Sun, 02 Jan 2022 19:07:33 +0000</pubDate>
@@ -848,7 +1101,7 @@ npm ERR! See C:\Users\user\AppData\Local\npm-cache\eresolve-report.txt for a ful
 &lt;li&gt;Experimental&lt;/li&gt;
 &lt;/ul&gt;
 
-&lt;p&gt;The main idea is to focus on small steps gathering feedback &lt;/p&gt;
+&lt;p&gt;The main idea is to focus on small steps gathering feedback and adjust. &lt;/p&gt;
 
 &lt;ul&gt;
 &lt;li&gt;Work in a way that allows us to make mistakes &lt;/li&gt;
@@ -857,16 +1110,15 @@ npm ERR! See C:\Users\user\AppData\Local\npm-cache\eresolve-report.txt for a ful
 &lt;/ul&gt;
 
 &lt;h2&gt;
-  &lt;a href="#optimize-for-handling"&gt;
+  &lt;a href="#optimize-for-handling-complexity"&gt;
   &lt;/a&gt;
-  Optimize for handling
+  Optimize for handling complexity
 &lt;/h2&gt;
 
 &lt;p&gt;Edsger Dijkstra said &lt;br&gt;
 &lt;em&gt;The art of programming is the art of handling complexity&lt;/em&gt; &lt;/p&gt;
 
 &lt;ul&gt;
-&lt;li&gt;Complexity &lt;/li&gt;
 &lt;li&gt;Cohesion&lt;/li&gt;
 &lt;li&gt;Coupling &lt;/li&gt;
 &lt;li&gt;Separation of concerns &lt;/li&gt;
@@ -1236,321 +1488,6 @@ standard repos don't have an old enough version to run kedro.&lt;/p&gt;
       <category>kedro</category>
       <category>python</category>
       <category>datascience</category>
-    </item>
-    <item>
-      <title>Excelize 2.5.0 Released - Go language API for spreadsheets (Excel) files</title>
-      <author>xuri</author>
-      <pubDate>Sun, 02 Jan 2022 16:38:44 +0000</pubDate>
-      <link>https://dev.to/xuri/excelize-250-released-go-language-api-for-spreadsheets-excel-files-hmg</link>
-      <guid>https://dev.to/xuri/excelize-250-released-go-language-api-for-spreadsheets-excel-files-hmg</guid>
-      <description>&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--jRqmRj73--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/fyhamsgpj5bzxf34owxz.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--jRqmRj73--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/fyhamsgpj5bzxf34owxz.png" alt="Excelize 2.5.0 Released - Go language API for spreadsheets (Excel) files" width="880" height="585"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Excelize is a library written in pure Go providing a set of functions that allow you to write to and read from XLSX / XLSM / XLTM files. Supports reading and writing spreadsheet documents generated by Microsoft Excel&amp;amp;tradde; 2007 and later. Supports complex components by high compatibility, and provided streaming API for generating or reading data from a worksheet with huge amounts of data.&lt;/p&gt;
-
-&lt;p&gt;GitHub: &lt;a href="https://github.com/xuri/excelize"&gt;github.com/xuri/excelize&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;We are pleased to announce the release of version 2.5.0. Featured are a handful of new areas of functionality and numerous bug fixes.&lt;/p&gt;
-
-&lt;p&gt;A summary of changes is available in the &lt;a href="https://github.com/xuri/excelize/releases/tag/v2.5.0"&gt;Release Notes&lt;/a&gt;. A full list of changes is available in the &lt;a href="https://github.com/xuri/excelize/compare/v2.4.1...v2.5.0"&gt;changelog&lt;/a&gt;.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#release-notes"&gt;
-  &lt;/a&gt;
-  Release Notes
-&lt;/h2&gt;
-
-&lt;p&gt;The most notable changes in this release are:&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#compatibility"&gt;
-  &lt;/a&gt;
-  Compatibility
-&lt;/h3&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Close spreadsheet and row's iterator required, the user should be close the stream after using the row's iterator, and close the spreadsheet after opening an existing spreadsheet&lt;/li&gt;
-&lt;li&gt;Change &lt;code&gt;ReadZipReader&lt;/code&gt; as an implementation of the &lt;code&gt;File&lt;/code&gt;, extract spreadsheet with given options, and support extract in memory or touching the filesystem&lt;/li&gt;
-&lt;li&gt;Remove unnecessary exported variable &lt;code&gt;XMLHeader&lt;/code&gt;, we can using &lt;code&gt;encoding/xml&lt;/code&gt; package's &lt;code&gt;xml.Header&lt;/code&gt; instead of it&lt;/li&gt;
-&lt;li&gt;Remove unused exported error variable &lt;code&gt;ErrToExcelTime&lt;/code&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h3&gt;
-  &lt;a href="#notable-features"&gt;
-  &lt;/a&gt;
-  Notable Features
-&lt;/h3&gt;
-
-&lt;ul&gt;
-&lt;li&gt;New API: &lt;code&gt;SetRowStyle&lt;/code&gt; support for set style for the rows, related issue #990&lt;/li&gt;
-&lt;li&gt;New API: &lt;code&gt;GetCellType&lt;/code&gt; support for get the cell's data type, related issue #417 and #520&lt;/li&gt;
-&lt;li&gt;New API: &lt;code&gt;SetAppProps&lt;/code&gt; and &lt;code&gt;GetAppProps&lt;/code&gt; support to set and get document application properites, related issue #1095&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;GetCellValue&lt;/code&gt;, &lt;code&gt;GetRows&lt;/code&gt;, &lt;code&gt;GetCols&lt;/code&gt;, &lt;code&gt;Rows&lt;/code&gt; and &lt;code&gt;Cols&lt;/code&gt; support to specify read cell with raw value, related issue #621&lt;/li&gt;
-&lt;li&gt;New support 95 formula functions: ACCRINT, ACCRINTM, ADDRESS, AMORDEGRC, AMORLINC, AVEDEV, AVERAGEIF, CHIDIST, CONFIDENCE, CONFIDENCE.NORM, COUNTIF, COUNTIFS, COUPDAYBS, COUPDAYS, COUPDAYSNC, COUPNCD, COUPNUM, COUPPCD, DATEVALUE, DAY, DAYS, DELTA, DEVSQ, DISC, DURATION, ERF, ERF.PRECISE, ERFC, ERFC.PRECISE, GEOMEAN, GESTEP, IFNA, IFS, INDEX, INTRATE, ISFORMULA, ISLOGICAL, ISREF, ISOWEEKNUM, MATCH, MAXA, MAXIFS, MDURATION, MINIFS, MINUTE, MONTH, ODDFPRICE, PERCENTILE.EXC, PERCENTRANK.EXC, PERCENTRANK.INC, PERCENTRANK, PRICE, PRICEDISC, PRICEMAT, PV, QUARTILE.EXC, RANK, RANK.EQ, RATE, RECEIVED, RRI, SHEETS, SLN, STANDARDIZE, STDEV.P, STDEVP, SWITCH, SYD, TBILLEQ, TBILLPRICE, TBILLYIELD, TEXTJOIN, TIME, TRANSPOSE, TRIMMEAN, VALUE, VAR, VAR.S, VARA, VARPA, VDB, WEEKDAY, WEIBULL, WEIBULL.DIST, XIRR, XLOOKUP, XNPV, XOR, YEAR, YEARFRAC, YIELD, YIELDDISC, YIELDMAT, Z.TEST, ZTEST, related issue #1002&lt;/li&gt;
-&lt;li&gt;Formula calculation engine support nested calc for &lt;code&gt;IF&lt;/code&gt; formula, related issue #987&lt;/li&gt;
-&lt;li&gt;Formula calculation engine support get shared formula, related issue #844&lt;/li&gt;
-&lt;li&gt;Formula calculation engine support text comparison, related issue #998&lt;/li&gt;
-&lt;li&gt;Support specify the formula in the data validation range, related issue #1012&lt;/li&gt;
-&lt;li&gt;Support specified unzip size limit on open file options, avoid zip bombs vulnerability attack&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;SetCellFormula&lt;/code&gt; now support set the shared formula&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;UpdateLinkedValue&lt;/code&gt; will skip macro sheet, related issue #1014&lt;/li&gt;
-&lt;li&gt;Fix &lt;code&gt;AddPicture&lt;/code&gt; created duplicate image in some cases, caused by incorrect internal relationships ID calculation, related issue #1017&lt;/li&gt;
-&lt;li&gt;
-&lt;code&gt;AddShape&lt;/code&gt; support set line width of add the shape, related issue #262&lt;/li&gt;
-&lt;li&gt;New options &lt;code&gt;UnzipXMLSizeLimit&lt;/code&gt; have been added, support to specifies the memory limit on unzipping worksheet and shared string table in bytes&lt;/li&gt;
-&lt;li&gt;An error will be returned if given an invalid custom number format when creating a new style, related issue #1028&lt;/li&gt;
-&lt;li&gt;Now support set row style in the stream writer&lt;/li&gt;
-&lt;li&gt;Stream writer will create a time number format for time type cells, related issue #1107&lt;/li&gt;
-&lt;li&gt;Now support specify compact and outline for the pivot table, related issue #1029&lt;/li&gt;
-&lt;li&gt;Support get current rows/columns and total rows/columns in the stream reader, related PR #1054&lt;/li&gt;
-&lt;li&gt;Now support time zone location when set cell value, related issue #1069&lt;/li&gt;
-&lt;li&gt;Export 7 errors so users can act differently on different type of errors&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h3&gt;
-  &lt;a href="#improve-the-compatibility"&gt;
-  &lt;/a&gt;
-  Improve the Compatibility
-&lt;/h3&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Improve compatibility with row element with &lt;code&gt;r="0"&lt;/code&gt; attribute&lt;/li&gt;
-&lt;li&gt;Preserve XML control character&lt;/li&gt;
-&lt;li&gt;Improve the compatibility of style settings with Apple Numbers, related issue #1059&lt;/li&gt;
-&lt;li&gt;Support multi-byte language on set header footer, related issue #1061&lt;/li&gt;
-&lt;li&gt;Preserve horizontal tab character when set the cell value, related issue #1108&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h3&gt;
-  &lt;a href="#bug-fixes"&gt;
-  &lt;/a&gt;
-  Bug Fixes
-&lt;/h3&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Fix the data validation deletion failed, resolve issue #979&lt;/li&gt;
-&lt;li&gt;Fix set data validation drop list failed in some cases, resolve issue #986&lt;/li&gt;
-&lt;li&gt;Fix formula calculation engine &lt;code&gt;LOOKUP&lt;/code&gt; doesn't handle array form correctly, resolve issue #994&lt;/li&gt;
-&lt;li&gt;Fix formula calculation engine &lt;code&gt;LOOKUP&lt;/code&gt; can only find exact match, resolve issue #997&lt;/li&gt;
-&lt;li&gt;Fix formula percentages calculated incorrectly, resolve issue #993&lt;/li&gt;
-&lt;li&gt;Fix panic caused by incorrect cell read on some case&lt;/li&gt;
-&lt;li&gt;Fix conditional format bottom N not working&lt;/li&gt;
-&lt;li&gt;Fix time parse accuracy issue, resolve issue #1026 and #1030&lt;/li&gt;
-&lt;li&gt;Fix build-in scientific number format failed, resolve issue #1027&lt;/li&gt;
-&lt;li&gt;Fix small float parse error in some case, resolve issue #1031&lt;/li&gt;
-&lt;li&gt;Fix worksheet deletion failed in some case&lt;/li&gt;
-&lt;li&gt;Fix build-in time number format parse error, resolve issue #1060&lt;/li&gt;
-&lt;li&gt;Fix &lt;code&gt;NewStyle&lt;/code&gt; returned incorrect style ID in some case&lt;/li&gt;
-&lt;li&gt;Fix merged cell range error after row/column insert/deletion in some corner case&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h3&gt;
-  &lt;a href="#performance"&gt;
-  &lt;/a&gt;
-  Performance
-&lt;/h3&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Merge cell time cost speed up, time cost decrease over 90%&lt;/li&gt;
-&lt;li&gt;Improve streaming reading performance, unzip shared string table to system temporary file when large inner XML, memory usage decreased about 60%, related issue #1096&lt;/li&gt;
-&lt;li&gt;Worksheet list read speed up&lt;/li&gt;
-&lt;li&gt;Merge column styles to reduce spreadsheet size, resolve issue #1057&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h3&gt;
-  &lt;a href="#miscellaneous"&gt;
-  &lt;/a&gt;
-  Miscellaneous
-&lt;/h3&gt;
-
-&lt;ul&gt;
-&lt;li&gt;The dependencies module has been updated&lt;/li&gt;
-&lt;li&gt;Unit tests and godoc updated&lt;/li&gt;
-&lt;li&gt;
-&lt;a href="https://xuri.me/excelize"&gt;Documentation website&lt;/a&gt; with multilingual: Arabic, German, Spanish, English, French, Russian, Chinese, Japanese, and Korean, which has been updated&lt;/li&gt;
-&lt;/ul&gt;
-
-</description>
-      <category>go</category>
-      <category>excel</category>
-      <category>xlsx</category>
-    </item>
-    <item>
-      <title>Javascript Hoisting</title>
-      <author>Nathan Cotrim Lemos</author>
-      <pubDate>Sun, 02 Jan 2022 16:34:16 +0000</pubDate>
-      <link>https://dev.to/nate_sfteng/javascript-hoisting-5192</link>
-      <guid>https://dev.to/nate_sfteng/javascript-hoisting-5192</guid>
-      <description>&lt;h2&gt;
-  &lt;a href="#what-is"&gt;
-  &lt;/a&gt;
-  What is
-&lt;/h2&gt;
-
-&lt;p&gt;Hoisting is basically a behavior from javascript that we can see in execution time, it makes functions and variables go to the top of the scope in which they were declared.&lt;/p&gt;
-
-
-
-
-&lt;h2&gt;
-  &lt;a href="#const-let-amp%C2%A0var"&gt;
-  &lt;/a&gt;
-  Const, let &amp;amp; var
-&lt;/h2&gt;
-
-&lt;p&gt;Before see some examples, we need to understand the difference between these three ways to declare a variable.&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;&lt;p&gt;&lt;strong&gt;var&lt;/strong&gt;: On the start of javascript, we had only var, currently, we don't have reasons to use it, the hoisting concept is applied just to this type of declaration, and, it can be problematic by some reasons I will explain later. Another point we can say here is, its value can be reassigned.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;&lt;strong&gt;let&lt;/strong&gt;: unlike var, hoisting is not applied to let, it's a reason to prefer it, but, like var, its value can be reassigned.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;&lt;strong&gt;const&lt;/strong&gt;: like let, hoisting is not applied to it, another point about const is that it can't has its value reassigned.&lt;/p&gt;&lt;/li&gt;
-&lt;/ul&gt;
-
-
-
-
-&lt;p&gt;&lt;strong&gt;to stay tuned&lt;/strong&gt;: in this case, reassigned means that variable can or not has a new value, don't think that it applies to object and arrays manipulation, we can do this normally.&lt;/p&gt;
-
-
-
-
-&lt;p&gt;&lt;strong&gt;resume&lt;/strong&gt;: with const and let among us, prefer use they, when you will need to change the value from any variable in execution time, prefer let, unlike it, prefer const.&lt;/p&gt;
-
-
-
-
-&lt;h2&gt;
-  &lt;a href="#operation"&gt;
-  &lt;/a&gt;
-  Operation
-&lt;/h2&gt;
-
-&lt;p&gt;&lt;strong&gt;Functions&lt;/strong&gt;&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;hoistMe() // output: I'm being executed by hoisting
-
-function hoistMe() {
-   console.log('I\'m being executed by hoisting')
-}
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;In the example above, the hoisting works effective, repair we call the function before its initialization!&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Variables&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;In the example below, we use a &lt;em&gt;const&lt;/em&gt;, referring to it, we repair that hoisting is not applyied!&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;console.log(assignedToConst) // output: cannot access before initialization
-
-const assignedToConst = 'hoisted'
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;OBS: with let the result would be the same&lt;/p&gt;
-
-
-
-
-&lt;p&gt;Now we can see a interesting behavior from hoisting&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;console.log(assignedToVar) // output: cannot access before initialization
-
-const assignedToVar = 'hoisted'
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;executing this piece of code above, we see the specified output, it occurs because hoisting not assign the value, just declares on top, the assignment occurs where it was really implemented! Pay attention with this behavior, it makes your code ready to bugs!&lt;/p&gt;
-
-
-
-
-&lt;p&gt;Unusual use case but worth understanding:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;handle = '\'hoisted\'';
-
-console.log(handle); // output: 'hoisted'
-
-var handle;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;if we assign the value before and declare it later the hoisting is done successfully&lt;/p&gt;
-
-
-
-
-&lt;h2&gt;
-  &lt;a href="#considerations"&gt;
-  &lt;/a&gt;
-  Considerations
-&lt;/h2&gt;
-
-&lt;p&gt;This explained concept works independent the scope, still the presented examples be all at global scope, for example:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;function anotherHoistTest() {
-   hoistMe()
-   function hoistMe() {
-      console.log('hoisted');
-   }
-}
-anotherHoistTest() // output: hoisted
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-
-
-&lt;p&gt;I think is good say to you do not enjoy from this behavior, it makes your code more fragile and less readable and concise.&lt;/p&gt;
-
-
-
-
-&lt;h2&gt;
-  &lt;a href="#author"&gt;
-  &lt;/a&gt;
-  Author
-&lt;/h2&gt;
-
-&lt;p&gt;Follow me:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;&lt;a href="https://linktr.ee/nate.sfteng"&gt;https://linktr.ee/nate.sfteng&lt;/a&gt;&lt;/li&gt;
-&lt;/ul&gt;
-
-</description>
-      <category>webdev</category>
-      <category>programming</category>
-      <category>javascript</category>
-      <category>algorithms</category>
     </item>
   </channel>
 </rss>
