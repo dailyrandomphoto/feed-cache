@@ -7,6 +7,281 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>video calling App in React JS using Simple Peer</title>
+      <author>Deepak</author>
+      <pubDate>Sat, 08 Jan 2022 04:18:08 +0000</pubDate>
+      <link>https://dev.to/deepakjaiswal/video-calling-app-in-react-js-using-simple-peer-4anh</link>
+      <guid>https://dev.to/deepakjaiswal/video-calling-app-in-react-js-using-simple-peer-4anh</guid>
+      <description>&lt;p&gt;we talk about web rtc communication to like video&lt;br&gt;
+ calling web application, audio calling application using simple peer.&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;npm install simple-peer&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;simple peer library directly communicate with browser without any extra library or api.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#serverjs"&gt;
+  &lt;/a&gt;
+  server.js
+&lt;/h2&gt;
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;io.on('connection', function(socket){
+  debug('a user connected');
+
+  io.emit('peer', {
+    peerId: socket.id
+  })
+
+  socket.on('disconnect', reason =&amp;gt; {
+    io.emit('unpeer', {
+      peerId: socket.id,
+      reason
+    })
+  })
+
+  socket.on('signal', msg =&amp;gt; {
+    debug('signal received', msg)
+    const receiverId = msg.to
+    const receiver = io.sockets.connected[receiverId]
+    if (receiver) {
+      const data = {
+        from: socket.id,
+        ...msg
+      }
+      debug('sending signal to', receiverId)
+      io.to(receiverId).emit('signal', data);
+    } else {
+      debug('no receiver found', receiverId)
+    }
+  })
+
+});
+
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#clientjs"&gt;
+  &lt;/a&gt;
+  client.js
+&lt;/h2&gt;
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;import React, { Component } from 'react';
+import Peer from 'simple-peer'
+import io from 'socket.io-client'
+
+const debug = require('debug')('screen-share:app')
+
+const ioUrl = 'http://localhost:4000/'
+const enableTrickle = true
+
+class App extends Component {
+
+  state = {
+    peers: {},
+    stream: null
+  }
+
+  constructor() {
+    super()
+    this.onMedia = this.onMedia.bind(this)
+    this.createPeer = this.createPeer.bind(this)
+    this.getMedia(this.onMedia, err =&amp;gt; {
+      this.setState({
+        mediaErr: 'Could not access webcam'
+      })
+      debug('getMedia error', err)
+    })
+  }
+
+  componentDidUpdate() {
+    if (this.stream &amp;amp;&amp;amp; this.video &amp;amp;&amp;amp; !this.video.srcObject) {
+      debug('set video stream', this.video, this.stream)
+      this.video.srcObject = this.stream
+    }
+    this.attachPeerVideos()
+  }
+
+  attachPeerVideos() {
+    Object.entries(this.state.peers).forEach(entry =&amp;gt; {
+      const [peerId, peer] = entry
+      if (peer.video &amp;amp;&amp;amp; !peer.video.srcObject &amp;amp;&amp;amp; peer.stream) {
+        debug('setting peer video stream', peerId, peer.stream)
+        peer.video.setAttribute('data-peer-id', peerId)
+        peer.video.srcObject = peer.stream
+      }
+    })
+  }
+
+  getMedia(callback, err) {
+    const options = { video: true, audio: true }
+    if (navigator.mediaDevices &amp;amp;&amp;amp; navigator.mediaDevices.getUserMedia) {
+      return navigator.mediaDevices.getUserMedia(options)
+        .then(stream =&amp;gt; callback(stream))
+        .catch(e =&amp;gt; err(e))
+    }
+    return navigator.getUserMedia(options, callback,  err)
+  }
+
+  onMedia(stream) {
+    this.stream = stream
+    this.forceUpdate() // we have stream
+    this.socket = io(ioUrl)
+    this.socket.on('peer', msg =&amp;gt; {
+      const peerId = msg.peerId
+      debug('new peer poof!', peerId)
+      if (peerId === this.socket.id) {
+        return debug('Peer is me :D', peerId)
+      }
+      this.createPeer(peerId, true, stream)
+    })
+    this.socket.on('signal', data =&amp;gt; {
+      const peerId = data.from
+      const peer = this.state.peers[peerId]
+      if (!peer) {
+        this.createPeer(peerId, false, stream)
+      }
+      debug('Setting signal', peerId, data)
+      this.signalPeer(this.state.peers[peerId], data.signal)
+    })
+    this.socket.on('unpeer', msg =&amp;gt; {
+      debug('Unpeer', msg)
+      this.destroyPeer(msg.peerId)
+    })
+  }
+
+  createPeer(peerId, initiator, stream) {
+    debug('creating new peer', peerId, initiator)
+
+    const peer = new Peer({initiator: initiator, trickle: enableTrickle, stream})
+
+    peer.on('signal', (signal) =&amp;gt; {
+      const msgId = (new Date().getTime())
+      const msg = { msgId, signal, to: peerId }
+      debug('peer signal sent', msg)
+      this.socket.emit('signal', msg)
+    })
+
+    peer.on('stream', (stream) =&amp;gt; {
+      debug('Got peer stream!!!', peerId, stream)
+      peer.stream = stream
+      this.setPeerState(peerId, peer)
+    })
+
+    peer.on('connect', () =&amp;gt; {
+      debug('Connected to peer', peerId)
+      peer.connected = true
+      this.setPeerState(peerId, peer)
+      peer.send(this.serialize({
+        msg: 'hey man!'
+      }))
+    })
+
+    peer.on('data', data =&amp;gt; {
+      debug('Data from peer', peerId, this.unserialize(data))
+    })
+
+    peer.on('error', (e) =&amp;gt; {
+      debug('Peer error %s:', peerId, e);
+    })
+
+    this.setPeerState(peerId, peer)
+
+    return peer
+  }
+
+  destroyPeer(peerId) {
+    const peers = {...this.state.peers}
+    delete peers[peerId]
+    this.setState({
+      peers
+    })
+  }
+
+  serialize(data) {
+    return JSON.stringify(data)
+  }
+
+  unserialize(data) {
+    try {
+      return JSON.parse(data.toString())
+    } catch(e) {
+      return undefined
+    }
+  }
+
+  setPeerState(peerId, peer) {
+    const peers = {...this.state.peers}
+    peers[peerId] = peer
+    this.setState({
+      peers
+    })
+  }
+
+  signalPeer(peer, data) {
+    try {
+      peer.signal(data)
+    } catch(e) {
+      debug('sigal error', e)
+    }
+  }
+
+  renderPeers() {
+    return Object.entries(this.state.peers).map(entry =&amp;gt; {
+      const [peerId, peer] = entry
+      debug('render peer', peerId, peer, entry)
+      return &amp;lt;div key={peerId}&amp;gt;
+        &amp;lt;video ref={video =&amp;gt; peer.video = video}&amp;gt;&amp;lt;/video&amp;gt;
+      &amp;lt;/div&amp;gt;
+    })
+  }
+
+  render() {
+    return (
+      &amp;lt;div className="App"&amp;gt;
+        &amp;lt;header className="App-header"&amp;gt;
+          &amp;lt;img src={logo} className="App-logo" alt="logo" /&amp;gt;
+          &amp;lt;h1 className="App-title"&amp;gt;WebRTC Video Chat&amp;lt;/h1&amp;gt;
+        &amp;lt;/header&amp;gt;
+        {this.state.mediaErr &amp;amp;&amp;amp; (
+          &amp;lt;p className="error"&amp;gt;{this.state.mediaErr}&amp;lt;/p&amp;gt;
+        )}
+        &amp;lt;div id="me"&amp;gt;
+          &amp;lt;video id="myVideo" ref={video =&amp;gt; this.video = video} controls&amp;gt;&amp;lt;/video&amp;gt;
+        &amp;lt;/div&amp;gt;
+        &amp;lt;div id="peers"&amp;gt;{this.renderPeers()}&amp;lt;/div&amp;gt;
+      &amp;lt;/div&amp;gt;
+    );
+  }
+}
+
+export default App;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--VeDRNVCc--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/3i2d03t3gflxwg5foz4w.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--VeDRNVCc--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/3i2d03t3gflxwg5foz4w.png" alt="Image description" width="880" height="466"&gt;&lt;/a&gt;&lt;/p&gt;
+
+</description>
+      <category>javascript</category>
+      <category>programming</category>
+      <category>webdev</category>
+      <category>beginners</category>
+    </item>
+    <item>
       <title>tsParticles 1.39.0 Released</title>
       <author>Matteo Bruni</author>
       <pubDate>Sat, 08 Jan 2022 01:10:02 +0000</pubDate>
@@ -143,6 +418,50 @@ links you need, and…&lt;/p&gt;
       <category>javascript</category>
       <category>webdev</category>
       <category>html</category>
+    </item>
+    <item>
+      <title>100 días de código: 51, avances obtenidos en vacaciones... Aunque se supone que eran vacaciones.</title>
+      <author>Daro</author>
+      <pubDate>Sat, 08 Jan 2022 00:46:50 +0000</pubDate>
+      <link>https://dev.to/darito/100-dias-de-codigo-51-avances-obtenidos-en-vacaciones-aunque-se-supone-que-eran-vacaciones-l13</link>
+      <guid>https://dev.to/darito/100-dias-de-codigo-51-avances-obtenidos-en-vacaciones-aunque-se-supone-que-eran-vacaciones-l13</guid>
+      <description>&lt;p&gt;¡Hey hey hey!&lt;/p&gt;
+
+&lt;p&gt;Cuando comenzaron mis vacaciones pensé que tomaría el tiempo para descansar pero jamas me imagine como terminaría...&lt;/p&gt;
+
+&lt;p&gt;En él, me encontré con un problema generado por las ocupaciones de familia, pareja y mis propios proyectos generado por falta de tiempo dedicado a estas ocupaciones y que debido a mis planes no tuve en cuenta en ningun momento. &lt;/p&gt;
+
+&lt;p&gt;No se si sera algo que le suceda a todos pero creo que la causa viene de que los programadores terminamos teniendo una estrecha relación entre vida personal y profesional que nos dificulta separar estas y dedicarle el tiempo necesario a cada una. Si piensas que te pasa algo similar te agradecería que me lo hicieras saber en los comentarios.&lt;/p&gt;
+
+&lt;p&gt;Cuando llego el día de año nuevo y yo me levante por la mañana un poco mas temprano solo para programar, me puse a reflexionar en que jamas me imagine que me entregaría a la programación de la forma en la que lo hago ya que incluso en vacaciones tomaba tiempo para dedicarme a escribir algo de código a diario. &lt;/p&gt;
+
+&lt;p&gt;Sin embargo como no pude dedicarle el tiempo que me gustaría no lo tomare en cuenta para el reto.&lt;/p&gt;
+
+&lt;p&gt;Ahora me gustaría relatar los acontecimientos y logros de mis vacaciones. &lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;p&gt;Termine la mayoría de secciones de &lt;a href="https://www.theodinproject.com/"&gt;The Odin Project&lt;/a&gt; exceptuando el backend y las entrevistas y puedo decir que estoy muy contento con todo lo aprendido en el. &lt;br&gt;
+Realmente se lo recomendaría a cualquier persona que tenga algunas nociones de desarrollo web aunque no se si a los que recién inician ya que puede ser un poco abrumador toda la información que va enseñando.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Comencé a crear los wireframes con ayuda de &lt;a href="https://www.autodraw.com/"&gt;autodraw.io&lt;/a&gt;. A pesar de que es una herramienta muy simple es poderosa por ello para la creatividad.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Comencé a aprender NextJs siguiendo la &lt;a href="https://nextjs.org/"&gt;guia de su propia pagina web&lt;/a&gt;.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Seguí practicando 15 min de Touch Typing a diario y aunque las velocidades de cada día son irregulares puedo decir con orgullo que un día obtuve 50 palabras por minuto.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Aprendí mas acerca de algunos frameworks css y preprocesadores como &lt;a href="https://postcss.org/"&gt;postcss&lt;/a&gt;, &lt;a href="https://sass-lang.com/"&gt;sass&lt;/a&gt; y &lt;a href="https://tailwindcss.com/"&gt;tailwind&lt;/a&gt; el cual esta siendo bastante popular.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Analice algunas web y comencé a pensar en un proyecto propio que a lo mejor llevare a cabo para obtener experiencia comprobable por mi mismo antes de conseguir un trabajo.&lt;/p&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;La verdad es que estoy muy contento con este inicio de año aunque comienzo a pensar que tal vez debería tomarme un descanso real para aligerar la carga de estrés y ansiedad que llevo acarreando estos meses. &lt;/p&gt;
+
+&lt;p&gt;Espero que tengan un excelente año y que hayan disfrutado mucho las fiestas. Animo con sus proyectos.&lt;/p&gt;
+
+&lt;p&gt;¡Hasta luego!&lt;/p&gt;
+
+&lt;p&gt;Foto del cover de &lt;a href="https://unsplash.com/@jl1232006?utm_source=unsplash&amp;amp;utm_medium=referral&amp;amp;utm_content=creditCopyText"&gt;Joshua Lam&lt;/a&gt; en &lt;a href="https://unsplash.com/s/photos/chrismas?utm_source=unsplash&amp;amp;utm_medium=referral&amp;amp;utm_content=creditCopyText"&gt;Unsplash&lt;/a&gt;&lt;/p&gt;
+
+</description>
+      <category>spanish</category>
+      <category>100daysofcode</category>
+      <category>beginners</category>
+      <category>javascript</category>
     </item>
     <item>
       <title>Some Thoughts on Server State in Remix</title>
@@ -861,6 +1180,27 @@ Try analyzing the columns and see if you can get more interesting insights from 
       <category>beginners</category>
     </item>
     <item>
+      <title>HTML email signatures</title>
+      <author>Ushieru Kokoran</author>
+      <pubDate>Fri, 07 Jan 2022 23:01:09 +0000</pubDate>
+      <link>https://dev.to/ushieru/html-email-signatures-3odc</link>
+      <guid>https://dev.to/ushieru/html-email-signatures-3odc</guid>
+      <description>&lt;p&gt;Tenemos que admitir que usar una imagen como firma de correo electrónico es estéticamente superior si tienes (o eres) un buen diseñador. Pero cuando hablamos de utilidad las firmas HTML llevan por mucho la delantera; Ahora si queremos que las firmas HTML sean mas estéticas, podemos hacer un esfuerzo para lograrlo pero si quieres hacer funcional una imagen... bueno, inténtalo y me platicas como te va con dolores de cabeza y la perdida de cabello.&lt;/p&gt;
+
+&lt;p&gt;En primer lugar, si sólo utilizas una imagen como firma de correo electrónico, corres el riesgo de que tus correos electrónicos sean tratados como spam. Esto se debe a que la proporción texto:imagen es demasiado baja.&lt;/p&gt;
+
+&lt;p&gt;Y en segunda, si quiero seguirte en alguna red social? o marcar a tu móvil? o entrar a tu web? deberé copiar el texto de la imagen a mano. Debería haber una forma mas fácil, no?&lt;/p&gt;
+
+&lt;p&gt;Pues sí: &lt;strong&gt;Hipervínculos&lt;/strong&gt;. Esto significa que puedes dirigir a tus clientes o contactos exactamente a lo que buscan, tanto si se hace clic en el logotipo o en un icono de una red social, la persona que haga clic será conducida exactamente a lo que busca.&lt;/p&gt;
+
+&lt;p&gt;Lamentablemente estas no son tan sencillas de hacer y las aplicaciones que hay por internet suelen tener un costo, así que como primer proyecto del año me di un fin de semana para dar una solución rápida y elegante a este problema.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://mail-sign.vercel.app/"&gt;Mail-sign&lt;/a&gt; pruébala, y no dudes en dar tu opinión o sugerencia, cualquiera es bienvenida.&lt;/p&gt;
+
+</description>
+      <category>html</category>
+    </item>
+    <item>
       <title>Perl module tests on Linux 32bit on Github Action</title>
       <author>Yuki Kimoto</author>
       <pubDate>Fri, 07 Jan 2022 22:40:47 +0000</pubDate>
@@ -1169,941 +1509,6 @@ Emmet cheat sheet. You can also download it as PDF.&lt;br&gt;
       <category>css</category>
       <category>html</category>
       <category>productivity</category>
-    </item>
-    <item>
-      <title>Designing a Prototype for a Social Network</title>
-      <author>Valeria</author>
-      <pubDate>Fri, 07 Jan 2022 21:28:51 +0000</pubDate>
-      <link>https://dev.to/valeriavg/designing-a-prototype-for-a-social-network-3ln3</link>
-      <guid>https://dev.to/valeriavg/designing-a-prototype-for-a-social-network-3ln3</guid>
-      <description>&lt;p&gt;A crucial part of every project is planning. Luckily for us, it's also where the most fun is! &lt;/p&gt;
-
-&lt;p&gt;Contrary to popular belief, design is not about drawing, but about making assumptions, validating them and deciding how your service will work.&lt;/p&gt;
-
-&lt;p&gt;There are various ways of doing it and, chances are, you'll come up with your own. Therefore, just to give you something to start with, I'll share the way I do it.&lt;/p&gt;
-
-&lt;p&gt;I call it &lt;em&gt;lazy developer&lt;/em&gt; design 🤪, but you can refer to it as &lt;em&gt;agile data driven user-first continuous design and development methodology&lt;/em&gt; 🤯 if you must.&lt;/p&gt;
-
-&lt;p&gt;It boils down to the principle of &lt;strong&gt;doing as little design as possible&lt;/strong&gt;, then &lt;strong&gt;doing as little coding as possible&lt;/strong&gt;, rinse and repeat.&lt;/p&gt;
-
-&lt;p&gt;So, what are we building today?&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#user-stories"&gt;
-  &lt;/a&gt;
-  User Stories
-&lt;/h2&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;As a &lt;em&gt;user&lt;/em&gt;, I want to &lt;em&gt;see relevant information&lt;/em&gt;, so that I can &lt;em&gt;stay up to date with the most recent trends&lt;/em&gt;&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;This way of phrasing a requirement for a product is called a &lt;em&gt;user story&lt;/em&gt;.&lt;/p&gt;
-
-&lt;p&gt;As a rule of thumb, a user story should be split to more detailed stories until they don't raise any more questions.&lt;/p&gt;
-
-&lt;p&gt;The one we have so far does. &lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;What kind of information does the user expect, for starters?&lt;/strong&gt; &lt;/p&gt;
-
-&lt;p&gt;Well, we don't really know yet, but for now, let's assume it'll be a text with an optional illustration.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Where do we get this information?&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;At this point, we have no idea either, probably from other users, but for now, let's assume that the information comes from external sources, like a news feed, for example.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Why would a user want to use our service then?&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;Well, we'll provide content from multiple sources in one place and allow them to vote for the content they like to see more often.&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;How do we know what information is relevant for the user?&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;We'll group posts by keywords, for now let's just add hashtags and allow users to see posts with a particular tag, if they want to. &lt;/p&gt;
-
-&lt;p&gt;We could dig deeper, but it sounds good enough for a &lt;em&gt;minimum viable product&lt;/em&gt; (MVP), so the user stories we will be working with are as follows:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;As a &lt;em&gt;user&lt;/em&gt;, I want to &lt;em&gt;see news feed, containing text and maybe an illustration&lt;/em&gt;, so that I can &lt;em&gt;stay up to date with recent news&lt;/em&gt; &lt;/li&gt;
-&lt;li&gt;As a &lt;em&gt;user&lt;/em&gt;, I want to &lt;em&gt;see posts, containing specific hashtags&lt;/em&gt;, so that I can &lt;em&gt;choose information, relevant to me&lt;/em&gt;
-&lt;/li&gt;
-&lt;li&gt;As a &lt;em&gt;user&lt;/em&gt;, I want to &lt;em&gt;be able to like posts&lt;/em&gt;, so that I can &lt;em&gt;vote for the content I would like to see more often&lt;/em&gt;
-&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;Much better! We know &lt;em&gt;what&lt;/em&gt; to do, let's figure out &lt;em&gt;how&lt;/em&gt;.&lt;/p&gt;
-
-&lt;p&gt;I say we should think about our users first and figure out how will they use it before we even think about the actual &lt;em&gt;implementation&lt;/em&gt;.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#design-prototype"&gt;
-  &lt;/a&gt;
-  Design Prototype
-&lt;/h2&gt;
-
-&lt;p&gt;We could use a pen and a paper to make a sketch, but I have a better idea.&lt;/p&gt;
-
-&lt;p&gt;There are different digital tools for prototyping specifically or drawing in general, yet my favourite one is called &lt;a href="https://www.figma.com/"&gt;Figma&lt;/a&gt;. Go check it out and create a free account before we proceed. You can use the web version or install an app, they work the same way so choose whatever you prefer.&lt;/p&gt;
-
-&lt;p&gt;When you're done, click on the "New design file" button or a "+" sign by the side of "Drafts":&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--zRNrfhvE--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/lyx0gu1158xvf9hcqy0x.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--zRNrfhvE--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/lyx0gu1158xvf9hcqy0x.png" alt='Drafts "+" and New design file "+"' width="880" height="451"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;You'll see an empty workspace like this:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--YnBIbyBr--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/kizy0dnskfhnnphaqpj7.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--YnBIbyBr--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/kizy0dnskfhnnphaqpj7.png" alt="Empty Figma workplace" width="880" height="524"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;We'll start by creating a &lt;em&gt;frame&lt;/em&gt; that resembles a mobile screen. &lt;/p&gt;
-
-&lt;p&gt;Some say a share of mobile traffic is now about &lt;em&gt;56%&lt;/em&gt; of the whole internet traffic! More the reason to start with the &lt;em&gt;mobile first&lt;/em&gt;! Also, it's much easier to figure out essential &lt;em&gt;user interface&lt;/em&gt; (UI) elements when you don't have too much space 😜.&lt;/p&gt;
-
-&lt;p&gt;So, let's add an iPhone screen, for starters. Press "F" or click the frame tool on the panel and select "iPhone 13 / 13 Pro":&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--z9q51Lod--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/vrvavn26bqnvc0gfedro.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--z9q51Lod--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/vrvavn26bqnvc0gfedro.png" alt='Frame tool highlighted on the left and "iPhone 13 / 13 Pro" on the right' width="880" height="524"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;New frame will appear. Double click on the name in the left menu and rename it to &lt;code&gt;Feed&lt;/code&gt;:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--igfT7dB8--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/eo0y9q6aqayrj9sc30gk.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--igfT7dB8--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/eo0y9q6aqayrj9sc30gk.png" alt="iPhone 13 / 13 Pro - 1 selected" width="880" height="524"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;According to our requirements, posts have some text and an image. So let's add an image!&lt;/p&gt;
-
-&lt;p&gt;I bet you have some pictures laying around, but if you don't - you can grab some from &lt;a href="https://unsplash.com/"&gt;Unsplash&lt;/a&gt; for free, just don't forget to attribute the author if you publish your creations somewhere 🤓&lt;/p&gt;
-
-&lt;p&gt;Just drag and drop an image from your computer to the &lt;code&gt;Feed&lt;/code&gt; frame:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--WU0ZwcoV--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ujkvspv9a1fcxmgadkol.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--WU0ZwcoV--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ujkvspv9a1fcxmgadkol.png" alt="Big image on the frame, cropped to the frame size" width="880" height="524"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Oops, that's a little bit too big 😳. &lt;/p&gt;
-
-&lt;p&gt;We could drag the corners to resize, or use a scale tool, but I prefer to edit element &lt;em&gt;properties&lt;/em&gt; instead. &lt;/p&gt;
-
-&lt;p&gt;Set &lt;code&gt;x&lt;/code&gt; and &lt;code&gt;y&lt;/code&gt; to &lt;code&gt;0&lt;/code&gt; and &lt;code&gt;width&lt;/code&gt; to &lt;code&gt;390&lt;/code&gt;(width of the frame) and hit "Enter":&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s---89KB4VJ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/w0ip7aup1em22lshhx3v.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s---89KB4VJ--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/w0ip7aup1em22lshhx3v.png" alt="x:0,y:0,width:390 (highlighted)" width="880" height="524"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Much better!🤩&lt;/p&gt;
-
-&lt;p&gt;Now how about some text? Click "T", click somewhere on the frame and type something.&lt;/p&gt;
-
-&lt;p&gt;Hm, that's not right! Let's limit the width of the text and set height to be flexible (instead of width) in the properties:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--e8grJWTU--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/fl58ucpzrz0c3qpwv96l.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--e8grJWTU--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/fl58ucpzrz0c3qpwv96l.png" alt='Select "Auto height" and change width to 390' width="880" height="524"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Now only a small portion of the text doesn't fit on the screen. I wanted to give it some &lt;em&gt;padding&lt;/em&gt; on the sides, so clicked away from the border, but set the width to the full width of the frame, which &lt;em&gt;clipped&lt;/em&gt; the content.&lt;/p&gt;
-
-&lt;p&gt;I want to have &lt;code&gt;16&lt;/code&gt; pixels on each size, so I'll set &lt;code&gt;x&lt;/code&gt; to &lt;code&gt;16&lt;/code&gt; and width to &lt;code&gt;390-16*2&lt;/code&gt;:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--YBW84Cur--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/q580gr0w5dhhmhp15l6s.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--YBW84Cur--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/q580gr0w5dhhmhp15l6s.png" alt="Width: 390-16*2" width="880" height="524"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Press "Enter" and you'll see that the width changed to &lt;code&gt;358&lt;/code&gt;. Nice, right?&lt;/p&gt;
-
-&lt;p&gt;I rely a lot on math when I design UI. For example, whenever I choose the width for a gap or a padding (a &lt;em&gt;whitespace&lt;/em&gt;), I use numbers, divisible by &lt;code&gt;8&lt;/code&gt;: 8, 16, 24, 32, etc. The more I want the item to stand out - the bigger number I choose. I often start with &lt;code&gt;16&lt;/code&gt; and then adjust it to my needs.&lt;/p&gt;
-
-&lt;p&gt;Same goes for the text size. Therefore, let's change it to &lt;code&gt;16&lt;/code&gt; too:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--EaVLsY-K--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/s1wg945luclfs3c735kt.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--EaVLsY-K--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/s1wg945luclfs3c735kt.png" alt="Changing text size from 12 to 16" width="880" height="524"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;I want to show users that they can click on &lt;em&gt;#hashtags&lt;/em&gt; to view similar posts. And the common approach to it - is to &lt;em&gt;underscore&lt;/em&gt; a link. &lt;/p&gt;
-
-&lt;p&gt;Double click to edit the text, select the hashtag and click "..." on the text properties panel:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Z10vLCGt--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/gk1cis39j2rvcxim4zn7.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Z10vLCGt--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/gk1cis39j2rvcxim4zn7.png" alt="Type details panel" width="880" height="524"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;And then click on the "U" button:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--ebPU1uSk--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/dxxlk3j9yrhexv33ofz4.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ebPU1uSk--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/dxxlk3j9yrhexv33ofz4.png" alt="Underscored hashtag" width="880" height="524"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Nicely done! It almost looks like a post, doesn't it?&lt;/p&gt;
-
-&lt;p&gt;But we need more posts for our feed. We could just copy and paste it, of course, as much times as we need, but Figma has a better option for reusable elements.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#components"&gt;
-  &lt;/a&gt;
-  Components
-&lt;/h2&gt;
-
-&lt;p&gt;Select both image and text by holding "Shift" and clicking on them one by one, press right mouse button and select "Create component" (or use a corresponding shortcut):&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--epM8q7qm--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/4f3nbw82qw7igu76jh81.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--epM8q7qm--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/4f3nbw82qw7igu76jh81.png" alt="Create component" width="880" height="524"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Double click on the name and rename it to &lt;code&gt;Post&lt;/code&gt;:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Wsj7wU3S--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/lpqjpz4wjrw6tx5ay9eh.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Wsj7wU3S--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/lpqjpz4wjrw6tx5ay9eh.png" alt='Select "Component 1"' width="880" height="524"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Now copy and paste the component (&lt;code&gt;ctrl+c&lt;/code&gt;,&lt;code&gt;ctrl+v&lt;/code&gt; or &lt;code&gt;cmd+c&lt;/code&gt;,&lt;code&gt;cmd+v&lt;/code&gt; for Mac) and drag it down:&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--ewhv9xyG--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/wtrljhj74wc2f4eemb9k.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ewhv9xyG--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/wtrljhj74wc2f4eemb9k.png" alt="Two posts one after another" width="880" height="524"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Let's make sure that the gap between the posts is aligned with our &lt;em&gt;design system&lt;/em&gt; (that size is divisible by &lt;code&gt;8&lt;/code&gt;).🧐&lt;/p&gt;
-
-&lt;p&gt;Select one post, move mouse over the other one and press "Alt":&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--62GCk6h0--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ey37fkjwyo560fli94to.gif" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--62GCk6h0--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ey37fkjwyo560fli94to.gif" alt="Gap is 31 pixel" width="389" height="761"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;In my case, I was off by just one pixel 😎, so in order to fix it I only needed to press "Arrow down" one time to move the selected post down by one pixel and make it &lt;code&gt;32&lt;/code&gt;.&lt;/p&gt;
-
-&lt;p&gt;It's not that interesting to see the same post over and over...&lt;/p&gt;
-
-&lt;p&gt;Let's select the second image and replace it by another picture:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--fw0lsV_J--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/3s1cx1v7xtntvlvi0ifi.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--fw0lsV_J--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/3s1cx1v7xtntvlvi0ifi.png" alt="Choose new image" width="880" height="524"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;And the text too. You should end up with something like this:&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--lh81ZIIg--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/a9lomngxloacbfqixyrv.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--lh81ZIIg--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/a9lomngxloacbfqixyrv.png" alt="Two different posts" width="880" height="524"&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;h2&gt;
-  &lt;a href="#style"&gt;
-  &lt;/a&gt;
-  Style
-&lt;/h2&gt;
-
-&lt;p&gt;Current design seems very plain to me. I want to add some flavor to it, make it recognisable! Add some style!&lt;/p&gt;
-
-&lt;p&gt;As you've probably guessed by the pictures, I'm a big fan of &lt;em&gt;voxel&lt;/em&gt; and &lt;em&gt;pixel&lt;/em&gt; art, so how about we do a pixel-art inspired theme 😍?&lt;/p&gt;
-
-&lt;p&gt;And for us it boils down to changing the font. &lt;/p&gt;
-
-&lt;p&gt;My go-to resource is &lt;a href="https://fonts.google.com/"&gt;Google Fonts&lt;/a&gt;: it offers free fonts for personal and commercial use and, so happens, it has a wonderful &lt;a href="https://fonts.google.com/specimen/VT323"&gt;VT323&lt;/a&gt; pixel font. Download it and install to your computer.&lt;/p&gt;
-
-&lt;p&gt;You'll need to reload Figma to see the newly installed font in the list and be able to select it. &lt;/p&gt;
-
-&lt;p&gt;When you're done, select the text of the main post component, type &lt;code&gt;VT&lt;/code&gt; and let autocomplete do the rest:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--m92dsdXg--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ayag1fk5xmhfaoetpdyz.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--m92dsdXg--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ayag1fk5xmhfaoetpdyz.png" alt="Pixelated font" width="880" height="524"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;But the other post didn't change, because Figma allows us to customise text appearance between copies of the same &lt;em&gt;component&lt;/em&gt;, unless we tell it to reuse the &lt;em&gt;style&lt;/em&gt;.&lt;/p&gt;
-
-&lt;p&gt;Click on the "Style" button by the side of "Text" in the properties and click "+" to add a new text style:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--BBjcBwv4--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ev0l5nt4do4h6cklae9b.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--BBjcBwv4--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ev0l5nt4do4h6cklae9b.png" alt="Adding a text style" width="510" height="560"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Call it &lt;code&gt;Default&lt;/code&gt; (or whatever you prefer) and press "Create Style". Both posts now share the same style:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--qGvPqF8v--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/26rebfl4xzqklco41j0x.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--qGvPqF8v--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/26rebfl4xzqklco41j0x.png" alt="Feed with new font" width="390" height="844"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Nice! Now we are only missing a nice like button ❤️&lt;/p&gt;
-&lt;h2&gt;
-  &lt;a href="#icons"&gt;
-  &lt;/a&gt;
-  Icons
-&lt;/h2&gt;
-
-&lt;p&gt;One icon can explain what a button do better than a thousand words (and much faster too). Figma is a &lt;em&gt;vector&lt;/em&gt; editor and has some built-in shapes and first-class support for &lt;em&gt;scalable vector graphics&lt;/em&gt;. You could grab an SVG icon from &lt;a href="https://fontawesome.com/v5.15/icons"&gt;FontAwesome&lt;/a&gt; or &lt;a href="https://www.flaticon.com/"&gt;FlatIcon&lt;/a&gt;, but I suggest we make them ourselves 😎&lt;/p&gt;
-
-&lt;p&gt;Recently I've been playing with &lt;em&gt;WebGL&lt;/em&gt; graphics and created a pixel art editor specifically for that 🥳 It's &lt;a href="https://github.com/ValeriaVG/pixel-vg"&gt;open source&lt;/a&gt; and I have a wrote a post about it here on dev.to, if you would like to know how it works. &lt;/p&gt;
-
-&lt;p&gt;Anyway, just open the &lt;a href="https://pixel-vg-6ijid.ondigitalocean.app/"&gt;live version&lt;/a&gt;, turn "X" mirroring on and start drawing a black heart outline:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--sCDgvZpR--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/1eau3611fjotsbairv6f.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--sCDgvZpR--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/1eau3611fjotsbairv6f.png" alt="Half of a heart" width="880" height="1168"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;And, when you ready, press "Save as SVG". &lt;/p&gt;
-
-&lt;p&gt;Here's my version , which you can use instead, if you prefer:&lt;/p&gt;
-
-
-&lt;div class="ltag_gist-liquid-tag"&gt;
-  
-&lt;/div&gt;
-
-
-&lt;p&gt;Drag and drop the SVG icon to an empty space in Figma:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--mf2ISOan--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/owscutuei2jxwmbwm97y.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--mf2ISOan--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/owscutuei2jxwmbwm97y.png" alt="Empty heart by the side of Feed" width="880" height="524"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Expand the icon contents in the left panel and select "Vector":&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--J1w67ek5--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/50zj5usrsncnxo85r65q.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--J1w67ek5--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/50zj5usrsncnxo85r65q.png" alt="Only Vector selected" width="880" height="524"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Drag it above its frame to pull it out of the container and leave only the icon itself:&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--A40LgAnH--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/7tapik9va248e2qp1fvj.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--A40LgAnH--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/7tapik9va248e2qp1fvj.png" alt="Vector in the root of the tree" width="486" height="656"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Get rid of the empty frame by selecting it alone and pressing "Backspace". &lt;/p&gt;
-
-&lt;p&gt;Rename "Vector" to &lt;code&gt;Heart&lt;/code&gt;.&lt;/p&gt;
-
-&lt;p&gt;Change the heart size to something more suitable for an icon by activating "Constrain proportions" and setting one of the sizes to e.g. &lt;code&gt;24&lt;/code&gt;:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--mtmROE1p--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/83nnm3r740iftt2mbn9b.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--mtmROE1p--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/83nnm3r740iftt2mbn9b.png" alt="Resizing image to 24" width="504" height="418"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Create a component from the heart, just like we did with the post before. &lt;/p&gt;
-
-&lt;p&gt;Click on a "+" next to "Variants" with the icon component selected:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--690x2Eot--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/z1acntw56iem81znipve.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--690x2Eot--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/z1acntw56iem81znipve.png" alt="Adding new variant" width="474" height="574"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Name the variant &lt;code&gt;Filled&lt;/code&gt;:&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--pvlMe0UN--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/fc0ax9blgl2udi96eg61.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--pvlMe0UN--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/fc0ax9blgl2udi96eg61.png" alt="Filled variant" width="508" height="470"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Select the "Heart" (not the "Default" or "Filled" variant) on the left:&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--4qjL7wjz--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ouebdlc5wzv2p9gw88ri.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--4qjL7wjz--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ouebdlc5wzv2p9gw88ri.png" alt='"Heart" selected' width="482" height="404"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Double click on "Property 1" in parameters and change it to &lt;code&gt;State&lt;/code&gt;:&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--rYMFUM3Z--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/xhmrrxb77gbsvh9nz1ma.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--rYMFUM3Z--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/xhmrrxb77gbsvh9nz1ma.png" alt="State: default, filled" width="536" height="282"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Now expand the "Filled" variant, select the underlying "Heart" and click "Edit Object" icon on the top and use "Paint bucket" to fill the icon and then press "Done":&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--vg5P3NUf--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/xaf9rkty4ebvp6nqh3bb.gif" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--vg5P3NUf--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/xaf9rkty4ebvp6nqh3bb.gif" alt="Paint the heart black" width="517" height="306"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Now we can switch between these &lt;em&gt;variants&lt;/em&gt; whenever we want! &lt;/p&gt;
-
-&lt;p&gt;Select the "Default" heart, copy it, then select the post &lt;em&gt;component&lt;/em&gt; &amp;amp; paste:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--XliZWl2---/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/574c8skxf9efw2lhd8hs.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--XliZWl2---/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/574c8skxf9efw2lhd8hs.png" alt="Icon on the post" width="880" height="671"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;The same icon with appear on the other post as well. Select that other icon and change "State" to "Filled" on the "Heart" properties panel:&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--xi-SNz7H--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/hfj6z3s6xrwfm6gqlzoe.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--xi-SNz7H--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/hfj6z3s6xrwfm6gqlzoe.png" alt="Filled icon" width="880" height="671"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;The icon is barely visible on my images, let's change it's color to white by scrolling the properties panel and changing "Selection color":&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--KEgW9RN7--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/je0tpp1rj24sq6rlij99.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--KEgW9RN7--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/je0tpp1rj24sq6rlij99.png" alt="White icon" width="880" height="671"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;We could go ahead and change the other one as well, but I prefer to add another variant to the icons!&lt;/p&gt;
-
-&lt;p&gt;Select the "Heart" component and click on the "..." and "Add property", call it &lt;code&gt;Color&lt;/code&gt;:&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Xj6jbchd--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ajomyje8m5zuf9oh0jj2.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Xj6jbchd--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ajomyje8m5zuf9oh0jj2.png" alt="Add new property to the icon" width="554" height="724"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Add two new variants: &lt;code&gt;Dark&lt;/code&gt; and &lt;code&gt;Light&lt;/code&gt;, by pressing "+" with icon you want to clone selected:&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--134IhgXl--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ezhw5mrv07fgt3jmizh3.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--134IhgXl--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ezhw5mrv07fgt3jmizh3.png" alt="Four variants" width="880" height="671"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Change "Selection color" for the light icons:&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--bFK-Ag3T--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/lwfi1gyw0j67ccyql1ze.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--bFK-Ag3T--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/lwfi1gyw0j67ccyql1ze.png" alt="Light and dark icons" width="880" height="671"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;And finally, change the "Color" property on the post &lt;em&gt;component&lt;/em&gt; to "Light":&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--ZvdzRdy4--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/9623j82s1prd72tlr93q.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ZvdzRdy4--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/9623j82s1prd72tlr93q.png" alt="Light icons on images" width="880" height="671"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Here's my final version:&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--m9ARFSik--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/vgguhdhxa0b22c30vtbn.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--m9ARFSik--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/vgguhdhxa0b22c30vtbn.png" alt="Feed, final version" width="390" height="844"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;I think it looks nice, doesn't it? 🤩&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#bonus-challenge"&gt;
-  &lt;/a&gt;
-  Bonus challenge
-&lt;/h2&gt;
-
-&lt;p&gt;Want to try something on your own?&lt;br&gt;
-Here's a suggestion!&lt;/p&gt;
-
-&lt;p&gt;Add two more items to the post &lt;em&gt;component&lt;/em&gt;:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Date, when the post was published&lt;/li&gt;
-&lt;li&gt;Author name and avatar&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;Also, add a short &lt;em&gt;variant&lt;/em&gt; to a post: without an image. &lt;/p&gt;
-
-&lt;p&gt;Show both variants the feed.&lt;/p&gt;
-
-&lt;p&gt;How would you visually separate them? 🧐&lt;/p&gt;
-
-&lt;p&gt;Till the next time! And good luck!&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://www.buymeacoffee.com/valeriavg"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Rb9xKs4G--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy me a coffee" width="545" height="153"&gt;&lt;/a&gt;&lt;/p&gt;
-
-</description>
-      <category>webdev</category>
-      <category>design</category>
-      <category>beginners</category>
-      <category>tutorial</category>
-    </item>
-    <item>
-      <title>Constant work to onboarding new members into engineering team</title>
-      <author>Avelino</author>
-      <pubDate>Fri, 07 Jan 2022 20:43:19 +0000</pubDate>
-      <link>https://dev.to/prestd/constant-work-to-onboarding-new-members-into-engineering-team-18k0</link>
-      <guid>https://dev.to/prestd/constant-work-to-onboarding-new-members-into-engineering-team-18k0</guid>
-      <description>&lt;p&gt;Developing the &lt;em&gt;"onboarding"&lt;/em&gt; process for a new person in an engineering team takes a lot of dedication, and keeping this process fluid takes even more work (with as little friction as possible).&lt;/p&gt;
-
-&lt;p&gt;This issue is challenging for any team working full time, it is even worse for Open Source projects where contributors usually work in their spare time. We should make this process as fluid as possible so that people don't get discouraged by the complexity of getting up there and testing, until they make their first pull request.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#configure-development-environment"&gt;
-  &lt;/a&gt;
-  Configure development environment
-&lt;/h2&gt;
-
-&lt;p&gt;Every developer has a different way of setting up a development environment, even if it is in a popular technology (programming language) with lots of documentation, text editor extensions (emacs, vim, vscode, ...), etc.&lt;/p&gt;
-
-&lt;p&gt;We developers are used to “&lt;em&gt;our way”&lt;/em&gt; of doing things, it is common for us to create resistance when someone presents a different way and I do it another way.&lt;/p&gt;
-
-&lt;p&gt;In the vast majority of applications they depend on external resources such as databases, APIs, tokens, etc., if we force the developer (user) to read all the project documentation before having the first contact with the project it is very likely that we will lose his engagement, and some frustrations in him, such as:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;I just wanted to test&lt;/li&gt;
-&lt;li&gt;I have to read all this to see it working&lt;/li&gt;
-&lt;li&gt;What a complicated project&lt;/li&gt;
-&lt;li&gt;I have to install X, Y and Z services/software on my machine&lt;/li&gt;
-&lt;li&gt;I don't know the programming language used in the project, which plugins should I install in my editor?&lt;/li&gt;
-&lt;li&gt;... and much more.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;There are some tools to assist project maintainers (open source or private) to generate an onboarding process with as little friction as possible.&lt;/p&gt;
-
-&lt;p&gt;Configuring editor (with all the necessary plugins and parameters), all the services the project needs to run, environment variables configured, database running with initial data load, data viewer configured (software to manage data from the database), etc.&lt;/p&gt;
-
-&lt;p&gt;To the point where the developer “&lt;strong&gt;clicks a button”&lt;/strong&gt; and magically has the development environment ready to test the software.&lt;/p&gt;
-
-&lt;p&gt;In the last few months we at &lt;em&gt;prestd&lt;/em&gt; have been working on improving our documentation (it is far from being good documentation) and removing as much friction as possible in the process of getting a new development environment up, some issues we have implemented until we got to what we have today:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;
-&lt;a href="https://github.com/prest/prest/issues/510"&gt;Improve local tests execution&lt;/a&gt; — it is frustrating that someone wants to contribute and cannot run the local tests (we use e2e tests, making requests to &lt;em&gt;prestd&lt;/em&gt;'s own API), a way was implemented where the tests run inside docker using &lt;code&gt;docker-compose&lt;/code&gt;;&lt;/li&gt;
-&lt;li&gt;
-&lt;a href="https://github.com/prest/prest/issues/542"&gt;Documentation: new content architecture&lt;/a&gt; — thinking of a person who has never had contact with &lt;em&gt;prestd&lt;/em&gt; and wants to test or use it in a production environment, both people should get into the documentation and be able to do what they want to do (bring up the environment);&lt;/li&gt;
-&lt;li&gt;
-&lt;a href="https://github.com/prest/prest/issues/665"&gt;Onboarding of new contributor: using devcontainer&lt;/a&gt; — prepare the development environment with &lt;em&gt;"1 click"&lt;/em&gt; using &lt;a href="https://code.visualstudio.com/docs/remote/containers"&gt;devcontainers&lt;/a&gt; (&lt;a href="https://github.com/features/codespaces"&gt;GitHub Codespaces&lt;/a&gt; support).&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;See &lt;em&gt;prestd&lt;/em&gt;'s development guide page &lt;a href="https://docs.prestd.com/prestd/setup/development-guide/#dev-container"&gt;&lt;strong&gt;here&lt;/strong&gt;&lt;/a&gt;.&lt;/p&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;It is not nice to have the engineering team working in a bad environment, we need to think more about our team and make the team experience fluid.&lt;br&gt;
-&lt;strong&gt;people &amp;gt; technology&lt;/strong&gt;&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;h2&gt;
-  &lt;a href="#focus-on-the-developer-user"&gt;
-  &lt;/a&gt;
-  Focus on the developer (user)
-&lt;/h2&gt;
-
-&lt;p&gt;The &lt;em&gt;prestd&lt;/em&gt; exists open source since 2016, I particularly like the project very much and believe it is a great solution to accelerate the development of a RESTful API for existing database and especially development of a new API (project starting from scratch).&lt;/p&gt;
-
-&lt;p&gt;But for many years we turned to developing the software didn't look at documentation with the dedication we should, causing the contributor base to shrink (existing and new) — people going through open source project, hardly stayed for many years, so we always have to have the most rounded onboarding process possible.&lt;/p&gt;
-
-&lt;p&gt;Given this problem I started to look at the documentation with more dedication and every decision in &lt;em&gt;prestd&lt;/em&gt; from now on will be thinking about the developer (user) experience, answering the following questions:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Will this improve the developer experience using the project?&lt;/li&gt;
-&lt;li&gt;Will this make the project easier to use?&lt;/li&gt;
-&lt;li&gt;Will this make it easier to maintain the development of the project?&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;When all 3 questions are “&lt;strong&gt;yes”&lt;/strong&gt;, we will proceed with the implementation, regardless of what it is: feature, improvement, fix, etc.&lt;/p&gt;
-
-</description>
-      <category>opensource</category>
-      <category>management</category>
-      <category>vscode</category>
-      <category>docker</category>
-    </item>
-    <item>
-      <title>Get email notifications from serverless Azure functions using SendGrid</title>
-      <author>Marcel.L</author>
-      <pubDate>Fri, 07 Jan 2022 20:40:38 +0000</pubDate>
-      <link>https://dev.to/pwd9000/get-email-alerts-from-serverless-azure-functions-using-sendgrid-217m</link>
-      <guid>https://dev.to/pwd9000/get-email-alerts-from-serverless-azure-functions-using-sendgrid-217m</guid>
-      <description>&lt;h2&gt;
-  &lt;a href="#overview"&gt;
-  &lt;/a&gt;
-  Overview
-&lt;/h2&gt;
-
-&lt;p&gt;I recently posted a tutorial on how to better manage and maintain the lifecycle of Azure resources, automating resource decommissions by using a simple &lt;strong&gt;Decommission&lt;/strong&gt; tag with a date value, and an Azure serverless &lt;strong&gt;Function App&lt;/strong&gt;. The tutorial also includes how to track successful and failed decommissions using the &lt;strong&gt;function apps&lt;/strong&gt; own storage account by recording the decommission events into table storage.&lt;/p&gt;
-
-&lt;p&gt;The full tutorial can be found here: &lt;/p&gt;
-&lt;div class="ltag__link"&gt;
-  &lt;a href="/pwd9000" class="ltag__link__link"&gt;
-    &lt;div class="ltag__link__pic"&gt;
-      &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Amb4rEJN--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://res.cloudinary.com/practicaldev/image/fetch/s--L_SDLOmq--/c_fill%2Cf_auto%2Cfl_progressive%2Ch_150%2Cq_auto%2Cw_150/https://dev-to-uploads.s3.amazonaws.com/uploads/user/profile_image/620034/93be2c72-3a13-478e-8af1-a4bedc1b2331.jpeg" alt="pwd9000"&gt;
-    &lt;/div&gt;
-  &lt;/a&gt;
-  &lt;a href="/pwd9000/automate-azure-resource-decommissions-with-tracking-aok" class="ltag__link__link"&gt;
-    &lt;div class="ltag__link__content"&gt;
-      &lt;h2&gt;Automate Azure Resource Decommissions (with tracking)&lt;/h2&gt;
-      &lt;h3&gt;Marcel.L ・ Dec 20 '21 ・ 12 min read&lt;/h3&gt;
-      &lt;div class="ltag__link__taglist"&gt;
-        &lt;span class="ltag__link__tag"&gt;#azurefunctions&lt;/span&gt;
-        &lt;span class="ltag__link__tag"&gt;#azure&lt;/span&gt;
-        &lt;span class="ltag__link__tag"&gt;#serverless&lt;/span&gt;
-        &lt;span class="ltag__link__tag"&gt;#automation&lt;/span&gt;
-      &lt;/div&gt;
-    &lt;/div&gt;
-  &lt;/a&gt;
-&lt;/div&gt;
-
-
-&lt;p&gt;This brings me to this new tutorial I want to share with you today. I was thinking how we can even better the process by also getting an email notification when a resource has been decommissioned or if a decommission has failed, and perhaps including the error message in the alert if it was a failed decommission. So today I will share with you a general guide on how we can utilize a SaaS service in Azure called &lt;strong&gt;SendGrid&lt;/strong&gt; to send us email notifications from an &lt;strong&gt;Azure Function App&lt;/strong&gt;.&lt;/p&gt;
-
-&lt;p&gt;This tutorial is only a general guide on how to utilize the &lt;strong&gt;SendGrid&lt;/strong&gt; service inside of a &lt;strong&gt;Function App&lt;/strong&gt; to send notification emails and does not follow on my previous tutorial. This guide is meant to serve as a supplement to show how to set up the &lt;strong&gt;SendGrid&lt;/strong&gt; service and utilize the service in any &lt;strong&gt;Powershell&lt;/strong&gt; based &lt;strong&gt;Function App&lt;/strong&gt; in any environment, giving the ability to send email notifications to relevant stakeholders.&lt;/p&gt;
-
-&lt;p&gt;Feel free to integrate the steps in this tutorial in addition to my previous blog post mentioned above, if you have the additional requirement to be notified by email about resource decommissions. Let's get started.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#what-is-sendgrid"&gt;
-  &lt;/a&gt;
-  What is SendGrid?
-&lt;/h2&gt;
-
-&lt;p&gt;&lt;a href="https://docs.sendgrid.com/for-developers/partners/microsoft-azure-2021#create-a-twilio-sendgrid-account"&gt;SendGrid&lt;/a&gt; is a third party provider in Azure that provides a cloud-based email service. The service manages various types of email including shipping notifications, friend requests, sign-up confirmations, and email newsletters. It also handles internet service provider (ISP) monitoring, domain keys, sender policy framework (SPF), and feedback loops. Additionally provides link tracking, open rate reporting. It also allows companies to track email opens, unsubscribes, bounces, and spam reports.&lt;/p&gt;
-
-&lt;p&gt;Azure offers a variety of &lt;strong&gt;&lt;a href="https://sendgrid.com/marketing/sendgrid-services-cro/#pricing-app"&gt;SendGrid pricing plans&lt;/a&gt;&lt;/strong&gt;. For the purpose of our use case and this tutorial we will create and use the &lt;strong&gt;FREE&lt;/strong&gt; plan which gives us access to the API and also 100 emails/day forever.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--dvwQGPQI--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/sendgrid_free1.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--dvwQGPQI--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/sendgrid_free1.png" alt="image.png" width="880" height="331"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#steps-to-set-up"&gt;
-  &lt;/a&gt;
-  Steps to set up
-&lt;/h2&gt;
-
-&lt;p&gt;We are going to need to perform the following steps:&lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;
-&lt;strong&gt;Create Azure resources:&lt;/strong&gt; (Optional) We will first create a Resource Group, PowerShell based Function App and KeyVault. This step is optional only for this demo/tutorial.&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;Create a SendGrid account:&lt;/strong&gt; We will create a FREE SendGrid account, activate the account and create a sender identity.&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;Generate a SendGrid API Key:&lt;/strong&gt; We will generate an API Key, store this key in the key vault and consume it in our PowerShell function to authenticate to the SendGrid API.&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;Create a SendGrid API PowerShell Function:&lt;/strong&gt; We will create a PowerShell function to interact with the SendGrid API to send an email notification.&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;Integrate PowerShell Function into Function App:&lt;/strong&gt; We will integrate our PowerShell function into our Function App and test.&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;h2&gt;
-  &lt;a href="#1-create-azure-resources"&gt;
-  &lt;/a&gt;
-  1. Create Azure resources
-&lt;/h2&gt;
-
-&lt;p&gt;To set up the function app I wrote a PowerShell script using AZ CLI, that would build and configure the function app to use as a demo for this tutorial. There was one manual step however I will cover a bit later on. You can find the script I used on my &lt;a href="https://github.com/Pwd9000-ML/blog-devto/tree/main/posts/Azure-SendGrid-Function-Alerts/code"&gt;github code&lt;/a&gt; page called &lt;a href="https://github.com/Pwd9000-ML/blog-devto/blob/main/posts/Azure-SendGrid-Function-Alerts/code/Azure-Pre-Reqs.ps1"&gt;Azure-Pre-Reqs.ps1&lt;/a&gt;.&lt;/p&gt;
-
-&lt;p&gt;First we will log into Azure by running:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight powershell"&gt;&lt;code&gt;&lt;span class="n"&gt;az&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;login&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-&lt;p&gt;After logging into Azure and selecting the subscription, we can run the script that will create the function app resources and set the environment up:&lt;br&gt;
-&lt;/p&gt;
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight powershell"&gt;&lt;code&gt;&lt;span class="c"&gt;## code/Azure-Pre-Reqs.ps1&lt;/span&gt;&lt;span class="w"&gt;
-
-&lt;/span&gt;&lt;span class="c"&gt;#Log into Azure&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="c"&gt;#az login&lt;/span&gt;&lt;span class="w"&gt;
-
-&lt;/span&gt;&lt;span class="c"&gt;# Setup Variables.&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="nv"&gt;$randomInt&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Get-Random&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;-Maximum&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;9999&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="nv"&gt;$subscriptionId&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;get-azcontext&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;Subscription&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;Id&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="nv"&gt;$resourceGroupName&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"SendGrid-Function-App-Demo"&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="nv"&gt;$storageName&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"sgridfuncsa&lt;/span&gt;&lt;span class="nv"&gt;$randomInt&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="nv"&gt;$functionAppName&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"sgridfunc&lt;/span&gt;&lt;span class="nv"&gt;$randomInt&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="nv"&gt;$kvName&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"sgridfunkv&lt;/span&gt;&lt;span class="nv"&gt;$randomInt&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="nv"&gt;$region&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"uksouth"&lt;/span&gt;&lt;span class="w"&gt;
-
-&lt;/span&gt;&lt;span class="c"&gt;# Create a resource resourceGroupName&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="n"&gt;az&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;group&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;create&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--name&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$resourceGroupName&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--location&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$region&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="w"&gt;
-
-&lt;/span&gt;&lt;span class="c"&gt;# Create a Key Vault&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="n"&gt;az&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;keyvault&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;create&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="se"&gt;`
-&lt;/span&gt;&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nt"&gt;--name&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$kvName&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="se"&gt;`
-&lt;/span&gt;&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nt"&gt;--resource-group&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$resourceGroupName&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="se"&gt;`
-&lt;/span&gt;&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nt"&gt;--location&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$region&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="se"&gt;`
-&lt;/span&gt;&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nt"&gt;--enable-rbac-authorization&lt;/span&gt;&lt;span class="w"&gt;
-
-&lt;/span&gt;&lt;span class="c"&gt;# Authorize the operation to create a few secrets - Signed in User (Key Vault Secrets Officer)&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="n"&gt;az&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;ad&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;signed-in-user&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;show&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--query&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;objectId&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;-o&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;tsv&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;|&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;foreach-object&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="n"&gt;az&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;role&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;assignment&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;create&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="se"&gt;`
-&lt;/span&gt;&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="nt"&gt;--role&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"Key Vault Secrets Officer"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="se"&gt;`
-&lt;/span&gt;&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="nt"&gt;--assignee&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="bp"&gt;$_&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="se"&gt;`
-&lt;/span&gt;&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="nt"&gt;--scope&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"/subscriptions/&lt;/span&gt;&lt;span class="nv"&gt;$subscriptionId&lt;/span&gt;&lt;span class="s2"&gt;/resourceGroups/&lt;/span&gt;&lt;span class="nv"&gt;$resourceGroupName&lt;/span&gt;&lt;span class="s2"&gt;/providers/Microsoft.KeyVault/vaults/&lt;/span&gt;&lt;span class="nv"&gt;$kvName&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
-
-&lt;/span&gt;&lt;span class="c"&gt;# Create an azure storage account for function app&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="n"&gt;az&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;storage&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;account&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;create&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="se"&gt;`
-&lt;/span&gt;&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nt"&gt;--name&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$storageName&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="se"&gt;`
-&lt;/span&gt;&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nt"&gt;--location&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$region&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="se"&gt;`
-&lt;/span&gt;&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nt"&gt;--resource-group&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$resourceGroupName&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="se"&gt;`
-&lt;/span&gt;&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nt"&gt;--sku&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"Standard_LRS"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="se"&gt;`
-&lt;/span&gt;&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nt"&gt;--kind&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"StorageV2"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="se"&gt;`
-&lt;/span&gt;&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nt"&gt;--https-only&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;true&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="se"&gt;`
-&lt;/span&gt;&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nt"&gt;--min-tls-version&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"TLS1_2"&lt;/span&gt;&lt;span class="w"&gt;
-
-&lt;/span&gt;&lt;span class="c"&gt;# Create a Function App&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="n"&gt;az&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;functionapp&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;create&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="se"&gt;`
-&lt;/span&gt;&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nt"&gt;--name&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$functionAppName&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="se"&gt;`
-&lt;/span&gt;&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nt"&gt;--storage-account&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$storageName&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="se"&gt;`
-&lt;/span&gt;&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nt"&gt;--consumption-plan-location&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$region&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="se"&gt;`
-&lt;/span&gt;&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nt"&gt;--resource-group&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$resourceGroupName&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="se"&gt;`
-&lt;/span&gt;&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nt"&gt;--os-type&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"Windows"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="se"&gt;`
-&lt;/span&gt;&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nt"&gt;--runtime&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"powershell"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="se"&gt;`
-&lt;/span&gt;&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nt"&gt;--runtime-version&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"7.0"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="se"&gt;`
-&lt;/span&gt;&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nt"&gt;--functions-version&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"3"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="se"&gt;`
-&lt;/span&gt;&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nt"&gt;--assign-identity&lt;/span&gt;&lt;span class="w"&gt;
-
-&lt;/span&gt;&lt;span class="c"&gt;# Set Key Vault Secrets (secret values are set to 'xxxx', we will update these later after creating SendGrid account)&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="n"&gt;Start-Sleep&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;-s&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;15&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="n"&gt;az&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;keyvault&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;secret&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;set&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--vault-name&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$kvName&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--name&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"sendGridApiKey"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--value&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"xxxx"&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="n"&gt;az&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;keyvault&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;secret&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;set&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--vault-name&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$kvName&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--name&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"fromAddress"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--value&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"xxxx"&lt;/span&gt;&lt;span class="w"&gt;
-
-&lt;/span&gt;&lt;span class="c"&gt;#Configure Function App environment variables:&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="nv"&gt;$settings&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;@(&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="c"&gt;# @Microsoft.KeyVault(SecretUri=https://&amp;lt;key-vault-name&amp;gt;.vault.azure.net/secrets/&amp;lt;secret-name&amp;gt;/&amp;lt;secret-version&amp;gt;)&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="c"&gt;# or @Microsoft.KeyVault(SecretUri=https://&amp;lt;key-vault-name&amp;gt;.vault.azure.net/secrets/&amp;lt;secret-name&amp;gt;/) '/' at end means to take latest secret&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="s2"&gt;"sendGridApiKey=@Microsoft.KeyVault(SecretUri=https://&lt;/span&gt;&lt;span class="nv"&gt;$kvName&lt;/span&gt;&lt;span class="s2"&gt;.vault.azure.net/secrets/sendGridApiKey/)"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c"&gt;#from KV&lt;/span&gt;&lt;span class="w"&gt;
-  &lt;/span&gt;&lt;span class="s2"&gt;"fromAddress=@Microsoft.KeyVault(SecretUri=https://&lt;/span&gt;&lt;span class="nv"&gt;$kvName&lt;/span&gt;&lt;span class="s2"&gt;.vault.azure.net/secrets/fromAddress/)"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c"&gt;#from KV&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;
-
-&lt;/span&gt;&lt;span class="nv"&gt;$settings&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;|&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;foreach-object&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="n"&gt;az&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;functionapp&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;config&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;appsettings&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;set&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--name&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$functionAppName&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--resource-group&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$resourceGroupName&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--settings&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"""&lt;/span&gt;&lt;span class="bp"&gt;$_&lt;/span&gt;&lt;span class="s2"&gt;"""&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
-
-&lt;/span&gt;&lt;span class="c"&gt;#Assign Function System MI permissions to KV to access secrets&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="nv"&gt;$functionMI&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;$&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;az&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;resource&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;list&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--name&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$functionAppName&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--query&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;identity&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;principalId&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;--out&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;tsv&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="o"&gt;|&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;foreach-object&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="n"&gt;az&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;role&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;assignment&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;create&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="se"&gt;`
-&lt;/span&gt;&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="nt"&gt;--role&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"Key Vault Secrets User"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="se"&gt;`
-&lt;/span&gt;&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="nt"&gt;--assignee&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="bp"&gt;$_&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="se"&gt;`
-&lt;/span&gt;&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="nt"&gt;--scope&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"/subscriptions/&lt;/span&gt;&lt;span class="nv"&gt;$subscriptionId&lt;/span&gt;&lt;span class="s2"&gt;/resourceGroups/&lt;/span&gt;&lt;span class="nv"&gt;$resourceGroupName&lt;/span&gt;&lt;span class="s2"&gt;/providers/Microsoft.KeyVault/vaults/&lt;/span&gt;&lt;span class="nv"&gt;$kvName&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-&lt;p&gt;Lets take a closer look, step-by-step what the above script does as part of setting up the function app environment.&lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;Create a resource group called &lt;code&gt;SendGrid-Function-App-Demo&lt;/code&gt;. &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--nn6GEQAi--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/rg.png" alt="image.png" width="753" height="333"&gt;
-&lt;/li&gt;
-&lt;li&gt;Create a &lt;strong&gt;PowerShell&lt;/strong&gt; Function App with &lt;code&gt;SystemAssigned&lt;/code&gt; managed identity, &lt;code&gt;consumption&lt;/code&gt; app service plan, &lt;code&gt;insights&lt;/code&gt;, a &lt;code&gt;key vault&lt;/code&gt; and function app &lt;code&gt;storage account&lt;/code&gt;. &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--437IlEZC--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/func.png" alt="image.png" width="765" height="314"&gt; &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--LLzYzdxX--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/funcmi1.png" alt="image.png" width="880" height="571"&gt;
-&lt;/li&gt;
-&lt;li&gt;Configure Function App environment variables. (These settings/variables will be consumed inside of the function app later). &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--G2Er29x_--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/funcappsettings1.png" alt="image.png" width="880" height="633"&gt;
-&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;p&gt;&lt;strong&gt;NOTE:&lt;/strong&gt; You will see that we are referencing the &lt;code&gt;fromAddress&lt;/code&gt; and &lt;code&gt;sendGridApiKey&lt;/code&gt; from the key vault we created.&lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;Assign Function App &lt;code&gt;SystemAssigned&lt;/code&gt; managed identity permissions to access/read secrets on the key vault. &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--DA-EJjB_--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/kvrbac1.png" alt="image.png" width="880" height="442"&gt;
-&lt;/li&gt;
-&lt;li&gt;Create two dummy key vault secrets called &lt;code&gt;fromAddress&lt;/code&gt; and &lt;code&gt;sendGridApiKey&lt;/code&gt; which we will update later. &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--_UxfzaSC--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/kvsec1.png" alt="image.png" width="817" height="368"&gt;
-&lt;/li&gt;
-&lt;li&gt;Remember I mentioned earlier there is one manual step. In the next step we will change the &lt;code&gt;requirements.psd1&lt;/code&gt; file on our function to allow the &lt;code&gt;AZ&lt;/code&gt; module inside of our function by uncommenting the following:
-&lt;/li&gt;
-&lt;/ol&gt;
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight powershell"&gt;&lt;code&gt;&lt;span class="c"&gt;# This file enables modules to be automatically managed by the Functions service.&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="c"&gt;# See https://aka.ms/functionsmanageddependency for additional information.&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="c"&gt;#&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="p"&gt;@{&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="c"&gt;# For latest supported version, go to 'https://www.powershellgallery.com/packages/Az'.&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="c"&gt;# To use the Az module in your function app, please uncomment the line below.&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="s1"&gt;'Az'&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s1"&gt;'7.*'&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--EYs3Atgp--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/manual1.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--EYs3Atgp--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/manual1.png" alt="image.png" width="880" height="318"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;NOTE:&lt;/strong&gt; Remember to save the manual change we made on &lt;code&gt;requirements.psd1&lt;/code&gt; above.&lt;/p&gt;
-&lt;h2&gt;
-  &lt;a href="#2-create-a-sendgrid-account"&gt;
-  &lt;/a&gt;
-  2. Create a SendGrid account
-&lt;/h2&gt;
-
-&lt;p&gt;Next we will create a SendGrid Account. Go to the &lt;strong&gt;Azure Portal&lt;/strong&gt; and search services for &lt;strong&gt;SendGrid&lt;/strong&gt; and &lt;strong&gt;create&lt;/strong&gt; an account. We will use the &lt;strong&gt;Free&lt;/strong&gt; account as mentioned earlier.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--sbWmOl4m--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/sgrid_plan.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--sbWmOl4m--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/sgrid_plan.png" alt="image.png" width="880" height="655"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;You will need to provide contact details such as your email address and phone number as &lt;strong&gt;SendGrid&lt;/strong&gt; is a SaaS service subscription. Shortly after creating the &lt;strong&gt;SendGrid&lt;/strong&gt; Azure resource you will receive an activation email on the email address you have provided at creation time.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--WPCfSx0L--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/sgrid_activate.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--WPCfSx0L--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/sgrid_activate.png" alt="image.png" width="672" height="421"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;After activation you can navigate to the &lt;strong&gt;SendGrid&lt;/strong&gt; publisher's site directly from Azure.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--8JXj8YP5--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/sgrid_nav.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--8JXj8YP5--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/sgrid_nav.png" alt="image.png" width="880" height="513"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;From the dashboard we will proceed to create the &lt;strong&gt;Sender Identity&lt;/strong&gt;.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--yIr6KXQi--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/sgrid_sender.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--yIr6KXQi--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/sgrid_sender.png" alt="image.png" width="828" height="399"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Note:&lt;/strong&gt; For the &lt;strong&gt;From Email Address&lt;/strong&gt;, &lt;a href="https://docs.sendgrid.com/ui/sending-email/sender-verification"&gt;sender verification&lt;/a&gt; is required. If the email domain doesn't match one of your authenticated domains, you'll need to verify ownership of the email address before using it as a sender.&lt;/p&gt;
-&lt;h2&gt;
-  &lt;a href="#3-generate-a-sendgrid-api-key"&gt;
-  &lt;/a&gt;
-  3. Generate a SendGrid API Key
-&lt;/h2&gt;
-
-&lt;p&gt;Next we will create an API key. Navigate to &lt;strong&gt;Settings&lt;/strong&gt; -&amp;gt; &lt;strong&gt;API Keys&lt;/strong&gt; and click on &lt;code&gt;Create API key&lt;/code&gt;.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--c_IOTYTS--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/sgrid_api.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--c_IOTYTS--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/sgrid_api.png" alt="image.png" width="171" height="729"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Give the API Key a Name, then select &lt;strong&gt;Full Access&lt;/strong&gt; and then click on &lt;code&gt;Create &amp;amp; View&lt;/code&gt;.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Twk0Vm12--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/sgrid_api2.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Twk0Vm12--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/sgrid_api2.png" alt="image.png" width="859" height="611"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;The API key will only be displayed once, so make sure that you copy the key and navigate back to the key vault that we created in the previous step and save the key under the key vault secret called &lt;code&gt;sendGridApiKey&lt;/code&gt;.&lt;/p&gt;
-
-&lt;p&gt;Additionally also update the &lt;code&gt;fromAddress&lt;/code&gt; secret in the key vault with the sender identity &lt;strong&gt;From Email Address&lt;/strong&gt; that you have verified in the previous step.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--_UxfzaSC--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/kvsec1.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--_UxfzaSC--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/kvsec1.png" alt="image.png" width="817" height="368"&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;h2&gt;
-  &lt;a href="#4-create-a-sendgrid-api-powershell-function"&gt;
-  &lt;/a&gt;
-  4. Create a SendGrid API PowerShell Function
-&lt;/h2&gt;
-
-&lt;p&gt;The PowerShell function in this section can also be found on my &lt;a href="https://github.com/Pwd9000-ML/blog-devto/tree/main/posts/Azure-SendGrid-Function-Alerts/code"&gt;github code&lt;/a&gt; page called &lt;a href="https://github.com/Pwd9000-ML/blog-devto/blob/main/posts/Azure-SendGrid-Function-Alerts/code/SendGrid-Notification.ps1"&gt;SendGrid-Notification.ps1&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;The PowerShell code below is a simple &lt;strong&gt;PowerShell&lt;/strong&gt; function to interact with and send an email via the SendGrid service API.&lt;br&gt;
-&lt;/p&gt;
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight powershell"&gt;&lt;code&gt;&lt;span class="c"&gt;## code/SendGrid-Notification.ps1&lt;/span&gt;&lt;span class="w"&gt;
-
-&lt;/span&gt;&lt;span class="kr"&gt;Function&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nf"&gt;SendGrid-Notification&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;CmdletBinding&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="bp"&gt;SupportsShouldProcess&lt;/span&gt;&lt;span class="p"&gt;)]&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="kr"&gt;Param&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;Parameter&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Mandatory&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;ValueFromPipeline&lt;/span&gt;&lt;span class="p"&gt;)]&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;String&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="nv"&gt;$ToAddress&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;Parameter&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Mandatory&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;ValueFromPipeline&lt;/span&gt;&lt;span class="p"&gt;)]&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;String&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="nv"&gt;$FromAddress&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;Parameter&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Mandatory&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;ValueFromPipeline&lt;/span&gt;&lt;span class="p"&gt;)]&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;String&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="nv"&gt;$Subject&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;Parameter&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Mandatory&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;ValueFromPipeline&lt;/span&gt;&lt;span class="p"&gt;)]&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;String&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="nv"&gt;$Body&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;Parameter&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Mandatory&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;ValueFromPipeline&lt;/span&gt;&lt;span class="p"&gt;)]&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;String&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="nv"&gt;$APIKey&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;
-
-    &lt;/span&gt;&lt;span class="c"&gt;# Body&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nv"&gt;$SendGridBody&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;@{&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="s2"&gt;"personalizations"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;@(&lt;/span&gt;&lt;span class="w"&gt;
-            &lt;/span&gt;&lt;span class="p"&gt;@{&lt;/span&gt;&lt;span class="w"&gt;
-                &lt;/span&gt;&lt;span class="s2"&gt;"to"&lt;/span&gt;&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;@(&lt;/span&gt;&lt;span class="w"&gt;
-                    &lt;/span&gt;&lt;span class="p"&gt;@{&lt;/span&gt;&lt;span class="w"&gt;
-                        &lt;/span&gt;&lt;span class="s2"&gt;"email"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$ToAddress&lt;/span&gt;&lt;span class="w"&gt;
-                    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
-                &lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;
-                &lt;/span&gt;&lt;span class="s2"&gt;"subject"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$Subject&lt;/span&gt;&lt;span class="w"&gt;
-            &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;
-
-        &lt;/span&gt;&lt;span class="s2"&gt;"content"&lt;/span&gt;&lt;span class="w"&gt;          &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;@(&lt;/span&gt;&lt;span class="w"&gt;
-            &lt;/span&gt;&lt;span class="p"&gt;@{&lt;/span&gt;&lt;span class="w"&gt;
-                &lt;/span&gt;&lt;span class="s2"&gt;"type"&lt;/span&gt;&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"text/html"&lt;/span&gt;&lt;span class="w"&gt;
-                &lt;/span&gt;&lt;span class="s2"&gt;"value"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$Body&lt;/span&gt;&lt;span class="w"&gt;
-            &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;
-
-        &lt;/span&gt;&lt;span class="s2"&gt;"from"&lt;/span&gt;&lt;span class="w"&gt;             &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;@{&lt;/span&gt;&lt;span class="w"&gt;
-            &lt;/span&gt;&lt;span class="s2"&gt;"email"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$FromAddress&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
-
-    &lt;/span&gt;&lt;span class="nv"&gt;$BodyJson&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$SendGridBody&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;|&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;ConvertTo-Json&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;-Depth&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;4&lt;/span&gt;&lt;span class="w"&gt;
-
-    &lt;/span&gt;&lt;span class="c"&gt;#Header for SendGrid API&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nv"&gt;$Header&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;@{&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="s2"&gt;"authorization"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"Bearer &lt;/span&gt;&lt;span class="nv"&gt;$APIKey&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
-
-    &lt;/span&gt;&lt;span class="c"&gt;#Send the email through SendGrid API&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nv"&gt;$Parameters&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;@{&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="nx"&gt;Method&lt;/span&gt;&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"POST"&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="nx"&gt;Uri&lt;/span&gt;&lt;span class="w"&gt;         &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"https://api.sendgrid.com/v3/mail/send"&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="nx"&gt;Headers&lt;/span&gt;&lt;span class="w"&gt;     &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$Header&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="nx"&gt;ContentType&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"application/json"&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="nx"&gt;Body&lt;/span&gt;&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$BodyJson&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="n"&gt;Invoke-RestMethod&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;@&lt;/span&gt;&lt;span class="nx"&gt;Parameters&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-&lt;h2&gt;
-  &lt;a href="#5-integrate-powershell-function-into-function-app"&gt;
-  &lt;/a&gt;
-  5. Integrate PowerShell Function into Function App
-&lt;/h2&gt;
-
-&lt;p&gt;The function app code in this section can also be found under my &lt;a href="https://github.com/Pwd9000-ML/blog-devto/tree/main/posts/Azure-SendGrid-Function-Alerts/code"&gt;github code&lt;/a&gt; page called &lt;a href="https://github.com/Pwd9000-ML/blog-devto/tree/main/posts/Azure-SendGrid-Function-Alerts/code/run.ps1"&gt;run.ps1&lt;/a&gt;.&lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;Navigate to the function app we created previously and select &lt;code&gt;+ Create&lt;/code&gt; under &lt;code&gt;Functions&lt;/code&gt;. &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--v7zyrO5k--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/create.png" alt="image.png" width="715" height="402"&gt;
-&lt;/li&gt;
-&lt;li&gt;Select &lt;code&gt;Develop in portal&lt;/code&gt; and for the template select &lt;code&gt;Timer trigger&lt;/code&gt;, name the function &lt;code&gt;SendGrid-Demo&lt;/code&gt;, set the cron schedule to run on the frequency you need (in my case I have set this to once a day at 23:00pm) &lt;code&gt;0 0 23 * * *&lt;/code&gt;, and hit &lt;code&gt;Create&lt;/code&gt;. &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--D3LF2uF6--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/create2.png" alt="image.png" width="722" height="814"&gt;
-&lt;/li&gt;
-&lt;li&gt;Navigate to &lt;code&gt;Code + Test&lt;/code&gt; and replace all the code under &lt;code&gt;run.ps1&lt;/code&gt; with the following powershell code and hit &lt;code&gt;save&lt;/code&gt;: &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--cHRGUaW9--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/create3.png" alt="image.png" width="880" height="497"&gt;
-&lt;/li&gt;
-&lt;/ol&gt;
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight powershell"&gt;&lt;code&gt;&lt;span class="c"&gt;## code/run.ps1&lt;/span&gt;&lt;span class="w"&gt;
-
-&lt;/span&gt;&lt;span class="c"&gt;# Input bindings are passed in via param block.&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="kr"&gt;param&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nv"&gt;$Timer&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;
-
-&lt;/span&gt;&lt;span class="c"&gt;# Get the current universal time in the default string format.&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="nv"&gt;$currentUTCtime&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Get-Date&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;ToUniversalTime&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="w"&gt;
-
-&lt;/span&gt;&lt;span class="c"&gt;# The 'IsPastDue' property is 'true' when the current function invocation is later than scheduled.&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="kr"&gt;if&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nv"&gt;$Timer&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;IsPastDue&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="n"&gt;Write-Host&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"PowerShell timer is running late!"&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
-
-&lt;/span&gt;&lt;span class="c"&gt;# SendGrid-Notification Function #&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="kr"&gt;Function&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nf"&gt;SendGrid-Notification&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;CmdletBinding&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="bp"&gt;SupportsShouldProcess&lt;/span&gt;&lt;span class="p"&gt;)]&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="kr"&gt;Param&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;Parameter&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Mandatory&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;ValueFromPipeline&lt;/span&gt;&lt;span class="p"&gt;)]&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;String&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="nv"&gt;$ToAddress&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;Parameter&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Mandatory&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;ValueFromPipeline&lt;/span&gt;&lt;span class="p"&gt;)]&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;String&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="nv"&gt;$FromAddress&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;Parameter&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Mandatory&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;ValueFromPipeline&lt;/span&gt;&lt;span class="p"&gt;)]&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;String&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="nv"&gt;$Subject&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;Parameter&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Mandatory&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;ValueFromPipeline&lt;/span&gt;&lt;span class="p"&gt;)]&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;String&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="nv"&gt;$Body&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;Parameter&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;Mandatory&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;ValueFromPipeline&lt;/span&gt;&lt;span class="p"&gt;)]&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;String&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="nv"&gt;$APIKey&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;
-
-    &lt;/span&gt;&lt;span class="c"&gt;# Body&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nv"&gt;$SendGridBody&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;@{&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="s2"&gt;"personalizations"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;@(&lt;/span&gt;&lt;span class="w"&gt;
-            &lt;/span&gt;&lt;span class="p"&gt;@{&lt;/span&gt;&lt;span class="w"&gt;
-                &lt;/span&gt;&lt;span class="s2"&gt;"to"&lt;/span&gt;&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;@(&lt;/span&gt;&lt;span class="w"&gt;
-                    &lt;/span&gt;&lt;span class="p"&gt;@{&lt;/span&gt;&lt;span class="w"&gt;
-                        &lt;/span&gt;&lt;span class="s2"&gt;"email"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$ToAddress&lt;/span&gt;&lt;span class="w"&gt;
-                    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
-                &lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;
-                &lt;/span&gt;&lt;span class="s2"&gt;"subject"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$Subject&lt;/span&gt;&lt;span class="w"&gt;
-            &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;
-
-        &lt;/span&gt;&lt;span class="s2"&gt;"content"&lt;/span&gt;&lt;span class="w"&gt;          &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;@(&lt;/span&gt;&lt;span class="w"&gt;
-            &lt;/span&gt;&lt;span class="p"&gt;@{&lt;/span&gt;&lt;span class="w"&gt;
-                &lt;/span&gt;&lt;span class="s2"&gt;"type"&lt;/span&gt;&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"text/html"&lt;/span&gt;&lt;span class="w"&gt;
-                &lt;/span&gt;&lt;span class="s2"&gt;"value"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$Body&lt;/span&gt;&lt;span class="w"&gt;
-            &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;
-
-        &lt;/span&gt;&lt;span class="s2"&gt;"from"&lt;/span&gt;&lt;span class="w"&gt;             &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;@{&lt;/span&gt;&lt;span class="w"&gt;
-            &lt;/span&gt;&lt;span class="s2"&gt;"email"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$FromAddress&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
-
-    &lt;/span&gt;&lt;span class="nv"&gt;$BodyJson&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$SendGridBody&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;|&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;ConvertTo-Json&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nt"&gt;-Depth&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;4&lt;/span&gt;&lt;span class="w"&gt;
-
-    &lt;/span&gt;&lt;span class="c"&gt;#Header for SendGrid API&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nv"&gt;$Header&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;@{&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="s2"&gt;"authorization"&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"Bearer &lt;/span&gt;&lt;span class="nv"&gt;$APIKey&lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
-
-    &lt;/span&gt;&lt;span class="c"&gt;#Send the email through SendGrid API&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nv"&gt;$Parameters&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;@{&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="nx"&gt;Method&lt;/span&gt;&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"POST"&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="nx"&gt;Uri&lt;/span&gt;&lt;span class="w"&gt;         &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"https://api.sendgrid.com/v3/mail/send"&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="nx"&gt;Headers&lt;/span&gt;&lt;span class="w"&gt;     &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$Header&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="nx"&gt;ContentType&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"application/json"&lt;/span&gt;&lt;span class="w"&gt;
-        &lt;/span&gt;&lt;span class="nx"&gt;Body&lt;/span&gt;&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$BodyJson&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="n"&gt;Invoke-RestMethod&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;@&lt;/span&gt;&lt;span class="nx"&gt;Parameters&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
-
-&lt;/span&gt;&lt;span class="c"&gt;# Set these environment variables up in Function App settings:&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="c"&gt;# These variables are from the Function App and is referenced from Key Vault&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="nv"&gt;$apiKey&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$&lt;/span&gt;&lt;span class="nn"&gt;env&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="nv"&gt;sendGridApiKey&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c"&gt;#SendGrid API Key&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="nv"&gt;$from&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$&lt;/span&gt;&lt;span class="nn"&gt;env&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="nv"&gt;fromAddress&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c"&gt;#SendGrid Sender Address&lt;/span&gt;&lt;span class="w"&gt;
-
-&lt;/span&gt;&lt;span class="c"&gt;#Set additional Function variables&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="nv"&gt;$to&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"recipient@domain.com"&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="nv"&gt;$subscriptionName&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;get-azcontext&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;Subscription&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;name&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="nv"&gt;$subscriptionId&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;get-azcontext&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;Subscription&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;Id&lt;/span&gt;&lt;span class="w"&gt;
-
-&lt;/span&gt;&lt;span class="n"&gt;Write-Error&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"This is a forced error, something has failed, Please investigate xxxx"&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="nv"&gt;$failureMessage&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$error&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;Exception&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;message&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;ToString&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="w"&gt;
-
-&lt;/span&gt;&lt;span class="nv"&gt;$body&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="nv"&gt;$failureMessage&lt;/span&gt;&lt;span class="s2"&gt; - Subscription Details: [Name: &lt;/span&gt;&lt;span class="nv"&gt;$subscriptionName&lt;/span&gt;&lt;span class="s2"&gt;; Id: &lt;/span&gt;&lt;span class="nv"&gt;$subscriptionId&lt;/span&gt;&lt;span class="s2"&gt;]"&lt;/span&gt;&lt;span class="w"&gt;
-
-&lt;/span&gt;&lt;span class="nv"&gt;$Parameters&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;@{&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nx"&gt;ToAddress&lt;/span&gt;&lt;span class="w"&gt;   &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$to&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nx"&gt;FromAddress&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$from&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nx"&gt;Subject&lt;/span&gt;&lt;span class="w"&gt;     &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s2"&gt;"Error notification from Azure Function App via SendGrid API"&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nx"&gt;Body&lt;/span&gt;&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$body&lt;/span&gt;&lt;span class="w"&gt;
-    &lt;/span&gt;&lt;span class="nx"&gt;APIKey&lt;/span&gt;&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nv"&gt;$apiKey&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;span class="n"&gt;SendGrid-Notification&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="err"&gt;@&lt;/span&gt;&lt;span class="nx"&gt;Parameters&lt;/span&gt;&lt;span class="w"&gt;
-&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-&lt;p&gt;Lets take a closer look at what this code actually does. In the first few lines we can see that the function app will take an input parameter called &lt;code&gt;$Timer&lt;/code&gt;. This parameter is linked to the cron timer we set when we created the function app earlier.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--9UGbGQ8b--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/code1.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--9UGbGQ8b--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/code1.png" alt="image.png" width="804" height="214"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Next we are loading the &lt;strong&gt;Powershell&lt;/strong&gt; function we created to allow us to send notifications via the &lt;strong&gt;SendGrid&lt;/strong&gt; service API.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--P45NTPOF--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/code2.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--P45NTPOF--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/code2.png" alt="image.png" width="740" height="93"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Next we set up some variables, create a forced error and then send that error in an email alert to a recipient address via the &lt;strong&gt;SendGrid&lt;/strong&gt; service API.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--tE5p0UKD--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/code3.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--tE5p0UKD--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/code3.png" alt="image.png" width="818" height="469"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;NOTE:&lt;/strong&gt; Note that the &lt;strong&gt;apiKey&lt;/strong&gt; and &lt;strong&gt;from&lt;/strong&gt; address on line73 and line74 are actually referenced from environment variables, which are the application settings of the &lt;strong&gt;Function App&lt;/strong&gt; which are referencing the key vault secrets we set up earlier. So we are not exposing any API secrets in our function app code nor the function app settings.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--G2Er29x_--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/funcappsettings1.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--G2Er29x_--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/funcappsettings1.png" alt="image.png" width="880" height="633"&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;h2&gt;
-  &lt;a href="#testing-the-function"&gt;
-  &lt;/a&gt;
-  Testing the Function
-&lt;/h2&gt;
-
-&lt;p&gt;Lets run and test our Function app and see if we get an email notification via the SendGrid service. Navigate to the function app and select the function we created. Select &lt;code&gt;Code + Test&lt;/code&gt; followed by &lt;code&gt;Test/Run&lt;/code&gt; and then click on &lt;code&gt;Run&lt;/code&gt;.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--EN5x7dM---/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/test.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--EN5x7dM---/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/test.png" alt="image.png" width="880" height="415"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;A few seconds later you should see the email notification that was triggered by the function app and sent via the &lt;strong&gt;SendGrid&lt;/strong&gt; service API.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--o2svnIhB--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/result.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--o2svnIhB--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://raw.githubusercontent.com/Pwd9000-ML/blog-devto/main/posts/Azure-SendGrid-Function-Alerts/assets/result.png" alt="image.png" width="880" height="379"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;That concludes this tutorial and I hope that you can utilize this great service in other use cases and functions that you may be running inside of your environment.&lt;br&gt;&lt;br&gt;
-I hope you have enjoyed this post and have learned something new. You can find the code samples used in this blog post on my &lt;a href="https://github.com/Pwd9000-ML/blog-devto/tree/main/posts/Azure-SendGrid-Function-Alerts/code"&gt;Github&lt;/a&gt; page. ❤️&lt;/p&gt;
-&lt;h3&gt;
-  &lt;a href="#author"&gt;
-  &lt;/a&gt;
-  &lt;em&gt;Author&lt;/em&gt;
-&lt;/h3&gt;
-
-&lt;p&gt;Like, share, follow me on: 🐙 &lt;a href="https://github.com/Pwd9000-ML"&gt;GitHub&lt;/a&gt; | 🐧 &lt;a href="https://twitter.com/pwd9000"&gt;Twitter&lt;/a&gt; | 👾 &lt;a href="https://www.linkedin.com/in/marcel-l-61b0a96b/"&gt;LinkedIn&lt;/a&gt;&lt;/p&gt;
-
-
-&lt;div class="ltag__user ltag__user__id__620034"&gt;
-  
-    .ltag__user__id__620034 .follow-action-button {
-      background-color: #0cbb58 !important;
-      color: #000000 !important;
-      border-color: #0cbb58 !important;
-    }
-  
-    &lt;a href="/pwd9000" class="ltag__user__link profile-image-link"&gt;
-      &lt;div class="ltag__user__pic"&gt;
-        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Amb4rEJN--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://res.cloudinary.com/practicaldev/image/fetch/s--L_SDLOmq--/c_fill%2Cf_auto%2Cfl_progressive%2Ch_150%2Cq_auto%2Cw_150/https://dev-to-uploads.s3.amazonaws.com/uploads/user/profile_image/620034/93be2c72-3a13-478e-8af1-a4bedc1b2331.jpeg" alt="pwd9000 image"&gt;
-      &lt;/div&gt;
-    &lt;/a&gt;
-  &lt;div class="ltag__user__content"&gt;
-    &lt;h2&gt;
-&lt;a class="ltag__user__link" href="/pwd9000"&gt;Marcel.L&lt;/a&gt;Follow
-&lt;/h2&gt;
-    &lt;div class="ltag__user__summary"&gt;
-      &lt;a class="ltag__user__link" href="/pwd9000"&gt;Cloud Solutions &amp;amp; DevOps Architect.&lt;/a&gt;
-    &lt;/div&gt;
-  &lt;/div&gt;
-&lt;/div&gt;
-
-
-
-</description>
-      <category>azurefunctions</category>
-      <category>azure</category>
-      <category>serverless</category>
-      <category>sendgrid</category>
     </item>
   </channel>
 </rss>
