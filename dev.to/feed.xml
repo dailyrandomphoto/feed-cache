@@ -35,6 +35,620 @@
       <category>css</category>
     </item>
     <item>
+      <title>I Built My Own TinyURL. Here’s How I Did It</title>
+      <author>Jerry Ng</author>
+      <pubDate>Sat, 08 Jan 2022 08:31:30 +0000</pubDate>
+      <link>https://dev.to/jerrynsh/i-built-my-own-tinyurl-heres-how-i-did-it-11ah</link>
+      <guid>https://dev.to/jerrynsh/i-built-my-own-tinyurl-heres-how-i-did-it-11ah</guid>
+      <description>&lt;p&gt;Designing a URL shortener such as &lt;a href="https://tinyurl.com/"&gt;TinyURL&lt;/a&gt; and &lt;a href="https://bitly.com/"&gt;Bitly&lt;/a&gt; is one of the most common system design interview questions in software engineering.&lt;/p&gt;
+
+&lt;p&gt;While meddling around with Cloudflare Worker to &lt;a href="https://jerrynsh.com/how-i-sync-daily-leetcoding-challenge-to-todoist/"&gt;sync the Daily LeetCode Challenge to my Todoist&lt;/a&gt;, it gave me an idea to build an actual URL shortener that can be used by anyone.&lt;/p&gt;
+
+&lt;p&gt;What follows is my thought process with code examples on how we can create a URL shortener using &lt;a href="https://workers.cloudflare.com/"&gt;Cloudflare Worker&lt;/a&gt;. If you would like to follow through, you would need &lt;a href="https://www.cloudflare.com/"&gt;a Cloudflare account&lt;/a&gt; and use the &lt;a href="https://developers.cloudflare.com/workers/get-started/guide"&gt;Wrangler CLI&lt;/a&gt;.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#tldr"&gt;
+  &lt;/a&gt;
+  TL;DR
+&lt;/h2&gt;
+
+&lt;ul&gt;
+&lt;li&gt;  Building a URL shortener for free with Cloudflare Worker and KV&lt;/li&gt;
+&lt;li&gt;  Project requirements and limitations planning&lt;/li&gt;
+&lt;li&gt;  Short URL UUID generation logic&lt;/li&gt;
+&lt;li&gt;  Live demo at &lt;a href="https://s.jerrynsh.com/"&gt;s.jerrynsh.com&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;  &lt;a href="https://github.com/ngshiheng/atomic-url"&gt;GitHub repository&lt;/a&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Before we begin, do not get your hopes up too high. This is NOT a guide on:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;  How to tackle an actual System Design interview&lt;/li&gt;
+&lt;li&gt;  Building a commercial grade URL shortener like TinyURL or Bitly&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;But, rather a proof of concept (POC) of how one builds an actual URL shortener service using serverless computing. So, throw “scalability”, “partitioning”, “replicas”, etc. out of the window and buckle up.&lt;/p&gt;
+
+&lt;p&gt;I hope this will find this post insightful and entertaining to read!&lt;/p&gt;
+
+
+
+
+&lt;h2&gt;
+  &lt;a href="#requirements"&gt;
+  &lt;/a&gt;
+  Requirements
+&lt;/h2&gt;
+
+&lt;p&gt;Like any System Design interview, let’s start by defining some functional and non-functional requirements.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#functional"&gt;
+  &lt;/a&gt;
+  Functional
+&lt;/h3&gt;
+
+&lt;ul&gt;
+&lt;li&gt;  Given a URL, our service should return a unique and short URL of it. E.g. &lt;code&gt;https://jerrynsh.com/how-to-write-clean-code-in-python/&lt;/code&gt; → &lt;code&gt;s.jerrynsh.com/UcFDnviQ&lt;/code&gt;
+&lt;/li&gt;
+&lt;li&gt;  Whenever a user tries to access &lt;code&gt;s.jerrynsh.com/UcFDnviQ&lt;/code&gt;, the user would be directed back to the original URL.&lt;/li&gt;
+&lt;li&gt;  The UUID (I sometimes call it URL key because it is the key of our storage object) should adhere to the &lt;a href="https://en.wikipedia.org/wiki/Base62"&gt;Base62 encoding scheme&lt;/a&gt; (26 + 26 + 10):&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;1. A lower case alphabet 'a' to 'z', a total of 26 characters
+2. An upper case alphabet 'A' to 'Z', a total of 26 characters
+3. A digit '0' to '9', a total of 10 characters
+4. In this POC, we will not be supporting custom short links
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+&lt;ul&gt;
+&lt;li&gt;  The length of our UUID should be ≤ 8 characters as 62⁸ would give us about ~218 trillion possibilities.&lt;/li&gt;
+&lt;li&gt;  The short URL generated should never expire.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3&gt;
+  &lt;a href="#nonfunctional"&gt;
+  &lt;/a&gt;
+  Non-Functional
+&lt;/h3&gt;
+
+&lt;ul&gt;
+&lt;li&gt;  Low latency&lt;/li&gt;
+&lt;li&gt;  High availability&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3&gt;
+  &lt;a href="#budget-capacity-amp-limitations-planning"&gt;
+  &lt;/a&gt;
+  Budget, Capacity, &amp;amp; Limitations Planning
+&lt;/h3&gt;
+
+&lt;p&gt;The aim is simple — I want to be able to host this service for free. As a result, our constraints depend largely on &lt;a href="https://developers.cloudflare.com/workers/platform/pricing"&gt;Cloudflare Worker’s pricing&lt;/a&gt; and &lt;a href="https://developers.cloudflare.com/workers/platform/limits"&gt;platform limits&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;At the time of writing this, the constraints per account to host our service for free are:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;  100k requests/day at 1k requests/min&lt;/li&gt;
+&lt;li&gt;  CPU runtime not exceeding 10ms&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Like most URL shorteners, our application is expected to encounter high reads but relatively low writes. To store our data, we will be using &lt;a href="https://developers.cloudflare.com/workers/learning/how-kv-works"&gt;Cloudflare KV, a key-value data store&lt;/a&gt; that supports high read with low latency — perfect for our use case.&lt;/p&gt;
+
+&lt;p&gt;Moving on from our previous constraints, the &lt;a href="https://developers.cloudflare.com/workers/platform/pricing#workers-kv"&gt;free tier of KV&lt;/a&gt; and &lt;a href="https://developers.cloudflare.com/workers/platform/limits#kv-limits"&gt;limit&lt;/a&gt; allows us to have:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;  100k reads/day&lt;/li&gt;
+&lt;li&gt;  1k writes/day&lt;/li&gt;
+&lt;li&gt;  1 GB of stored data (key size of 512 bytes; value size of 25 MiB)&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3&gt;
+  &lt;a href="#how-many-short-urls-can-we-store"&gt;
+  &lt;/a&gt;
+  How many short URLs can we store
+&lt;/h3&gt;
+
+&lt;p&gt;With 1 GB of free maximum stored data limit in mind, let’s try to estimate how many URLs can we possibly store. Here, I am using &lt;a href="https://mothereff.in/byte-counter"&gt;this tool&lt;/a&gt; to estimate the byte size of the URL:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;  1 character is 1 byte&lt;/li&gt;
+&lt;li&gt;  Since our UUID should only be a maximum of 8 characters, we definitely have no issue with the key size limit.&lt;/li&gt;
+&lt;li&gt;  The value size limit on the other hand — I am making a calculated guess that the maximum URL size should average around 200 characters. Thus, I believe it is safe to assume that each stored object should be an average of ≤400 bytes, which is very well below 25 MiB.&lt;/li&gt;
+&lt;li&gt;  And finally, with 1 GB to work with, our URL shortener can support up to a total of 2,500,000 (1 GB divided by 400 bytes) short URLs.&lt;/li&gt;
+&lt;li&gt;  I know, I know. 2.5 million URLs is not a lot.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Looking back, we could have made the length of our UUID ≥ 4 instead of 8 as 62⁴ possibilities are well more than 2.5 million. Having that said, let’s stick with a UUID with a length of 8.&lt;/p&gt;
+
+&lt;p&gt;Overall, I would say that the free tier for Cloudflare Worker and KV is pretty generous and definitely decent enough for our POC. Do note that the limits are applied on a per-account basis.&lt;/p&gt;
+
+
+
+
+&lt;h2&gt;
+  &lt;a href="#storage-amp-database"&gt;
+  &lt;/a&gt;
+  Storage &amp;amp; Database
+&lt;/h2&gt;
+
+&lt;p&gt;Like I mentioned earlier, we will be using Cloudflare KV as the database to store our shortened URLs as we are expecting more reads than writes.&lt;/p&gt;
+
+&lt;p&gt;Eventually Consistent&lt;br&gt;
+One important note — while KV is able to support exceptionally high read globally, it is an eventually consistent storage solution. In other words, any writes (i.e. creating a short URL) may take up to 60 seconds to propagate globally — this is a downside we are okay with.&lt;/p&gt;
+
+&lt;p&gt;Through my experiments, I have yet to encounter anything more than a couple of seconds.&lt;/p&gt;
+&lt;h3&gt;
+  &lt;a href="#atomic-operation"&gt;
+  &lt;/a&gt;
+  Atomic Operation
+&lt;/h3&gt;
+
+&lt;p&gt;Reading about &lt;a href="https://developers.cloudflare.com/workers/learning/how-kv-works"&gt;how KV works&lt;/a&gt;, KV is not ideal for situations that require atomic operations (e.g. a bank transaction between two account balances). Lucky for us, this does not concern us at all.&lt;/p&gt;
+
+&lt;p&gt;For our POC, the key of our KV would be a UUID that follows after our domain name (e.g. &lt;code&gt;s.jerrynsh.com/UcFDnviQ&lt;/code&gt;) while the value would consist of the long URL given by the users.&lt;/p&gt;
+&lt;h3&gt;
+  &lt;a href="#creating-a-kv"&gt;
+  &lt;/a&gt;
+  Creating a KV
+&lt;/h3&gt;
+
+&lt;p&gt;To create a KV, simply run the following commands with Wrangler CLI.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="c"&gt;# Production namespace:&lt;/span&gt;
+wrangler kv:namespace create &lt;span class="s2"&gt;"URL_DB"&lt;/span&gt;
+
+&lt;span class="c"&gt;# This namespace is used for `wrangler dev` local testing:&lt;/span&gt;
+wrangler kv:namespace create &lt;span class="s2"&gt;"URL_DB"&lt;/span&gt; &lt;span class="nt"&gt;--preview&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;For creating these KV namespaces, we also need to update our &lt;code&gt;wrangler.toml&lt;/code&gt; file to include the namespace bindings accordingly. You can view your KV’s dashboard by visiting &lt;code&gt;https://dash.cloudflare.com/&amp;lt;your_cloudflare_account_id&amp;gt;/workers/kv/namespaces&lt;/code&gt;.&lt;/p&gt;
+
+
+
+
+&lt;h2&gt;
+  &lt;a href="#short-url-uuid-generation-logic"&gt;
+  &lt;/a&gt;
+  Short URL UUID Generation Logic
+&lt;/h2&gt;
+
+&lt;p&gt;This is probably the most important aspect of our entire application.&lt;/p&gt;
+
+&lt;p&gt;Based on our requirements, the aim is to generate an alphanumeric UUID for each URL whereby the length of our key should be no more than 8 characters.&lt;/p&gt;
+
+&lt;p&gt;In a perfect world, the UUID of the short link generated should have no collision. Another important aspect to consider is — what if multiple users shorten the same URL? Ideally, we should also check for duplication.&lt;/p&gt;
+
+&lt;p&gt;Let’s consider the following solutions:&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#1-using-a-uuid-generator"&gt;
+  &lt;/a&gt;
+  1. Using a UUID generator
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--gleW0fVf--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/r166tl95hxy3vi0bes2d.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--gleW0fVf--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/r166tl95hxy3vi0bes2d.png" alt="UUID generator flow" width="880" height="192"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;This solution is relatively straightforward to implement. For every new URL that we encounter, we simply call our UUID generator to give us a new UUID. We would then assign the new URL with the generated UUID as our key.&lt;/p&gt;
+
+&lt;p&gt;In the case whereby the UUID has already existed (collision) in our KV, we can keep retrying. However, we do want to be mindful of retrying as it can be relatively expensive.&lt;/p&gt;
+
+&lt;p&gt;Furthermore, using a UUID generator would not help us when it comes to dealing with duplications in our KV. Looking up the long URL value within our KV would be relatively slow.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#2-hashing-the-url"&gt;
+  &lt;/a&gt;
+  2. Hashing the URL
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--bQ2lTmRi--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/i0bfiscymp926dzim5vi.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--bQ2lTmRi--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/i0bfiscymp926dzim5vi.png" alt="Hashing the URL flow" width="880" height="192"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;On the other hand, hashing a URL allows us to check for duplicated URLs because passing a string (URL) through a hashing function would always yield the same result. We can then use the result (key) to look up in our KV to check for duplication.&lt;/p&gt;
+
+&lt;p&gt;Assuming that we use &lt;a href="https://en.wikipedia.org/wiki/MD5"&gt;MD5&lt;/a&gt;, we would end up with ≥ 8 characters for our key. So, what if we could just take the first 8 bytes of the generated MD5 hash? Problem solved right?&lt;/p&gt;
+
+&lt;p&gt;Not exactly. Hashing function would always produce collisions. To reduce the &lt;a href="https://stackoverflow.com/questions/201705/how-many-random-elements-before-md5-produces-collisions"&gt;probability of collision&lt;/a&gt;, we could generate a longer hash. But, it would not be very user-friendly. Also, we want to keep our UUID ≤ 8 characters.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#3-using-an-incremental-counter"&gt;
+  &lt;/a&gt;
+  3. Using an incremental counter
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--mTTldVoU--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/okck6tnj8jgc4dy6afeh.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--mTTldVoU--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/okck6tnj8jgc4dy6afeh.png" alt="Incremental counter flow" width="880" height="192"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Possibly the simplest yet most scalable solution in my opinion. Using this solution, we will not run into issues with collision. Whenever we consume the entire set (from 00000000 to 99999999), we can simply increment the number of characters in our UUID.&lt;/p&gt;
+
+&lt;p&gt;Nonetheless, I do not want users to be able to randomly guess a short URL by simply visiting &lt;code&gt;s.jerrynsh.com/12345678&lt;/code&gt;. So, this solution is out of the question.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#which-to-choose"&gt;
+  &lt;/a&gt;
+  Which to choose
+&lt;/h3&gt;
+
+&lt;p&gt;There are a lot of other solutions (e.g. pre-generate a list of keys and assign an unused key when a new request comes in) out there with their own pros and cons.&lt;/p&gt;
+
+&lt;p&gt;For our POC, we are going with &lt;strong&gt;solution 1&lt;/strong&gt; as it is straightforward to implement and I am fine with duplicates. To cope with duplicates, we could cache our users’ requests to shorten URLs.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#nano-id"&gt;
+  &lt;/a&gt;
+  Nano ID
+&lt;/h3&gt;
+
+&lt;p&gt;To generate a UUID, we are using the &lt;a href="https://github.com/ai/nanoid"&gt;&lt;code&gt;nanoid&lt;/code&gt;&lt;/a&gt; package. To estimate our rate of collision, we can use the &lt;a href="https://zelark.github.io/nano-id-cc/"&gt;Nano ID collision calculator&lt;/a&gt;:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--fUX4pG1n--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/x7a6vffxh4zun31tl1ny.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--fUX4pG1n--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/x7a6vffxh4zun31tl1ny.png" alt="Nano ID collision calculator" width="700" height="322"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;KV free tier can only handle 1k writes/day, so the speed would be ~42 IDs/hour (1k / 24 hours)&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;Okay enough talk, let’s write some code!&lt;/p&gt;
+
+&lt;p&gt;To handle the possibility of collision, we simply have to keep retrying:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// utils/urlKey.js&lt;/span&gt;
+&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;customAlphabet&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;nanoid&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;ALPHABET&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt;
+    &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="cm"&gt;/*
+Generate a unique `urlKey` using `nanoid` package.
+Keep retrying until a unique urlKey which does not exist in the URL_DB.
+*/&lt;/span&gt;
+&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;generateUniqueUrlKey&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;nanoId&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;customAlphabet&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;ALPHABET&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;8&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;urlKey&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;nanoId&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+    &lt;span class="k"&gt;while&lt;/span&gt; &lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;URL_DB&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="kd"&gt;get&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;urlKey&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt; &lt;span class="o"&gt;!==&lt;/span&gt; &lt;span class="kc"&gt;null&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="nx"&gt;urlKey&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;nanoId&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;urlKey&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="p"&gt;};&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+
+
+
+&lt;h2&gt;
+  &lt;a href="#api"&gt;
+  &lt;/a&gt;
+  API
+&lt;/h2&gt;
+
+&lt;p&gt;In this section, we will define the API endpoints that we would like to support. This project is initialized using the &lt;a href="https://github.com/kwhitley/itty-router"&gt;&lt;code&gt;itty-router&lt;/code&gt;&lt;/a&gt; worker &lt;a href="https://github.com/cloudflare/worker-template-router"&gt;template&lt;/a&gt; — it helps us with all the routing logic:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;wrangler generate &amp;lt;project-name&amp;gt; https://github.com/cloudflare/worker-template-router
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The entry point of our project lies in the index.js:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// index.js&lt;/span&gt;
+&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;Router&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;itty-router&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;createShortUrl&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;./src/handlers/createShortUrl&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;redirectShortUrl&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;./src/handlers/redirectShortUrl&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;LANDING_PAGE_HTML&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;./src/utils/constants&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;router&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;Router&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+
+&lt;span class="c1"&gt;// GET landing page html&lt;/span&gt;
+&lt;span class="nx"&gt;router&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="kd"&gt;get&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;/&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;Response&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;LANDING_PAGE_HTML&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="na"&gt;headers&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;content-type&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;text/html;charset=UTF-8&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+        &lt;span class="p"&gt;},&lt;/span&gt;
+    &lt;span class="p"&gt;});&lt;/span&gt;
+&lt;span class="p"&gt;});&lt;/span&gt;
+
+&lt;span class="c1"&gt;// GET redirects short URL to its original URL.&lt;/span&gt;
+&lt;span class="nx"&gt;router&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="kd"&gt;get&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;/:text&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;redirectShortUrl&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+
+&lt;span class="c1"&gt;// POST creates a short URL that is associated with its an original URL.&lt;/span&gt;
+&lt;span class="nx"&gt;router&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;post&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;/api/url&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;createShortUrl&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+
+&lt;span class="c1"&gt;// 404 for everything else.&lt;/span&gt;
+&lt;span class="nx"&gt;router&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;all&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;*&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;Response&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Not Found&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;status&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="mi"&gt;404&lt;/span&gt; &lt;span class="p"&gt;}));&lt;/span&gt;
+
+&lt;span class="c1"&gt;// All incoming requests are passed to the router where your routes are called and the response is sent.&lt;/span&gt;
+&lt;span class="nx"&gt;addEventListener&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;fetch&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;e&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="nx"&gt;e&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;respondWith&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;router&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;handle&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;e&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;request&lt;/span&gt;&lt;span class="p"&gt;));&lt;/span&gt;
+&lt;span class="p"&gt;});&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;In the name of a better user experience, I have created a simple HTML landing page that anyone could use; you can get the landing page’s HTML &lt;a href="https://github.com/ngshiheng/atomic-url/blob/main/src/utils/constants.js#L4"&gt;here&lt;/a&gt;.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#creating-short-url"&gt;
+  &lt;/a&gt;
+  Creating short URL
+&lt;/h3&gt;
+
+&lt;p&gt;To start, we need a POST endpoint (&lt;code&gt;/api/url&lt;/code&gt;) that calls &lt;code&gt;createShortUrl&lt;/code&gt; that parses the &lt;code&gt;originalUrl&lt;/code&gt; from the body and generates a short URL from it.&lt;/p&gt;
+
+&lt;p&gt;Here’s the code example:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// handlers/createShortUrl.js&lt;/span&gt;
+&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;generateUniqueUrlKey&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;../utils/urlKey&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;createShortUrl&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;request&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;event&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="k"&gt;try&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;urlKey&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;generateUniqueUrlKey&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+
+        &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;host&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;URL&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;request&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;url&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+        &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;shortUrl&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s2"&gt;`https://&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;host&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;/&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;urlKey&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+        &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;originalUrl&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;request&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;json&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+        &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;response&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;Response&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+            &lt;span class="nx"&gt;JSON&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;stringify&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt;
+                &lt;span class="nx"&gt;urlKey&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+                &lt;span class="nx"&gt;shortUrl&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+                &lt;span class="nx"&gt;originalUrl&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+            &lt;span class="p"&gt;}),&lt;/span&gt;
+            &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;headers&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Content-Type&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;application/json&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="p"&gt;},&lt;/span&gt;
+        &lt;span class="p"&gt;);&lt;/span&gt;
+
+        &lt;span class="nx"&gt;event&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;waitUntil&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;URL_DB&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;put&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;urlKey&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;originalUrl&lt;/span&gt;&lt;span class="p"&gt;));&lt;/span&gt;
+
+        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;response&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;catch&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;stack&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;Response&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Unexpected Error&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;status&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="mi"&gt;500&lt;/span&gt; &lt;span class="p"&gt;});&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;};&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;To try this out locally (you can use &lt;code&gt;wrangler dev&lt;/code&gt; to start the server locally), use the &lt;code&gt;curl&lt;/code&gt; command bellow:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;curl &lt;span class="nt"&gt;--request&lt;/span&gt; POST &lt;span class="se"&gt;\\&lt;/span&gt;
+  &lt;span class="nt"&gt;--url&lt;/span&gt; http://127.0.0.1:8787/api/url &lt;span class="se"&gt;\\&lt;/span&gt;
+  &lt;span class="nt"&gt;--header&lt;/span&gt; &lt;span class="s1"&gt;'Content-Type: application/json'&lt;/span&gt; &lt;span class="se"&gt;\\&lt;/span&gt;
+  &lt;span class="nt"&gt;--data&lt;/span&gt; &lt;span class="s1"&gt;'{
+    "originalUrl": "https://www.google.com/"
+}'&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#redirecting-short-url"&gt;
+  &lt;/a&gt;
+  Redirecting short URL
+&lt;/h3&gt;
+
+&lt;p&gt;As a URL shortening service, we want users to be able to redirect to their original URL when they visit a short URL:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// handlers/redirectShortUrl.js&lt;/span&gt;
+&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;redirectShortUrl&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="p"&gt;({&lt;/span&gt; &lt;span class="nx"&gt;params&lt;/span&gt; &lt;span class="p"&gt;})&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;urlKey&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nb"&gt;decodeURIComponent&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;params&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;text&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;originalUrl&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;URL_DB&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="kd"&gt;get&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;urlKey&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;originalUrl&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;Response&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;redirect&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;originalUrl&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="mi"&gt;301&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;Response&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Invalid Short URL&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;status&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="mi"&gt;404&lt;/span&gt; &lt;span class="p"&gt;});&lt;/span&gt;
+&lt;span class="p"&gt;};&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;How about deletion? Since the user does not require any authorization to shorten any URL, the decision was made to move forward without a deletion API as it makes no sense that any user can simply delete another user’s short URL.&lt;/p&gt;
+
+&lt;p&gt;To try out our URL shortener locally, simply run wrangler dev.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#bonus-dealing-with-duplication-with-caching"&gt;
+  &lt;/a&gt;
+  Bonus: dealing with duplication with caching
+&lt;/h3&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;NOTE: Currently, this only works with a custom domain.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;What happens if a user decides to repeatedly shorten the same URL? We wouldn’t want our KV to end up with duplicated URLs with unique UUID assigned to them right?&lt;/p&gt;
+
+&lt;p&gt;To mitigate this, we could use a cache middleware that caches the originalUrl submitted by users using the &lt;a href="https://developers.cloudflare.com/workers/runtime-apis/cache"&gt;Cache API&lt;/a&gt;:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;URL_CACHE&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;../utils/constants&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;shortUrlCacheMiddleware&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;request&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;originalUrl&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;request&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;clone&lt;/span&gt;&lt;span class="p"&gt;().&lt;/span&gt;&lt;span class="nx"&gt;json&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+
+    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="nx"&gt;originalUrl&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;Response&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Invalid Request Body&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="na"&gt;status&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="mi"&gt;400&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+        &lt;span class="p"&gt;});&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;cache&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;caches&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;open&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;URL_CACHE&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+    &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;response&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;cache&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;match&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;originalUrl&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+
+    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;response&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;log&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Serving response from cache.&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;response&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;};&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;To use this cache middleware, simply update our &lt;code&gt;index.js&lt;/code&gt; accordingly:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// index.js&lt;/span&gt;
+&lt;span class="p"&gt;...&lt;/span&gt;
+&lt;span class="nx"&gt;router&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;post&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;/api/url&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;shortUrlCacheMiddleware&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;createShortUrl&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="p"&gt;...&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Finally, we need to make sure that we update our cache instance with the original URL upon shortening it:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="c1"&gt;// handlers/createShortUrl.js&lt;/span&gt;
+&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;URL_CACHE&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;../utils/constants&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;generateUniqueUrlKey&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;../utils/urlKey&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;createShortUrl&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;async&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;request&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;event&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="k"&gt;try&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;urlKey&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;generateUniqueUrlKey&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+
+        &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;host&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;URL&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;request&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;url&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+        &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;shortUrl&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="s2"&gt;`https://&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;host&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;/&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;urlKey&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+
+        &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;originalUrl&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;request&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;json&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
+        &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;response&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;Response&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+            &lt;span class="nx"&gt;JSON&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;stringify&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt;
+                &lt;span class="nx"&gt;urlKey&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+                &lt;span class="nx"&gt;shortUrl&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+                &lt;span class="nx"&gt;originalUrl&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+            &lt;span class="p"&gt;}),&lt;/span&gt;
+            &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;headers&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Content-Type&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;application/json&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="p"&gt;},&lt;/span&gt;
+        &lt;span class="p"&gt;);&lt;/span&gt;
+
+        &lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;cache&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;await&lt;/span&gt; &lt;span class="nx"&gt;caches&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;open&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;URL_CACHE&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt; &lt;span class="c1"&gt;// Access our API cache instance&lt;/span&gt;
+
+        &lt;span class="nx"&gt;event&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;waitUntil&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;URL_DB&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;put&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;urlKey&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;originalUrl&lt;/span&gt;&lt;span class="p"&gt;));&lt;/span&gt;
+        &lt;span class="nx"&gt;event&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;waitUntil&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;cache&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;put&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;originalUrl&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;response&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;clone&lt;/span&gt;&lt;span class="p"&gt;()));&lt;/span&gt; &lt;span class="c1"&gt;// Update our cache here&lt;/span&gt;
+
+        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;response&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;catch&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;stack&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
+        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;Response&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Unexpected Error&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="na"&gt;status&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="mi"&gt;500&lt;/span&gt; &lt;span class="p"&gt;});&lt;/span&gt;
+    &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="p"&gt;};&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;During my testing with &lt;code&gt;wrangler dev&lt;/code&gt;, it seems like the &lt;a href="https://community.cloudflare.com/t/cloudflare-worker-cache-does-not-work/298125"&gt;Worker cache does not work locally or on any worker.dev domain&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;The workaround to test this is to run &lt;code&gt;wrangler publish&lt;/code&gt; to publish the application on a custom domain. You can validate the changes by sending a request to the &lt;code&gt;/api/url&lt;/code&gt; endpoint while observing the log via &lt;code&gt;wrangler tail&lt;/code&gt;.&lt;/p&gt;
+
+
+
+
+&lt;h2&gt;
+  &lt;a href="#deployment"&gt;
+  &lt;/a&gt;
+  Deployment
+&lt;/h2&gt;
+
+&lt;p&gt;No side project is ever done without hosting it right?&lt;/p&gt;
+
+&lt;p&gt;Before publishing your code you need to edit the &lt;code&gt;wrangler.toml&lt;/code&gt; file and add your Cloudflare &lt;code&gt;account_id&lt;/code&gt; inside. You can read more information about configuring and publishing your code can be found in the &lt;a href="https://developers.cloudflare.com/workers/get-started/guide#7-configure-your-project-for-deployment"&gt;official documentation&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;To deploy and publish any new changes to your Cloudflare Worker, simply run &lt;code&gt;wrangler publish&lt;/code&gt;. To deploy your application to a custom domain, check out this &lt;a href="https://egghead.io/lessons/cloudflare-deploy-to-a-custom-domain-with-cloudflare-wrangler-environments"&gt;short clip&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;In case you are lost halfway through, you can always check out the GitHub repository &lt;a href="https://github.com/ngshiheng/atomic-url"&gt;here&lt;/a&gt;. And that’s it!&lt;/p&gt;
+
+
+
+
+&lt;h2&gt;
+  &lt;a href="#final-thoughts"&gt;
+  &lt;/a&gt;
+  Final Thoughts
+&lt;/h2&gt;
+
+&lt;p&gt;Honestly, this is the most fun I have had in a while — researching, writing, and building this POC at the same time. There’s a lot more on top of my mind that we could have done for our URL shortener; just to name a few:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;  Storing &lt;a href="https://developers.cloudflare.com/workers/runtime-apis/kv#metadata"&gt;metadata&lt;/a&gt; such as creation date, number of visits&lt;/li&gt;
+&lt;li&gt;  Adding authentication&lt;/li&gt;
+&lt;li&gt;  Handle short URL deletion and &lt;a href="https://developers.cloudflare.com/workers/runtime-apis/kv#creating-expiring-keys"&gt;expiration&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;  Analytics for users&lt;/li&gt;
+&lt;li&gt;  Custom link&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;A problem that most URL shortening services face is that short URLs are often abused to lead users to malicious sites. I think it’d be an interesting topic to look further into.&lt;/p&gt;
+
+&lt;p&gt;That’s all for today! Thank you for reading and cheers!&lt;/p&gt;
+
+</description>
+      <category>javascript</category>
+      <category>serverless</category>
+      <category>programming</category>
+      <category>showdev</category>
+    </item>
+    <item>
+      <title>Hello everyone,test my fist blog</title>
+      <author>vuong1stfb</author>
+      <pubDate>Sat, 08 Jan 2022 08:09:56 +0000</pubDate>
+      <link>https://dev.to/vuong1stfb/hello-everyone-my-fist-blog-2nfc</link>
+      <guid>https://dev.to/vuong1stfb/hello-everyone-my-fist-blog-2nfc</guid>
+      <description>&lt;p&gt;What is Lorem Ipsum?&lt;br&gt;
+Lorem Ipsum is simply dummy text of the printing and typesetting industry. Lorem Ipsum has been the industry's standard dummy text ever since the 1500s, when an unknown printer took a galley of type and scrambled it to make a type specimen book. It has survived not only five centuries, but also the leap into electronic typesetting, remaining essentially unchanged. It was popularised in the 1960s with the release of Letraset sheets containing Lorem Ipsum passages, and more recently with desktop publishing software like Aldus PageMaker including versions of Lorem Ipsum.&lt;/p&gt;
+
+&lt;p&gt;Why do we use it?&lt;br&gt;
+It is a long established fact that a reader will be distracted by the readable content of a page when looking at its layout. The point of using Lorem Ipsum is that it has a more-or-less normal distribution of letters, as opposed to using 'Content here, content here', making it look like readable English. Many desktop publishing packages and web page editors now use Lorem Ipsum as their default model text, and a search for 'lorem ipsum' will uncover many web sites still in their infancy. Various versions have evolved over the years, sometimes by accident, sometimes on purpose (injected humour and the like).&lt;/p&gt;
+
+&lt;p&gt;Where does it come from?&lt;br&gt;
+Contrary to popular belief, Lorem Ipsum is not simply random text. It has roots in a piece of classical Latin literature from 45 BC, making it over 2000 years old. Richard McClintock, a Latin professor at Hampden-Sydney College in Virginia, looked up one of the more obscure Latin words, consectetur, from a Lorem Ipsum passage, and going through the cites of the word in classical literature, discovered the undoubtable source. Lorem Ipsum comes from sections 1.10.32 and 1.10.33 of "de Finibus Bonorum et Malorum" (The Extremes of Good and Evil) by Cicero, written in 45 BC. This book is a treatise on the theory of ethics, very popular during the Renaissance. The first line of Lorem Ipsum, "Lorem ipsum dolor sit amet..", comes from a line in section 1.10.32.&lt;/p&gt;
+
+&lt;p&gt;The standard chunk of Lorem Ipsum used since the 1500s is reproduced below for those interested. Sections 1.10.32 and 1.10.33 from "de Finibus Bonorum et Malorum" by Cicero are also reproduced in their exact original form, accompanied by English versions from the 1914 translation by H. Rackham.&lt;/p&gt;
+
+&lt;p&gt;Where can I get some?&lt;/p&gt;
+
+</description>
+      <category>news</category>
+    </item>
+    <item>
       <title>Creating a Discord slash command bot</title>
       <author>Chris Bongers</author>
       <pubDate>Sat, 08 Jan 2022 07:27:40 +0000</pubDate>
@@ -2306,188 +2920,6 @@ User&lt;br&gt;
       <category>instadownloader</category>
       <category>javascript</category>
       <category>node</category>
-    </item>
-    <item>
-      <title>tsParticles 1.39.0 Released</title>
-      <author>Matteo Bruni</author>
-      <pubDate>Sat, 08 Jan 2022 01:10:02 +0000</pubDate>
-      <link>https://dev.to/matteobruni/tsparticles-1390-released-2111</link>
-      <guid>https://dev.to/matteobruni/tsparticles-1390-released-2111</guid>
-      <description>&lt;h1&gt;
-  &lt;a href="#tsparticles-1390-changelog"&gt;
-  &lt;/a&gt;
-  tsParticles 1.39.0 Changelog
-&lt;/h1&gt;
-
-&lt;h2&gt;
-  &lt;a href="#bug-fixes"&gt;
-  &lt;/a&gt;
-  Bug Fixes
-&lt;/h2&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Fixed priority on canvas styles&lt;/li&gt;
-&lt;li&gt;Fixed react/preact/inferno components exports&lt;/li&gt;
-&lt;li&gt;Improved image loading, now in parallel&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h2&gt;
-  &lt;a href="#improvements"&gt;
-  &lt;/a&gt;
-  Improvements
-&lt;/h2&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Added all files for supporting the smaller engine file, preparing for v2 incoming changes. The engine file can be included or imported for a clean setup, and the plugins can be chosen manually&lt;/li&gt;
-&lt;li&gt;Renamed &lt;code&gt;Main&lt;/code&gt; class to &lt;code&gt;Engine&lt;/code&gt;, kept backward compatibility&lt;/li&gt;
-&lt;li&gt;Improved image loading, now they are loaded in parallel, and now if an image is missing, it will be loaded at runtime&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h2&gt;
-  &lt;a href="#breaking-changes"&gt;
-  &lt;/a&gt;
-  Breaking Changes
-&lt;/h2&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Enums are not exported anymore, this breaks their javascript usages&lt;/li&gt;
-&lt;/ul&gt;
-
-
-
-
-
-&lt;div class="ltag-github-readme-tag"&gt;
-  &lt;div class="readme-overview"&gt;
-    &lt;h2&gt;
-      &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--566lAguM--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/github-logo-5a155e1f9a670af7944dd5e12375bc76ed542ea80224905ecaf878b9157cdefc.svg" alt="GitHub logo"&gt;
-      &lt;a href="https://github.com/matteobruni"&gt;
-        matteobruni
-      &lt;/a&gt; / &lt;a href="https://github.com/matteobruni/tsparticles"&gt;
-        tsparticles
-      &lt;/a&gt;
-    &lt;/h2&gt;
-    &lt;h3&gt;
-      tsParticles - Easily create highly customizable particles animations and use them as animated backgrounds for your website. Ready to use components available for React.js, Vue.js (2.x and 3.x), Angular, Svelte, jQuery, Preact, Inferno, Solid, Riot and Web Components.
-    &lt;/h3&gt;
-  &lt;/div&gt;
-  &lt;div class="ltag-github-body"&gt;
-    
-&lt;div id="readme" class="md"&gt;
-&lt;p&gt;&lt;a href="https://particles.js.org" rel="nofollow"&gt;&lt;img src="https://camo.githubusercontent.com/58f22f0a546d5d7f34b4668dc842ac91b3a4cf9a5de72346559b7d15b13e587e/68747470733a2f2f7061727469636c65732e6a732e6f72672f696d616765732f62616e6e6572322e706e67" alt="banner"&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;h1&gt;
-tsParticles - TypeScript Particles&lt;/h1&gt;
-&lt;p&gt;&lt;strong&gt;A lightweight TypeScript library for creating particles. Dependency free (*), browser ready and compatible with
-React.js, Vue.js (2.x and 3.x), Angular, Svelte, jQuery, Preact, Inferno, Riot.js, Solid.js, and Web Components&lt;/strong&gt;&lt;/p&gt;
-&lt;p&gt;&lt;a href="https://openbase.com/js/tsparticles?utm_source=embedded&amp;amp;utm_medium=badge&amp;amp;utm_campaign=rate-badge" rel="nofollow"&gt;&lt;img src="https://camo.githubusercontent.com/303db015a31c411aee869f57d55a44a53cd2f5380d0de5ee8abecb337a9452a6/68747470733a2f2f6261646765732e6f70656e626173652e636f6d2f6a732f726174696e672f74737061727469636c65732e737667" alt="Rate on Openbase"&gt;&lt;/a&gt; &lt;a href="https://www.jsdelivr.com/package/npm/tsparticles" rel="nofollow"&gt;&lt;img src="https://camo.githubusercontent.com/8c64088d02effc095dd7386325d216ce6d6bd46513a88ed2274e0ec4e6d876cf/68747470733a2f2f646174612e6a7364656c6976722e636f6d2f76312f7061636b6167652f6e706d2f74737061727469636c65732f62616467653f7374796c653d726f756e646564" alt="jsDelivr"&gt;&lt;/a&gt; &lt;a href="https://cdnjs.com/libraries/tsparticles" rel="nofollow"&gt;&lt;img src="https://camo.githubusercontent.com/e9e5a7a72f7cbc65eedd0e4d7431e4d4762c472ad4a66b6648a8e74c2b6be331/68747470733a2f2f696d672e736869656c64732e696f2f63646e6a732f762f74737061727469636c6573" alt="Cdnjs"&gt;&lt;/a&gt; &lt;a href="https://www.npmjs.com/package/tsparticles" rel="nofollow"&gt;&lt;img src="https://camo.githubusercontent.com/e18baafcedd7efbbd13d6e2b1cf738c07ea898383c946e6e7b16400f813d70cb/68747470733a2f2f62616467652e667572792e696f2f6a732f74737061727469636c65732e737667" alt="npmjs"&gt;&lt;/a&gt; &lt;a href="https://www.npmjs.com/package/tsparticles" rel="nofollow"&gt;&lt;img src="https://camo.githubusercontent.com/bc16ec38506bbab6f6b729850ad28fd94a5643f1633b4356647033c3aa3fe102/68747470733a2f2f696d672e736869656c64732e696f2f6e706d2f646d2f74737061727469636c6573" alt="npm"&gt;&lt;/a&gt; &lt;a href="https://lerna.js.org/" rel="nofollow"&gt;&lt;img src="https://camo.githubusercontent.com/3bc63f921dd60bac6d91aa900ef570c928b2aa4c2124ed23647e8fe9d2232853/68747470733a2f2f696d672e736869656c64732e696f2f62616467652f6d61696e7461696e6564253230776974682d6c65726e612d6363303066662e737667" alt="lerna"&gt;&lt;/a&gt; &lt;a href="https://www.codefactor.io/repository/github/matteobruni/tsparticles" rel="nofollow"&gt;&lt;img src="https://camo.githubusercontent.com/ce969771f1502f57861fe8ce7c787c209c50ef17c2e19f35cb1de0c960eba94a/68747470733a2f2f7777772e636f6465666163746f722e696f2f7265706f7369746f72792f6769746875622f6d617474656f6272756e692f74737061727469636c65732f6261646765" alt="CodeFactor"&gt;&lt;/a&gt; &lt;a href="https://www.codacy.com/manual/ar3s/tsparticles?utm_source=github.com&amp;amp;utm_medium=referral&amp;amp;utm_content=matteobruni/tsparticles&amp;amp;utm_campaign=Badge_Grade" rel="nofollow"&gt;&lt;img src="https://camo.githubusercontent.com/8f96d4d0dccc9c7491f3ed07af70a808b0fd4d2e4d863a1f7bb9e51e10ae526e/68747470733a2f2f6170692e636f646163792e636f6d2f70726f6a6563742f62616467652f47726164652f6239383361616633343631613463343862316532656563636531666631643734" alt="Codacy Badge"&gt;&lt;/a&gt; &lt;a href="https://gitpod.io/#https://github.com/matteobruni/tsparticles" rel="nofollow"&gt;&lt;img src="https://camo.githubusercontent.com/daadb4894128d1e19b72d80236f5959f1f2b47f9fe081373f3246131f0189f6c/68747470733a2f2f696d672e736869656c64732e696f2f62616467652f476974706f642d72656164792d2d746f2d2d636f64652d626c75653f6c6f676f3d676974706f64" alt="Gitpod Ready-to-Code"&gt;&lt;/a&gt; &lt;a href="https://repl.it/github/matteobruni/tsparticles" rel="nofollow"&gt;&lt;img src="https://camo.githubusercontent.com/64adf1bd83058aa64f848245f74bef77cd7cc2a3f36343ac44d6d0c39cc41bc3/68747470733a2f2f7265706c2e69742f62616467652f6769746875622f6d617474656f6272756e692f74737061727469636c6573" alt="Run on Repl.it"&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;a href="https://join.slack.com/t/tsparticles/shared_invite/enQtOTcxNTQxNjQ4NzkxLWE2MTZhZWExMWRmOWI5MTMxNjczOGE1Yjk0MjViYjdkYTUzODM3OTc5MGQ5MjFlODc4MzE0N2Q1OWQxZDc1YzI" rel="nofollow"&gt;&lt;img src="https://camo.githubusercontent.com/ee2eed4d8159b570eef394a484f574d3bd038f6c64ad92ca0db286045486edcb/68747470733a2f2f7061727469636c65732e6a732e6f72672f696d616765732f736c61636b2e706e67" alt="Slack"&gt;&lt;/a&gt; &lt;a href="https://discord.gg/hACwv45Hme" rel="nofollow"&gt;&lt;img src="https://camo.githubusercontent.com/7c4f4ed816c2b77d7c2e15df3876cafa1cf89a896afb04633a1b6e28a81c5036/68747470733a2f2f7061727469636c65732e6a732e6f72672f696d616765732f646973636f72642e706e67" alt="Discord"&gt;&lt;/a&gt; &lt;a href="https://t.me/tsparticles" rel="nofollow"&gt;&lt;img src="https://camo.githubusercontent.com/309cad18f9a2090efdb147ac71064a969b826c3f4e9387f0a8d8e36e70133a80/68747470733a2f2f7061727469636c65732e6a732e6f72672f696d616765732f74656c656772616d2e706e67" alt="Telegram"&gt;&lt;/a&gt;&lt;/p&gt;
-&lt;p&gt;&lt;a href="https://www.producthunt.com/posts/tsparticles?utm_source=badge-featured&amp;amp;utm_medium=badge&amp;amp;utm_souce=badge-tsparticles%22" rel="nofollow"&gt;&lt;img src="https://camo.githubusercontent.com/e86b7f51a0224618fe45aad99bff3e02ed8a5838691f244bf1df0e94454dafe2/68747470733a2f2f6170692e70726f6475637468756e742e636f6d2f776964676574732f656d6265642d696d6167652f76312f66656174757265642e7376673f706f73745f69643d313836313133267468656d653d6c69676874" alt="tsParticles Product Hunt"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;h2&gt;
-Table of Contents&lt;/h2&gt;
-&lt;ul&gt;
-&lt;li&gt;
-&lt;a href="https://github.com/matteobruni/tsparticles#Do-you-want-to-use-it-on-your-website"&gt;Use for your website&lt;/a&gt;
-&lt;ul&gt;
-&lt;li&gt;&lt;a href="https://github.com/matteobruni/tsparticles#Library-installation"&gt;Library installation&lt;/a&gt;&lt;/li&gt;
-&lt;/ul&gt;
-&lt;/li&gt;
-&lt;li&gt;
-&lt;a href="https://github.com/matteobruni/tsparticles#Official-components-for-some-of-the-most-used-frameworks"&gt;Official components for some of the most used frameworks&lt;/a&gt;
-&lt;ul&gt;
-&lt;li&gt;&lt;a href="https://github.com/matteobruni/tsparticles#Angular"&gt;Angular&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://github.com/matteobruni/tsparticles#Inferno"&gt;Inferno&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://github.com/matteobruni/tsparticles#jQuery"&gt;jQuery&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://github.com/matteobruni/tsparticles#Preact"&gt;Preact&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://github.com/matteobruni/tsparticles#ReactJS"&gt;ReactJS&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://github.com/matteobruni/tsparticles#RiotJS"&gt;RiotJS&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://github.com/matteobruni/tsparticles#SolidJS"&gt;SolidJS&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://github.com/matteobruni/tsparticles#Svelte"&gt;Svelte&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://github.com/matteobruni/tsparticles#VueJS-2x"&gt;VueJS 2.x&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://github.com/matteobruni/tsparticles#VueJS-3x"&gt;VueJS 3.x&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://github.com/matteobruni/tsparticles#Web-Components"&gt;Web Components&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://github.com/matteobruni/tsparticles#WordPress"&gt;WordPress&lt;/a&gt;&lt;/li&gt;
-&lt;/ul&gt;
-&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://github.com/matteobruni/tsparticles#Templates-and-Resources"&gt;Templates and Resources&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;
-&lt;a href="https://github.com/matteobruni/tsparticles#Demo--Generator"&gt;Demo / Generator&lt;/a&gt;
-&lt;ul&gt;
-&lt;li&gt;&lt;a href="https://github.com/matteobruni/tsparticles#Characters-as-particles"&gt;Characters as particles&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://github.com/matteobruni/tsparticles#Mouse-hover-connections"&gt;Mouse hover connections&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://github.com/matteobruni/tsparticles#Polygon-mask"&gt;Polygon mask&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://github.com/matteobruni/tsparticles#Animated-stars"&gt;Animated stars&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://github.com/matteobruni/tsparticles#Nyan-cat-flying-on-scrolling-stars"&gt;Nyan cat flying on scrolling stars&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://github.com/matteobruni/tsparticles#Background-Mask-particles"&gt;Background Mask particles&lt;/a&gt;&lt;/li&gt;
-&lt;/ul&gt;
-&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://github.com/matteobruni/tsparticles#Migrating-from-Particlesjs"&gt;Migrating from Particles.js&lt;/a&gt;&lt;/li&gt;
-&lt;li&gt;&lt;a href="https://github.com/matteobruni/tsparticles#PluginsCustomizations"&gt;Plugins/Customizations&lt;/a&gt;&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h2&gt;
-Do you want to use it on your website?&lt;/h2&gt;
-&lt;p&gt;&lt;em&gt;Documentation and Development references &lt;a href="https://particles.js.org/docs/" rel="nofollow"&gt;here&lt;/a&gt; 📖&lt;/em&gt;&lt;/p&gt;
-&lt;p&gt;&lt;strong&gt;This library is available on the two most popular CDNs and it's easy and ready to use, if you were using particles.js
-it's even easier&lt;/strong&gt;.&lt;/p&gt;
-&lt;p&gt;You'll find the
-instructions &lt;a href="https://github.com/matteobruni/tsparticles/blob/main/README.md#library-installation"&gt;below&lt;/a&gt;, with all the
-links you need, and…&lt;/p&gt;
-&lt;/div&gt;
-  &lt;/div&gt;
-  &lt;div class="gh-btn-container"&gt;&lt;a class="gh-btn" href="https://github.com/matteobruni/tsparticles"&gt;View on GitHub&lt;/a&gt;&lt;/div&gt;
-&lt;/div&gt;
-
-
-</description>
-      <category>showdev</category>
-      <category>javascript</category>
-      <category>webdev</category>
-      <category>html</category>
-    </item>
-    <item>
-      <title>100 días de código: 51, avances obtenidos en vacaciones... Aunque se supone que eran vacaciones.</title>
-      <author>Daro</author>
-      <pubDate>Sat, 08 Jan 2022 00:46:50 +0000</pubDate>
-      <link>https://dev.to/darito/100-dias-de-codigo-51-avances-obtenidos-en-vacaciones-aunque-se-supone-que-eran-vacaciones-l13</link>
-      <guid>https://dev.to/darito/100-dias-de-codigo-51-avances-obtenidos-en-vacaciones-aunque-se-supone-que-eran-vacaciones-l13</guid>
-      <description>&lt;p&gt;¡Hey hey hey!&lt;/p&gt;
-
-&lt;p&gt;Cuando comenzaron mis vacaciones pensé que tomaría el tiempo para descansar pero jamas me imagine como terminaría...&lt;/p&gt;
-
-&lt;p&gt;En él, me encontré con un problema generado por las ocupaciones de familia, pareja y mis propios proyectos generado por falta de tiempo dedicado a estas ocupaciones y que debido a mis planes no tuve en cuenta en ningun momento. &lt;/p&gt;
-
-&lt;p&gt;No se si sera algo que le suceda a todos pero creo que la causa viene de que los programadores terminamos teniendo una estrecha relación entre vida personal y profesional que nos dificulta separar estas y dedicarle el tiempo necesario a cada una. Si piensas que te pasa algo similar te agradecería que me lo hicieras saber en los comentarios.&lt;/p&gt;
-
-&lt;p&gt;Cuando llego el día de año nuevo y yo me levante por la mañana un poco mas temprano solo para programar, me puse a reflexionar en que jamas me imagine que me entregaría a la programación de la forma en la que lo hago ya que incluso en vacaciones tomaba tiempo para dedicarme a escribir algo de código a diario. &lt;/p&gt;
-
-&lt;p&gt;Sin embargo como no pude dedicarle el tiempo que me gustaría no lo tomare en cuenta para el reto.&lt;/p&gt;
-
-&lt;p&gt;Ahora me gustaría relatar los acontecimientos y logros de mis vacaciones. &lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;&lt;p&gt;Termine la mayoría de secciones de &lt;a href="https://www.theodinproject.com/"&gt;The Odin Project&lt;/a&gt; exceptuando el backend y las entrevistas y puedo decir que estoy muy contento con todo lo aprendido en el. &lt;br&gt;
-Realmente se lo recomendaría a cualquier persona que tenga algunas nociones de desarrollo web aunque no se si a los que recién inician ya que puede ser un poco abrumador toda la información que va enseñando.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;Comencé a crear los wireframes con ayuda de &lt;a href="https://www.autodraw.com/"&gt;autodraw.io&lt;/a&gt;. A pesar de que es una herramienta muy simple es poderosa por ello para la creatividad.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;Comencé a aprender NextJs siguiendo la &lt;a href="https://nextjs.org/"&gt;guia de su propia pagina web&lt;/a&gt;.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;Seguí practicando 15 min de Touch Typing a diario y aunque las velocidades de cada día son irregulares puedo decir con orgullo que un día obtuve 50 palabras por minuto.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;Aprendí mas acerca de algunos frameworks css y preprocesadores como &lt;a href="https://postcss.org/"&gt;postcss&lt;/a&gt;, &lt;a href="https://sass-lang.com/"&gt;sass&lt;/a&gt; y &lt;a href="https://tailwindcss.com/"&gt;tailwind&lt;/a&gt; el cual esta siendo bastante popular.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;Analice algunas web y comencé a pensar en un proyecto propio que a lo mejor llevare a cabo para obtener experiencia comprobable por mi mismo antes de conseguir un trabajo.&lt;/p&gt;&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;La verdad es que estoy muy contento con este inicio de año aunque comienzo a pensar que tal vez debería tomarme un descanso real para aligerar la carga de estrés y ansiedad que llevo acarreando estos meses. &lt;/p&gt;
-
-&lt;p&gt;Espero que tengan un excelente año y que hayan disfrutado mucho las fiestas. Animo con sus proyectos.&lt;/p&gt;
-
-&lt;p&gt;¡Hasta luego!&lt;/p&gt;
-
-&lt;p&gt;Foto del cover de &lt;a href="https://unsplash.com/@jl1232006?utm_source=unsplash&amp;amp;utm_medium=referral&amp;amp;utm_content=creditCopyText"&gt;Joshua Lam&lt;/a&gt; en &lt;a href="https://unsplash.com/s/photos/chrismas?utm_source=unsplash&amp;amp;utm_medium=referral&amp;amp;utm_content=creditCopyText"&gt;Unsplash&lt;/a&gt;&lt;/p&gt;
-
-</description>
-      <category>spanish</category>
-      <category>100daysofcode</category>
-      <category>beginners</category>
-      <category>javascript</category>
     </item>
   </channel>
 </rss>
