@@ -7,6 +7,384 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>Clean 'em! Getting rid of unused AMIs using Python Lambda and Terraform</title>
+      <author>Oksana Horlock</author>
+      <pubDate>Tue, 11 Jan 2022 22:33:49 +0000</pubDate>
+      <link>https://dev.to/oksanah/clean-em-getting-rid-of-unused-amis-using-python-lambda-and-terraform-4ekg</link>
+      <guid>https://dev.to/oksanah/clean-em-getting-rid-of-unused-amis-using-python-lambda-and-terraform-4ekg</guid>
+      <description>&lt;p&gt;We are all aware that in the AWS-cloud world of today, immutable infrastructure and deployments are preferrable. It is also a fact that if we use immutable deployments, it means we often create multiple Amazon Machine Images (AMIs). To reduce storage costs we might want to delete (or deregister, in AWS speak) these AMIs and associated storage volumes.&lt;/p&gt;
+
+&lt;p&gt;In this blog post I will describe how to set up an AMI cleaner for unused images.&lt;/p&gt;
+
+&lt;p&gt;The main part is a Lambda function. It checks the images and deletes them and accompanying EBS snapshots. The function is written in Python, and it uses Boto3, an AWS SDK for Python. It also relies on JMESPath, the query language of the AWS CLI for querying JSON (more on it &lt;a href="https://jmespath.org/"&gt;here&lt;/a&gt;).  The function takes the following in the "event" argument:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;
+&lt;em&gt;regions (list of strings)&lt;/em&gt;: in what region you'd like to run the cleaner&lt;/li&gt;
+&lt;li&gt;
+&lt;em&gt;max_ami_age_to_prevent_deletion (number)&lt;/em&gt;: if an AMI is older than the specified value, it can safely be deleted&lt;/li&gt;
+&lt;li&gt;
+&lt;em&gt;ami_tags (a map of strings where each object has a tag key and tag value)&lt;/em&gt;: if an image has the specified tags, it could be a candidate for deletion&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Let's have a look at the helper methods that are used in the Lambda:&lt;/p&gt;
+
+&lt;p&gt;1) A method to find AMIs used in autoscaling groups:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;def imagesInASGs(region):
+  amis = []
+  autoscaling = boto3.client('autoscaling', region_name=region)
+  print(f'Checking autoscaling groups in region {region}...')
+  paginator = autoscaling.get_paginator('describe_auto_scaling_groups')
+
+  page_iterator = paginator.paginate(
+    PaginationConfig = {'PageSize': 10}
+  )  
+  filtered_asgs = page_iterator.search(f"AutoScalingGroups[*].[Instances[?LifecycleState == 'InService'].[InstanceId, LaunchTemplate.LaunchTemplateId,LaunchTemplate.Version]]")
+
+  for key_data in filtered_asgs:
+    matches = re.findall(r"'(.+?)'",str(key_data))
+    instance_id = matches[0]
+    template = matches[1]
+    version = matches[2]
+    print(f"Template found: {template} version {version}")
+
+    if (template == ""):
+      send_alert(f"AMI cleaner failure", f"Failed to find launch template that was used for instance {instance_id}")
+      return
+
+    ec2 = boto3.client('ec2', region_name = region)
+    launch_template_versions = ec2.describe_launch_template_versions(
+      LaunchTemplateId=template, 
+      Versions=[version]
+    );  
+    used_ami_id = launch_template_versions["LaunchTemplateVersions"][0]["LaunchTemplateData"]["ImageId"]
+    if not used_ami_id:
+      send_alert(f"AMI cleaner failure", f"Failed to find AMI for launch template {template} version {version}")
+      return    
+    amis.append(used_ami_id)
+  return amis
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Here, by using boto3 we paginate through autoscaling groups in a region. And then we use an equivalent of AWS CLI query to get the details of the autoscaling groups that are most interesting for us:&lt;br&gt;
+&lt;code&gt;filtered_asgs = page_iterator.search(f"AutoScalingGroups[*].[InstanceId, LaunchTemplate.LaunchTemplateId,LaunchTemplate.Version]]")&lt;/code&gt;&lt;/p&gt;
+
+&lt;p&gt;The result we get is a string, and by using this regex: &lt;code&gt;"'(.+?)'"&lt;/code&gt; we break down the string into separate variables.&lt;/p&gt;
+
+&lt;p&gt;After that we use boto3 ec2 client to extract the AMI Id used in autoscaling groups, and save this value into an array.&lt;/p&gt;
+
+&lt;p&gt;2) The next function will get AMI Ids that are used in running EC2s, including those that were not launched using autoscaling:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;def imagesUsedInEC2s(region):
+  print(f'Checking instances that are not in ASGs in region {region}...')
+  amis = []
+  ec2_resource = boto3.resource('ec2', region_name = region)
+  instances = ec2_resource.instances.filter(
+    Filters=
+    [
+      {
+        'Name': 'instance-state-name',
+        'Values': [ 'running' ]
+      }
+    ])
+  for instance in list(instances):
+      amis.append(instance.image_id)
+
+  return amis
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;3) A method that creates AMI filters in the correct format. We pass in values as a &lt;em&gt;map(string)&lt;/em&gt; in Terraform, and we need to convert these values into JMESPath format, which is the following:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;{
+   'Name': 'tag:CatName',
+   'Values': [ 'Boris' ]
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The method itself looks like this:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;def makeAmiFilters(ami_tags):
+  filters = [
+    {
+      'Name': 'state',
+      'Values': ['available']
+    }
+  ]
+  for tag in ami_tags:
+    filters.append({'Name': f'tag:{key}', 'Values':[f'{value}'] })
+  return filters
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;4) A function that sends a message to an SNS topic:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;def send_alert(subject, message):
+  sns.publish(
+    TargetArn=os.environ['sns_topic_arn'], 
+    Subject=subject, 
+    Message=message)
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;5) The main function, or the handler:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;def lambda_handler(event, context):
+  amis_in_use = []
+  total_amis_deleted = 0
+  total_snapshots_deleted = 0
+  try:
+    regions = event['regions']
+    max_ami_age_to_prevent_deletion = event['max_ami_age_to_prevent_deletion']
+
+    filters = makeAmiFilters(event['ami_tags'])
+
+    for region in regions:
+      amis_in_use = list(set(imagesInASGs(region) + imagesUsedInEC2s(region)))
+      ec2 = boto3.client('ec2', region_name = region)
+      amis = ec2.describe_images(
+        Owners = ['self'],
+        Filters = filters
+      ).get('Images')
+      for ami in amis:
+        now = datetime.now()
+        ami_id = ami['ImageId']
+        img_creation_datetime = datetime.strptime(ami['CreationDate'], '%Y-%m-%dT%H:%M:%S.%fZ')
+        days_since_creation = (now - img_creation_datetime).days
+
+        if ami_id not in amis_in_use and days_since_creation &amp;gt; max_ami_age_to_prevent_deletion:
+          ec2.deregister_image(ImageId = ami_id)
+          total_amis_deleted += 1
+
+          for ebs in ami['BlockDeviceMappings']:
+            if 'Ebs' in ebs:
+              snapshot_id = ebs['Ebs']['SnapshotId']              
+              ec2.delete_snapshot(SnapshotId=snapshot_id)
+              total_snapshots_deleted += 1
+
+    print(f"Deleted {total_amis_deleted} AMIs and {total_snapshots_deleted} EBS snapshots")
+
+  except Exception as e:
+    send_alert(f"AMI cleaner failure", e)
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;strong&gt;Infrastructure&lt;/strong&gt;&lt;br&gt;
+CloudWatch Events rule that triggers on schedule has the above Lambda function as a target. In this example, the function will run on the first day of every month:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;resource "aws_cloudwatch_event_rule" "trigger" {
+  name = "${var.name_prefix}-ami-cleaner-lambda-trigger"
+  description = "Triggers that fires the lambda function"
+  schedule_expression = "cron(0 0 1 * ? *)"
+  tags = var.tags
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The event target specifies an input to pass into the Lambda function, among other parameters (the values here are purely for example purposes):&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;resource "aws_cloudwatch_event_target" "clean_amis" {
+  rule = aws_cloudwatch_event_rule.trigger.name
+  arn = aws_lambda_function.ami_cleaner.arn
+  input = jsonencode({
+    ami_tags_to_check= {
+     "Environment"="UAT"
+     "Application"="MyApp"
+    }
+    regions = ["us-east-2", "eu-west-1"]
+    max_ami_age_to_prevent_deletion = 7
+  })
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;If you'd like to create a test event for this Lambda function, you'll need to enter the following into the test event field:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;{
+  "regions": ["us-east-2", "eu-west-1"],
+  "max_ami_age_to_prevent_deletion": 7,
+  "ami_tags_to_check": {
+    "Environment": "UAT"
+    "Application": "MyApp"
+  }
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The function itself needs to have the following Terraform resources defined:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;resource "aws_lambda_function" "ami_cleaner" {
+  filename = "${path.module}/lambda.zip"
+  function_name = "ami-cleaner-lambda"
+  role = aws_iam_role.iam_for_lambda.arn
+  handler = "lambda_function.lambda_handler"
+  runtime = "python3.8"
+  source_code_hash = data.archive_file.lambda_zip.output_base64sha256
+  tags = var.tags
+
+  environment {
+    variables = {
+      sns_topic_arn = var.sns_topic_arn
+    }
+  }
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;resource "aws_lambda_permission" "allow_cloudwatch_to_call_ami_cleaner" {
+  statement_id  = "AllowExecutionFromCloudWatch"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.ami_cleaner.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = "arn:aws:events:&amp;lt;region&amp;gt;:&amp;lt;account_id&amp;gt;:rule/ami-cleaner-lambda-trigger*"
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;data "archive_file" "lambda_zip" {
+  type        = "zip"
+  source_file = "${path.module}/lambda.py"
+  output_path = "${path.module}/lambda.zip"
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Using &lt;em&gt;archive_file&lt;/em&gt; data source in Terraform is convenient because you won't need to create a zip with the function manually when you update it.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Lambda IAM Policy&lt;/strong&gt;&lt;br&gt;
+For the Lambda function to perform the described operations on resources, the following IAM actions need to be allowed in the policy:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;"ec2:DescribeImages", 
+"ec2:DescribeInstances",
+"ec2:DescribeLaunchTemplates",
+"ec2:DescribeLaunchTemplateVersions",
+
+"ec2:DeregisterImage",
+"ec2:DeleteSnapshot",
+"autoscaling:DescribeAutoScalingGroups",
+"sns:Publish"   
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;In order to not allow the function to delete any AMIs and snapshots but only those with a specific tag, we can create Terraform policy statement dynamically and restrict the policy to allow removal of resources only if they have a certain tag key and value:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;data "aws_iam_policy_document" "ami_cleaner_policy_doc" {
+...
+  dynamic "statement" {
+    for_each = var.ami_tags_to_check
+      content {
+        actions = [
+        "ec2:DeregisterImage",
+        "ec2:DeleteSnapshot"
+        ]
+        resources = ["*"]
+        condition {
+          test     = "StringLike"
+          variable = "aws:ResourceTag/${statement.key}"
+          values = [statement.value]
+        }        
+        effect = "Allow"      
+    }
+  }   
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Of course, a lot of the values in Terraform can be set as variables. In this case, we can pass the following values as variables to the AMI cleaner module:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;tags&lt;/li&gt;
+&lt;li&gt;regions&lt;/li&gt;
+&lt;li&gt;sns_topic_arn&lt;/li&gt;
+&lt;li&gt;ami_tags_to_check&lt;/li&gt;
+&lt;li&gt;max_ami_age_to_prevent_deletion&lt;/li&gt;
+&lt;li&gt;schedule_expression&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;&lt;strong&gt;SUMMARY&lt;/strong&gt;&lt;br&gt;
+Hopefully, this post exemplifies how to do AMI cleanup based on tags, in multiple AWS regions. I have learnt a lot from this piece of work, and I hope someone will learn something new about AWS or Terraform too.&lt;/p&gt;
+
+</description>
+      <category>aws</category>
+      <category>awscommunity</category>
+      <category>python</category>
+      <category>terraform</category>
+    </item>
+    <item>
       <title>GraphQL vs REST: What’s the difference?</title>
       <author>Fauna</author>
       <pubDate>Tue, 11 Jan 2022 21:51:50 +0000</pubDate>
@@ -1153,6 +1531,529 @@ Here there’s a higher chance of them responding, but the odds are still low.&l
       <category>beginners</category>
       <category>webdev</category>
       <category>programming</category>
+    </item>
+    <item>
+      <title>Running Kafka on kubernetes for local development</title>
+      <author>Marcos Maia</author>
+      <pubDate>Tue, 11 Jan 2022 20:02:57 +0000</pubDate>
+      <link>https://dev.to/thegroo/running-kafka-on-kubernetes-for-local-development-2a54</link>
+      <guid>https://dev.to/thegroo/running-kafka-on-kubernetes-for-local-development-2a54</guid>
+      <description>&lt;p&gt;In this post I will cover the steps to run Kafka locally on your development machine using &lt;a href="https://kubernetes.io/"&gt;Kubernetes&lt;/a&gt;. Usually I go with docker-compose for that as it is simpler to get it going but due to the omnipresence of Kubernetes these days in companies I decided to also port my local &lt;a href="https://docs.confluent.io/home/overview.html"&gt;Confluent Kafka&lt;/a&gt; setup to run on Kubernetes for practicing and getting closer to production environments where my application will most likely also run on Kubernetes. &lt;/p&gt;
+
+&lt;p&gt;This is a minimal local Kafka setup meant for development so it's a single instance of Kafka, Schema-registry and Zookeeper. You may want to run a local kafka for quick and easy test and prototyping and also to save money from running it in the cloud just for functional development, if you combine that with also packaging and running your application on Kubernetes you have a very efficient setup that closely mirrors cloud environments where your app and the Kubernetes cluster you will use for the environments are probably running.&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;&lt;a href="https://strimzi.io/"&gt;Strimzi&lt;/a&gt; is an awesome simpler alternative to achieve the same, check it out. My goal with this setup here is for learning and to have a more "realistic" Kubernetes setup on local development machine so I opted to not use Strimzi or &lt;a href="https://helm.sh/docs/"&gt;Helm charts&lt;/a&gt;.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;In the past couple of days I came up with two local setups running Kafka, Schema-registry and Zookeeper on local development machine with Kubernetes using &lt;a href="https://kind.sigs.k8s.io/"&gt;Kind&lt;/a&gt;, in this first post I will cover a setup using &lt;a href="https://kubernetes.io/docs/concepts/storage/persistent-volumes/"&gt;Persistent Volumes&lt;/a&gt; and &lt;a href="https://kubernetes.io/docs/concepts/storage/persistent-volumes/#persistentvolumeclaims"&gt;Persistent Volume Claims&lt;/a&gt; and in the next one I will cover using &lt;a href="https://kubernetes.io/docs/concepts/storage/storage-classes/"&gt;Storage classes&lt;/a&gt;. &lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;I have created and tested these approaches on a Linux Development machine. It should work for Mac and Windows also but I have never tried it.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;You can get the full source from &lt;a href="https://github.com/mmaia/kafka-local-kubernetes"&gt;Github repo&lt;/a&gt; where you will find the files and Quick Start for both aforementioned approaches. To clone the repo &lt;code&gt;git clone git@github.com:mmaia/kafka-local-kubernetes.git&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;Well I guess this is more than enough introduction let's have some fun. &lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#the-setup-using-persistent-volumes-and-persistent-volume-claims"&gt;
+  &lt;/a&gt;
+  The setup using Persistent Volumes and Persistent Volume Claims
+&lt;/h2&gt;
+
+&lt;p&gt;If you checked out the repo described above the setup presented here is under &lt;code&gt;pv-pvc-setup&lt;/code&gt; folder. You will find multiple Kubernetes declarative files in this folder, please notice that you could also combine all files in a single one separating them with a line containing triple dashes &lt;code&gt;---&lt;/code&gt;, if combining them is your preference you can open a terminal and from the pv-pvc-setup folder run &lt;code&gt;for each in ./kafka-k8s/*; do cat $each; echo "---"; done &amp;gt; local-kafka-combined.yaml&lt;/code&gt; this will concatenate all files in a single one called local-kafka-combined.yaml.&lt;/p&gt;
+
+&lt;p&gt;I keep them separate to explicitly separate each type in this case and because it's convenient as you can just run kubectl pointing to the directory as described below in the "Running it" section.&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;kind-config.yaml&lt;/code&gt; - This file configures Kind to expose the kafka and schema-registry ports to the local machine host so you can connect your application while developing from your IDE or command line and connect with Kafka running on Kubernetes.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;apiVersion&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;kind.x-k8s.io/v1alpha4&lt;/span&gt;
+&lt;span class="na"&gt;kind&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Cluster&lt;/span&gt;
+&lt;span class="na"&gt;nodes&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;role&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;control-plane&lt;/span&gt;
+  &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;role&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;worker&lt;/span&gt;
+    &lt;span class="na"&gt;extraPortMappings&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;containerPort&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;30092&lt;/span&gt; &lt;span class="c1"&gt;# internal kafka nodeport&lt;/span&gt;
+        &lt;span class="na"&gt;hostPort&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;9092&lt;/span&gt; &lt;span class="c1"&gt;# port exposed on "host" machine for kafka&lt;/span&gt;
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;containerPort&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;30081&lt;/span&gt; &lt;span class="c1"&gt;# internal schema-registry nodeport&lt;/span&gt;
+        &lt;span class="na"&gt;hostPort&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;8081&lt;/span&gt; &lt;span class="c1"&gt;# port exposed on "host" machine for schema-registry&lt;/span&gt;
+    &lt;span class="na"&gt;extraMounts&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;hostPath&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;./tmp/kafka-data&lt;/span&gt;
+        &lt;span class="na"&gt;containerPath&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;/var/lib/kafka/data&lt;/span&gt;
+        &lt;span class="na"&gt;readOnly&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="no"&gt;false&lt;/span&gt;
+        &lt;span class="na"&gt;selinuxRelabel&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="no"&gt;false&lt;/span&gt;
+        &lt;span class="na"&gt;propagation&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Bidirectional&lt;/span&gt;
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;hostPath&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;./tmp/zookeeper-data/data&lt;/span&gt;
+        &lt;span class="na"&gt;containerPath&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;/var/lib/zookeeper/data&lt;/span&gt;
+        &lt;span class="na"&gt;readOnly&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="no"&gt;false&lt;/span&gt;
+        &lt;span class="na"&gt;selinuxRelabel&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="no"&gt;false&lt;/span&gt;
+        &lt;span class="na"&gt;propagation&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Bidirectional&lt;/span&gt;
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;hostPath&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;./tmp/zookeeper-data/log&lt;/span&gt;
+        &lt;span class="na"&gt;containerPath&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;/var/lib/zookeeper/log&lt;/span&gt;
+        &lt;span class="na"&gt;readOnly&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="no"&gt;false&lt;/span&gt;
+        &lt;span class="na"&gt;selinuxRelabel&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="no"&gt;false&lt;/span&gt;
+        &lt;span class="na"&gt;propagation&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Bidirectional&lt;/span&gt;
+
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Notice the mapping from the internal container paths to the external &lt;code&gt;hostPath&lt;/code&gt; on the local machine. The local paths will need to be manually created before running the setup as per instructions on the section "Running it" below. &lt;/p&gt;
+
+&lt;p&gt;This is it for the Kind configuration now let's check the Kubernetes files(under kafka-kl8s if you checked out the project): &lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;kafka-deployment.yaml&lt;/code&gt; - Configures the kafka broker and exposes an internal(for kubernetes network) and external port(for kafka clients) for kafka also maps an internal volume to expose kafka data files.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;apiVersion&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;apps/v1&lt;/span&gt;
+&lt;span class="na"&gt;kind&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Deployment&lt;/span&gt;
+&lt;span class="na"&gt;metadata&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;labels&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;service&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;kafka&lt;/span&gt;
+  &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;kafka&lt;/span&gt;
+&lt;span class="na"&gt;spec&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;replicas&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;1&lt;/span&gt;
+  &lt;span class="na"&gt;selector&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;matchLabels&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;service&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;kafka&lt;/span&gt;
+  &lt;span class="na"&gt;strategy&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Recreate&lt;/span&gt;
+  &lt;span class="na"&gt;template&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;metadata&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;labels&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="na"&gt;network/kafka-network&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;true"&lt;/span&gt;
+        &lt;span class="na"&gt;service&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;kafka&lt;/span&gt;
+    &lt;span class="na"&gt;spec&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;enableServiceLinks&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="no"&gt;false&lt;/span&gt;
+      &lt;span class="na"&gt;containers&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;kafka&lt;/span&gt;
+        &lt;span class="na"&gt;imagePullPolicy&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;IfNotPresent&lt;/span&gt;
+        &lt;span class="na"&gt;image&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;confluentinc/cp-kafka:7.0.1&lt;/span&gt;
+        &lt;span class="na"&gt;ports&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+          &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;containerPort&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;29092&lt;/span&gt;
+          &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;containerPort&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;9092&lt;/span&gt;
+        &lt;span class="na"&gt;env&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+          &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;CONFLUENT_SUPPORT_CUSTOMER_ID&lt;/span&gt;
+            &lt;span class="na"&gt;value&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;anonymous"&lt;/span&gt;
+          &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;KAFKA_ADVERTISED_LISTENERS&lt;/span&gt;
+            &lt;span class="na"&gt;value&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;INTERNAL://kafka:29092,LISTENER_EXTERNAL://kafka:9092"&lt;/span&gt;
+          &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;KAFKA_AUTO_CREATE_TOPICS_ENABLE&lt;/span&gt;
+            &lt;span class="na"&gt;value&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;true"&lt;/span&gt;
+          &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;KAFKA_BROKER_ID&lt;/span&gt;
+            &lt;span class="na"&gt;value&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;1"&lt;/span&gt;
+          &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;KAFKA_DEFAULT_REPLICATION_FACTOR&lt;/span&gt;
+            &lt;span class="na"&gt;value&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;1"&lt;/span&gt;
+          &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;KAFKA_INTER_BROKER_LISTENER_NAME&lt;/span&gt;
+            &lt;span class="na"&gt;value&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;INTERNAL"&lt;/span&gt;
+          &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;KAFKA_LISTENERS&lt;/span&gt;
+            &lt;span class="na"&gt;value&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;INTERNAL://:29092,LISTENER_EXTERNAL://:9092"&lt;/span&gt;
+          &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;KAFKA_LISTENER_SECURITY_PROTOCOL_MAP&lt;/span&gt;
+            &lt;span class="na"&gt;value&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;INTERNAL:PLAINTEXT,LISTENER_EXTERNAL:PLAINTEXT"&lt;/span&gt;
+          &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;KAFKA_NUM_PARTITIONS&lt;/span&gt;
+            &lt;span class="na"&gt;value&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;1"&lt;/span&gt;
+          &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR&lt;/span&gt;
+            &lt;span class="na"&gt;value&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;1"&lt;/span&gt;
+          &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;KAFKA_LOG_CLEANUP_POLICY&lt;/span&gt;
+            &lt;span class="na"&gt;value&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;compact"&lt;/span&gt;
+          &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;KAFKA_ZOOKEEPER_CONNECT&lt;/span&gt;
+            &lt;span class="na"&gt;value&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;zookeeper:2181"&lt;/span&gt;
+        &lt;span class="na"&gt;resources&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="pi"&gt;{}&lt;/span&gt;
+        &lt;span class="na"&gt;volumeMounts&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+          &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;mountPath&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;/var/lib/kafka/data&lt;/span&gt;
+            &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;kafka-data&lt;/span&gt;
+      &lt;span class="na"&gt;hostname&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;kafka&lt;/span&gt;
+      &lt;span class="na"&gt;restartPolicy&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Always&lt;/span&gt;
+      &lt;span class="na"&gt;volumes&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;kafka-data&lt;/span&gt;
+          &lt;span class="na"&gt;persistentVolumeClaim&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+            &lt;span class="na"&gt;claimName&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;kafka-pvc&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;code&gt;kafka-network-np.yaml&lt;/code&gt; - Sets up the internal Kubernetes network used by the&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;apiVersion&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;networking.k8s.io/v1&lt;/span&gt;
+&lt;span class="na"&gt;kind&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;NetworkPolicy&lt;/span&gt;
+&lt;span class="na"&gt;metadata&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;kafka-network&lt;/span&gt;
+&lt;span class="na"&gt;spec&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;ingress&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;from&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;podSelector&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+            &lt;span class="na"&gt;matchLabels&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+              &lt;span class="na"&gt;network/kafka-network&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;true"&lt;/span&gt;
+  &lt;span class="na"&gt;podSelector&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;matchLabels&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;network/kafka-network&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;true"&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;code&gt;kafka-pv.yaml&lt;/code&gt; - this file describes the persistent volume used.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;apiVersion&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;v1&lt;/span&gt;
+&lt;span class="na"&gt;kind&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;PersistentVolume&lt;/span&gt;
+&lt;span class="na"&gt;metadata&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;kafka-pv&lt;/span&gt;
+&lt;span class="na"&gt;spec&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;accessModes&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;ReadWriteOnce&lt;/span&gt;
+  &lt;span class="na"&gt;storageClassName&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;kafka-local-storage&lt;/span&gt;
+  &lt;span class="na"&gt;capacity&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;storage&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;5Gi&lt;/span&gt;
+  &lt;span class="na"&gt;persistentVolumeReclaimPolicy&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Retain&lt;/span&gt;
+  &lt;span class="na"&gt;hostPath&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;path&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;/var/lib/kafka/data&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;code&gt;kafka-pvc.yaml&lt;/code&gt; - this file is the claim used by the 'pod' as described in the deployment file for kafka above and associated to the persistent volume.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;apiVersion&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;v1&lt;/span&gt;
+&lt;span class="na"&gt;kind&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;PersistentVolumeClaim&lt;/span&gt;
+&lt;span class="na"&gt;metadata&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;kafka-pvc&lt;/span&gt;
+&lt;span class="na"&gt;spec&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;accessModes&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;ReadWriteOnce&lt;/span&gt;
+  &lt;span class="na"&gt;storageClassName&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;kafka-local-storage&lt;/span&gt;
+  &lt;span class="na"&gt;resources&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;requests&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;storage&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;5Gi&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;code&gt;kafka-service.yaml&lt;/code&gt; - This file defines the mappings between the internal containers and ports that are exposed, called NodePorts in Kubernetes.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;apiVersion&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;v1&lt;/span&gt;
+&lt;span class="na"&gt;kind&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Service&lt;/span&gt;
+&lt;span class="na"&gt;metadata&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;labels&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;service&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;kafka&lt;/span&gt;
+  &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;kafka&lt;/span&gt;
+&lt;span class="na"&gt;spec&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;selector&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;service&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;kafka&lt;/span&gt;
+  &lt;span class="na"&gt;ports&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;internal&lt;/span&gt;
+      &lt;span class="na"&gt;port&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;29092&lt;/span&gt;
+      &lt;span class="na"&gt;targetPort&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;29092&lt;/span&gt;
+    &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;external&lt;/span&gt;
+      &lt;span class="na"&gt;port&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;30092&lt;/span&gt;
+      &lt;span class="na"&gt;targetPort&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;9092&lt;/span&gt;
+      &lt;span class="na"&gt;nodePort&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;30092&lt;/span&gt;
+  &lt;span class="na"&gt;type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;NodePort&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The remaining files are declarative Kubernetes configurations files to schema-registry and zookeeper. &lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;schema-registry-deployment.yaml&lt;/code&gt;&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;apiVersion&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;apps/v1&lt;/span&gt;
+&lt;span class="na"&gt;kind&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Deployment&lt;/span&gt;
+&lt;span class="na"&gt;metadata&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;labels&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;service&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;schema-registry&lt;/span&gt;
+  &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;schema-registry&lt;/span&gt;
+&lt;span class="na"&gt;spec&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;replicas&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;1&lt;/span&gt;
+  &lt;span class="na"&gt;selector&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;matchLabels&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;service&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;schema-registry&lt;/span&gt;
+  &lt;span class="na"&gt;strategy&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="pi"&gt;{}&lt;/span&gt;
+  &lt;span class="na"&gt;template&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;metadata&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;labels&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="na"&gt;network/kafka-network&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;true"&lt;/span&gt;
+        &lt;span class="na"&gt;service&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;schema-registry&lt;/span&gt;
+    &lt;span class="na"&gt;spec&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;enableServiceLinks&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="no"&gt;false&lt;/span&gt;
+      &lt;span class="na"&gt;containers&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;env&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+            &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;SCHEMA_REGISTRY_HOST_NAME&lt;/span&gt;
+              &lt;span class="na"&gt;value&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;schema-registry"&lt;/span&gt;
+            &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS&lt;/span&gt;
+              &lt;span class="na"&gt;value&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;kafka:29092"&lt;/span&gt;
+            &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;SCHEMA_REGISTRY_LISTENERS&lt;/span&gt;
+              &lt;span class="na"&gt;value&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;http://0.0.0.0:30081"&lt;/span&gt;
+          &lt;span class="na"&gt;image&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;confluentinc/cp-schema-registry:7.0.1&lt;/span&gt;
+          &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;schema-registry&lt;/span&gt;
+          &lt;span class="na"&gt;ports&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+            &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;containerPort&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;30081&lt;/span&gt;
+          &lt;span class="na"&gt;resources&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="pi"&gt;{}&lt;/span&gt;
+      &lt;span class="na"&gt;hostname&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;schema-registry&lt;/span&gt;
+      &lt;span class="na"&gt;restartPolicy&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Always&lt;/span&gt;
+
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;code&gt;schema-registry-service.yaml&lt;/code&gt;&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;apiVersion&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;v1&lt;/span&gt;
+&lt;span class="na"&gt;kind&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Service&lt;/span&gt;
+&lt;span class="na"&gt;metadata&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;labels&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;service&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;schema-registry&lt;/span&gt;
+  &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;schema-registry&lt;/span&gt;
+&lt;span class="na"&gt;spec&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;ports&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;port&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;30081&lt;/span&gt;
+      &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;outport&lt;/span&gt;
+      &lt;span class="na"&gt;targetPort&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;30081&lt;/span&gt;
+      &lt;span class="na"&gt;nodePort&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;30081&lt;/span&gt;
+  &lt;span class="na"&gt;type&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;NodePort&lt;/span&gt;
+  &lt;span class="na"&gt;selector&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;service&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;schema-registry&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;code&gt;zookeeper-data-pv.yaml&lt;/code&gt;&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;apiVersion&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;v1&lt;/span&gt;
+&lt;span class="na"&gt;kind&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;PersistentVolume&lt;/span&gt;
+&lt;span class="na"&gt;metadata&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;zookeeper-data-pv&lt;/span&gt;
+&lt;span class="na"&gt;spec&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;accessModes&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;ReadWriteOnce&lt;/span&gt;
+  &lt;span class="na"&gt;storageClassName&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;zookeeper-data-local-storage&lt;/span&gt;
+  &lt;span class="na"&gt;capacity&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;storage&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;5Gi&lt;/span&gt;
+  &lt;span class="na"&gt;persistentVolumeReclaimPolicy&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Retain&lt;/span&gt;
+  &lt;span class="na"&gt;hostPath&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;path&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;/var/lib/zookeeper/data&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;code&gt;zookeeper-data-pvc.yaml&lt;/code&gt;&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;apiVersion&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;v1&lt;/span&gt;
+&lt;span class="na"&gt;kind&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;PersistentVolumeClaim&lt;/span&gt;
+&lt;span class="na"&gt;metadata&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;zookeeper-data-pvc&lt;/span&gt;
+&lt;span class="na"&gt;spec&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;accessModes&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;ReadWriteOnce&lt;/span&gt;
+  &lt;span class="na"&gt;storageClassName&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;zookeeper-data-local-storage&lt;/span&gt;
+  &lt;span class="na"&gt;resources&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;requests&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;storage&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;5Gi&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;code&gt;zookeeper-deployment.yaml&lt;/code&gt;&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;apiVersion&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;apps/v1&lt;/span&gt;
+&lt;span class="na"&gt;kind&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Deployment&lt;/span&gt;
+&lt;span class="na"&gt;metadata&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;labels&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;service&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;zookeeper&lt;/span&gt;
+  &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;zookeeper&lt;/span&gt;
+&lt;span class="na"&gt;spec&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;replicas&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;1&lt;/span&gt;
+  &lt;span class="na"&gt;selector&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;matchLabels&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;service&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;zookeeper&lt;/span&gt;
+  &lt;span class="na"&gt;strategy&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="pi"&gt;{}&lt;/span&gt;
+  &lt;span class="na"&gt;template&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;metadata&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;labels&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="na"&gt;network/kafka-network&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;true"&lt;/span&gt;
+        &lt;span class="na"&gt;service&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;zookeeper&lt;/span&gt;
+    &lt;span class="na"&gt;spec&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;containers&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;env&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+            &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;TZ&lt;/span&gt;
+            &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;ZOOKEEPER_CLIENT_PORT&lt;/span&gt;
+              &lt;span class="na"&gt;value&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;2181"&lt;/span&gt;
+            &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;ZOOKEEPER_DATA_DIR&lt;/span&gt;
+              &lt;span class="na"&gt;value&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;/var/lib/zookeeper/data"&lt;/span&gt;
+            &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;ZOOKEEPER_LOG_DIR&lt;/span&gt;
+              &lt;span class="na"&gt;value&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;/var/lib/zookeeper/log"&lt;/span&gt;
+            &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;ZOOKEEPER_SERVER_ID&lt;/span&gt;
+              &lt;span class="na"&gt;value&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;1"&lt;/span&gt;
+          &lt;span class="na"&gt;image&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;confluentinc/cp-zookeeper:7.0.1&lt;/span&gt;
+          &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;zookeeper&lt;/span&gt;
+          &lt;span class="na"&gt;ports&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+            &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;containerPort&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;2181&lt;/span&gt;
+          &lt;span class="na"&gt;resources&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="pi"&gt;{}&lt;/span&gt;
+          &lt;span class="na"&gt;volumeMounts&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+            &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;mountPath&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;/var/lib/zookeeper/data&lt;/span&gt;
+              &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;zookeeper-data&lt;/span&gt;
+            &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;mountPath&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;/var/lib/zookeeper/log&lt;/span&gt;
+              &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;zookeeper-log&lt;/span&gt;
+      &lt;span class="na"&gt;hostname&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;zookeeper&lt;/span&gt;
+      &lt;span class="na"&gt;restartPolicy&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Always&lt;/span&gt;
+      &lt;span class="na"&gt;volumes&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+        &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;zookeeper-data&lt;/span&gt;
+          &lt;span class="na"&gt;persistentVolumeClaim&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+            &lt;span class="na"&gt;claimName&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;zookeeper-data-pvc&lt;/span&gt;
+        &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;zookeeper-log&lt;/span&gt;
+          &lt;span class="na"&gt;persistentVolumeClaim&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+            &lt;span class="na"&gt;claimName&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;zookeeper-log-pvc&lt;/span&gt;
+
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;code&gt;zookeeper-log-pv.yaml&lt;/code&gt;&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;apiVersion&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;v1&lt;/span&gt;
+&lt;span class="na"&gt;kind&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;PersistentVolume&lt;/span&gt;
+&lt;span class="na"&gt;metadata&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;zookeeper-log-pv&lt;/span&gt;
+&lt;span class="na"&gt;spec&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;accessModes&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;ReadWriteOnce&lt;/span&gt;
+  &lt;span class="na"&gt;storageClassName&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;zookeeper-log-local-storage&lt;/span&gt;
+  &lt;span class="na"&gt;capacity&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;storage&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;5Gi&lt;/span&gt;
+  &lt;span class="na"&gt;persistentVolumeReclaimPolicy&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Retain&lt;/span&gt;
+  &lt;span class="na"&gt;hostPath&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;path&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;/var/lib/zookeeper/log&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;code&gt;zoopeeker-log-pvc.yaml&lt;/code&gt;&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;apiVersion&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;v1&lt;/span&gt;
+&lt;span class="na"&gt;kind&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;PersistentVolumeClaim&lt;/span&gt;
+&lt;span class="na"&gt;metadata&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;zookeeper-log-pvc&lt;/span&gt;
+&lt;span class="na"&gt;spec&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;accessModes&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="s"&gt;ReadWriteOnce&lt;/span&gt;
+  &lt;span class="na"&gt;storageClassName&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;zookeeper-log-local-storage&lt;/span&gt;
+  &lt;span class="na"&gt;resources&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;requests&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;storage&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;5Gi&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;code&gt;zookeeper-service.yaml&lt;/code&gt;&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;apiVersion&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;v1&lt;/span&gt;
+&lt;span class="na"&gt;kind&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Service&lt;/span&gt;
+&lt;span class="na"&gt;metadata&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;labels&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;service&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;zookeeper&lt;/span&gt;
+  &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;zookeeper&lt;/span&gt;
+&lt;span class="na"&gt;spec&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;ports&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="pi"&gt;-&lt;/span&gt; &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;2181"&lt;/span&gt;
+      &lt;span class="na"&gt;port&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;2181&lt;/span&gt;
+      &lt;span class="na"&gt;targetPort&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="m"&gt;2181&lt;/span&gt;
+  &lt;span class="na"&gt;selector&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;service&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;zookeeper&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#running-it"&gt;
+  &lt;/a&gt;
+  Running it
+&lt;/h2&gt;
+
+&lt;ol&gt;
+&lt;li&gt;&lt;p&gt;After cloning the project open a terminal and cd to the pv-pvc-setup folder. Or if you're creating the files navigate to folder where the kind-config.yaml is located.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Create the folders on your local host machine so the persistent volumes can be persisted to the file system and you&lt;br&gt;
+will be able to restart the kafka and zookeeper cluster without loosing data from topic. Restarting the kind cluster&lt;br&gt;
+will delete the contents of persistent volumes, this is by design how Kind works when having&lt;br&gt;
+a &lt;code&gt;propagation: Bidirectional&lt;/code&gt; configuration. To create the folders you'll need to have &lt;code&gt;uid&lt;/code&gt; and &lt;code&gt;gid&lt;/code&gt; from same&lt;br&gt;
+user running kind cluster otherwise the persistent folders will not be properly persisted. i.e - make sure to&lt;br&gt;
+create &lt;code&gt;tmp/kafka-data&lt;/code&gt;, &lt;code&gt;tmp/zookeeper-data/data&lt;/code&gt; and &lt;code&gt;tmp/zookeeper-data/log&lt;/code&gt;&lt;br&gt;
+from same level where the &lt;code&gt;kind-config.yaml&lt;/code&gt; file you're running kind with or it won't work as expected.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Run kind specifying configuration: &lt;code&gt;kind create cluster --config=kind-config.yml&lt;/code&gt;. This will start a kubernetes&lt;br&gt;
+control plane + worker&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Run kubernetes configuration for kafka &lt;code&gt;kubectl apply -f kafka-k8s&lt;/code&gt;&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;When done stop kubernetes objects: &lt;code&gt;kubectl delete -f kafka-k8s&lt;/code&gt; and then if you want also stop the kind cluster&lt;br&gt;
+which:&lt;br&gt;
+will also delete the storage on the host machine: &lt;code&gt;kind delete cluster&lt;/code&gt;&lt;/p&gt;&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;Check Kind docker containers with Kubernetes control-plane and worker running with &lt;code&gt;docker ps&lt;/code&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;That's all for now folks. &lt;/p&gt;
+
+&lt;p&gt;Stay tunned as I will post about a simpler approach using the default Storage Class automatically provisioned by Kind (Rancher/local-path-provisioner) which simplifies the setup considerably with the trade off of not having so much control over the host local storage where kafka and zookpeeper files are stored on the host machine.&lt;/p&gt;
+
+&lt;p&gt;Photo by &lt;a href="https://unsplash.com/@ffstop?utm_source=unsplash&amp;amp;utm_medium=referral&amp;amp;utm_content=creditCopyText"&gt;Fotis Fotopoulos&lt;/a&gt; on &lt;a href="https://unsplash.com/s/photos/development?utm_source=unsplash&amp;amp;utm_medium=referral&amp;amp;utm_content=creditCopyText"&gt;Unsplash&lt;/a&gt;&lt;/p&gt;
+
+</description>
+      <category>kubernetes</category>
+      <category>kafka</category>
+      <category>devops</category>
+      <category>productivity</category>
     </item>
     <item>
       <title>React State Pattern | Day 8</title>
@@ -2461,631 +3362,6 @@ I've created PowerShell profile to script frequent tasks, making them easy and f
       <category>windows</category>
       <category>dotnet</category>
       <category>angular</category>
-    </item>
-    <item>
-      <title>Building a PWA with Vue.js</title>
-      <author>Matt Angelosanto</author>
-      <pubDate>Tue, 11 Jan 2022 18:47:44 +0000</pubDate>
-      <link>https://dev.to/logrocket/building-a-pwa-with-vuejs-2h8g</link>
-      <guid>https://dev.to/logrocket/building-a-pwa-with-vuejs-2h8g</guid>
-      <description>&lt;p&gt;&lt;strong&gt;Written by &lt;a href="https://blog.logrocket.com/author/joshcollinsworth/"&gt;Josh Collinsworth&lt;/a&gt;&lt;/strong&gt; ✏️&lt;/p&gt;
-
-&lt;p&gt;A while back, I built a little &lt;a href="https://codepen.io/collinsworth/pen/bGdmmrY"&gt;liquid unit conversion app in CodePen&lt;/a&gt; to convert between ounces, teaspoons, cups, etc. I didn’t think anyone would actually use it in real life — it was mostly just for fun and learning with &lt;a href="https://vuejs.org/"&gt;Vue&lt;/a&gt;:&lt;/p&gt;
-
-&lt;p&gt;&lt;iframe height="600" src="https://codepen.io/collinsworth/embed/bGdmmrY?height=600&amp;amp;default-tab=result&amp;amp;embed-version=2"&gt;
-&lt;/iframe&gt;
-&lt;/p&gt;
-
-&lt;p&gt;But, surprisingly, I’ve found the app quite useful. As I began cooking and mixing cocktails at home over the last couple of years (you know why), I found myself repeatedly reaching for that handy liquid converter app.&lt;/p&gt;
-
-&lt;p&gt;There was just one problem, though: accessing the app on my phone was a pain. I could bookmark it, sure, but that experience wasn’t great, and it didn’t seem that much better than just Googling what I needed. There were plenty of great alternatives, of course, but they just weren’t as much fun as using something I’d built.&lt;/p&gt;
-
-&lt;p&gt;I found myself wishing my CodePen app was an actual app that lived on my phone, and that I could pull it up as easily as, say, tapping Twitter or Slack.&lt;/p&gt;
-
-&lt;p&gt;There’s good news: this is very doable, &lt;a href="https://blog.logrocket.com/why-you-should-turn-your-app-into-a-pwa/"&gt;thanks to progressive web apps&lt;/a&gt;!&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#what-is-a-progressive-web-app"&gt;
-  &lt;/a&gt;
-  What is a progressive web app?
-&lt;/h2&gt;
-
-&lt;p&gt;Defining the term progressive web app (PWA) in detail would be enough for &lt;a href="https://developer.mozilla.org/en-US/docs/Web/Progressive_web_apps/Introduction"&gt;its own post&lt;/a&gt; (or even &lt;a href="https://abookapart.com/products/progressive-web-apps"&gt;its own book&lt;/a&gt;), but to briefly hit the highlights: a progressive web app is a website with features that make it look, feel, and behave like a native app.&lt;/p&gt;
-
-&lt;p&gt;Essentially, it’s an enhanced website! How? Unlike traditional websites, you can install a PWA on your device. You can even prompt users to install your PWA when they visit your site, as shown in this screenshot from &lt;a href="https://quina.app/"&gt;Quina&lt;/a&gt;, my word game app, which is also a PWA (and also built with &lt;a href="https://vuejs.org/"&gt;Vue&lt;/a&gt;):&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--vqDdE-Aa--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://blog.logrocket.com/wp-content/uploads/2021/12/quina-app.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--vqDdE-Aa--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://blog.logrocket.com/wp-content/uploads/2021/12/quina-app.png" alt="Quina App" width="730" height="1583"&gt;&lt;/a&gt; You can prompt a user to install your PWA as soon as they visit the URL.&lt;/p&gt;
-
-&lt;p&gt;Once the PWA is installed, you can open it with an icon from your dock or home screen, just like a native app.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--C000AWDw--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://blog.logrocket.com/wp-content/uploads/2021/12/quina-icon.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--C000AWDw--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://blog.logrocket.com/wp-content/uploads/2021/12/quina-icon.png" alt="Quina Icon" width="730" height="1583"&gt;&lt;/a&gt; Once installed, a PWA will show up alongside all the rest of your apps.&lt;/p&gt;
-
-&lt;p&gt;Once opened, a PWA becomes a standalone, full-screen experience instead of opening in the device’s browser, just like a native app would. Notice the custom status bar color. Nifty!&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--ln84eSF_--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://blog.logrocket.com/wp-content/uploads/2021/12/full-screen-quina.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ln84eSF_--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://blog.logrocket.com/wp-content/uploads/2021/12/full-screen-quina.png" alt="Full Screen Quina" width="730" height="1583"&gt;&lt;/a&gt; A PWA opens in its own fullscreen window — no browser bar, just like a native app!&lt;/p&gt;
-
-&lt;p&gt;Progressive web apps can run even while the device is not connected to the internet, and can store their own data locally on the device.&lt;/p&gt;
-
-&lt;p&gt;Thanks to recent improvements to browser APIs, PWAs are even capable of things like device vibration, accessing the device’s camera and Bluetooth connections, and even creating push notifications. (It should be noted that iOS restricts several features, however, including push notifications. One bad Apple, as they say.)&lt;/p&gt;
-
-&lt;p&gt;Any website can be a PWA. Despite the name, it doesn’t actually have to be what you might call an “app,” exactly. A static blog, one-pager, an eCommerce store, or a simple brochure site could be a PWA. Twitter and Starbucks are among companies offering a PWA experience.&lt;/p&gt;
-
-&lt;p&gt;It doesn’t matter how the site was built, either. Many PWAs are made using modern JavaScript frameworks (like Vue, which we’ll be focusing on here), but that’s just because they’re convenient.&lt;/p&gt;
-
-&lt;p&gt;When it comes to PWAs, there’s nothing special about Vue specifically, or even frameworks in general.&lt;/p&gt;
-
-&lt;p&gt;To put it simply: if it loads in a browser, it can be a progressive web app.&lt;/p&gt;
-
-&lt;p&gt;That groundwork laid, let’s talk specifically about how to build a PWA with Vue, one of my personal favorite tools for web development.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#how-to-turn-an-app-into-a-pwa-using-vuejs"&gt;
-  &lt;/a&gt;
-  How to turn an app into a PWA using Vue.js
-&lt;/h2&gt;
-
-&lt;p&gt;PWAs have a few requirements, including:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;  A JavaScript service worker (to allow the site to load offline and store data locally)&lt;/li&gt;
-&lt;li&gt;  A valid JSON manifest of the app’s info, with the correct info filled in&lt;/li&gt;
-&lt;li&gt;  A set of properly named icons, at multiple sizes&lt;/li&gt;
-&lt;li&gt;  A secure, HTTPS connection&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;Most hosts provide SSL certificates for free these days (many even do so automatically), so we won't go into the HTTPS requirement here. That should be the easiest part.&lt;/p&gt;
-
-&lt;p&gt;The rest may not sound like a lot, but there’s a good deal of boilerplate that goes into creating all of that stuff, both in terms of the files and the code itself. If you were to go about it manually, it would be a tedious task, to say the least.&lt;/p&gt;
-
-&lt;p&gt;Fortunately, there’s an easier way with Vue, thanks to &lt;a href="https://cli.vuejs.org/"&gt;Vue CLI&lt;/a&gt;!&lt;/p&gt;
-
-&lt;p&gt;Vue CLI offers a convenient PWA plugin, and, even better, it can be added to an existing or new project.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#adding-the-pwa-plugin-to-an-existing-vue-project"&gt;
-  &lt;/a&gt;
-  Adding the PWA plugin to an existing Vue project
-&lt;/h2&gt;
-
-&lt;p&gt;If you’d like to turn an existing Vue project into a PWA, the plugin to do so can easily be installed on its own. The command to install the PWA plugin (assuming you already have Vue CLI installed) is simply:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;vue add pwa
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Run this on the command line in your project folder, and Vue CLI will install all the files and config you need to transform your project into a progressive web app.&lt;/p&gt;
-
-&lt;p&gt;The original project doesn’t even need to be created with Vue CLI, although you may need to make some adjustments, depending on your project structure.&lt;/p&gt;
-
-&lt;p&gt;If you’ve run that command successfully in an existing Vue project, you can skip ahead past the next section, and we’ll talk about what the plugin actually did and how to customize it after that.&lt;/p&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;Note that if your original project is built with &lt;a href="https://nuxtjs.org/"&gt;Nuxt&lt;/a&gt; (a Vue meta-framework), you have a better-suited solution readily available in the &lt;a href="https://pwa.nuxtjs.org/"&gt;Nuxt PWA module&lt;/a&gt;. Nuxt and its ecosystem of plugins are a bit much to tackle in the scope of this post, but the same PWA general principles we’ll cover here apply there, too. The difference is how the config options are entered. So, while the concepts translate, if you’re using Nuxt, I’ll refer you to the &lt;a href="https://pwa.nuxtjs.org/setup"&gt;Nuxt PWA module docs&lt;/a&gt; for the details.&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;h2&gt;
-  &lt;a href="#creating-a-new-project-with-vue-cli"&gt;
-  &lt;/a&gt;
-  Creating a new project with Vue CLI
-&lt;/h2&gt;
-
-&lt;p&gt;First, install Vue CLI.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;npm &lt;span class="nb"&gt;install&lt;/span&gt; &lt;span class="nt"&gt;-g&lt;/span&gt; @vue/cli
-&lt;span class="c"&gt;# OR&lt;/span&gt;
-yarn global add @vue/cli
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;With Vue CLI installed, enter this command in your terminal (the name &lt;code&gt;my-vue-pwa&lt;/code&gt; can be changed if you prefer):&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;vue create my-vue-pwa
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;You should see a prompt asking what kind of project you’d like to create:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--R9O0vakC--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://blog.logrocket.com/wp-content/uploads/2021/12/pick-preset.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--R9O0vakC--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://blog.logrocket.com/wp-content/uploads/2021/12/pick-preset.png" alt="Pick Preset" width="730" height="423"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Choose &lt;strong&gt;Manually select features&lt;/strong&gt;, and you’ll see a list of à la carte options for your new app, including &lt;code&gt;Progressive Web App (PWA) Support&lt;/code&gt;.&lt;/p&gt;
-
-&lt;p&gt;Use your arrow keys to move down to that option, and press &lt;strong&gt;space&lt;/strong&gt; to enable it. You can also add or remove other features if you like, but other than the PWA option, I’ll be sticking with the defaults shown.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Tl6_QQwP--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://blog.logrocket.com/wp-content/uploads/2021/12/pwa-support-options.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Tl6_QQwP--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://blog.logrocket.com/wp-content/uploads/2021/12/pwa-support-options.png" alt="PWA Support Options" width="730" height="423"&gt;&lt;/a&gt; Be sure the Progressive Web App (PWA) Support option is checked.&lt;/p&gt;
-
-&lt;p&gt;Hit &lt;strong&gt;enter&lt;/strong&gt; when you’re happy with your choices, and you’ll be prompted to choose Vue 2 or 3. Go with whichever you prefer.&lt;/p&gt;
-
-&lt;p&gt;Vue CLI will then ask you a few more questions about your project, and unless you have a reason not to, I’d recommend using the default for each one. When the installation is finished, you should see something like this:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--nCLvRJKc--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://blog.logrocket.com/wp-content/uploads/2021/12/vue-project.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--nCLvRJKc--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://blog.logrocket.com/wp-content/uploads/2021/12/vue-project.png" alt="Vue Project" width="730" height="424"&gt;&lt;/a&gt; Our Vue project has been successfully created.&lt;/p&gt;
-
-&lt;p&gt;Now that we have our project set up, let’s open the project folder in &lt;a href="https://code.visualstudio.com/"&gt;VS Code&lt;/a&gt; (or your preferred text editor).&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#how-the-vue-pwa-plugin-works"&gt;
-  &lt;/a&gt;
-  How the Vue PWA plugin works
-&lt;/h2&gt;
-
-&lt;p&gt;When you peek at the folders and files in the project Vue CLI generated for us, you’ll see a file named &lt;code&gt;registerServiceWorker.js&lt;/code&gt;. As the name implies, this file will help to create a service worker, which will store the site’s data locally.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--2bWasQD9--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://blog.logrocket.com/wp-content/uploads/2021/12/registerserviceworker.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--2bWasQD9--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://blog.logrocket.com/wp-content/uploads/2021/12/registerserviceworker.png" alt="RegisterServiceWorker" width="730" height="420"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;The actual service worker is created automatically during the build step, but you can see some of the work that Vue CLI did for us when we chose the “progressive web app” option.&lt;/p&gt;
-
-&lt;p&gt;This means we won’t see our service worker during development, which is actually a good thing. Service workers do much more to get in the way than to be helpful during the development process, as they serve cached files aggressively rather than show our most recent changes.&lt;/p&gt;
-
-&lt;p&gt;That being the case, let’s talk about how to actually see and use our PWA, as a user might.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#testing-a-pwa"&gt;
-  &lt;/a&gt;
-  Testing a PWA
-&lt;/h2&gt;
-
-&lt;p&gt;For building the actual code of our app, Vue’s default &lt;code&gt;npm run serve&lt;/code&gt; will serve us well (pun fully intended). While developing our components, code, and the functional bits of the app itself, this will continue to be our go-to.&lt;/p&gt;
-
-&lt;p&gt;Both the service worker and manifest file—critical to PWA functionality—are generated during the production build, and not fully functional in the dev environment. To get around this, we’ll need to build the site, then serve it.&lt;/p&gt;
-
-&lt;p&gt;You can do this with a host like &lt;a href="https://www.netlify.com/"&gt;Netlify&lt;/a&gt;, &lt;a href="https://vercel.com/"&gt;Vercel&lt;/a&gt;, or &lt;a href="https://render.com/"&gt;Render&lt;/a&gt;. It’s perfectly viable to commit, push, and wait for the build to go live in order to see and interact with it.&lt;/p&gt;
-
-&lt;p&gt;With an app this simple, the build should take less than a minute. There’s also one unique upside to this method: you get an SSL certificate installed for HTTPS connection automatically.&lt;/p&gt;
-
-&lt;p&gt;That said: I usually prefer to build and serve locally. It’s faster and won’t cost you any build minutes on a host. This command will handle both in one line:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight shell"&gt;&lt;code&gt;npm run build &lt;span class="o"&gt;&amp;amp;&amp;amp;&lt;/span&gt; npx http-server dist
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Run that (you may be prompted to click &lt;strong&gt;y&lt;/strong&gt; to approve temporarily installing the &lt;code&gt;http-server&lt;/code&gt; package), and you’ll have a local domain ready to use to access your built site locally:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--sznk6tFL--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://blog.logrocket.com/wp-content/uploads/2021/12/local-domain.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--sznk6tFL--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://blog.logrocket.com/wp-content/uploads/2021/12/local-domain.png" alt="Local Domain" width="730" height="870"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;Note: there are many HTTP server packages available. I like &lt;code&gt;http-server&lt;/code&gt; for this purpose because, as you can see, it gives you a range of IPs and ports to use, so that if you’re running into caching issues on one, you can try another. But you’re welcome to use another package (and/or install the one you’re using permanently, rather than use &lt;code&gt;npx&lt;/code&gt; every time).&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;Let’s open the first IP address in our browser. You can command-click in VS Code on Mac, control-click on Windows, or just good ol’ copy and paste.&lt;/p&gt;
-
-&lt;p&gt;If you open the site in Chrome, you might notice you can install the PWA from the browser bar now.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--PJsaSR1F--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://blog.logrocket.com/wp-content/uploads/2021/12/install-app.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--PJsaSR1F--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://blog.logrocket.com/wp-content/uploads/2021/12/install-app.png" alt="Install App" width="730" height="303"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;(Sadly, Firefox and Safari only support PWAs on Android and iOS, not on desktop.)&lt;/p&gt;
-
-&lt;p&gt;Go ahead and click &lt;strong&gt;Install.&lt;/strong&gt; Your app will be installed and will open in a new standalone window.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--vmEcGZVX--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://blog.logrocket.com/wp-content/uploads/2021/12/standalone-window.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--vmEcGZVX--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://blog.logrocket.com/wp-content/uploads/2021/12/standalone-window.png" alt="Standalone Window" width="730" height="590"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Notice that our PWA window looks just like an app window, and, if you look in your dock, you’ll see our app’s default Vue logo:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--UccJ1Tgy--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://blog.logrocket.com/wp-content/uploads/2021/12/app-logo-taskbar.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--UccJ1Tgy--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://blog.logrocket.com/wp-content/uploads/2021/12/app-logo-taskbar.png" alt="App Logo Taskbar" width="730" height="200"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Pretty cool, right!?&lt;/p&gt;
-
-&lt;p&gt;The PWA can just as easily be installed on a tablet or smartphone as well and will load the same way there.&lt;/p&gt;
-
-&lt;p&gt;One word of warning: as long as you’re looking at the built production site in the browser, the service worker will kick in and cache assets pretty aggressively. Develop with the &lt;strong&gt;Network&lt;/strong&gt; tab open and the &lt;strong&gt;Disable Cache&lt;/strong&gt; checkbox checked.&lt;/p&gt;
-
-&lt;p&gt;I’d also recommend checking &lt;strong&gt;Application &amp;gt; Service Workers &amp;gt; Update on reload&lt;/strong&gt; in Chrome, as shown.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--LuBrkyGb--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://blog.logrocket.com/wp-content/uploads/2021/12/update-on-reload.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--LuBrkyGb--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://blog.logrocket.com/wp-content/uploads/2021/12/update-on-reload.png" alt="Update on Reload" width="730" height="288"&gt;&lt;/a&gt; Be sure to configure your site’s service worker to avoid caching issues.&lt;/p&gt;
-
-&lt;p&gt;If all else fails, you can force a refresh by updating or unregistering the service worker from the same panel in the browser’s dev tools.&lt;/p&gt;
-
-&lt;p&gt;Finally, one last important thing to mention about service workers: they’re a complex topic all on their own. While the PWA plugin sets one up for us, it’s filled with standard defaults and may not be ideally configured for your app’s needs.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#customizing-our-pwa-in-vue"&gt;
-  &lt;/a&gt;
-  Customizing our PWA in Vue
-&lt;/h2&gt;
-
-&lt;p&gt;The PWA plugin’s defaults are serviceable, but let’s customize our app’s colors and logo.&lt;/p&gt;
-
-&lt;p&gt;To override the defaults in our web app manifest, we’ll need to set up a &lt;code&gt;vue.config.js&lt;/code&gt; file in the root of our project. You can check out the &lt;a href="https://cli.vuejs.org/core-plugins/pwa.html"&gt;PWA plugin documentation&lt;/a&gt; for full details, but whatever is defined in our &lt;code&gt;vue.config.js&lt;/code&gt; file will take precedence over the PWA plugin defaults and override them.&lt;/p&gt;
-
-&lt;p&gt;According to the docs, you can also define these settings in the project’s &lt;code&gt;package.json&lt;/code&gt; file, but I find JavaScript a bit easier to write, and less syntactically strict than JSON.&lt;/p&gt;
-
-&lt;p&gt;The &lt;a href="https://cli.vuejs.org/core-plugins/pwa.html"&gt;PWA plugin documentation&lt;/a&gt; has a full list of all the properties you can control, but there are a few worth highlighting.&lt;/p&gt;
-
-&lt;p&gt;Check out &lt;code&gt;pwa.name&lt;/code&gt;, and &lt;code&gt;pwa.themeColor&lt;/code&gt;, both found under the &lt;a href="https://cli.vuejs.org/core-plugins/pwa.html#configuration"&gt;Config heading&lt;/a&gt;. Here’s a screenshot from the docs for reference:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--J--nUJix--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://blog.logrocket.com/wp-content/uploads/2021/12/docs-for-reference.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--J--nUJix--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://blog.logrocket.com/wp-content/uploads/2021/12/docs-for-reference.png" alt="Docs for Reference" width="730" height="238"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Notice the defaults here. It’s handy to know what options will apply when we don’t choose anything. (In the cases above, the &lt;code&gt;name&lt;/code&gt; field from &lt;code&gt;package.json&lt;/code&gt; and Vue green.)&lt;/p&gt;
-
-&lt;p&gt;Go ahead and create a file named &lt;code&gt;vue.config.js&lt;/code&gt; in the root of your project. Open it and add code, like so:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="nx"&gt;module&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;exports&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="c1"&gt;// ...Other Vue config options here, possibly&lt;/span&gt;
-  &lt;span class="na"&gt;pwa&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="na"&gt;name&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Liquid Measurement Converter&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="na"&gt;themeColor&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;#ffd100&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
-  &lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="p"&gt;};&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Now, if we re-run our build and serve script, we can re-install the PWA. We should see our new title and theme color reflected.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--4whf66BL--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://blog.logrocket.com/wp-content/uploads/2021/12/liquid-measurement-converter.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--4whf66BL--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://blog.logrocket.com/wp-content/uploads/2021/12/liquid-measurement-converter.png" alt="Liquid Measurement Converter" width="730" height="634"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Notice there are some required fields in the manifest — the PWA plugin just handles them all for us. Having a short name for your app (that’s just a handful of characters) is probably a good idea; “Liquid Measurement Converter” would be too long in some cases.&lt;/p&gt;
-
-&lt;p&gt;There are also other color options that are worth adjusting; again, see the &lt;a href="https://cli.vuejs.org/core-plugins/pwa.html"&gt;plugin docs&lt;/a&gt; for more details.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#adding-custom-pwa-icons"&gt;
-  &lt;/a&gt;
-  Adding custom PWA icons
-&lt;/h3&gt;
-
-&lt;p&gt;There’s one other nice thing the PWA plugin took care of for us: it generated a set of icons for our app in &lt;code&gt;public/img/icons&lt;/code&gt;:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--qg8j3Sqz--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://blog.logrocket.com/wp-content/uploads/2021/12/public-img-icons.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--qg8j3Sqz--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://blog.logrocket.com/wp-content/uploads/2021/12/public-img-icons.png" alt="Public Img Icons" width="730" height="526"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;The names and sizes of these icons are important. Various browsers and operating systems will search for these icons to help identify our PWA.&lt;/p&gt;
-
-&lt;p&gt;We also have some control of our icon via our web app manifest. To change the icon we want our PWA to use, we need to add an &lt;code&gt;icons&lt;/code&gt; property to the &lt;code&gt;pwa&lt;/code&gt; options object inside of &lt;code&gt;vue.config.js&lt;/code&gt;.&lt;/p&gt;
-
-&lt;p&gt;Here’s what the default looks like, just for reference:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="nx"&gt;module&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;exports&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="c1"&gt;// ...Other Vue config options here, possibly&lt;/span&gt;
-  &lt;span class="na"&gt;pwa&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="c1"&gt;// ...Other pwa config options&lt;/span&gt;
-    &lt;span class="na"&gt;icons&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-      &lt;span class="na"&gt;favicon32&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;img/icons/favicon-32x32.png&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-      &lt;span class="na"&gt;favicon16&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;img/icons/favicon-16x16.png&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-      &lt;span class="na"&gt;appleTouchIcon&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;img/icons/apple-touch-icon-152x152.png&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-      &lt;span class="na"&gt;maskIcon&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;img/icons/safari-pinned-tab.svg&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-      &lt;span class="na"&gt;msTileImage&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;img/icons/msapplication-icon-144x144.png&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;
-    &lt;span class="p"&gt;}&lt;/span&gt;
-  &lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Anywhere our app is referenced in the UI, these icons will serve as our app’s logo. These will be used as favicons, app icons, status bar indicators, etc.&lt;/p&gt;
-
-&lt;p&gt;And again, just to emphasize: a PWA will not be installable if it doesn’t have the right icon files. Icons must be in the correct place, and named correctly, for universal support.&lt;/p&gt;
-
-&lt;p&gt;Fortunately, the PWA plugin already added all the icons we need. All we need to do is replace each image with an identically sized and named icon of our choosing.&lt;/p&gt;
-
-&lt;p&gt;There are several browser-based PWA icon generator tools available if you’d like to make one version and automate the rest. I found &lt;a href="https://realfavicongenerator.net/"&gt;realfavicongenerator.net&lt;/a&gt; to be the most useful of these tools. Ideally, the original should be 512px by 512 px, as that’s the largest any OS or browser might use.&lt;/p&gt;
-
-&lt;p&gt;It may be helpful to know that after a build, you can open &lt;code&gt;dist/manifest.json&lt;/code&gt; in your text editor (or visit &lt;code&gt;/manifest.json&lt;/code&gt; in the browser window) to get a first-hand look at the manifest file the Vue PWA plugin is generating for your project, just to be sure what’s going into the &lt;code&gt;vue.config.js&lt;/code&gt; file is coming out the other end correctly.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#other-pwa-options-with-vue"&gt;
-  &lt;/a&gt;
-  Other PWA options with Vue
-&lt;/h3&gt;
-
-&lt;p&gt;There are several other config options available. Browse the list of options in the &lt;a href="https://cli.vuejs.org/core-plugins/pwa.html"&gt;PWA plugin docs&lt;/a&gt; to get a sense of what’s possible.&lt;/p&gt;
-
-&lt;p&gt;When in doubt, I’d recommend sticking with the defaults unless you have a compelling reason to make a change. The documentation does a good job of linking to explainers where things get complex, too.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#prompting-the-user-to-install-a-pwa"&gt;
-  &lt;/a&gt;
-  Prompting the user to install a PWA
-&lt;/h2&gt;
-
-&lt;p&gt;Users can install a PWA directly from their browser (depending on the browser and OS), but the option is generally not highly visible. If we actually want users to install our PWA, then we should make it easy to do so.&lt;/p&gt;
-
-&lt;p&gt;Browser vendors are conscious to prevent annoying abuse of the PWA prompt, so there’s a specific way to accomplish this. Here’s a post on &lt;a href="https://web.dev/customize-install/"&gt;how to provide your own in-app install experience&lt;/a&gt;, but we’ll tailor the approach specifically for Vue.&lt;/p&gt;
-
-&lt;p&gt;We’ll wrap the code up in a Vue component that can be dropped into any PWA project:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight vue"&gt;&lt;code&gt;&lt;span class="c"&gt;&amp;lt;!-- PWAPrompt.vue --&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;&lt;/span&gt;&lt;span class="k"&gt;template&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-  &lt;span class="nt"&gt;&amp;lt;div&lt;/span&gt; &lt;span class="na"&gt;v-if=&lt;/span&gt;&lt;span class="s"&gt;"shown"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-    Add app to home screen?
-
-    &lt;span class="nt"&gt;&amp;lt;button&lt;/span&gt; &lt;span class="err"&gt;@&lt;/span&gt;&lt;span class="na"&gt;click=&lt;/span&gt;&lt;span class="s"&gt;"installPWA"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-      Install!
-    &lt;span class="nt"&gt;&amp;lt;/button&amp;gt;&lt;/span&gt;
-
-    &lt;span class="nt"&gt;&amp;lt;button&lt;/span&gt; &lt;span class="err"&gt;@&lt;/span&gt;&lt;span class="na"&gt;click=&lt;/span&gt;&lt;span class="s"&gt;"dismissPrompt"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-      No, thanks
-    &lt;span class="nt"&gt;&amp;lt;/button&amp;gt;&lt;/span&gt;
-  &lt;span class="nt"&gt;&amp;lt;/div&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;/&lt;/span&gt;&lt;span class="k"&gt;template&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-
-&lt;span class="nt"&gt;&amp;lt;&lt;/span&gt;&lt;span class="k"&gt;script&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="k"&gt;default&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="na"&gt;data&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;({&lt;/span&gt;
-    &lt;span class="na"&gt;shown&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kc"&gt;false&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="p"&gt;}),&lt;/span&gt;
-
-  &lt;span class="nx"&gt;beforeMount&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nb"&gt;window&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;addEventListener&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;beforeinstallprompt&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;e&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-      &lt;span class="nx"&gt;e&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;preventDefault&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
-      &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;installEvent&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;e&lt;/span&gt;
-      &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;shown&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="kc"&gt;true&lt;/span&gt;
-    &lt;span class="p"&gt;})&lt;/span&gt;
-  &lt;span class="p"&gt;},&lt;/span&gt;
-
-  &lt;span class="na"&gt;methods&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="nx"&gt;dismissPrompt&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-      &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;shown&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="kc"&gt;false&lt;/span&gt;
-    &lt;span class="p"&gt;},&lt;/span&gt;
-
-    &lt;span class="nx"&gt;installPWA&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-      &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;installEvent&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;prompt&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
-      &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;installEvent&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;userChoice&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;then&lt;/span&gt;&lt;span class="p"&gt;((&lt;/span&gt;&lt;span class="nx"&gt;choice&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-        &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;dismissPrompt&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="c1"&gt;// Hide the prompt once the user's clicked&lt;/span&gt;
-        &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;choice&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;outcome&lt;/span&gt; &lt;span class="o"&gt;===&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;accepted&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-          &lt;span class="c1"&gt;// Do something additional if the user chose to install&lt;/span&gt;
-        &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;else&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-          &lt;span class="c1"&gt;// Do something additional if the user declined&lt;/span&gt;
-        &lt;span class="p"&gt;}&lt;/span&gt;
-      &lt;span class="p"&gt;})&lt;/span&gt;
-    &lt;span class="p"&gt;},&lt;/span&gt;
-  &lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;/&lt;/span&gt;&lt;span class="k"&gt;script&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Now we need to import and use that component in our app wherever we want the prompt to show up, and it will take care of the rest for us.&lt;/p&gt;
-
-&lt;p&gt;We don’t have to do &lt;strong&gt;anything if the user clicks install&lt;/strong&gt;; the browser handles that. We wait for the browser to fire the default &lt;code&gt;beforeinstallprompt&lt;/code&gt; event, intercept it, and show our more visible prompt instead.&lt;/p&gt;
-
-&lt;p&gt;We can do something extra in the &lt;code&gt;if&lt;/code&gt;/&lt;code&gt;else&lt;/code&gt; above if we want to log the result, for example, or show another message, but we don’t have to.&lt;/p&gt;
-
-&lt;p&gt;We cannot force the prompt again, however, or create any other way for the PWA to be installed. The browser has full control over when that functionality can be used.&lt;/p&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;Note: I didn’t include any styles with this component; just the minimal functional bits. &lt;a href="https://web.dev/promote-install/"&gt;Here’s a guide to various approaches and best practices for the prompt&lt;/a&gt;.&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;h2&gt;
-  &lt;a href="#troubleshooting-your-pwa"&gt;
-  &lt;/a&gt;
-  Troubleshooting your PWA
-&lt;/h2&gt;
-
-&lt;p&gt;If you’re having issues getting your install prompt to show up — or getting your PWA validated — here are some things to double-check.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#is-your-pwa-loading-over-https"&gt;
-  &lt;/a&gt;
-  Is your PWA loading over HTTPS?
-&lt;/h3&gt;
-
-&lt;p&gt;PWAs require a secure HTTPS connection (unless loading locally).&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#do-you-have-a-manifest"&gt;
-  &lt;/a&gt;
-  Do you have a manifest?
-&lt;/h3&gt;
-
-&lt;p&gt;You should be able to visit &lt;code&gt;/manifest.json&lt;/code&gt; at your PWA URL and see it loaded in the browser.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#are-there-image-404s-in-the-console"&gt;
-  &lt;/a&gt;
-  Are there image 404s in the console?
-&lt;/h3&gt;
-
-&lt;p&gt;If your PWA doesn’t have the right images named the right things in the right sizes and in the right place, it may not be installable. The console in dev tools should show errors if that’s the case.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#do-you-have-a-service-worker"&gt;
-  &lt;/a&gt;
-  Do you have a service worker?
-&lt;/h3&gt;
-
-&lt;p&gt;The PWA plugin takes care of this for us, but it’s still worth verifying you see the worker loading. You should be able to see a &lt;code&gt;service-worker.js&lt;/code&gt; file being loaded in the &lt;strong&gt;Network&lt;/strong&gt; tab or see it registered in &lt;strong&gt;Application &amp;gt; Service&lt;/strong&gt; workers in dev tools.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#is-your-service-worker-running"&gt;
-  &lt;/a&gt;
-  Is your service worker running?
-&lt;/h3&gt;
-
-&lt;p&gt;If you’re dealing with changes not showing up as expected, you might need to try an incognito window, disable caching, and/or unregister the service worker in dev tools.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#is-your-prompt-code-correct"&gt;
-  &lt;/a&gt;
-  Is your prompt code correct?
-&lt;/h3&gt;
-
-&lt;p&gt;Check the previous section to verify your prompt code is doing everything it needs to.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#does-your-current-browser-and-os-support-pwas"&gt;
-  &lt;/a&gt;
-  Does your current browser and OS support PWAs?
-&lt;/h3&gt;
-
-&lt;p&gt;Remember, Firefox and Safari don’t support PWAs on desktop. iOS also restricts some PWA features, but PWAs should still be installable on iOS. Here are the &lt;a href="https://web.dev/install-criteria/"&gt;install criteria for Chrome&lt;/a&gt;.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#conclusion"&gt;
-  &lt;/a&gt;
-  Conclusion
-&lt;/h2&gt;
-
-&lt;p&gt;I went through the steps outlined in this article to convert the liquid measure conversion CodePen project to fully fleshed-out PWA.&lt;/p&gt;
-
-&lt;p&gt;You can see the finished product at &lt;a href="https://vlmc.netlify.app"&gt;vlmc.netlify.app&lt;/a&gt;. I made some noticeable adjustments from the original UI format to make it more friendly to use on a mobile phone, but the general idea is the same.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--C7A5wTEB--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://blog.logrocket.com/wp-content/uploads/2021/12/improved-ui.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--C7A5wTEB--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://blog.logrocket.com/wp-content/uploads/2021/12/improved-ui.png" alt="Improved UI" width="730" height="1583"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Here’s &lt;a href="https://github.com/josh-collinsworth/vue-liquid-measurement-converter"&gt;the finished GitHub repo&lt;/a&gt;, and &lt;a href="https://github.com/josh-collinsworth/vue-liquid-measurement-converter/blob/main/src/components/PWAPrompt.vue"&gt;here’s my finished PWAPrompt component&lt;/a&gt;, specifically, if you’d like to yoink it for your own repurposing. Just be sure to adjust the code as needed.&lt;/p&gt;
-
-&lt;p&gt;Personally, I had fun converting this project to a PWA, and I was re-energized by the possibilities PWAs offer along the journey. Progressive web apps are powerful, amazing, and exciting! I hope you’re inspired to try out the tech for yourself on your own project.&lt;/p&gt;
-
-
-
-
-&lt;h2&gt;
-  &lt;a href="#experience-your-vue-apps-exactly-how-a-user-does"&gt;
-  &lt;/a&gt;
-  Experience your Vue apps exactly how a user does
-&lt;/h2&gt;
-
-&lt;p&gt;Debugging Vue.js applications can be difficult, especially when there are dozens, if not hundreds of mutations during a user session. If you’re interested in monitoring and tracking Vue mutations for all of your users in production, &lt;a href="https://logrocket.com/signup/"&gt;try LogRocket&lt;/a&gt;. &lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://logrocket.com/signup/"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s---Rso_joi--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://files.readme.io/00591d0-687474703a2f2f692e696d6775722e636f6d2f6a3049327856572e706e67.png" alt="LogRocket Dashboard Free Trial Banner" width="858" height="500"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://logrocket.com/signup/"&gt;LogRocket&lt;/a&gt; is like a DVR for web apps, recording literally everything that happens in your Vue apps including network requests, JavaScript errors, performance problems, and much more. Instead of guessing why problems happen, you can aggregate and report on what state your application was in when an issue occurred.&lt;/p&gt;
-
-&lt;p&gt;The LogRocket Vuex plugin logs Vuex mutations to the LogRocket console, giving you context around what led to an error, and what state the application was in when an issue occurred.&lt;/p&gt;
-
-&lt;p&gt;Modernize how you debug your Vue apps - &lt;a href="https://logrocket.com/signup/"&gt;Start monitoring for free&lt;/a&gt;.&lt;/p&gt;
-
-</description>
-      <category>pwa</category>
-      <category>vue</category>
-      <category>webdev</category>
-    </item>
-    <item>
-      <title>Local Shop Search - Search shop near you</title>
-      <author>Nithin I Bhandari</author>
-      <pubDate>Tue, 11 Jan 2022 18:43:44 +0000</pubDate>
-      <link>https://dev.to/nithinibhandari1999/local-shop-search-search-shop-near-you-1135</link>
-      <guid>https://dev.to/nithinibhandari1999/local-shop-search-search-shop-near-you-1135</guid>
-      <description>&lt;p&gt;Local Shop Search is used to search a shop near you by a map.&lt;br&gt;
-Shop keeper can add a shop and list his product.&lt;br&gt;
-End-User can Search Products and can visit his shop to purchase the product.&lt;/p&gt;
-
-&lt;p&gt;Live Website: &lt;a href="https://local-shop-search.netlify.app/search/"&gt;https://local-shop-search.netlify.app/search/&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--g2MlhSu0--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/zt9ef1wmgwts7p6q1lqe.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--g2MlhSu0--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/zt9ef1wmgwts7p6q1lqe.png" alt="Website Demo" width="880" height="409"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#overview-of-my-submission"&gt;
-  &lt;/a&gt;
-  Overview of My Submission
-&lt;/h3&gt;
-
-&lt;h4&gt;
-  &lt;a href="#tech-stack"&gt;
-  &lt;/a&gt;
-  Tech Stack
-&lt;/h4&gt;
-
-&lt;ul&gt;
-&lt;li&gt;MongoDB and MongoDB Autocomplete&lt;/li&gt;
-&lt;li&gt;Node JS&lt;/li&gt;
-&lt;li&gt;Express JS&lt;/li&gt;
-&lt;li&gt;React JS&lt;/li&gt;
-&lt;li&gt;Leaflet JS&lt;/li&gt;
-&lt;li&gt;Netlify for frontend and Netlify serverless backend.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h4&gt;
-  &lt;a href="#how-search-functionality-works"&gt;
-  &lt;/a&gt;
-  How search functionality works
-&lt;/h4&gt;
-
-&lt;p&gt;Here i am using MongoDB autocomplete nGram which offer autocomplete search and location index to search query by location.&lt;/p&gt;
-
-&lt;h5&gt;
-  &lt;a href="#aggregate-query-example"&gt;
-  &lt;/a&gt;
-  Aggregate query example
-&lt;/h5&gt;
-
-&lt;p&gt;&lt;a href="https://github.com/NithinIBhandari1999/localshopsearch_client/blob/main/info/mongodbAggregateFunction.json"&gt;Code Link&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Ls95c6Dr--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/00gpmpdqup15k9587mbn.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Ls95c6Dr--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/00gpmpdqup15k9587mbn.png" alt="MongoDB Autocomplete Query Example" width="880" height="1192"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;h5&gt;
-  &lt;a href="#mongodb-autocomplete-index"&gt;
-  &lt;/a&gt;
-  MongoDB Autocomplete index
-&lt;/h5&gt;
-
-&lt;p&gt;&lt;a href="https://github.com/NithinIBhandari1999/localshopsearch_client/blob/main/info/mongodbSearchIndex.json"&gt;Code Link&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--CM-8aGF7--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/e1rph770xlkp03mr1zm2.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--CM-8aGF7--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/e1rph770xlkp03mr1zm2.png" alt="MongoDB Autocomplete Index Example" width="624" height="534"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#submission-category"&gt;
-  &lt;/a&gt;
-  Submission Category:
-&lt;/h3&gt;
-
-&lt;p&gt;E-Commerce Creation&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#link-to-code"&gt;
-  &lt;/a&gt;
-  Link to Code
-&lt;/h3&gt;
-
-&lt;p&gt;Live Link: &lt;a href="https://local-shop-search.netlify.app/search/"&gt;Visit Now&lt;/a&gt;&lt;br&gt;
-Read Me: &lt;a href="https://github.com/NithinIBhandari1999/localshopsearch_client/blob/main/README.md"&gt;Visit Now&lt;/a&gt;&lt;br&gt;
-Local Shop Search Front end: &lt;a href="https://github.com/NithinIBhandari1999/localshopsearch_client"&gt;Visit Now&lt;/a&gt;&lt;br&gt;
-Local Shop Search Back end: &lt;a href="https://github.com/NithinIBhandari1999/localshopsearch_api"&gt;Visit Now&lt;/a&gt;&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#additional-resources-info"&gt;
-  &lt;/a&gt;
-  Additional Resources / Info
-&lt;/h3&gt;
-
-&lt;h4&gt;
-  &lt;a href="#how-to-deploy"&gt;
-  &lt;/a&gt;
-  How to deploy
-&lt;/h4&gt;
-
-&lt;ol&gt;
-&lt;li&gt;Clone frontend and backend code.&lt;/li&gt;
-&lt;li&gt;Create an Imagekit account.&lt;/li&gt;
-&lt;li&gt;Visit to Netlify and deploy the code, add all env variable.&lt;/li&gt;
-&lt;/ol&gt;
-
-</description>
-      <category>atlashackathon</category>
-      <category>mongodb</category>
-      <category>react</category>
-      <category>node</category>
     </item>
   </channel>
 </rss>
