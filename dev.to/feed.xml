@@ -7,6 +7,372 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>Property-Based Testing In Go</title>
+      <author>Adam Gordon Bell</author>
+      <pubDate>Wed, 12 Jan 2022 16:31:08 +0000</pubDate>
+      <link>https://dev.to/adamgordonbell/property-based-testing-in-go-48kb</link>
+      <guid>https://dev.to/adamgordonbell/property-based-testing-in-go-48kb</guid>
+      <description>&lt;p&gt;Have you ever wanted your unit tests written for you? Property based testing is a powerful testing technique that, in a sense, is just that. You describe the properties you’d like to test, and the specific cases are generated for you.&lt;/p&gt;
+
+&lt;p&gt;Property-based testing can be a bit trickier to learn, and not every problem can be well tested in this manner, but it’s a powerful technique that’s well supported by the go std-lib (&lt;code&gt;testing/quick&lt;/code&gt;) and that is under-utilized.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#testing-raw-csvquote-endraw-"&gt;
+  &lt;/a&gt;
+  Testing &lt;code&gt;csvquote&lt;/code&gt;
+&lt;/h2&gt;
+
+&lt;p&gt;&lt;code&gt;csvquote&lt;/code&gt; is a small program that makes it easier to deal with CSV files at the command line. It does this by replacing problematic CSV characters with the controls characters &lt;code&gt;\x1e&lt;/code&gt; and &lt;code&gt;\x1f&lt;/code&gt; and later removing them.&lt;/p&gt;
+
+&lt;p&gt;You can use it like this:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;csvquote | head | csvquote -u
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;I want to improve it a bit, but first, I want to add some testing to ensure I don’t break it. The tests will also help me document how it works.&lt;/p&gt;
+
+&lt;p&gt;Here are my initial test cases:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;var tests = []struct {
+ in string
+ out string
+}{
+ {`"a","b"`, `"a","b"`}, // Simple
+ {"\"a,\",\"b\"", "\"a\x1f\",\"b\""}, //Comma
+ {"\"a\n\",\"b\"", "\"a\x1e\",\"b\""}, //New Line
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;To test that the &lt;code&gt;in&lt;/code&gt; string always results in the &lt;code&gt;out&lt;/code&gt;, I do the following:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;func TestSubstitute(t *testing.T) {
+ f := substituteNonprintingChars(',', '"', '\n')
+ for _, tt := range tests {
+  out := string([]byte(apply([]byte(tt.in), f)))
+  assert.Equal(t, tt.out, out, "input and output should match")
+ }
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;code&gt;substituteNonprintingChars&lt;/code&gt; returns a function that does the conversion and &lt;code&gt;apply&lt;/code&gt; is a helper for applying that function over a &lt;code&gt;[]byte&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;Slightly simplified, it looks like this:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;func apply(data []byte, f mapper) []byte {
+ count := len(data)
+
+ for i := 0; i &amp;lt; count; i++ {
+  data[i] = f(data[i])
+ }
+ return data
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The second thing I want to test is that I can reverse this operation. That is, when &lt;code&gt;csvquote&lt;/code&gt; is run with &lt;code&gt;-u&lt;/code&gt;, it should always return the original input.&lt;/p&gt;
+
+&lt;p&gt;I can test this by going in reverse from output to input:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;func TestRestore(t *testing.T) {
+ f := restoreOriginalChars(',', '\n')
+ for _, tt := range tests {
+  in := string([]byte(apply([]byte(tt.out), f)))
+  assert.Equal(t, tt.in, in, "input and output should match")
+ }
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;&lt;code&gt;restoreOriginalChars&lt;/code&gt; is the function that restores the string to its original form.&lt;/p&gt;
+
+&lt;p&gt;Both these tests pass (the full source is &lt;a href="https://github.com/adamgordonbell/csvquote/blob/7f4698ad3d3c2d12f063b5d8a8bd304e8307a089/cmd/cvsquote/main_test.go"&gt;on GitHub&lt;/a&gt;). However, it’s still possible there are edge cases that work incorrectly. What I need is a way to generate more test cases.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#propertybased-testing"&gt;
+  &lt;/a&gt;
+  Property-Based Testing
+&lt;/h2&gt;
+
+&lt;p&gt;One way I could improve my testing is to combine the two tests. That is, rather than testing that the substituted value matches expectations and that the restored value matches expectations, I can simply test that substituting and restoring a string always results in the original string.&lt;/p&gt;
+
+&lt;p&gt;That is for almost all possible values of the string &lt;code&gt;a&lt;/code&gt;:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;echo a | csvquote | csvquote -u == a
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;In my go test, I can state that property like this:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;func doesIdentityHold(in string) bool {
+ substitute := substituteNonprintingChars(',', '"', '\n')
+ restore := restoreOriginalChars(',', '\n')
+ substituted := apply([]byte(in), substitute)
+ restored := string([]byte(apply(substituted, restore)))
+ return in == restored
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;That is, for a string &lt;code&gt;in&lt;/code&gt;, substituting and then restoring it should equal itself. I’m calling this &lt;code&gt;doesIdentityHold&lt;/code&gt; because an identity is any function that returns the original result. &lt;code&gt;csvquote | csvquote -u&lt;/code&gt; should be an identity.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#quick-check"&gt;
+  &lt;/a&gt;
+  Quick Check
+&lt;/h3&gt;
+
+&lt;p&gt;Now that we have that function, we can use &lt;code&gt;testing/quick&lt;/code&gt;, the property-based testing library, to test it:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;func TestIdentity1(t *testing.T) {
+ if err := quick.Check(doesIdentityHold, nil); err != nil {
+  t.Error(err)
+ }
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;By default, this will cause &lt;code&gt;testing/quick&lt;/code&gt; to run 100 iterations of my identity test, using random strings as inputs. You can bump that up much higher, like so:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;func TestIdentity1(t *testing.T) {
+ c := quick.Config{MaxCount: 1000000} // &amp;lt;- changed
+  if err := quick.Check(doesIdentityHold, &amp;amp;c); err != nil {
+  t.Error(err)
+ }
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;And with that number of tests cases, I run into a problem:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;--- FAIL: TestIdentity1 (5.17s)
+    main_test.go:43: #13072: failed on input "\x1f\U00037f8b\U000732a1\"
+FAIL
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The failing test is helpfully printed. However, it’s found a problem in my testing method, not with the code under test. You see, &lt;code&gt;csvquote&lt;/code&gt; should always be able to reverse it’s input, &lt;em&gt;except in the case that the input contains the non-printable ASCII control characters&lt;/em&gt; and that is what this test case has found.&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;\x1f&lt;/code&gt; may not be used much outside of traditional teletype terminals but I asked &lt;code&gt;csvquote&lt;/code&gt; to check across all possible strings, and eventually, it found a failing case.&lt;/p&gt;
+
+&lt;p&gt;Long term, I should adjust &lt;code&gt;csvquote&lt;/code&gt; to exit with an error condition when it receives input it can’t handle, but that is a problem for another day. Instead let’s focus on constraining the input used in the tests.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#writing-a-property-testing-generator"&gt;
+  &lt;/a&gt;
+  Writing a Property Testing Generator
+&lt;/h2&gt;
+
+&lt;p&gt;As I’ve shown above, &lt;code&gt;testing/quick&lt;/code&gt; can generate test values for testing on its own, but it’s often valuable to write your own.&lt;/p&gt;
+
+&lt;p&gt;In this case, writing my own CSV file generator will allow me to make a couple of improvements to the test. First of all, I can remove control characters from the test set. But also, I can move to generating strings that are valid CSV files, rather than just random characters. Testing with random characters is easy, but my main concern is that &lt;code&gt;csvquote&lt;/code&gt; can handle valid CSV files, so by narrowing in on that case, I’ll have a better chance of catching real-world issues.&lt;/p&gt;
+
+&lt;p&gt;First I write a function to generate random strings of size &lt;code&gt;size&lt;/code&gt; and from the character set &lt;code&gt;alphabet&lt;/code&gt;:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;func RandString(r *rand.Rand, size int, alphabet string) string {
+ var buffer bytes.Buffer
+ for i := 0; i &amp;lt; size; i++ {
+  index := r.Intn(len(alphabet))
+  buffer.WriteString(string(alphabet[index]))
+ }
+ return buffer.String()
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;It outputs what I expect:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;r := rand.Rand{}
+println(RandString(&amp;amp;r, 5, "abc"))
+println(RandString(&amp;amp;r, 5, "abc"))
+
+caccb
+cabbb
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Then I used that to generate a CSV files with random number or lines and rows:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;func randCSV(r *rand.Rand) string {
+ var sb strings.Builder
+ lines := r.Intn(20) + 1
+ rows := r.Intn(20) + 1
+ for i := 0; i &amp;lt; lines; i++ {
+  for j := 0; j &amp;lt; rows; j++ {
+   if j != 0 {
+    sb.WriteString(`,`)
+   }
+   sb.WriteString(fmt.Sprintf(`"%s"`, randCSVString(r)))
+  }
+  sb.WriteString("\n")
+ }
+ return sb.String()
+}
+
+func randCSVString(r *rand.Rand) string {
+ s := RandString(r, 20, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz01233456789,\"")
+ return strings.Replace(s, `"`, `""`, -1) // In CSV all double quotes must be doubled up
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Here is what calling &lt;code&gt;randCSVString&lt;/code&gt; will generate:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;"7IWvdDEGTxlRdJZrc4Ra","LMHcCcN,D2RVRsfbw0IF",",LrZ3B4SvFEfG3FqO01n","""vY4FmzhbyR4iDgYpr6f","sw83uJkitIc8trzaYmEO"
+"fGloXshqwC""O9Bd,eM,L","LDRajiwNgZNitCA0QL11","1Q
+nqhMhzu7Mlu92qxK""8","jtj33vTlH5VP4UlbKu2e","sDhVlor4RRg4JrKfdR""W"
+"EGWYmpm1TVNdB3rfmU80","Mx0RdqqVUuWiOpKY""IXk","ctprb8
+7PrVu8rX8iJqTg","wnmagEjUDJrZCGBdmAYH","EJtuq1ZJqz9jf,j6vzh1"
+",88Q7qWLewZVK9pE83ut","1kZJipoz2FOWLS96xMjW","5BkVvtZqZk""S2wpOB3rQ","kYN6aGPDmgSLAEI4CJtu","xOH,9y9wDDtwWUPsjgz7"
+"mbexX2,Wl4""cuq3VGekP","uMXK5uLDz2ZS3Wv4wynY","KJBLt0RipsJyEqVHqrDx","glDHHs6Ujyg""piJGv595","rIa4KOxe,B""qS7EmO
+nTB"
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;I can then hook this up to my test method:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;func TestIdentity2(t *testing.T) {
+ c := quick.Config{MaxCount: 10000,
+  Values: func(values []reflect.Value, r *rand.Rand) {
+   values[0] = reflect.ValueOf(randCSV(r))
+  }}
+ if err := quick.Check(doesIdentityHold, &amp;amp;c); err != nil {
+  t.Error(err)
+ }
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;And now I can test &lt;code&gt;csvquote&lt;/code&gt; against ten thousand random CSV files in under a second.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;&amp;gt; go test
+PASS
+ok github.com/adamgordonbell/csvquote/cmd/cvsquote 0.635s
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;I’ll leave extending this to covering Unicode values and unquoted rows for another day.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#property-testing"&gt;
+  &lt;/a&gt;
+  Property Testing
+&lt;/h3&gt;
+
+&lt;p&gt;Property-based testing is a powerful technique for testing your code. As you can see from this real-world but somewhat contrived scenario, it moves the work of testing away from specific test cases and towards validating properties that hold for all values. Here the property under test was that substituting and restoring are inverses of each other (and therefore form an identity).&lt;/p&gt;
+
+&lt;p&gt;For me, the most challenging part of property-based testing is seeing how I can transform a specific test-case into a testable property. It’s not always immediately clear what’s possible to test in this manner and some tests are simply hard to state in this form. But when a problem is well suited for property-based testing, it is a powerful tool!&lt;/p&gt;
+
+&lt;p&gt;( The second most challenging thing about property-based testing is writing generators for your problem domain. Although once written, they make testing in this style feel quite natural. )&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#more-resources"&gt;
+  &lt;/a&gt;
+  More Resources
+&lt;/h2&gt;
+
+&lt;p&gt;The hardest part of this style of testing is seeing where and how it can apply. The places I’ve found it valuable include:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Verifying serialization and deserialization code&lt;/li&gt;
+&lt;li&gt;Verifying an optimization (by comparing the results to the un-optimized version)&lt;/li&gt;
+&lt;li&gt;Anywhere I have more than one representation of some data and need to test the boundaries of those representations.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;But others have found more ways to use this paradigm. If you want to learn more about property-based testing, then &lt;a href="https://github.com/leanovate/gopter"&gt;&lt;code&gt;gopter&lt;/code&gt;&lt;/a&gt;, &lt;em&gt;the GOlang Property TestER&lt;/em&gt;, is worth taking a look at. &lt;a href="https://github.com/amir"&gt;Amir Saeid&lt;/a&gt;, who’s good at this technique, recommends this &lt;a href="https://leanpub.com/property-based-testing-in-a-screencast-editor"&gt;book&lt;/a&gt; full of examples, and &lt;a href="https://jacobstanley.io/how-to-use-hedgehog-to-test-a-real-world-large-scale-stateful-app/"&gt;this blog&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;If you have any tips or suggested resources for property-based testing, please let me know on Twitter (&lt;a href="https://twitter.com/adamgordonbell/"&gt;@adamgordonbell&lt;/a&gt;).&lt;/p&gt;
+
+&lt;p&gt;And if you care about reliable software, take a look at &lt;a href="https://earthly.dev/"&gt;Earthly&lt;/a&gt;. Earthly makes continuous integration less flakey and works with your existing workflow.&lt;/p&gt;
+
+</description>
+      <category>go</category>
+      <category>testing</category>
+      <category>beginners</category>
+    </item>
+    <item>
       <title>How To SSH Your ECS Server(Running Fargate)</title>
       <author>Lei Feng</author>
       <pubDate>Wed, 12 Jan 2022 15:38:30 +0000</pubDate>
@@ -2599,90 +2965,6 @@ detect crashes in your running apps, and publish notifications to your favorite 
       <category>javascript</category>
       <category>webdev</category>
       <category>beginners</category>
-    </item>
-    <item>
-      <title>I started to write on english, this is why</title>
-      <author>Fernando Cutire 🔨</author>
-      <pubDate>Wed, 12 Jan 2022 13:50:32 +0000</pubDate>
-      <link>https://dev.to/fernandocutire/i-started-to-write-on-english-this-is-why-4kce</link>
-      <guid>https://dev.to/fernandocutire/i-started-to-write-on-english-this-is-why-4kce</guid>
-      <description>&lt;p&gt;When I thought about this topic, I said to myself “Writing in English is hard, because it’s not my native language”&lt;/p&gt;
-
-&lt;p&gt;It’s hard but is also an opportunity. I needed to start practicing my English. And guess what was the way?&lt;/p&gt;
-
-&lt;p&gt;I said, “Ok I will start to write in English because almost every content I consume online is in English and I have read and watched a lot”&lt;/p&gt;
-
-&lt;p&gt;But of course writing is challenging.&lt;/p&gt;
-
-&lt;p&gt;So in this article, I teach you what it’s working for me.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#writing-is-hard-thinking-in-a-different-language"&gt;
-  &lt;/a&gt;
-  Writing is hard: Thinking in a different language
-&lt;/h2&gt;
-
-&lt;p&gt;Of course, I could use the easy way who was to just use translate apps.&lt;/p&gt;
-
-&lt;p&gt;But this was enough?&lt;/p&gt;
-
-&lt;p&gt;I have been using google translate with my Spanish-based articles. And it worked weird.&lt;/p&gt;
-
-&lt;p&gt;It doesn´t have that consistency or as I want to call “soul”.&lt;/p&gt;
-
-&lt;p&gt;It seemed like just different words and doesn’t seem to be written by a human.&lt;/p&gt;
-
-&lt;p&gt;So another thing that happens to me, was to begin writing in English. &lt;/p&gt;
-
-&lt;p&gt;And maybe I will sound better, you can judge by yourself.&lt;/p&gt;
-
-&lt;p&gt;Of course, my grammar is not the best, but anyways here I am. And I will continue to improve.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#more-writing-equals-better-writing-why-consistency-over-time-matters"&gt;
-  &lt;/a&gt;
-  More writing equals better writing: Why consistency over time matters
-&lt;/h2&gt;
-
-&lt;p&gt;Just focusing on writing. It´s that simple?&lt;/p&gt;
-
-&lt;p&gt;Maybe not, but some of the benefits I could say are&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Start thinking in English&lt;/li&gt;
-&lt;li&gt;Start creating content (in English ofc)&lt;/li&gt;
-&lt;li&gt;Having more articles makes you more confident. Like “I have written so many articles, I know I am good”&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;As you see, there are many benefits and progress over time.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#in-general-it%C2%B4s-cool-to-learn-a-new-language-in-this-way"&gt;
-  &lt;/a&gt;
-  In general, it´s cool to learn a new language in this way.
-&lt;/h2&gt;
-
-&lt;p&gt;Receiving and giving are both beautiful things to do.&lt;/p&gt;
-
-&lt;p&gt;And consuming media in a different language makes it faster to learn it.&lt;/p&gt;
-
-&lt;p&gt;Also, It seems that you are giving your knowledge, expertise and somehow improving the way for us.&lt;/p&gt;
-
-&lt;p&gt;It´s that simple. &lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#lets-connect"&gt;
-  &lt;/a&gt;
-  Let's connect
-&lt;/h2&gt;
-
-&lt;p&gt;Remember you can follow me on Twitter &lt;a href="https://twitter.com/fernandocutire"&gt;@fernandocutire&lt;/a&gt;, I am getting better at writing in English so we could talk there.&lt;br&gt;
-&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Qyip4FVh--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/x5ym12tgb443cl6ztalq.jpg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Qyip4FVh--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/x5ym12tgb443cl6ztalq.jpg" alt="Image description" width="880" height="660"&gt;&lt;/a&gt;&lt;/p&gt;
-
-</description>
-      <category>writing</category>
-      <category>javascript</category>
-      <category>tutorial</category>
     </item>
   </channel>
 </rss>
