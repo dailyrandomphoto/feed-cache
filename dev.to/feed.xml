@@ -7,6 +7,366 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>Solving Four Kubernetes Networking Challenges</title>
+      <author>Michael Bogan</author>
+      <pubDate>Tue, 18 Jan 2022 16:56:50 +0000</pubDate>
+      <link>https://dev.to/mbogan/solving-four-kubernetes-networking-challenges-49lp</link>
+      <guid>https://dev.to/mbogan/solving-four-kubernetes-networking-challenges-49lp</guid>
+      <description>&lt;p&gt;One of the main responsibilities of &lt;a href="https://konghq.com/learning-center/kubernetes/what-is-kubernetes/?utm_source=guest&amp;amp;utm_medium=devspotlight&amp;amp;utm_campaign=community"&gt;Kubernetes&lt;/a&gt; is to share nodes between applications. Networking is a fundamental requirement since those applications need to communicate with one another and the outside world.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--ZKvvnN0g--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/olvmy8t3x5xbxw7l96cl.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ZKvvnN0g--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/olvmy8t3x5xbxw7l96cl.png" alt="A Kubernetes-hosted Distributed Application Architecture" width="603" height="402"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Requests from outside a Kubernetes cluster usually go through a router or &lt;a href="https://konghq.com/learning-center/api-gateway/?utm_source=guest&amp;amp;utm_medium=devspotlight&amp;amp;utm_campaign=community"&gt;API gateway&lt;/a&gt; responsible for proxying them to the appropriate services. The responsibility of Kubernetes networking is to provide the underlying communication layer, enabling requests to reach their intended destinations.&lt;/p&gt;
+
+&lt;p&gt;Distributed applications spread across many nodes. When there are multiple replicas of each application, Kubernetes handles &lt;a href="https://thenewstack.io/how-does-service-discovery-work-in-kubernetes/#:~:text=The%20services%20model%20in%20Kubernetes,%2C%20aspect%20of%20microservices%3A%20discovery.&amp;amp;text=Kubernetes%20refers%20to%20these%20key,with%20a%20set%20of%20pods."&gt;service discovery&lt;/a&gt; and communication between the &lt;a href="https://kubernetes.io/docs/concepts/services-networking/service/"&gt;service&lt;/a&gt; and Pods. Inside a Pod, containers can communicate easily and transparently. Inside a cluster, Pods can connect to other Pods, made possible through a combination of virtual network interfaces, bridges, and routing rules through an &lt;a href="https://en.wikipedia.org/wiki/Overlay_network"&gt;overlay network&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;Despite the transparent handling, however, Kubernetes networking is more complex than it seems. &lt;strong&gt;Deploying across multiple clouds, maintaining multiple environments, and ensuring reliable and scalable network policies are significant challenges.&lt;/strong&gt; Not all of these complexities are natively addressed by Kubernetes. In this article, we’ll look at how to tackle those challenges.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#the-basics-of-kubernetes-networking"&gt;
+  &lt;/a&gt;
+  The Basics of Kubernetes Networking
+&lt;/h2&gt;
+
+&lt;p&gt;In Kubernetes, &lt;a href="https://kubernetes.io/docs/concepts/workloads/pods/"&gt;Pods&lt;/a&gt; are responsible for handling container-to-container communication. Pods leverage network namespaces with their own network resources (interfaces and routing tables). Inside a Pod, containers share these resources, allowing them to communicate via localhost.&lt;/p&gt;
+
+&lt;p&gt;Pod-to-Pod communication must meet the following Kubernetes requirements:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Pods need to communicate without &lt;a href="https://en.wikipedia.org/wiki/Network_address_translation"&gt;network address translation (NAT)&lt;/a&gt;.&lt;/li&gt;
+&lt;li&gt;Nodes need to be able to communicate with Pods without NAT.&lt;/li&gt;
+&lt;li&gt;The IP address that a Pod can see assigned to itself must match the IP that other Pods see.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;The &lt;a href="https://github.com/containernetworking/cni"&gt;Container Network Interface (CNI)&lt;/a&gt; includes a specification for writing network plugins to configure network interfaces. This allows you to create &lt;a href="https://en.wikipedia.org/wiki/Overlay_network"&gt;overlay networks&lt;/a&gt; that satisfy Pod-to-Pod communication requirements.&lt;/p&gt;
+
+&lt;p&gt;A &lt;a href="https://kubernetes.io/docs/concepts/services-networking/service/"&gt;service&lt;/a&gt; is a Kubernetes abstraction that allows Pods to expose and receive requests. It provides a service discovery mechanism through Pod labels and basic load balancing capabilities. Applications running inside Pods can easily use services to connect to other applications running in the cluster. Requests from outside the cluster can be routed through &lt;a href="https://kubernetes.io/docs/concepts/services-networking/ingress-controllers/"&gt;Ingress controllers&lt;/a&gt;. These controllers will use &lt;a href="https://kubernetes.io/docs/concepts/services-networking/ingress/"&gt;Ingress&lt;/a&gt; resources to configure routing rules, usually leveraging &lt;a href="https://kubernetes.io/docs/concepts/services-networking/service/"&gt;services&lt;/a&gt; to facilitate routing to the correct applications.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#nontrivial-challenges"&gt;
+  &lt;/a&gt;
+  Non-Trivial Challenges
+&lt;/h2&gt;
+
+&lt;p&gt;While these networking capabilities provide the foundational building blocks for Kubernetes managed workloads, the dynamic and complex nature of &lt;a href="https://konghq.com/blog/cloud-native-infrastructure/?utm_source=guest&amp;amp;utm_medium=devspotlight&amp;amp;utm_campaign=community"&gt;cloud native&lt;/a&gt; systems presents several challenges.&lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#servicetoservice-communication-reliability"&gt;
+  &lt;/a&gt;
+  Service-to-Service Communication Reliability
+&lt;/h4&gt;
+
+&lt;p&gt;In distributed systems, business functions are divided into multiple, autonomous services running over a cluster of nodes, Pods, and containers. A microservice architecture introduces the need for services to communicate over the network.&lt;/p&gt;
+
+&lt;p&gt;The volatility and elastic nature of the cloud require constant monitoring of the Kubernetes cluster and rerouting in case of failures. With ephemeral Pods and continual rerouting of resources, reliable service-to-service communication is not a given.&lt;/p&gt;
+
+&lt;p&gt;Efficient load balancing algorithms need to assign traffic to available replicas and isolate the overloaded ones. Similarly, service failure means client requests need to be retried and timed out gracefully. Complex scenarios might need &lt;a href="https://en.wikipedia.org/wiki/Circuit_breaker"&gt;circuit breakers&lt;/a&gt; and load-shedding techniques to handle surges in demand and failures. &lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#elaborate-multicloud-deployments"&gt;
+  &lt;/a&gt;
+  Elaborate Multi-Cloud Deployments
+&lt;/h4&gt;
+
+&lt;p&gt;Complex, large-scale systems are often divided into multiple environments, with different parts deployed to different cloud platforms. These heterogeneous environments need to communicate with one another.&lt;/p&gt;
+
+&lt;p&gt;Even within the same cloud tenancy—or on-premise—the same workload can run in different environments (development, staging, and production). Though separated, these environments sometimes need to communicate with one another. For example, a staging environment may need to emulate the production workload and rigorously test the application before it goes live. With successful testing, both code and data may need to migrate from it. &lt;/p&gt;
+
+&lt;p&gt;A seamless migration can be challenging in such cases. Also, there may be cases where a team simultaneously supports both VM and Kubernetes-hosted services. Or, perhaps a team designs systems that support multi-cloud—or at least multi-region—deployments for reliability, specifying the complex network configurations and elaborate ingress and egress rules.&lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#service-discovery"&gt;
+  &lt;/a&gt;
+  Service Discovery
+&lt;/h4&gt;
+
+&lt;p&gt;When running Kubernetes in cloud-native environments, it’s easy to scale services by spawning several replicas across multiple nodes. These application replicas are ephemeral—instantiated and destroyed as Kubernetes deems necessary. It’s non-trivial for &lt;a href="https://konghq.com/learning-center/microservices/"&gt;microservices&lt;/a&gt; in the application to keep track of all these changes to IP addresses and ports. Nonetheless, these microservices need an efficient way to find service replicas. &lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#network-rules-scalability"&gt;
+  &lt;/a&gt;
+  Network Rules Scalability
+&lt;/h4&gt;
+
+&lt;p&gt;Security best practices and industry regulations like the &lt;a href="https://en.wikipedia.org/wiki/Payment_Card_Industry_Data_Security_Standard"&gt;Payment Card Industry Data Security Standard (PCI DSS)&lt;/a&gt; enforce strict networking rules. These rules dictate strict communication constraints between services.&lt;/p&gt;
+
+&lt;p&gt;Kubernetes has the concept of &lt;a href="https://kubernetes.io/docs/concepts/services-networking/network-policies/"&gt;Network Policies&lt;/a&gt;. These allow you to control traffic at the IP address or port level. You can specify the rules that would enable a Pod to communicate with other services using labels and selectors.&lt;/p&gt;
+
+&lt;p&gt;As your system of microservices grows in number, reaching hundreds or thousands of services, network policy management becomes a complex, tedious, and error-prone process. &lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#how-kong-ingress-controller-can-help"&gt;
+  &lt;/a&gt;
+  How Kong Ingress Controller Can Help
+&lt;/h3&gt;
+
+&lt;p&gt;The &lt;a href="https://konghq.com/solutions/kubernetes-ingress/?utm_source=guest&amp;amp;utm_medium=devspotlight&amp;amp;utm_campaign=community"&gt;Kubernetes Ingress Controller (KIC)&lt;/a&gt; from Kong is an &lt;a href="https://kubernetes.io/docs/concepts/services-networking/ingress/"&gt;Ingress&lt;/a&gt; implementation for Kubernetes. This Ingress controller, powered by &lt;a href="https://konghq.com/kong/?utm_source=guest&amp;amp;utm_medium=devspotlight&amp;amp;utm_campaign=community"&gt;Kong Gateway&lt;/a&gt;, acts as a cloud native, platform-agnostic, scalable API gateway. It’s built for hybrid and multi-cloud environments and optimized for microservices and distributed architectures.&lt;/p&gt;
+
+&lt;p&gt;The KIC allows for creating a configuration of routing rules, health checks, and load balancing, and it supports a variety of &lt;a href="https://docs.konghq.com/hub/"&gt;plugins&lt;/a&gt; that provide advanced functionality. This wide range of capabilities can help address the challenges we’ve discussed.&lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#reliable-servicetoservice-communication"&gt;
+  &lt;/a&gt;
+  Reliable Service-to-Service Communication
+&lt;/h4&gt;
+
+&lt;p&gt;Kubernetes &lt;a href="https://kubernetes.io/docs/concepts/services-networking/service/"&gt;services&lt;/a&gt; provide simple load balancing capabilities (Round Robin). One of the core features of KIC is to load balance between replicas of the same application. It can use algorithms like weighted connections or least connections, or even sophisticated, custom implementations. These algorithms leverage the service registry of KIC to provide efficient routing. &lt;/p&gt;
+
+&lt;p&gt;With KIC, you can easily configure retries when a service is down, sensible timeouts, rerouting requests to healthy service instances, or error handling. You can also implement failure patterns such as circuit breaking and load-shedding to smooth and throttle traffic.&lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#simpler-multicloud-environments-deployments"&gt;
+  &lt;/a&gt;
+  Simpler Multi-Cloud Environments Deployments
+&lt;/h4&gt;
+
+&lt;p&gt;Multi-environment and heterogeneous infrastructure deployments demand complex network policies and routing configurations. &lt;a href="https://docs.konghq.com/gateway/"&gt;Kong Gateway&lt;/a&gt;, built into KIC, addresses many of these challenges. &lt;/p&gt;
+
+&lt;p&gt;Kong Gateway allows &lt;a href="https://docs.konghq.com/gateway/2.6.x/get-started/quickstart/configuring-a-service/#main"&gt;service registration&lt;/a&gt; independent of where services are deployed. With a registered service, you’ll be able to &lt;a href="https://docs.konghq.com/gateway/2.6.x/get-started/quickstart/configuring-a-service/#2-add-a-route-for-the-service"&gt;add routes&lt;/a&gt;, and KIC will be ready to proxy requests to your service. Additionally, while complex systems can sometimes communicate with different protocols (REST versus gRPC), you can easily configure KIC to support multiple protocols.&lt;/p&gt;
+
+&lt;p&gt;The &lt;a href="https://docs.konghq.com/hub/plugins/overview/"&gt;plugin system&lt;/a&gt; allows you to extend the functionality of KIC for more complex scenarios. &lt;a href="https://docs.konghq.com/hub/"&gt;Kong Plugin Hub&lt;/a&gt; contains a strong collection of useful and battle-tested plugins, and KIC also enables &lt;a href="https://docs.konghq.com/gateway/2.6.x/plugin-development/"&gt;you to develop&lt;/a&gt; and use whatever plugin best suits your needs.&lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#enhanced-service-discovery"&gt;
+  &lt;/a&gt;
+  Enhanced Service Discovery
+&lt;/h4&gt;
+
+&lt;p&gt;As mentioned, KIC tracks available instances through its registry of services. As services integrate with KIC, they can self-register and report their availability. This registration can also be done through third-party registration services. By taking advantage of the service registry, KIC can proxy client requests to the proper backends at any time.&lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#scalable-network-rules"&gt;
+  &lt;/a&gt;
+  Scalable Network Rules
+&lt;/h4&gt;
+
+&lt;p&gt;Although enforcing network rules through &lt;a href="https://kubernetes.io/docs/concepts/services-networking/network-policies/"&gt;Network Policies&lt;/a&gt; can be complicated, KIC can &lt;a href="https://docs.konghq.com/kubernetes-ingress-controller/2.0.x/guides/getting-started-istio/#main"&gt;easily integrate&lt;/a&gt; with &lt;a href="https://konghq.com/learning-center/service-mesh/what-is-a-service-mesh/?utm_source=guest&amp;amp;utm_medium=devspotlight&amp;amp;utm_campaign=community"&gt;service mesh&lt;/a&gt; implementations like the CNCF’s &lt;a href="https://kuma.io/"&gt;Kuma&lt;/a&gt; or &lt;a href="https://istio.io/"&gt;Istio&lt;/a&gt; with &lt;a href="https://konghq.com/blog/istio-gateway/?utm_source=guest&amp;amp;utm_medium=devspotlight&amp;amp;utm_campaign=community"&gt;Kong Istio Gateway&lt;/a&gt;, extending the capabilities of &lt;a href="https://kubernetes.io/docs/concepts/services-networking/network-policies/"&gt;Network Policies&lt;/a&gt; and guaranteeing additional security. &lt;/p&gt;
+
+&lt;p&gt;With &lt;a href="https://kuma.io/docs/1.4.1/security/certificates/"&gt;authentication and authorization&lt;/a&gt; policies, you’ll be able to enhance network security in a secure, consistent, and automated way. Moreover, you can use &lt;a href="https://kuma.io/docs/1.4.1/policies/general-notes-about-kuma-policies/"&gt;network policies and service mesh policies together&lt;/a&gt; to provide an even better security posture.&lt;/p&gt;
+
+&lt;p&gt;An added benefit of the service mesh integration is that it allows for deployment patterns like canary deployments and blue/green deployments. It also enhances observability with reliable metrics and traces. &lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#conclusion"&gt;
+  &lt;/a&gt;
+  Conclusion
+&lt;/h3&gt;
+
+&lt;p&gt;Kubernetes can handle common networking tasks, making it easier for developers and operators to onboard services. However, with large and complex cloud-native systems, networking concerns are rarely simple. Organizations want to split &lt;a href="https://konghq.com/learning-center/microservices/monolith-vs-microservices/?utm_source=guest&amp;amp;utm_medium=devspotlight&amp;amp;utm_campaign=community"&gt;monoliths&lt;/a&gt; into microservices, but they need to address unique concerns such as efficient load balancing or fault tolerance. Similarly, enabling seamless service migrations and transitions between different environments is not easy. Kubernetes networking capabilities need to be extended to support a wider range of scenarios.&lt;/p&gt;
+
+&lt;p&gt;KIC can efficiently tackle many of these challenges. It offers a broad range of functionality, including advanced routing and load balancing rules, complex ingress and egress rules, and fault tolerance measures. You can greatly improve service discovery with the service registry of KIC, which can track all available instances of each service. The easy integration with KIC and service meshes can help establish strong network security policies and leverage different deployment patterns.&lt;/p&gt;
+
+</description>
+      <category>kubernetes</category>
+      <category>devops</category>
+      <category>webdev</category>
+    </item>
+    <item>
+      <title>Why Load Balancing Is Important</title>
+      <author>Ifihan Olusheye</author>
+      <pubDate>Tue, 18 Jan 2022 16:52:50 +0000</pubDate>
+      <link>https://dev.to/ifihan/why-load-balancing-is-important-50kn</link>
+      <guid>https://dev.to/ifihan/why-load-balancing-is-important-50kn</guid>
+      <description>&lt;h3&gt;
+  &lt;a href="#introduction"&gt;
+  &lt;/a&gt;
+  INTRODUCTION
+&lt;/h3&gt;
+
+&lt;p&gt;Modern high-traffic websites must handle hundreds of thousands, if not millions of the concurrent user or client requests when returning accurate text, images, video, or device data in a timely and consistent manner. As a result of this amount of requests, such websites might lag and eventually crash. The use of load balancers can prevent such events from occurring.&lt;/p&gt;
+
+&lt;p&gt;A load balancer is a system that distributes network or application traffic through several servers by acting as a reverse proxy. With a load balancer,&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;User requests or network load are distributed through many servers in an optimal manner.&lt;/li&gt;
+&lt;li&gt;Allows you to add or remove servers as needed, depending on demand.&lt;/li&gt;
+&lt;li&gt;Sends requests to only online repositories, ensuring high availability and reliability.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h4&gt;
+  &lt;a href="#so-what-is-load-balancing"&gt;
+  &lt;/a&gt;
+  So, what is Load balancing?
+&lt;/h4&gt;
+
+&lt;p&gt;Load balancing is the process of evenly spreading incoming network traffic among a collection of backend servers, often referred to as a server farm or server pool. As the name implies, it is a process of balancing the load on a server, and load in this context refers to requests.&lt;/p&gt;
+
+&lt;p&gt;Some several techniques or algorithms can be utilized depending on their use. Some of them are:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;&lt;p&gt;Least connection: This approach takes the actual server load into account. The latest request is forwarded to the site that has the fewest pending requests at any given time.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;Hash: Requests are distributed based on a key you choose, such as the client's IP address or the file URL.&lt;/p&gt;&lt;/li&gt;
+&lt;li&gt;&lt;p&gt;IP Hash: The client's IP address is used to decide which server will receive the message.&lt;/p&gt;&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;h4&gt;
+  &lt;a href="#why-is-load-balancing-important"&gt;
+  &lt;/a&gt;
+  Why is load balancing important?
+&lt;/h4&gt;
+
+&lt;ol&gt;
+&lt;li&gt;Load balancing improves service availability and helps prevent downtimes. &lt;/li&gt;
+&lt;li&gt;To maximize the use of resources and reduce the response time.&lt;/li&gt;
+&lt;li&gt;A load balancer prevents the entire network from failing if a server from a server cluster fails.&lt;/li&gt;
+&lt;li&gt;A load balancer helps to manage traffic flow on a website.&lt;/li&gt;
+&lt;li&gt;Add flexibility to the network. For example, a site can be upgraded without downtime while using load balancers.&lt;/li&gt;
+&lt;li&gt;It improves scalability.&lt;/li&gt;
+&lt;li&gt;Load balancers improve the capacity of existing servers.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;In conclusion, it is good practice to use and advisable to use load balancers if you plan on having a high-traffic website or application.&lt;/p&gt;
+
+</description>
+      <category>devops</category>
+      <category>programming</category>
+      <category>backend</category>
+    </item>
+    <item>
+      <title>How to run GUI apps trough WSL?</title>
+      <author>Ivaylo Ivanov</author>
+      <pubDate>Tue, 18 Jan 2022 16:49:22 +0000</pubDate>
+      <link>https://dev.to/ivayloiv/how-to-run-gui-apps-trough-wsl-9oa</link>
+      <guid>https://dev.to/ivayloiv/how-to-run-gui-apps-trough-wsl-9oa</guid>
+      <description>&lt;p&gt;Hi, guys today I will show you how to run GUI apps through &lt;strong&gt;WSL&lt;/strong&gt;. As you know by default &lt;strong&gt;WSL 1&lt;/strong&gt; offers just a terminal of the selected Linux distro but in &lt;strong&gt;WSL 2&lt;/strong&gt; there are some changes and you are going to be able to run GUI applications through WLS 2 directly in windows. Without further due let's hop into the topic.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#note-if-you-have-wsl-1-installed-skip-to-step-2-otherwise-follow-the-steps-as-it-is"&gt;
+  &lt;/a&gt;
+  Note: If you have wsl 1 installed skip to step 2, otherwise follow the steps as it is.
+&lt;/h3&gt;
+
+&lt;h2&gt;
+  &lt;a href="#1-installing-wsl"&gt;
+  &lt;/a&gt;
+  1. Installing &lt;strong&gt;WSL&lt;/strong&gt;.
+&lt;/h2&gt;
+
+&lt;p&gt;In case to install the &lt;strong&gt;WSL&lt;/strong&gt; (windows subsystem for Linux), you will need administrator permissions on your machine. After that, you will have to open the windows PowerShell as administrator and activate the wsl feature. To that just paste this command in ht PowerShell and hit enter.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight powershell"&gt;&lt;code&gt;&lt;span class="n"&gt;dism.exe&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;/online&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;/enable-feature&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;/featurename:Microsoft-Windows-Subsystem-Linux&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;/all&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;/norestart&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;If the command has been executed successfully restart your machine and continue to step 2.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#2-enabling-virtual-machine-feature-and-installing-wsl-2-version"&gt;
+  &lt;/a&gt;
+  2. Enabling Virtual Machine Feature and installing &lt;strong&gt;WSL 2&lt;/strong&gt; version.
+&lt;/h2&gt;
+
+&lt;p&gt;After everyone has &lt;strong&gt;WSL&lt;/strong&gt; installed, in case to switch to &lt;strong&gt;WSL 2&lt;/strong&gt; you will need to enable A special built-in virtual machine for &lt;strong&gt;wsl 2&lt;/strong&gt;. To do that just paste this into your PowerShell (opened as administrator)&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight powershell"&gt;&lt;code&gt;&lt;span class="n"&gt;dism.exe&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;/online&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;/enable-feature&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;/featurename:VirtualMachinePlatform&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;/all&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;/norestart&lt;/span&gt;&lt;span class="w"&gt;
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;After you have enabled the virtual machine feature, it is time to install the &lt;strong&gt;WSL&lt;/strong&gt; version 2. To do that, download the latest kernel update &lt;a href="https://wslstorestorage.blob.core.windows.net/wslblob/wsl_update_x64.msi"&gt;here&lt;/a&gt;. It is an official Microsoft executable, that you can run just by double-clicking after you install it. It is time for the final step - Running GUI apps through &lt;strong&gt;WSL&lt;/strong&gt; on windows.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#3-running-gui-apps-through-wsl"&gt;
+  &lt;/a&gt;
+  3. Running GUI apps through &lt;strong&gt;WSL&lt;/strong&gt;.
+&lt;/h2&gt;
+
+&lt;p&gt;We are almost finished this is the last step to do, I promise. To be able to run any graphical app through &lt;strong&gt;WSL&lt;/strong&gt; you will need a graphics card driver in addition. You can download the special driver for either &lt;a href="https://developer.nvidia.com/51006-gameready-win11-win10-dch-64bit-international"&gt;GeForce&lt;/a&gt; or &lt;a href="https://developer.nvidia.com/51006_quadro_win11_win10-dch_64bit_international"&gt;Quadro&lt;/a&gt; series graphics cards. Wait for it to download, then install it by double-clicking. After it is installed it is good to practice rebooting your machine. After you have it rebooted you can install any application on your WSL Linux Distro, for example, "Firefox".&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nb"&gt;sudo &lt;/span&gt;apt &lt;span class="nb"&gt;install &lt;/span&gt;firefox
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;After the installation is completed you can simply run the application, in our case, it is firefox so we are going to run it by typing in the command line &lt;code&gt;firefox&lt;/code&gt;. Wait for it for some time because it is the first launch and if everything has been set up as it should, you should be prompted with the firefox application directly on your windows screen, running through &lt;strong&gt;WSL&lt;/strong&gt;. &lt;br&gt;
+Congratulations you have successfully set up &lt;strong&gt;WSL 2&lt;/strong&gt; and enabled GUI on trough &lt;strong&gt;WSL&lt;/strong&gt;. 🎉🎺🎉&lt;/p&gt;
+
+&lt;p&gt;If you have any questions, just leave a comment, I will answer as soon as possible.&lt;/p&gt;
+
+</description>
+      <category>wsl</category>
+      <category>linux</category>
+      <category>tutorial</category>
+      <category>bash</category>
+    </item>
+    <item>
+      <title>How to Make Link Previews Look Nice on Twitter</title>
+      <author>Florian (mnml.wtf)</author>
+      <pubDate>Tue, 18 Jan 2022 16:42:12 +0000</pubDate>
+      <link>https://dev.to/mnml/how-to-make-link-previews-look-nice-on-twitter-55lc</link>
+      <guid>https://dev.to/mnml/how-to-make-link-previews-look-nice-on-twitter-55lc</guid>
+      <description>&lt;p&gt;Today I shared a tweet containing a link to a post on my website. I expected Twitter to do some magic and make the link preview look great as I was used to from other tweets. However, the link was displayed just as a text link. &lt;/p&gt;
+
+&lt;p&gt;After some googling I found out that in order for link previews to look nice on Twitter you need to add some Open-Graph data to your website and tell Twitter how to render the link preview.&lt;/p&gt;
+
+&lt;p&gt;The page I wanted to share was &lt;a href="https://mnml.wtf/notes/product-love"&gt;https://mnml.wtf/notes/product-love&lt;/a&gt; (I also &lt;a href="https://dev.to/mnml/products-and-tools-i-love-and-use-regularly-44dd"&gt;shared in on DEV here&lt;/a&gt;). &lt;/p&gt;
+
+&lt;p&gt;This is what I needed to add:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight html"&gt;&lt;code&gt;&lt;span class="nt"&gt;&amp;lt;meta&lt;/span&gt; &lt;span class="na"&gt;name=&lt;/span&gt;&lt;span class="s"&gt;"twitter:card"&lt;/span&gt; &lt;span class="na"&gt;content=&lt;/span&gt;&lt;span class="s"&gt;"summary_large_image"&lt;/span&gt; &lt;span class="nt"&gt;/&amp;gt;&lt;/span&gt;
+&lt;span class="nt"&gt;&amp;lt;meta&lt;/span&gt; &lt;span class="na"&gt;name=&lt;/span&gt;&lt;span class="s"&gt;"twitter:site"&lt;/span&gt; &lt;span class="na"&gt;content=&lt;/span&gt;&lt;span class="s"&gt;"@mnmlwtf"&lt;/span&gt; &lt;span class="nt"&gt;/&amp;gt;&lt;/span&gt;
+&lt;span class="nt"&gt;&amp;lt;meta&lt;/span&gt; &lt;span class="na"&gt;name=&lt;/span&gt;&lt;span class="s"&gt;"twitter:creator"&lt;/span&gt; &lt;span class="na"&gt;content=&lt;/span&gt;&lt;span class="s"&gt;"@mnmlwtf"&lt;/span&gt; &lt;span class="nt"&gt;/&amp;gt;&lt;/span&gt;
+&lt;span class="nt"&gt;&amp;lt;meta&lt;/span&gt; &lt;span class="na"&gt;property=&lt;/span&gt;&lt;span class="s"&gt;"og:title"&lt;/span&gt; &lt;span class="na"&gt;content=&lt;/span&gt;&lt;span class="s"&gt;"Product Love"&lt;/span&gt; &lt;span class="nt"&gt;/&amp;gt;&lt;/span&gt;
+&lt;span class="nt"&gt;&amp;lt;meta&lt;/span&gt; &lt;span class="na"&gt;property=&lt;/span&gt;&lt;span class="s"&gt;"og:url"&lt;/span&gt; &lt;span class="na"&gt;content=&lt;/span&gt;&lt;span class="s"&gt;"https://mnml.wtf/notes/product-love"&lt;/span&gt; &lt;span class="nt"&gt;/&amp;gt;&lt;/span&gt;
+&lt;span class="nt"&gt;&amp;lt;meta&lt;/span&gt; &lt;span class="na"&gt;property=&lt;/span&gt;&lt;span class="s"&gt;"og:image"&lt;/span&gt; &lt;span class="na"&gt;content=&lt;/span&gt;&lt;span class="s"&gt;"https://mnml.wtf/static/og/product-love.png"&lt;/span&gt; &lt;span class="nt"&gt;/&amp;gt;&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Let's go through these meta tags one by one:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;
+&lt;code&gt;twitter:card&lt;/code&gt; tells Twitter to render a large image as link preview instead of a small image&lt;/li&gt;
+&lt;li&gt;
+&lt;code&gt;twitter:site&lt;/code&gt; and &lt;code&gt;twitter:creator&lt;/code&gt; let Twitter know that I am the author of the content&lt;/li&gt;
+&lt;li&gt;
+&lt;code&gt;og:title&lt;/code&gt; contains the post title as it should be rendered on social media&lt;/li&gt;
+&lt;li&gt;
+&lt;code&gt;og:url&lt;/code&gt; is the URL to to the page on my website&lt;/li&gt;
+&lt;li&gt;
+&lt;code&gt;og:image&lt;/code&gt; is an image I created in Figma, it looks like this:&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--4mxCZZ51--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/1pg1pjeyrqdn918dd5m9.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--4mxCZZ51--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/1pg1pjeyrqdn918dd5m9.png" alt="The image used as  raw `og:image` endraw " width="880" height="462"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#invalidate-twitters-cache"&gt;
+  &lt;/a&gt;
+  Invalidate Twitter's Cache
+&lt;/h2&gt;
+
+&lt;p&gt;Since I already had shared the link and Twitter had tried to fetch all these meta tags I needed to invalidate Twitter's cache to make sure it checked my page again for these meta information. &lt;/p&gt;
+
+&lt;p&gt;I did this by submitting my post's URL on this tool: &lt;a href="https://cards-dev.twitter.com/validator"&gt;https://cards-dev.twitter.com/validator&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;The nice thing about it is that it instantly renders a tweet preview so you immediately know if everything looks as it should:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--ZD-59RlK--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/a14x5uwstkgjyp7l7o47.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ZD-59RlK--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/a14x5uwstkgjyp7l7o47.png" alt="Tweet Preview" width="880" height="709"&gt;&lt;/a&gt;&lt;/p&gt;
+
+</description>
+      <category>twitter</category>
+      <category>tutorial</category>
+      <category>writing</category>
+    </item>
+    <item>
       <title>Production Ready React</title>
       <author>Joel Warrington</author>
       <pubDate>Tue, 18 Jan 2022 15:54:13 +0000</pubDate>
@@ -163,6 +523,301 @@
       <category>graphql</category>
       <category>webdev</category>
       <category>typescript</category>
+    </item>
+    <item>
+      <title>What is OpenAPI?</title>
+      <author>Anthony Lio</author>
+      <pubDate>Tue, 18 Jan 2022 15:43:51 +0000</pubDate>
+      <link>https://dev.to/bump/what-is-openapi-1p6</link>
+      <guid>https://dev.to/bump/what-is-openapi-1p6</guid>
+      <description>&lt;p&gt;OpenAPI is a standard for describing APIs (Application Programming Interfaces). The OpenAPI specification (or OAS) defines an open and independent description format for API services and allows both humans and computers to discover and understand how an API works and how to interact with it, without the need to look at the source code. More specifically, OpenAPI allows to describe, develop, test, and document APIs conforming to the REST architecture, to create RESTful APIs.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#a-bit-of-history-from-swagger-to-openapi"&gt;
+  &lt;/a&gt;
+  A bit of history: From Swagger to OpenAPI
+&lt;/h2&gt;
+
+&lt;p&gt;To avoid any misunderstanding, we may have to explain the difference between OpenAPI and Swagger. Until version 3.0, this specification was still called Swagger before being renamed to OpenAPI specification.&lt;/p&gt;
+
+&lt;p&gt;In 2016, the OpenAPI specification became a separate project from Swagger, now supervised by the &lt;a href="https://www.openapis.org/"&gt;OpenAPI Initiative&lt;/a&gt;, an open-source project under the &lt;a href="https://linuxfoundation.org/"&gt;Linux Foundation&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;The name Swagger is still very popular even if most people are now using OpenAPI under the hood. Habits are hard to break!&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#definitions"&gt;
+  &lt;/a&gt;
+  Definitions
+&lt;/h2&gt;
+
+&lt;p&gt;Sometimes the terms we come across differ from one source to another, and it can be a bit confusing. Here is a quick reminder to understand correctly every concept and call a cat a cat.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--GpjeR0H5--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://storage.googleapis.com/bump-blog-resources/what-is-openapi/bump-api-call.gif" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--GpjeR0H5--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_66%2Cw_880/https://storage.googleapis.com/bump-blog-resources/what-is-openapi/bump-api-call.gif" alt="Call a cat a cat gif" width="640" height="360"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#openapi-specification"&gt;
+  &lt;/a&gt;
+  OpenAPI specification
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;em&gt;Also known as OpenAPI specs / OAS&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;The OpenAPI specification is the standard for describing a RESTful API. It can be seen as your guide for writing the API definition following the OpenAPI rules.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#openapi-definition"&gt;
+  &lt;/a&gt;
+  OpenAPI definition
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;em&gt;Also known as OpenAPI file / OpenAPI document / OpenAPI description / OpenAPI contract&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;The OpenAPI definition describes exactly how your API works. The OpenAPI definition is written following the OpenAPI specification.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#openapi-documentation"&gt;
+  &lt;/a&gt;
+  OpenAPI documentation
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;em&gt;Also known as OpenAPI reference&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;The OpenAPI documentation is human-readable documentation for your API based on your OpenAPI definition. Your documentation can be automatically generated from your OpenAPI definition to avoid the pain of writing it by hand.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#major-differences-between-openapi-20-30-31"&gt;
+  &lt;/a&gt;
+  Major differences between OpenAPI 2.0, 3.0, 3.1
+&lt;/h2&gt;
+
+&lt;h3&gt;
+  &lt;a href="#versions"&gt;
+  &lt;/a&gt;
+  Versions
+&lt;/h3&gt;
+
+&lt;p&gt;In the 2.0 specification, a property called “&lt;code&gt;swagger&lt;/code&gt;” indicated which version of the specification you are using. In OpenAPI 3.0, this is replaced by a new “&lt;code&gt;openapi&lt;/code&gt;” property:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;
+&lt;code&gt;"swagger": "2.0"&lt;/code&gt;  line is thus transformed into &lt;code&gt;"openapi": "3.0.0"&lt;/code&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3&gt;
+  &lt;a href="#structural-changes"&gt;
+  &lt;/a&gt;
+  Structural changes
+&lt;/h3&gt;
+
+&lt;p&gt;The following image sums up the main structural changes between 2.0 and 3.0. As you can see a simplification effort has been made to group each concern in a more logical way.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--zJeB9ETV--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://storage.googleapis.com/bump-blog-resources/what-is-openapi/OpenAPI-2-versus-OpenAPI-3.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--zJeB9ETV--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://storage.googleapis.com/bump-blog-resources/what-is-openapi/OpenAPI-2-versus-OpenAPI-3.png" alt="openapi 2 versus openapi 3" width="880" height="519"&gt;&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;If you want to get more into the details about what changed between OpenAPI 3.0 and 3.1, you can have a look at our dedicated article &lt;a href="https://bump.sh/blog/changes-in-openapi-3-1"&gt;here&lt;/a&gt;.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#format"&gt;
+  &lt;/a&gt;
+  Format
+&lt;/h2&gt;
+
+&lt;p&gt;OpenAPI definition can be written both in YAML and JSON formats.&lt;/p&gt;
+
+&lt;p&gt;These formats were chosen because they are easy for a human to read and write, and easy for machines to parse. In practice, YAML is the most used format adopted to write OpenAPI definitions. Like it or not, YAML is easier to read than JSON mainly because it reduces the use of markup tags. Also, it is a format that is widely used to write any sort of software configuration.&lt;/p&gt;
+
+&lt;p&gt;Here is an example of a simple OpenAPI (3.0.2) definition endpoint written in YAML :&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="na"&gt;/previews&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+  &lt;span class="na"&gt;post&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+    &lt;span class="na"&gt;summary&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s"&gt;Create a preview&lt;/span&gt;
+    &lt;span class="na"&gt;description&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="pi"&gt;|&lt;/span&gt;
+      &lt;span class="s"&gt;Create a preview for a given documentation file. The preview will have a unique&lt;/span&gt;
+      &lt;span class="s"&gt;temporary URL, and will be active for 30 minutes.&lt;/span&gt;
+    &lt;span class="na"&gt;security&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="pi"&gt;[]&lt;/span&gt;
+    &lt;span class="na"&gt;requestBody&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="na"&gt;$ref&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;#/components/requestBodies/Preview"&lt;/span&gt;
+    &lt;span class="na"&gt;responses&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+      &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;201"&lt;/span&gt;&lt;span class="err"&gt;:&lt;/span&gt;
+        &lt;span class="na"&gt;description&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;Success"&lt;/span&gt;
+        &lt;span class="na"&gt;content&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+          &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;application/json"&lt;/span&gt;&lt;span class="err"&gt;:&lt;/span&gt;
+            &lt;span class="na"&gt;schema&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt;
+              &lt;span class="na"&gt;$ref&lt;/span&gt;&lt;span class="pi"&gt;:&lt;/span&gt; &lt;span class="s2"&gt;"&lt;/span&gt;&lt;span class="s"&gt;#/components/schemas/Preview"&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h2&gt;
+  &lt;a href="#openapi-simple-definition-structure"&gt;
+  &lt;/a&gt;
+  OpenAPI simple definition structure
+&lt;/h2&gt;
+
+&lt;p&gt;Your OpenAPI definition lets you describe your REST API:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;Define general information about your API: description, terms of use, license, contact, etc…&lt;/li&gt;
+&lt;li&gt;Authentication methods &lt;code&gt;HTTP&lt;/code&gt;, &lt;code&gt;API keys&lt;/code&gt;, &lt;code&gt;OAuth 2&lt;/code&gt;, &lt;code&gt;OpenID&lt;/code&gt;, etc…&lt;/li&gt;
+&lt;li&gt;Available endpoints &lt;code&gt;/users&lt;/code&gt;, etc…&lt;/li&gt;
+&lt;li&gt;Since OpenAPI 3.1, &lt;a href="https://bump.sh/blog/changes-in-openapi-3-1#webhooks-support"&gt;available webhooks&lt;/a&gt; &lt;/li&gt;
+&lt;li&gt;Available operations on each endpoint: &lt;code&gt;GET&lt;/code&gt;, &lt;code&gt;POST&lt;/code&gt;, &lt;code&gt;PUT&lt;/code&gt;, &lt;code&gt;PATCH&lt;/code&gt;, &lt;code&gt;DELETE&lt;/code&gt;, etc…&lt;/li&gt;
+&lt;li&gt;Input and output parameters for each operation&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h2&gt;
+  &lt;a href="#openapi-benefits"&gt;
+  &lt;/a&gt;
+  OpenAPI benefits
+&lt;/h2&gt;
+
+&lt;h3&gt;
+  &lt;a href="#designfirst"&gt;
+  &lt;/a&gt;
+  Design-First
+&lt;/h3&gt;
+
+&lt;p&gt;In a design-first world, OpenAPI allows you to describe your whole API from endpoints to examples before even writing the first line of code.&lt;/p&gt;
+
+&lt;p&gt;Using this approach, the API definition is the cornerstone of your API and becomes the single source of truth in your organization. Code is based on what has been validated during the design phase and the documentation is generated and synced with the API definition.&lt;/p&gt;
+
+&lt;p&gt;Your team can collaborate at every step of the API design phase and leverage their workflow:&lt;/p&gt;
+
+&lt;p&gt;Business and product teams can specify new features that meet consumers needs and a technical writer or an engineer can create or update the OpenAPI definition. Teams can &lt;a href="https://bump.sh/blog/api-design-first-with-bump-diff#collaborating-on-api-design"&gt;discuss the changes&lt;/a&gt;, test the impacts and validate them.&lt;/p&gt;
+
+&lt;p&gt;The API design process is boosted: frontend and backend developers can use the OpenAPI file to start working on the implementation, even if this is not the final version of the document.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#codefirst"&gt;
+  &lt;/a&gt;
+  Code-first
+&lt;/h3&gt;
+
+&lt;p&gt;Obviously, we can’t talk about Design-First without mentioning the historical approach of Code-First, as it can have some benefits as well.&lt;/p&gt;
+
+&lt;p&gt;If you need to deploy an API fast for a MVP, internal use or with few endpoints, spending time on API design before you start coding may not be necessary and may slow your delivery time.&lt;/p&gt;
+
+&lt;p&gt;As developers, we have our rooted habits and Code-First follows the historical development process. We put ourselves directly into coding, without the need to learn yet another language or design tools to create our APIs. Sometimes it is a great time saver.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#tools-for-openapi"&gt;
+  &lt;/a&gt;
+  Tools for OpenAPI
+&lt;/h2&gt;
+
+&lt;p&gt;There are many tools to help you get the most out of OpenAPI, at every step of the API life cycle, here is a selection of our preferred ones:&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#editors"&gt;
+  &lt;/a&gt;
+  Editors
+&lt;/h3&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="https://mermade.github.io/openapi-gui/"&gt;OpenAPI-GUI&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://stoplight.io/studio/"&gt;Stoplight studio&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://editor.swagger.io/"&gt;Swagger editor&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://insomnia.rest/"&gt;Insomnia&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3&gt;
+  &lt;a href="#linters"&gt;
+  &lt;/a&gt;
+  Linters
+&lt;/h3&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="https://github.com/wework/speccy"&gt;Speccy&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://github.com/stoplightio/spectral"&gt;Spectral&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3&gt;
+  &lt;a href="#documentation"&gt;
+  &lt;/a&gt;
+  Documentation
+&lt;/h3&gt;
+
+&lt;ul&gt;
+&lt;li&gt;
+&lt;a href="https://bump.sh/api-documentation"&gt;Bump.sh&lt;/a&gt; 💙&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://github.com/swagger-api/swagger-ui"&gt;Swagger UI&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://github.com/Redocly/redoc"&gt;Redoc&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://readme.com/"&gt;Readme&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3&gt;
+  &lt;a href="#mocking"&gt;
+  &lt;/a&gt;
+  Mocking
+&lt;/h3&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="https://github.com/stoplightio/prism"&gt;Prism&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://github.com/danielgtaylor/apisprout"&gt;APISprout&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3&gt;
+  &lt;a href="#testing"&gt;
+  &lt;/a&gt;
+  Testing
+&lt;/h3&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="https://www.postman.com/api-platform/api-testing/"&gt;Postman&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://microcks.io/"&gt;Microcks&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3&gt;
+  &lt;a href="#clients-generator"&gt;
+  &lt;/a&gt;
+  Clients generator
+&lt;/h3&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="https://github.com/OpenAPITools/openapi-generator"&gt;OpenAPI Generator&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3&gt;
+  &lt;a href="#observability"&gt;
+  &lt;/a&gt;
+  Observability
+&lt;/h3&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="https://www.akitasoftware.com/"&gt;Akita&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://useoptic.com/"&gt;Optic&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Besides the ones mentioned above, here is an amazing and more exhaustive list of curated tools for OpenAPI: &lt;a href="https://openapi.tools/"&gt;&lt;/a&gt;&lt;a href="https://openapi.tools/"&gt;https://openapi.tools/&lt;/a&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#give-it-a-try"&gt;
+  &lt;/a&gt;
+  Give it a try
+&lt;/h2&gt;
+
+&lt;p&gt;Now that you know what OpenAPI is, try it out and get inspired by existing OpenAPI definitions to create your own.&lt;br&gt;
+Here are some examples of public API definitions:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;&lt;a href="https://raw.githubusercontent.com/meilisearch/specifications/main/open-api.yaml"&gt;Meilisearch API&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://gitlab.com/gitlab-org/gitlab/-/raw/master/doc/api/openapi/openapi.yaml"&gt;Gitlab API&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a href="https://developers.bump.sh/source.json"&gt;Bump API&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;You can use any of those URL in our dedicated preview box right below this article.&lt;/p&gt;
+
+&lt;p&gt;Have fun with OpenAPI! ✨&lt;/p&gt;
+
+</description>
+      <category>openapi</category>
+      <category>api</category>
+      <category>swagger</category>
+      <category>apidocumentation</category>
     </item>
     <item>
       <title>How to use really long environment variables in Netlify functions</title>
@@ -859,1196 +1514,6 @@ This was just a short look at SRE to understand it in comparison to DevOps, but 
       <category>devjournal</category>
       <category>motivation</category>
       <category>beginners</category>
-    </item>
-    <item>
-      <title>My Road To Software Engineering </title>
-      <author>Doug Jones </author>
-      <pubDate>Tue, 18 Jan 2022 15:04:38 +0000</pubDate>
-      <link>https://dev.to/codejones/my-road-to-software-engineering-no4</link>
-      <guid>https://dev.to/codejones/my-road-to-software-engineering-no4</guid>
-      <description>&lt;h2&gt;
-  &lt;a href="#the-beginning"&gt;
-  &lt;/a&gt;
-  The Beginning
-&lt;/h2&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--_iXFz_ed--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/6sdbs67avxrdhhhi8buk.jpeg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--_iXFz_ed--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/6sdbs67avxrdhhhi8buk.jpeg" alt="description" width="322" height="157"&gt;&lt;/a&gt; &lt;br&gt;
-I started 2021 with no software engineering experience. &lt;br&gt;
-If you would of asked me to type "Hello World" in HTML. &lt;br&gt;
-I would of looked at you as if you had 3 three dragon heads.&lt;br&gt;
-I was looking to start a new career and find something different. &lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#career-karma"&gt;
-  &lt;/a&gt;
-  Career Karma
-&lt;/h2&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--UNFsVXeY--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/772mu68g85sagjjpyila.jpeg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--UNFsVXeY--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/772mu68g85sagjjpyila.jpeg" alt="description" width="351" height="144"&gt;&lt;/a&gt;&lt;br&gt;
-I saw an advertisement for the Career Karma app. I was looking to make a change in my life and find a new direction. &lt;br&gt;
-I took the quiz to see if software engineering was right for me. After the quiz I accepted the 21 day challenge (&lt;strong&gt;Which I finished&lt;/strong&gt;) and started my journey into the tech field. &lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#flatiron"&gt;
-  &lt;/a&gt;
-  Flatiron
-&lt;/h2&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--VOukfAp0--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/p176cv0q62apa627o90n.jpeg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--VOukfAp0--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/p176cv0q62apa627o90n.jpeg" alt="description" width="298" height="169"&gt;&lt;/a&gt;&lt;br&gt;
-After committing to learning about programming. I took a quiz to find the right bootcamps for me. Through some personal research combined with the results of my test. I enrolled in Flatiron School and my commitment to this journey continued. &lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#the-journey"&gt;
-  &lt;/a&gt;
-  The Journey
-&lt;/h2&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--srJ-8Xt0--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/sqzkz69txsefaqevvuj3.jpeg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--srJ-8Xt0--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/sqzkz69txsefaqevvuj3.jpeg" alt="description" width="300" height="168"&gt;&lt;/a&gt;&lt;br&gt;
-Every journey starts with a first step or code in this case. I began learning a new way of thinking and processing information. A new language because &lt;em&gt;let's be honest not everyone speaks code&lt;/em&gt; 🥸. A new community of friends. All of a sudden I went from talking about sports and the latest video games, to text editors, keyboards, and VS code themes.&lt;br&gt;
-The world of possibilities to create new things and help improve old one's was opened to me and I jump right in. &lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#the-growth"&gt;
-  &lt;/a&gt;
-  The Growth
-&lt;/h2&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--A7_bYHob--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/km5gcu1s26uzacl9whp7.jpeg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--A7_bYHob--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/km5gcu1s26uzacl9whp7.jpeg" alt="description" width="362" height="139"&gt;&lt;/a&gt;&lt;br&gt;
-Taking the journey to becoming a software engineer challenged me beyond my limits. The skills I was learning didn't just begin or end with doing coding labs or build projects. They transferred to all areas of life. I was to apply these problem solving processes at my current job, helping to teach my kids how to break problems down and solve them. &lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#the-now"&gt;
-  &lt;/a&gt;
-  The Now
-&lt;/h2&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--YwpUjRpd--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/k8jk21j4hz9vkq90p0bf.jpeg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--YwpUjRpd--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/k8jk21j4hz9vkq90p0bf.jpeg" alt="description" width="300" height="295"&gt;&lt;/a&gt; &lt;br&gt;
-When I stated at Flatiron they asked us Why Software Engineering? Now I would say the real question is Why Not? &lt;br&gt;
-In a world where more and more things in our everyday lives are being powered by apps and technology continues to grow. Software Engineering really puts the world at your finger tips. I hope you take the journey to &lt;/p&gt;
-
-&lt;p&gt;Happy Coding 👨🏿‍💻👨🏻‍💻🧑🏾‍💻👩‍💻&lt;/p&gt;
-
-</description>
-    </item>
-    <item>
-      <title>Cross Browser Testing In Selenium [Tutorial]</title>
-      <author>himanshuseth004</author>
-      <pubDate>Tue, 18 Jan 2022 15:01:34 +0000</pubDate>
-      <link>https://dev.to/himanshusheth004/cross-browser-testing-in-selenium-tutorial-54f7</link>
-      <guid>https://dev.to/himanshusheth004/cross-browser-testing-in-selenium-tutorial-54f7</guid>
-      <description>&lt;p&gt;Selenium is a popular automation testing framework that is primarily used for cross browser testing. It is an open-source framework that is primarily used for &lt;a href="https://www.lambdatest.com/automation-testing?utm_source=devto&amp;amp;utm_medium=organic&amp;amp;utm_campaign=jan18_cd&amp;amp;utm_term=rn&amp;amp;utm_content=webpage"&gt;automating testing&lt;/a&gt; of web applications (and websites) across a range of browsers like Firefox, Chrome, Internet Explorer, Microsoft Edge, etc.&lt;/p&gt;
-
-&lt;p&gt;If you are a Selenium enthusiast, you would have definitely tried out Selenium 4 – the latest version of the Selenium framework. Selenium 4 has been in the works since the last three years and we have been toying around with Selenium 4 since the time it was in the Alpha stage.&lt;/p&gt;
-
-
-&lt;blockquote class="ltag__twitter-tweet"&gt;
-
-  &lt;div class="ltag__twitter-tweet__main"&gt;
-    &lt;div class="ltag__twitter-tweet__header"&gt;
-      &lt;img class="ltag__twitter-tweet__profile-image" src="https://res.cloudinary.com/practicaldev/image/fetch/s--Z-bWLFK9--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://pbs.twimg.com/profile_images/1476699944211910660/Ub17LND7_normal.jpg" alt="Simon Mavi Stewart profile image"&gt;
-      &lt;div class="ltag__twitter-tweet__full-name"&gt;
-        Simon Mavi Stewart
-      &lt;/div&gt;
-      &lt;div class="ltag__twitter-tweet__username"&gt;
-        @shs96c
-      &lt;/div&gt;
-      &lt;div class="ltag__twitter-tweet__twitter-logo"&gt;
-        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ir1kO05j--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/twitter-f95605061196010f91e64806688390eb1a4dbc9e913682e043eb8b1e06ca484f.svg" alt="twitter logo"&gt;
-      &lt;/div&gt;
-    &lt;/div&gt;
-    &lt;div class="ltag__twitter-tweet__body"&gt;
-      🎉🎉 Woohoo! 🎉🎉 I am absolutely over-the-moon excited to announce that we have just shipped Selenium 4.0.0! &lt;a href="https://twitter.com/hashtag/selenium4"&gt;#selenium4&lt;/a&gt;&lt;br&gt;&lt;br&gt;It's taken over 4000 commits, one brand new Grid implementation, and almost three years since the last stable release, but it's here for you now!
-    &lt;/div&gt;
-    &lt;div class="ltag__twitter-tweet__date"&gt;
-      13:50 PM - 13 Oct 2021
-    &lt;/div&gt;
-
-
-    &lt;div class="ltag__twitter-tweet__actions"&gt;
-      &lt;a href="https://twitter.com/intent/tweet?in_reply_to=1448285008809144333" class="ltag__twitter-tweet__actions__button"&gt;
-        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--fFnoeFxk--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/twitter-reply-action-238fe0a37991706a6880ed13941c3efd6b371e4aefe288fe8e0db85250708bc4.svg" alt="Twitter reply action"&gt;
-      &lt;/a&gt;
-      &lt;a href="https://twitter.com/intent/retweet?tweet_id=1448285008809144333" class="ltag__twitter-tweet__actions__button"&gt;
-        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--k6dcrOn8--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/twitter-retweet-action-632c83532a4e7de573c5c08dbb090ee18b348b13e2793175fea914827bc42046.svg" alt="Twitter retweet action"&gt;
-      &lt;/a&gt;
-      &lt;a href="https://twitter.com/intent/like?tweet_id=1448285008809144333" class="ltag__twitter-tweet__actions__button"&gt;
-        &lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--SRQc9lOp--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev.to/assets/twitter-like-action-1ea89f4b87c7d37465b0eb78d51fcb7fe6c03a089805d7ea014ba71365be5171.svg" alt="Twitter like action"&gt;
-      &lt;/a&gt;
-    &lt;/div&gt;
-  &lt;/div&gt;
-&lt;/blockquote&gt;
-
-
-&lt;p&gt;Relative locators, renewed Selenium Grid implementation, W3C compliance and super-powerful newly architectured Selenium Grid are some of the talking points of Selenium 4.&lt;/p&gt;
-
-&lt;p&gt;In this Selenium WebDriver tutorial, we deep dive into the essential components of Selenium framework including Selenium WebDriver architecture, performing cross browser testing using Selenium, along with touching upon the most useful features of the Selenium 4 framework.&lt;/p&gt;
-
-&lt;p&gt;This Selenium WebDriver Tutorial for beginners and professionals will help you learn what’s new in Selenium 4 (Features and Improvements).&lt;/p&gt;
-
-&lt;p&gt;&lt;iframe width="710" height="399" src="https://www.youtube.com/embed/Mmp_FiNIYtQ"&gt;
-&lt;/iframe&gt;
-&lt;/p&gt;
-
-&lt;p&gt;What is Cross Browser Testing ?&lt;/p&gt;
-
-&lt;p&gt;Cross browser testing is the process of testing a website or web application on different combinations of browsers and browser versions. The browser market share for desktops is a clear indicator about the fragmentation that exists in the desktop browser market.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--7etVRwDE--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/powu7bfhptde7q99ei3x.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--7etVRwDE--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/powu7bfhptde7q99ei3x.png" alt="Stats Counter" width="880" height="576"&gt;&lt;/a&gt;&lt;br&gt;
-&lt;a href="https://gs.statcounter.com/browser-market-share"&gt;Source&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Though Internet Explorer (IE) does not surface in the list of prominent browsers, the fact is that testing on Internet Explorer is still relevant as a certain percentage of users still use IE as their primary web browser. As every browser has its own rendering engine, there is a possibility that certain functionalities might not work (as expected) on those browsers and operating systems.&lt;/p&gt;
-
-&lt;p&gt;Cross browser compatibility testing is an approach through which you can test your website (or web application) on different browsers, browser versions, and operating systems. It is essential for ensuring that the product experience is uniform across browsers and platforms (or operating systems).&lt;/p&gt;
-
-&lt;p&gt;Why use Selenium for Cross Browser Testing ?&lt;br&gt;
-For starters, Selenium is a popular open-source framework that is used for cross browser testing or automation testing of websites (or web applications). The Selenium framework provides language bindings for popular programming languages like Python, Java, JavaScript, C#, Ruby, and PHP.&lt;/p&gt;
-
-&lt;p&gt;Shown below is the overall timeline (or version history) of the Selenium framework:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--uIMw9xZp--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/c8llrv8eygmp5qm7sekp.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--uIMw9xZp--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/c8llrv8eygmp5qm7sekp.png" alt="Evolution of the Selenium framework" width="880" height="537"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;On the whole, Selenium is a powerful test automation framework that is not only instrumental in web automation testing but also helps in accelerating the overall software release via integration with popular CI/CD tools like Jenkins, TeamCity, GitLab CI, and more. The only downside about Selenium is that it cannot be used for automation desktop applications.&lt;/p&gt;
-
-&lt;p&gt;Selenium versions prior to Selenium 4 were using the JSON Wire Protocol for communicating between the client and server. However, JSON Wire protocol is retiring in Selenium 4, as WebDriver W3C protocol is used in the Selenium 4 framework. This essentially means that your cross browser tests would be more stable (or less flaky) when the tests are performed on the Selenium 4 Grid.&lt;/p&gt;
-
-&lt;p&gt;In case you are looking for the Selenium 4 upgrade guide, make sure to check out our blog that deep dives into how to upgrade from Selenium 3 to 4.&lt;/p&gt;
-
-&lt;p&gt;Selenium framework is designed in a manner that updates (or enhancements) in the browsers have minimal impact on the test scenarios. Interaction with the WebElements on the page that is rendered on the browser is facilitated via the browser drivers.&lt;/p&gt;
-
-&lt;p&gt;Now that we have covered the basic essentials of the Selenium framework, let’s look into the what and how of cross browser testing in Selenium.&lt;/p&gt;
-
-&lt;p&gt;Seamless User Experience&lt;br&gt;
-Every web product consists of the front end and back end. HTML, CSS, and JavaScript are some of the most widely-used web languages for front-end development. On the other hand, the back-end can be developed using popular programming PHP, Python, Java, amongst others.&lt;/p&gt;
-
-&lt;p&gt;Also, every web browser uses a different rendering engine and JavaScript engine that might result in differentiated experience across different web browsers. For example, Google Chrome uses Blink engine, Mozilla Firefox uses Gecko engine, Apple Safari uses WebKit engine, and so on.&lt;/p&gt;
-
-&lt;p&gt;Role of rendering engines in browsers has played a major role in the importance of cross browser testing of websites (and web applications). In a nutshell, cross browser testing is required to ensure that your website (or web app) visitors are presented with a uniform experience, irrespective of the browser, browser version, or OS being used for accessing the same.&lt;/p&gt;
-
-&lt;p&gt;Increased Browser Coverage&lt;br&gt;
-Browser coverage is an integral aspect of test coverage. The primary agenda of cross browser testing is to perform testing on different browsers and version combinations.&lt;/p&gt;
-
-&lt;p&gt;Using Selenium for cross browser testing helps in rigorous testing of the code across multiple browsers; thereby helping achieve better browser coverage. This in turn helps in improving the user experience across the target web browsers. Browser compatibility matrix can be instrumental in prioritizing the web browsers that are in use by the target audience.&lt;/p&gt;
-
-&lt;p&gt;Shorter Release Cycles&lt;br&gt;
-True potential of cross browser testing with Selenium can be exploited by running tests on a Selenium Grid. The Selenium Grid is a Hub-Node (or Client-Server) based architecture that lets you run cross browser tests in parallel on different browser and OS combinations.&lt;/p&gt;
-
-&lt;p&gt;Based on the test combination, Hub in Selenium Grid hands over the test execution to the best-suited Node.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--9aVgGEl7--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/036xz2f9afczs4fnh4u1.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--9aVgGEl7--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/036xz2f9afczs4fnh4u1.png" alt="Selenium Grid Architecture" width="548" height="524"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;The in-house Selenium Grid infrastructure can help in expediting test execution but at the expense of higher maintenance and lower reliability.&lt;/p&gt;
-
-&lt;p&gt;Major release bottlenecks like high test flakiness, high test execution time, low test reliability and mounting infrastructure costs can be fixed by migrating cross browser tests to a secure, reliable, and scalable cloud Grid like LambdaTest.&lt;/p&gt;
-
-&lt;p&gt;The combination of cloud grid, parallel cross browser testing using Selenium, and integration with the best CI/CD tools can be instrumental in achieving improved product quality and accelerated time to market.&lt;/p&gt;
-
-&lt;p&gt;Selenium WebDriver Architecture&lt;br&gt;
-Before we get our hands dirty with cross browser testing using Selenium, let’s have a brief look at some of the integral components of the Selenium Suite. Apart from Selenium Grid, the Selenium IDE and Selenium Grid are the major components of the Selenium Suite.&lt;/p&gt;
-
-&lt;p&gt;Selenium RC (Remote Control) which was a part of Selenium suite until V2, was officially deprecated in Selenium v3. Selenium WebDriver can be considered as the soul of Selenium, as it helps in establishing the communication with the web browser through its corresponding browser driver.&lt;/p&gt;
-
-&lt;p&gt;The JSON Wire protocol which was used for communication between the Selenium Client libraries and Browser Drivers is no longer a part of Selenium 4. The JSON Wire protocol in Selenium 3 is replaced with W3C WebDriver protocol in Selenium 4, there is no necessity of encoding and decoding of test requests. You can expect better test stability when using the Selenium 4 framework.&lt;/p&gt;
-
-&lt;p&gt;Shown below is the pictorial representation of the Selenium 3 WebDriver Architecture:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Iax3CxV7--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/mza8tfxs8gqw485xf2u4.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Iax3CxV7--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/mza8tfxs8gqw485xf2u4.png" alt="WebDriver Architecture in Selenium 3" width="880" height="391"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;As Selenium 4 is compliant with the W3C WebDriver, there is no necessity of encoding and decoding the test requests. Shown below is the pictorial representation of the Selenium 4 WebDriver Architecture:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--QKjD4ho_--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/yk44w4nqz8bl2ga2eug0.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--QKjD4ho_--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/yk44w4nqz8bl2ga2eug0.png" alt="WebDriver Architecture in Selenium 4" width="844" height="496"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Demonstration: Cross Browser Testing using Selenium&lt;br&gt;
-Finally, let’s get our hands dirty with cross browser testing using Selenium. We would be running tests on LambdaTest Selenium grid. Website testing on cloud provides numerous benefits, the major ones are listed below:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Reliable and accelerated test execution&lt;/li&gt;
-&lt;li&gt;Massive reduction in test flakiness&lt;/li&gt;
-&lt;li&gt;Shorter release cycles and faster TTM (Time to Market)&lt;/li&gt;
-&lt;li&gt;Improved product user experience owing to cross browser compatibility tests being conducted on a range of browser, OS, and viewport combinations&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;Parameterized testing in Selenium and data driven testing in Selenium are two major options to realize cross browser testing using Selenium at a scale. Though the mechanism of reading test parameters differ in the two cases, the primary goal of performing cross browser tests across different test combinations is met.&lt;/p&gt;
-
-&lt;p&gt;Now that you are aware of the major advantages offered by a cloud Selenium Grid, let’s look at a simple demonstration of cross browser testing using Selenium.&lt;/p&gt;
-
-&lt;p&gt;Test Scenario&lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;Open MVC ToDo App&lt;/li&gt;
-&lt;li&gt;Add 5 new items in the list&lt;/li&gt;
-&lt;li&gt;Delete all the items till the ToDo list is empty&lt;/li&gt;
-&lt;li&gt;Assert if the list is not empty&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;p&gt;Cross Browser Test Combinations&lt;/p&gt;
-
-&lt;div class="table-wrapper-paragraph"&gt;&lt;table&gt;
-&lt;thead&gt;
-&lt;tr&gt;
-&lt;th&gt;Browser&lt;/th&gt;
-&lt;th&gt;Browser Version&lt;/th&gt;
-&lt;th&gt;Platform&lt;/th&gt;
-&lt;/tr&gt;
-&lt;/thead&gt;
-&lt;tbody&gt;
-&lt;tr&gt;
-&lt;td&gt;Chrome&lt;/td&gt;
-&lt;td&gt;latest&lt;/td&gt;
-&lt;td&gt;Windows 10&lt;/td&gt;
-&lt;/tr&gt;
-&lt;tr&gt;
-&lt;td&gt;Firefox&lt;/td&gt;
-&lt;td&gt;latest&lt;/td&gt;
-&lt;td&gt;Windows 10&lt;/td&gt;
-&lt;/tr&gt;
-&lt;tr&gt;
-&lt;td&gt;Microsoft Edge&lt;/td&gt;
-&lt;td&gt;latest&lt;/td&gt;
-&lt;td&gt;MacOS Catalina&lt;/td&gt;
-&lt;/tr&gt;
-&lt;/tbody&gt;
-&lt;/table&gt;&lt;/div&gt;
-
-&lt;p&gt;Implementation&lt;/p&gt;
-
-&lt;p&gt;The demonstration of cross browser testing is done using the TestNG framework with Selenium. We have used the IntelliJ IDEA IDE, however you have the flexibility of using Eclipse IDE for development. TestNG Eclipse step-by-step guide is the ideal resource in case you are just getting started with TestNG with Selenium using the Eclipse IDE.&lt;/p&gt;
-
-&lt;p&gt;As seen in the project setup, we have created a class file named Test1 under src/test/java folder.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--HJZn4O5---/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/juzfr3naofzyuf44py31.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--HJZn4O5---/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/juzfr3naofzyuf44py31.png" alt="Directory" width="724" height="578"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Since we would be passing the browser and OS combinations as parameters, the code will be&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;&amp;lt;?xml version="1.0" encoding="UTF-8"?&amp;gt;
-&amp;lt;project xmlns="http://maven.apache.org/POM/4.0.0"
-        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-        xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd"&amp;gt;
-   &amp;lt;modelVersion&amp;gt;4.0.0&amp;lt;/modelVersion&amp;gt;
-
-   &amp;lt;groupId&amp;gt;org.example&amp;lt;/groupId&amp;gt;
-   &amp;lt;artifactId&amp;gt;AutomationDemo&amp;lt;/artifactId&amp;gt;
-   &amp;lt;version&amp;gt;1.0-SNAPSHOT&amp;lt;/version&amp;gt;
-
-   &amp;lt;properties&amp;gt;
-       &amp;lt;maven.compiler.source&amp;gt;16&amp;lt;/maven.compiler.source&amp;gt;
-       &amp;lt;maven.compiler.target&amp;gt;16&amp;lt;/maven.compiler.target&amp;gt;
-   &amp;lt;/properties&amp;gt;
-
-   &amp;lt;dependencies&amp;gt;
-       &amp;lt;dependency&amp;gt;
-           &amp;lt;groupId&amp;gt;org.testng&amp;lt;/groupId&amp;gt;
-           &amp;lt;artifactId&amp;gt;testng&amp;lt;/artifactId&amp;gt;
-           &amp;lt;version&amp;gt;6.9.10&amp;lt;/version&amp;gt;
-           &amp;lt;scope&amp;gt;test&amp;lt;/scope&amp;gt;
-       &amp;lt;/dependency&amp;gt;
-       &amp;lt;dependency&amp;gt;
-           &amp;lt;groupId&amp;gt;org.slf4j&amp;lt;/groupId&amp;gt;
-           &amp;lt;artifactId&amp;gt;slf4j-nop&amp;lt;/artifactId&amp;gt;
-           &amp;lt;version&amp;gt;1.7.28&amp;lt;/version&amp;gt;
-           &amp;lt;scope&amp;gt;test&amp;lt;/scope&amp;gt;
-       &amp;lt;/dependency&amp;gt;
-       &amp;lt;dependency&amp;gt;
-           &amp;lt;groupId&amp;gt;org.seleniumhq.selenium&amp;lt;/groupId&amp;gt;
-           &amp;lt;artifactId&amp;gt;selenium-java&amp;lt;/artifactId&amp;gt;
-           &amp;lt;version&amp;gt;3.141.59&amp;lt;/version&amp;gt;
-       &amp;lt;/dependency&amp;gt;
-       &amp;lt;dependency&amp;gt;
-           &amp;lt;groupId&amp;gt;org.seleniumhq.selenium&amp;lt;/groupId&amp;gt;
-           &amp;lt;artifactId&amp;gt;selenium-remote-driver&amp;lt;/artifactId&amp;gt;
-           &amp;lt;version&amp;gt;3.141.59&amp;lt;/version&amp;gt;
-       &amp;lt;/dependency&amp;gt;
-       &amp;lt;dependency&amp;gt;
-           &amp;lt;groupId&amp;gt;org.seleniumhq.selenium&amp;lt;/groupId&amp;gt;
-           &amp;lt;artifactId&amp;gt;selenium-chrome-driver&amp;lt;/artifactId&amp;gt;
-           &amp;lt;version&amp;gt;3.141.59&amp;lt;/version&amp;gt;
-       &amp;lt;/dependency&amp;gt;
-       &amp;lt;dependency&amp;gt;
-           &amp;lt;groupId&amp;gt;junit&amp;lt;/groupId&amp;gt;
-           &amp;lt;artifactId&amp;gt;junit&amp;lt;/artifactId&amp;gt;
-           &amp;lt;version&amp;gt;4.12&amp;lt;/version&amp;gt;
-           &amp;lt;scope&amp;gt;test&amp;lt;/scope&amp;gt;
-       &amp;lt;/dependency&amp;gt;
-       &amp;lt;dependency&amp;gt;
-           &amp;lt;groupId&amp;gt;org.apache.httpcomponents&amp;lt;/groupId&amp;gt;
-           &amp;lt;artifactId&amp;gt;httpclient&amp;lt;/artifactId&amp;gt;
-           &amp;lt;version&amp;gt;4.5.13&amp;lt;/version&amp;gt;
-       &amp;lt;/dependency&amp;gt;
-   &amp;lt;/dependencies&amp;gt;
-
-   &amp;lt;build&amp;gt;
-       &amp;lt;defaultGoal&amp;gt;install&amp;lt;/defaultGoal&amp;gt;
-       &amp;lt;plugins&amp;gt;
-           &amp;lt;plugin&amp;gt;
-               &amp;lt;artifactId&amp;gt;maven-compiler-plugin&amp;lt;/artifactId&amp;gt;
-               &amp;lt;version&amp;gt;3.0&amp;lt;/version&amp;gt;
-               &amp;lt;configuration&amp;gt;
-                   &amp;lt;source&amp;gt;1.8&amp;lt;/source&amp;gt;
-                   &amp;lt;target&amp;gt;1.8&amp;lt;/target&amp;gt;
-               &amp;lt;/configuration&amp;gt;
-           &amp;lt;/plugin&amp;gt;
-           &amp;lt;plugin&amp;gt;
-               &amp;lt;groupId&amp;gt;org.apache.maven.plugins&amp;lt;/groupId&amp;gt;
-               &amp;lt;artifactId&amp;gt;maven-surefire-plugin&amp;lt;/artifactId&amp;gt;
-               &amp;lt;version&amp;gt;2.12.4&amp;lt;/version&amp;gt;
-               &amp;lt;configuration&amp;gt;
-                   &amp;lt;suiteXmlFiles&amp;gt;
-                       &amp;lt;!-- TestNG suite XML files --&amp;gt;
-                       &amp;lt;suiteXmlFile&amp;gt;testng.xml&amp;lt;/suiteXmlFile&amp;gt;
-                   &amp;lt;/suiteXmlFiles&amp;gt;
-               &amp;lt;/configuration&amp;gt;
-           &amp;lt;/plugin&amp;gt;
-           &amp;lt;plugin&amp;gt;
-               &amp;lt;groupId&amp;gt;org.apache.maven.plugins&amp;lt;/groupId&amp;gt;
-               &amp;lt;artifactId&amp;gt;maven-surefire-report-plugin&amp;lt;/artifactId&amp;gt;
-               &amp;lt;version&amp;gt;3.0.0-M5&amp;lt;/version&amp;gt;
-           &amp;lt;/plugin&amp;gt;
-       &amp;lt;/plugins&amp;gt;
-   &amp;lt;/build&amp;gt;
-&amp;lt;/project&amp;gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;&amp;lt;?xml version="1.0" encoding="UTF-8"?&amp;gt;
-&amp;lt;!DOCTYPE suite SYSTEM "http://testng.org/testng-1.0.dtd"&amp;gt;
-&amp;lt;suite name="[Demo] Cross Browser Testing Using Selenium" parallel="tests" thread-count="3"&amp;gt;
-   &amp;lt;test name="[Demo] Cross Browser Testing Using Selenium"/&amp;gt;
-   &amp;lt;test name="[LambdaTest] Test Scenario - 1"&amp;gt;
-       &amp;lt;parameter name="browser" value="Chrome"/&amp;gt;
-       &amp;lt;parameter name="version" value="latest"/&amp;gt;
-       &amp;lt;parameter name="platform" value="Windows 10"/&amp;gt;
-       &amp;lt;parameter name="resolution" value="1024x768"/&amp;gt;
-       &amp;lt;classes&amp;gt;
-           &amp;lt;class name="AutomationDemo"&amp;gt; &amp;lt;/class&amp;gt;
-       &amp;lt;/classes&amp;gt;
-   &amp;lt;/test&amp;gt;
-   &amp;lt;test name="[LambdaTest] Test Scenario - 2"&amp;gt;
-       &amp;lt;parameter name="browser" value="Firefox"/&amp;gt;
-       &amp;lt;parameter name="version" value="latest"/&amp;gt;
-       &amp;lt;parameter name="platform" value="Windows 10"/&amp;gt;
-       &amp;lt;parameter name="resolution" value="1024x768"/&amp;gt;
-       &amp;lt;classes&amp;gt;
-           &amp;lt;class name="AutomationDemo"&amp;gt; &amp;lt;/class&amp;gt;
-       &amp;lt;/classes&amp;gt;
-   &amp;lt;/test&amp;gt;
-   &amp;lt;test name="[LambdaTest] Test Scenario - 3"&amp;gt;
-       &amp;lt;parameter name="browser" value="MicrosoftEdge"/&amp;gt;
-       &amp;lt;parameter name="version" value="latest"/&amp;gt;
-       &amp;lt;parameter name="platform" value="MacOS Catalina"/&amp;gt;
-       &amp;lt;parameter name="resolution" value="1024x768"/&amp;gt;
-       &amp;lt;classes&amp;gt;
-           &amp;lt;class name="AutomationDemo"&amp;gt; &amp;lt;/class&amp;gt;
-       &amp;lt;/classes&amp;gt;
-   &amp;lt;/test&amp;gt;
-&amp;lt;/suite&amp;gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight plaintext"&gt;&lt;code&gt;import org.openqa.selenium.*;
-import org.openqa.selenium.WebDriver;
-import org.openqa.selenium.remote.DesiredCapabilities;
-import org.openqa.selenium.remote.RemoteWebDriver;
-import org.openqa.selenium.support.ui.WebDriverWait;
-import org.testng.annotations.*;
-import java.net.MalformedURLException;
-import java.net.URL;
-import java.time.Duration;
-
-public class AutomationDemo
-{
-   WebDriver driver = null;
-   public static String status = "passed";
-   String username = "user_name";
-   String access_key = "access_key";
-
-   String testURL = "https://todomvc.com/examples/react/#/";
-   String testURLTitle = "React • TodoMVC";
-
-   @BeforeTest
-   @Parameters(value={"browser","version","platform", "resolution"})
-   public void testSetUp(String browser, String version, String platform, String resolution) throws Exception
-   //public void testSetUp() throws Exception
-   {
-       DesiredCapabilities capabilities = new DesiredCapabilities();
-       capabilities.setCapability("build", "[LambdaTest] Demonstration of Selenium Automation Testing");
-       capabilities.setCapability("name", "[LambdaTest] Demonstration of Selenium Automation Testing");
-       capabilities.setCapability("platform", platform);
-       capabilities.setCapability("browserName", browser);
-       capabilities.setCapability("version",version);
-       capabilities.setCapability("resolution",resolution);
-       capabilities.setCapability("tunnel",false);
-       capabilities.setCapability("network",true);
-       capabilities.setCapability("console",true);
-       capabilities.setCapability("visual",true);
-
-       try
-       {
-           driver = new RemoteWebDriver(new URL("https://" + username + ":" + access_key + "@hub.lambdatest.com/wd/hub"), capabilities);
-       }
-       catch (MalformedURLException e)
-       {
-           System.out.println("Invalid grid URL");
-       }
-       System.out.println("Started session");
-   }
-
-   @Test(description="To Do App on React App")
-   public void test_element_addition() throws InterruptedException
-   {
-       driver.get(testURL);
-       Thread.sleep(5000);
-
-       /* Selenium Java 3.141.59 */
-       WebDriverWait wait = new WebDriverWait(driver, 5);
-       /* WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(10)); */
-
-       /* Click on the Link */
-       By elem_new_item_locator = By.xpath("//input[@class='new-todo']");
-       WebElement elem_new_item = driver.findElement(elem_new_item_locator);
-
-       /* Add 5 items in the list */
-       Integer item_count = 5;
-
-       for (int count = 1; count &amp;lt;= item_count; count++)
-       {
-           /* Enter the text box for entering the new item */
-           elem_new_item.click();
-           elem_new_item.sendKeys("Adding a new item " + count + Keys.ENTER);
-           Thread.sleep(2000);
-       }
-
-       WebElement temp_element;
-
-       /* Now that the items are added, we mark the top three items as completed */
-       for (int count = 1; count &amp;lt;= item_count; count++)
-       {
-           Integer fixed_cta_count = 1;
-
-           /* Enter the text box for entering the new item */
-           /* Create a varying string to create a new XPath */
-           String xpath_str = "//ul[@class='todo-list']/li[" + fixed_cta_count + "]" + "//input[@class='toggle']";
-           temp_element = driver.findElement(By.xpath(xpath_str));
-
-           temp_element.click();
-           Thread.sleep(2000);
-           /* Toggle button to destroy */
-           driver.findElement(By.xpath("//li[@class='completed']//button[@class='destroy']")).click();
-           Thread.sleep(1000);
-       }
-
-       /* Once you are outside this code, the list would be empty */
-   }
-
-   @AfterTest
-   public void tearDown()
-   {
-       if (driver != null)
-       {
-           ((JavascriptExecutor) driver).executeScript("lambda-status=" + status);
-           driver.quit();
-       }
-   }
-}
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Code Walkthrough&lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;Addition of Project Dependencies&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;p&gt;We have created a new Maven project in IntelliJ IDEA. Once the project is created, the necessary dependencies are added in pom.xml. The POM file contains all the project configurations and dependencies that are used by Maven for building the project.&lt;/p&gt;
-
-&lt;p&gt;For demonstrating cross browser testing with Selenium, we have used the Selenium 3.141.59 on LambdaTest.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--DIl2ZdXP--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/4a7t8w0p9q9d85xaef1o.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--DIl2ZdXP--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/4a7t8w0p9q9d85xaef1o.png" alt="Code" width="860" height="388"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;The requisite test combinations would be passed in the form of parameters to the test method. Parameterized testing in TestNG is one of the ideal ways to provide test scenarios with different test combinations.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--G1L-mwA6--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/uora1t04uo1la2nvjlo8.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--G1L-mwA6--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/uora1t04uo1la2nvjlo8.png" alt="Code" width="734" height="428"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;Implementation of Test Method&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;p&gt;We have only one test method in src\test\java\Automation.java. We import all the necessary packages at the start of the implementation. Since Selenium cross browser testing is performed on the cloud grid (i.e. LambdaTest), we import the methods in the RemoteWebDriver class.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--XNXfV2lp--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/t0cv59ipu4m82a575bqp.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--XNXfV2lp--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/t0cv59ipu4m82a575bqp.png" alt="Code" width="880" height="221"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Since we are using Selenium 3, we would be using the methods provided by the DesiredCapabilities class. It is important to note that DesiredCapabilities is deprecated in Selenium 4. Please refer to our What is Deprecated in Selenium 4 blog that deep dives into the additions and depreciation in the Selenium 4 release.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--tPqrIBNn--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/1r1so3ciilzxg44rk9go.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--tPqrIBNn--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/1r1so3ciilzxg44rk9go.png" alt="Code" width="880" height="207"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Different annotations in TestNG like @BeforeTest, &lt;a class="mentioned-user" href="https://dev.to/test"&gt;@test&lt;/a&gt;, @Parameters, @AfterTest, etc. are used for creating more robust tests. The methods implemented under @BeforeTest &amp;amp; @AfterTest annotations are invoked respectively before &amp;amp; after the execution of the test methods.&lt;/p&gt;
-
-&lt;p&gt;The cleanup activity (or Teardown) is normally done as a part of the method implemented under the @AfterTest annotation.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--RM6HJXLw--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/caenvf9feovz68u2wfe2.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--RM6HJXLw--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/caenvf9feovz68u2wfe2.png" alt="Code" width="880" height="207"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--OfKBhrjI--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/alk30y3bk2chaetq5aaa.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--OfKBhrjI--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/alk30y3bk2chaetq5aaa.png" alt="Code" width="880" height="212"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;The testSetUp method implemented under the @BeforeTest annotation is a parameterized method that takes the following input parameters:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;browser&lt;/li&gt;
-&lt;li&gt;version&lt;/li&gt;
-&lt;li&gt;platform&lt;/li&gt;
-&lt;li&gt;resolution&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;These test combinations are passed from testng.xml. We will be discussing the same in the next section.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--qPWrT26A--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/xef2ovu9ap3my44u0dos.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--qPWrT26A--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/xef2ovu9ap3my44u0dos.png" alt="Code" width="880" height="251"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;A new object named capabilities of the type DesiredCapabilities is created in the testSetUp method. The capabilities object sets the browser, browser version, platform, and other relevant properties that are necessary for performing cross browser testing using Selenium.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--8FtHPjyS--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/eekydavycz9f441v9s51.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--8FtHPjyS--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/eekydavycz9f441v9s51.png" alt="Code" width="880" height="272"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;As the tests are run on the Selenium cloud grid on LambdaTest, the desired capabilities are generated using the Selenium Capabilities Generator on LambdaTest.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--DadQ2Xb0--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/6bhisa5u443p5nqtbwke.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--DadQ2Xb0--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/6bhisa5u443p5nqtbwke.png" alt="Selenium Capabilities Generator" width="880" height="317"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;An instance of RemoteWebDriver in Selenium created in the testSetUp method. The following parameters are passed to the RemoteWebDriver method:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;username&lt;/li&gt;
-&lt;li&gt;accesskey&lt;/li&gt;
-&lt;li&gt;LambdaTest Hub URL [i.e. @hub.lambdatest.com/wd/hub]&lt;/li&gt;
-&lt;li&gt;capabilities&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--MapmIEp1--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/3n2iks4acxc66k3ob0rk.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--MapmIEp1--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/3n2iks4acxc66k3ob0rk.png" alt="code" width="880" height="241"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;In the test method test_element_addition(), we first set the test URL using driver.get in Selenium. For adding a new item in the ToDo list, we first use the relevant locators in Selenium to find the desired WebElement in the DOM. In our case, we have used the XPath locator in Selenium to locate the required element.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--huMmk2Ng--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/hrghgkstx6gd5ukag767.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--huMmk2Ng--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/hrghgkstx6gd5ukag767.png" alt="Selenium Locator" width="880" height="464"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;findElement in Selenium WebDriver is used for accessing the element that was earlier located using the XPath locator. The XPath locators cheat sheet is the ideal resource in case you want to check the numerous ways of using the XPath locator.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--VEN11cit--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/3qte296tf0kn3i04dwko.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--VEN11cit--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/3qte296tf0kn3i04dwko.png" alt="Code" width="880" height="225"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Since we want to add 5 elements in the ToDo list, we run a for loop of 1 to 5 where the required item is added to the list. Click method in Selenium is used for clicking inside the text box where the text for ToDo item needs to be inserted.&lt;/p&gt;
-
-&lt;p&gt;The send_keys method which is a part of the Action Class in Selenium is used for entering a new item to the list. Keys.ENTER simulates the Enter key, owing to which the desired item (or text) is added to the list.&lt;/p&gt;
-
-&lt;p&gt;You can read our detailed tutorial on keyboard actions in Selenium WebDriver to know more about handling keyboard actions with Selenium. A sleep of 2000 ms (i.e. 2 seconds) is added to ensure that the elements to be interacted with are available in the DOM. Waits in Selenium are used for handling dynamic elements on a web page.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--ue93m_9a--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/vyjskrlxb9i53ekqixe6.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--ue93m_9a--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/vyjskrlxb9i53ekqixe6.png" alt="Code" width="880" height="356"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Once the 5 items are added to the ToDo list, we use a simple logic to locate each item using its XPath. In our case, we have used the POM Builder extension in Chrome that helps compute dynamic XPath with ease.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--JQnYx7Ur--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/1hnd38nmq6oojld5p404.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--JQnYx7Ur--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/1hnd38nmq6oojld5p404.png" alt="X path" width="880" height="625"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--q4ystFEM--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/pkiw5tcu8n8hltze1stv.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--q4ystFEM--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/pkiw5tcu8n8hltze1stv.png" alt="Code" width="880" height="177"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Now that the element is located, the click method in Selenium is used for clicking the element.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--qBmxNgxz--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/50u2nii6ob7r4fgzyxhs.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--qBmxNgxz--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/50u2nii6ob7r4fgzyxhs.png" alt="Code" width="880" height="198"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Thread sleep in Selenium Java is used for adding a few seconds of delay. Though we have used it for demonstrating cross browser testing using Selenium, thread sleep should not be used for large-scale test applications. The destroy (or ‘x’) icon is located using its XPath.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--cIYM13aS--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ka6mh0kfzs4bffze7g3i.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--cIYM13aS--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ka6mh0kfzs4bffze7g3i.png" alt="Selenium Testing" width="880" height="461"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Once the click method is applied on the destroy icon, the respective item is removed from the ToDo list. The same steps are repeated until the entire list is empty.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--G0rmxrL3--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/i1ookk3o24n6ou7cagaw.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--G0rmxrL3--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/i1ookk3o24n6ou7cagaw.png" alt="code" width="880" height="198"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;In the method implemented under the @AfterTest annotation, JavaScriptExecutor in Selenium WebDriver is used for executing JavaScript code from WebDriver. The executeScript method executes JavaScript in the context of the currently selected window or frame in Selenium.&lt;/p&gt;
-
-&lt;p&gt;Finally, quit in Selenium WebDriver closes all the browser windows and releases all the resources used by the WebDriver instance by terminating all the instances of WebDriver.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--nO8MykRD--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/bnfrdi8ov0ibh5da5qn2.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--nO8MykRD--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/bnfrdi8ov0ibh5da5qn2.png" alt="Code" width="880" height="390"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;ol&gt;
-&lt;li&gt;Passing Test Parameters from testng.xml&lt;/li&gt;
-&lt;/ol&gt;
-
-&lt;p&gt;The test suite comprises a single test that is run against three different browser and OS combinations. Parallel execution with TestNG in Selenium is used for achieving parallelism at the “tests” level. This means that the test against 3 input combinations is run in parallel on the LambdaTest cloud grid.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--K7m2QSws--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/k9plvbazhofiyjurmdsc.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--K7m2QSws--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/k9plvbazhofiyjurmdsc.png" alt="Code" width="880" height="353"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;The  tag in TestNG lets you pass the parameter(s) to the tests. In this cross browser testing in Selenium demo, three test combinations are added in testng.xml.&lt;/p&gt;
-
-&lt;p&gt;Execution&lt;/p&gt;
-
-&lt;p&gt;To run the tests, right click on testng.xml in the IDE and press Run.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--XRcckZeY--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/s63gs2rjnwrdmc6vrn6q.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--XRcckZeY--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/s63gs2rjnwrdmc6vrn6q.png" alt="Testing" width="880" height="1556"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Hop on to Automation Dashboard on LambdaTest to check the status of the test execution. My plan on LambdaTest supports parallel execution upto five tests. As seen below, three tests are running in parallel on the LambdaTest cloud Selenium Grid.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--9b42yIIf--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ic7gjvs266upt98bk46e.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--9b42yIIf--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/ic7gjvs266upt98bk46e.png" alt="Automation Test" width="880" height="513"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;You can click on videos, logs, and other available information to gain more insights on the test execution. As seen below, the demo on cross browser testing in Selenium was successful since all the three tests passed without any failures.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--I2F4GLXS--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/9un6x9ah0n9o8vjmetg6.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--I2F4GLXS--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/9un6x9ah0n9o8vjmetg6.png" alt="Testing" width="880" height="513"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Conclusion&lt;/p&gt;
-
-&lt;p&gt;Cross browser testing is crucial when launching a website or web application. It ensures you reach your audience with a consistent and flexible approach to browsing online. However, the biggest concern of organizations is how to perform cross browser testing. The manual testing approach can be straining, time-consuming, and expensive for modern businesses.&lt;/p&gt;
-
-&lt;p&gt;Automated cross-browser testing using frameworks like &lt;a href="https://www.lambdatest.com/selenium?utm_source=devto&amp;amp;utm_medium=organic&amp;amp;utm_campaign=jan18_cd&amp;amp;utm_term=rn&amp;amp;utm_content=webpage"&gt;Selenium&lt;/a&gt; is the best solution for businesses of all sizes. LambdaTest proves to be the best option for any business need with real-time cross browser testing using Selenium Grid.&lt;/p&gt;
-
-&lt;p&gt;In this Selenium WebDriver tutorial, we have discussed the key components of the Selenium WebDriver framework, such as its architecture and browser compatibility, and highlight the most useful features in Selenium 4.&lt;/p&gt;
-
-</description>
-      <category>testing</category>
-      <category>webdev</category>
-      <category>beginners</category>
-      <category>test</category>
-    </item>
-    <item>
-      <title>How to Create a Progressive Web App with Angular</title>
-      <author>Kingsley Ubah</author>
-      <pubDate>Tue, 18 Jan 2022 14:51:51 +0000</pubDate>
-      <link>https://dev.to/sanity-io/how-to-create-a-progressive-web-app-with-angular-2dgi</link>
-      <guid>https://dev.to/sanity-io/how-to-create-a-progressive-web-app-with-angular-2dgi</guid>
-      <description>&lt;p&gt;In this guide, we'll learn how to create an angular application with PWA features, making it act and feel like a progressive web application.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#what-is-a-progressive-web-app"&gt;
-  &lt;/a&gt;
-  What is a Progressive Web App?
-&lt;/h2&gt;
-
-&lt;p&gt;Progressive Web Apps, also known as PWAs are basically web applications enhanced to look and feel like native apps.&lt;/p&gt;
-
-&lt;p&gt;PWAs are configured to run on multiple devices using a single codebase. Thus once a progressive web app is deployed to the web, the app is also installable as a native application.&lt;/p&gt;
-
-&lt;p&gt;PWAs can be made to work offline using service workers; service workers can be used to cache and display content to a user even when the user is offline. No more error page with a dinosaur game.&lt;/p&gt;
-
-&lt;p&gt;Progressive Web Apps have been increasingly popular in the last couple of years as developers look for ways to increase the reach of their applications and improve user experience on their apps.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#setting-up-an-angular-project-with-the-angular-cli"&gt;
-  &lt;/a&gt;
-  Setting Up an Angular Project with the Angular CLI
-&lt;/h2&gt;
-
-&lt;p&gt;Let's install the Angular CLI and create a new Angular project with it.&lt;/p&gt;
-
-&lt;p&gt;As a prerequisite, you must have the latest versions of node.js and NPM (Node package manager) installed on your system to be able to install and use the Angular CLI. &lt;/p&gt;
-
-&lt;p&gt;At the time of writing, the current LTS version of node.js is v16.13.1. Head to the official website and &lt;a href="https://nodejs.org/en/download/"&gt;grab the installers for your operating system.&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Once you have the latest version of node.js installed, head over to a new command-line interface and run the following command to install the Angular CLI globally:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="nx"&gt;npm&lt;/span&gt; &lt;span class="nx"&gt;install&lt;/span&gt; &lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="nx"&gt;g&lt;/span&gt; &lt;span class="p"&gt;@&lt;/span&gt;&lt;span class="nd"&gt;angular&lt;/span&gt;&lt;span class="sr"&gt;/cl&lt;/span&gt;&lt;span class="err"&gt;i
-&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Next, let's create an angular app via the CLI using the following command:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="nx"&gt;ng&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;pwa&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="nx"&gt;app&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;To configure your app, the CLI will first ask if you want to install the Angular router and then prompt you to select a stylesheet. You should install the router and select the default CSS for styling.&lt;/p&gt;
-
-&lt;p&gt;The &lt;code&gt;ng new&lt;/code&gt; command will create a workspace folder named &lt;code&gt;pwa-app&lt;/code&gt; and generate the angular materials and files inside of it.&lt;/p&gt;
-
-&lt;p&gt;If you are setting out with the intention of building a progressive app with Angular, you can just add the &lt;code&gt;--service-worker&lt;/code&gt; flag to the command, like so:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="nx"&gt;ng&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;pwa&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="nx"&gt;app&lt;/span&gt; &lt;span class="o"&gt;--&lt;/span&gt;&lt;span class="nx"&gt;service&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="nx"&gt;worker&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;However, for the sake of learning, we'll go with the former approach so we can later add the service worker package using the &lt;code&gt;ng add&lt;/code&gt; command.&lt;/p&gt;
-
-&lt;p&gt;Once the folder is generated, run the ng build command to generate build files for your app:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="nx"&gt;ng&lt;/span&gt; &lt;span class="nx"&gt;build&lt;/span&gt; 
-
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Barring any issues, your app's final build files will be bundled into a directory named &lt;code&gt;dist/&lt;/code&gt;:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--3M8ib6Yx--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/two83vbb4uwss1z1x7ix.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--3M8ib6Yx--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/two83vbb4uwss1z1x7ix.png" alt="CLI after building app" width="764" height="548"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;With the browser files ready, you can now serve your app by running the &lt;code&gt;npm run start&lt;/code&gt; script, this will in turn execute on the &lt;code&gt;ng serve&lt;/code&gt; command.&lt;/p&gt;
-
-&lt;p&gt;Follow the link provided on your command terminal and you will be directed to the starter page for your Angular project, hosted on &lt;a href="http://localhost:4200/"&gt;http://localhost:4200/&lt;/a&gt;:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--238_TYO6--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/9xcdmkr801apqrex78o2.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--238_TYO6--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/9xcdmkr801apqrex78o2.png" alt="Starter Page for Angular" width="880" height="714"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Please note that at this point, our app is not yet a progressive web app. You can check for this by inspecting your page’s HTML file using your browser's developer tool.&lt;/p&gt;
-
-&lt;p&gt;If you are on chrome, open your developer tool with &lt;code&gt;cmd&lt;/code&gt;+&lt;code&gt;shift&lt;/code&gt;+&lt;code&gt;i&lt;/code&gt;, click on the Application tab, and then navigate to the Service Workers tab. As shown below, our app has no registered service worker:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--R5VrPz2e--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/y3k05m88pfc0bi2jd0gt.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--R5VrPz2e--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/y3k05m88pfc0bi2jd0gt.png" alt="Without Service Worker" width="687" height="299"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Now select the offline checkbox to simulate offline mode on your browser.&lt;/p&gt;
-
-&lt;p&gt;After simulating offline mode, go ahead and refresh the page. The following page will be displayed if you are on Google Chrome:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--4Aob-uMo--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/0zurmrbc8tdhe9y9bd5j.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--4Aob-uMo--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/0zurmrbc8tdhe9y9bd5j.png" alt="Internet Switched Off" width="524" height="348"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;In the following section, we'll add the angular PWA library to our angular app using the &lt;code&gt;ng add&lt;/code&gt; command.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#adding-angular-service-worker-with-angularpwa"&gt;
-  &lt;/a&gt;
-  Adding Angular Service Worker with @angular/pwa
-&lt;/h2&gt;
-
-&lt;p&gt;A service worker is a JavaScript file that is run by your browser in the background, separate from your web page, and handles events fired either by the browser or your webpage. Service workers can be used to make a web page work offline or to make the page perform well on slow networks.&lt;/p&gt;
-
-&lt;p&gt;Now that we have created an Angular project from scratch, let's turn it into a progressive web application.&lt;/p&gt;
-
-&lt;p&gt;Open your command terminal, then cd to your workspace folder and run the following command:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="nx"&gt;ng&lt;/span&gt; &lt;span class="nx"&gt;add&lt;/span&gt; &lt;span class="p"&gt;@&lt;/span&gt;&lt;span class="nd"&gt;angular&lt;/span&gt;&lt;span class="sr"&gt;/pw&lt;/span&gt;&lt;span class="err"&gt;a
-&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;This command will generate templates and files for your PWA. Here's the image of all generated files:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--5rY8YR5L--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/7m57swft7h4u6j16vprq.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--5rY8YR5L--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/7m57swft7h4u6j16vprq.png" alt="Installing Angular PWA package" width="539" height="455"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Once installation is complete, rebuild and serve your app with the following command:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight jsx"&gt;&lt;code&gt;
-&lt;span class="nx"&gt;ng&lt;/span&gt; &lt;span class="nx"&gt;serve&lt;/span&gt;
-
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Follow the link to the browser and open the service worker tab on the developer tool just like before. This time you'll find a registered service worker file called &lt;code&gt;ngsw-worker.js&lt;/code&gt;:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--OpaGmA0v--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/kbphsu3tzhtnbnrv5b6x.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--OpaGmA0v--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/kbphsu3tzhtnbnrv5b6x.png" alt="Service Worker Now registered" width="716" height="336"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;You'll also find information about your PWA under the Manifest tab:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--9E-zzrlr--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/xducgphtyh5d235gkzh8.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--9E-zzrlr--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/xducgphtyh5d235gkzh8.png" alt="Web Manifest shown on DevTool" width="768" height="615"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Thanks to caching from the service worker, your PWA will still be displayed even without an internet connection.&lt;/p&gt;
-
-&lt;p&gt;The &lt;code&gt;manifest.webmanifest&lt;/code&gt; and &lt;code&gt;ngsw-config.json&lt;/code&gt; files were generated as a result of adding the &lt;code&gt;@angular/pwa&lt;/code&gt; package.&lt;/p&gt;
-
-&lt;p&gt;Now let's take a brief look at these two files.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#customize-your-pwa-with-the-web-app-manifest"&gt;
-  &lt;/a&gt;
-  Customize your PWA with the Web App Manifest
-&lt;/h2&gt;
-
-&lt;p&gt;Every PWA should have a web app manifest. The &lt;code&gt;manifest.webmanifest&lt;/code&gt; file found in the &lt;code&gt;dist/pwa-app&lt;/code&gt; folder contains information regarding the appearance and behaviour of your PWA.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;name&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;pwa-app&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;short_name&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;pwa-app&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;theme_color&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;#1976d2&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;background_color&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;#fafafa&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;display&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;standalone&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;scope&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;./&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;start_url&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;./&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;icons&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;
-    &lt;span class="p"&gt;{&lt;/span&gt;
-      &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;src&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;assets/icons/icon-72x72.png&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-      &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;sizes&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;72x72&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-      &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;type&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;image/png&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
-    &lt;span class="p"&gt;},&lt;/span&gt;
-    &lt;span class="p"&gt;{&lt;/span&gt;
-      &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;src&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;assets/icons/icon-96x96.png&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-      &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;sizes&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;96x96&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-      &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;type&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;image/png&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
-    &lt;span class="p"&gt;},&lt;/span&gt;
-   &lt;span class="c1"&gt;// other icons&lt;/span&gt;
-  &lt;span class="p"&gt;]&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;This includes the name for your app which will show up on the home screen, the theme and background colours, the URL which should be loaded when the application is launched, as well as the different icons for your app's use.&lt;/p&gt;
-
-&lt;p&gt;You can customize your app's properties by changing the values in the JSON object inside of the &lt;code&gt;manifest.webmanifest&lt;/code&gt; file.&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#service-worker-configuration-with-ngswconfigjson"&gt;
-  &lt;/a&gt;
-  Service worker configuration with ngsw-config.json
-&lt;/h2&gt;
-
-&lt;p&gt;Another file generated by adding the angular PWA library is the &lt;code&gt;ngsw-config.json&lt;/code&gt; file, found in the root directory. &lt;/p&gt;
-
-&lt;p&gt;This config file is used to specify which files and data URLs the service worker should cache and how it should update the cached files and data. &lt;a href="https://angular.io/guide/service-worker-config"&gt;More detailed documentation on available configuration options can be found here.&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Now let's take a look at how to use this file to cache resources and API endpoints for offline display.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#caching-resources-for-offline-use"&gt;
-  &lt;/a&gt;
-  Caching resources for offline use
-&lt;/h3&gt;
-
-&lt;p&gt;Suppose you want to cache a set of fonts for offline use, you'll have to manually add a &lt;code&gt;urls&lt;/code&gt; entry for those resources inside the &lt;code&gt;resources&lt;/code&gt; object as follows:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="c1"&gt;// [...]&lt;/span&gt;
-&lt;span class="p"&gt;{&lt;/span&gt;
-      &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;name&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;app&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-      &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;installMode&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;prefetch&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-      &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;resources&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-        &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;files&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;
-          &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;/favicon.ico&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-          &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;/index.html&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-          &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;/manifest.webmanifest&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-          &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;/*.css&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-          &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;/*.js&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
-        &lt;span class="p"&gt;],&lt;/span&gt;
-        &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;urls&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;
-          &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;https://fonts.googleapis.com/css2?family=Roboto+Condensed:wght@700&amp;amp;display=swap&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
-          &lt;span class="c1"&gt;// other resources goes here&lt;/span&gt;
-        &lt;span class="p"&gt;]&lt;/span&gt;
-      &lt;span class="p"&gt;}&lt;/span&gt;
-    &lt;span class="p"&gt;},&lt;/span&gt;
-&lt;span class="c1"&gt;// [...]&lt;/span&gt;
-
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Here we are adding the Roboto font to be cached by the service worker. Every resource you add inside the array will be accessed by the PWA in offline mode.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#caching-data-from-api-endpoints-for-offline-use"&gt;
-  &lt;/a&gt;
-  Caching data from API endpoints for offline use
-&lt;/h3&gt;
-
-&lt;p&gt;Within &lt;code&gt;ngsw-config.js&lt;/code&gt;, you can also cache data from API (Application Programming Interface) endpoints. &lt;/p&gt;
-
-&lt;p&gt;The &lt;code&gt;dataGroups&lt;/code&gt; field accepts an array of API groups which should be cached by the service worker.&lt;/p&gt;
-
-&lt;p&gt;Suppose our PWA displays the latest football results which it retrieves from an API endpoint. We can cache the API by inserting it into a &lt;code&gt;dataGroups&lt;/code&gt; array as follows:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;$schema&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;./node_modules/@angular/service-worker/config/schema.json&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;index&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;/index.html&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;assetGroups&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;
-   &lt;span class="c1"&gt;// [...]&lt;/span&gt;
-  &lt;span class="p"&gt;],&lt;/span&gt;
-  &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;dataGroups&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;
-    &lt;span class="p"&gt;{&lt;/span&gt;
-      &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;name&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;football-results-api&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-      &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;urls&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;&amp;lt;https://api.footyresults.com/list&amp;gt;&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt;
-      &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;cacheConfig&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-        &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;strategy&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;freshness&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-        &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;maxSize&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="mi"&gt;20&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-        &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;maxAge&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;10min&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
-      &lt;span class="p"&gt;}&lt;/span&gt;
-    &lt;span class="p"&gt;}&lt;/span&gt;
-  &lt;span class="p"&gt;]&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;&lt;code&gt;dataGroups&lt;/code&gt; tells the service worker what APIs to cache for offline use.&lt;/p&gt;
-
-&lt;p&gt;Each API group is defined inside an object. In our example, we defined a name for our API using the &lt;code&gt;name&lt;/code&gt; property.&lt;/p&gt;
-
-&lt;p&gt;Under the &lt;code&gt;url&lt;/code&gt; property, we supplied the URL to the API that we want the service worker to cache. Since it is an array, we can pass in multiple URLs all of which will be under the same API name.&lt;/p&gt;
-
-&lt;p&gt;The final property is &lt;code&gt;cacheConfig&lt;/code&gt;, which has a value set to an object with some options. &lt;code&gt;freshness&lt;/code&gt; checks for the endpoint(s) before falling back to the service worker cache. &lt;code&gt;maxSize&lt;/code&gt; defines the maximum number of responses that the service worker should cache, and &lt;code&gt;maxAge&lt;/code&gt; defines how long the cache is valid for.&lt;/p&gt;
-
-&lt;p&gt;You can learn more about cache configuration options from the angular docs.&lt;/p&gt;
-
-&lt;p&gt;Without an internet connection, the PWA will show the last cached football results. After the user comes back online, the PWA will then pull the latest football results from the football results API.&lt;/p&gt;
-
-&lt;p&gt;Thus after 10 minutes, the list of results cached by the service worker will become invalid and as a result, a newer version of data will be cached from the API for offline display.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#update-your-pwa-with-swupdate"&gt;
-  &lt;/a&gt;
-  Update your PWA with SwUpdate
-&lt;/h3&gt;
-
-&lt;p&gt;Whenever you deploy a new version of your PWA, it might take a while for the updates to reflect on the page.&lt;/p&gt;
-
-&lt;p&gt;For example, inside &lt;code&gt;pwa-app/src/app/app.component.html&lt;/code&gt;, if you change any text content, save the file, rebuild the app and then restart your server, it might take a while for your updates to reflect, though this depends on your cache policies.&lt;/p&gt;
-
-&lt;p&gt;This issue can be resolved using the &lt;code&gt;SwUpdate&lt;/code&gt; class from the Angular service worker library. &lt;code&gt;SwUpdate&lt;/code&gt; basically tells the service worker to update the PWA whenever an update is available.&lt;/p&gt;
-
-&lt;p&gt;Inside &lt;code&gt;/src/app.component.ts&lt;/code&gt;, we'll use &lt;code&gt;swUpdate&lt;/code&gt; to tell the service worker to check the http server for updates using the following code:&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight jsx"&gt;&lt;code&gt;&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;Component&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;@angular/core&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;span class="k"&gt;import&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="nx"&gt;SwUpdate&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;from&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;@angular/service-worker&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-
-&lt;span class="p"&gt;@&lt;/span&gt;&lt;span class="nd"&gt;Component&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt;
-  &lt;span class="na"&gt;selector&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;app-root&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="na"&gt;templateUrl&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;./app.component.html&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="na"&gt;styleUrls&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;./app.component.css&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
-&lt;span class="p"&gt;})&lt;/span&gt;
-&lt;span class="k"&gt;export&lt;/span&gt; &lt;span class="kd"&gt;class&lt;/span&gt; &lt;span class="nx"&gt;AppComponent&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="nx"&gt;title&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;pwa-app&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-
-  &lt;span class="kd"&gt;constructor&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt; &lt;span class="kr"&gt;private&lt;/span&gt; &lt;span class="nx"&gt;readonly&lt;/span&gt; &lt;span class="nx"&gt;swUpdate&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;SwUpdate&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="k"&gt;if&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;swUpdate&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;available&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-      &lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;swUpdate&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;available&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;subscribe&lt;/span&gt;&lt;span class="p"&gt;(()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-        &lt;span class="nb"&gt;window&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;location&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;reload&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
-      &lt;span class="p"&gt;})&lt;/span&gt;
-    &lt;span class="p"&gt;}&lt;/span&gt;
-  &lt;span class="p"&gt;}&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Here we create a constructor method on our &lt;code&gt;app&lt;/code&gt; component, passing in &lt;code&gt;SwUpdate&lt;/code&gt; as an argument. Inside the constructor method, we subscribe to an event with a callback function that triggers a page reload.&lt;/p&gt;
-
-&lt;p&gt;Save the file. Rebuild your app and view it on the browser. Now any updates you make will reflect on the browser.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--27deNrMq--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/jbkhwv16h47gpjf1o779.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--27deNrMq--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/jbkhwv16h47gpjf1o779.png" alt="Updated Page" width="880" height="440"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#conclusion"&gt;
-  &lt;/a&gt;
-  Conclusion
-&lt;/h3&gt;
-
-&lt;p&gt;Throughout this guide, we have walked through the process of creating a progressive web application with the Angular framework.&lt;/p&gt;
-
-&lt;p&gt;We have covered the &lt;code&gt;manifest.webmanifest&lt;/code&gt; file which is used for setting the metadata for a progressive web application. We also used the &lt;code&gt;ngsw-config.js&lt;/code&gt; to cache resources and API data for offline usage.&lt;/p&gt;
-
-&lt;p&gt;You can learn more about progressive web apps and service workers in Angular by reading &lt;a href="https://angular.io/guide/service-worker-intro"&gt;the Service Worker and PWA guide from the official Angular documentation&lt;/a&gt;.&lt;/p&gt;
-
-</description>
-      <category>angular</category>
-      <category>javascript</category>
-      <category>tutorial</category>
-      <category>webdev</category>
-    </item>
-    <item>
-      <title>Laravel Community Surprised Me!</title>
-      <author>Mostafa Said</author>
-      <pubDate>Tue, 18 Jan 2022 14:39:25 +0000</pubDate>
-      <link>https://dev.to/moose_said/laravel-community-surprised-me-4pe8</link>
-      <guid>https://dev.to/moose_said/laravel-community-surprised-me-4pe8</guid>
-      <description>&lt;h2&gt;
-  &lt;a href="#today-is-special"&gt;
-  &lt;/a&gt;
-  Today is special
-&lt;/h2&gt;
-
-&lt;p&gt;Unexpectedly Laravel community surprised me! &lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--51I9HFlm--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1642101019222/UKK_f8fy1.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--51I9HFlm--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1642101019222/UKK_f8fy1.png" alt="image.png" width="593" height="125"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#let-me-tell-you-the-whole-story-from-the-very-beginning"&gt;
-  &lt;/a&gt;
-  Let me tell you the whole story from the very beginning:
-&lt;/h2&gt;
-
-&lt;p&gt;I work as a Business Operations Specialist at VodafoneGroup (_VOIS) and I actually love it and I'm very good with Project Management, Operations Management and communication.&lt;/p&gt;
-
-&lt;p&gt;I started to learn Web Development '2' months ago hoping that I will be able to shift my career eventually. You may be wondering now "Since you're good at your job and you love it, why would you do career shifting?", and that's a good question but allow me to answer that in another post later. For now, let me focus on the great surprise.&lt;/p&gt;
-
-&lt;p&gt;I spent the past 2 months self-motivating and praising myself for every little accomplishment on twitter even though I didn't have audience at all except the auto-bots retweeting my tweets with hashtags.&lt;/p&gt;
-
-&lt;p&gt;Few days ago I released my first complete Laravel project on GitHub and started to share it on twitter with my !audience and of course I found almost no motivation at all as if I created nothing. I was so disappointed because I thought what I created was very cool for only '1' month studying Laravel but felt like that I built something cool yet no one came to see it.&lt;/p&gt;
-
-&lt;p&gt;But that didn't stop me from self motivating and keep sharing it and modify the repository on GitHub everyday. I kept exciting myself and before going to sleep I imagine myself creating even more awesome content to an extent that it wakes me up all night. &lt;/p&gt;
-
-&lt;p&gt;And then.. Povilas happened! &lt;/p&gt;
-
-&lt;h2&gt;
-  &lt;a href="#i-woke-up-to-this"&gt;
-  &lt;/a&gt;
-  I woke up to this:
-&lt;/h2&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--yCIa0lrE--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1642102776319/69rstEFjj.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--yCIa0lrE--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://cdn.hashnode.com/res/hashnode/image/upload/v1642102776319/69rstEFjj.png" alt="image.png" width="593" height="529"&gt;&lt;/a&gt;&lt;br&gt;
-Tweet:  &lt;a href="https://dev.toLink"&gt;https://twitter.com/PovilasKorop/status/1481516878384320516&lt;/a&gt; &lt;/p&gt;
-
-&lt;p&gt;I didn't even have the chance to wash my face or get ready to attend a scheduled meeting related to my current job. I just watched this great motivational video on LaravelDaily Youtube Channel :&lt;br&gt;
- &lt;a href="https://dev.toLink"&gt;https://www.youtube.com/watch?v=FBk56ocB2D8&amp;amp;t=208s&lt;br&gt;
-&lt;/a&gt; &lt;/p&gt;
-
-&lt;p&gt;In case you don't have the time to watch the video. In this video Povilas is saying that &lt;/p&gt;
-
-&lt;blockquote&gt;
-&lt;p&gt;Mostafa is an inspiration to others and he should be proud of himself.&lt;/p&gt;
-
-&lt;p&gt;Mostafa reminds me of myself when I started LaravelDaily in 2015.&lt;/p&gt;
-&lt;/blockquote&gt;
-
-&lt;p&gt;He discussed my project, recommended modifications and some other pretty cool stuff..&lt;/p&gt;
-
-&lt;p&gt;This might mean nothing to someone else but for me it meant the world really! I mean I was learning while having hundreds of thoughts everyday thinking if I'm doing the right thing or should I just stick with the job I have. And then something like this happens out of nowhere! Someone you look up to and learn from, suddenly he is giving you a shout-out and good feedback in front of his fans and followers. &lt;/p&gt;
-
-&lt;p&gt;You might think this is funny but my wife told me that this could be some sort of a sign that I'm in the right direction and that I should continue chasing my dream of becoming a great Web Developer. And I choose to see it the same way she sees it. And I shall continue chasing my dream.&lt;/p&gt;
-
-&lt;p&gt;Today I felt that I belong to a community, and I love it. &lt;/p&gt;
-
-&lt;p&gt;And you know what? I will make all new developers feel the same as much as I can.&lt;/p&gt;
-
-</description>
-      <category>laravel</category>
-      <category>webdev</category>
-      <category>twitter</category>
-      <category>github</category>
-    </item>
-    <item>
-      <title>Why We’re Bringing “Google Maps for Code” to Node.js Apps</title>
-      <author>Kevin Gilpin</author>
-      <pubDate>Tue, 18 Jan 2022 14:18:35 +0000</pubDate>
-      <link>https://dev.to/appland/why-were-bringing-google-maps-for-code-to-nodejs-apps-45mg</link>
-      <guid>https://dev.to/appland/why-were-bringing-google-maps-for-code-to-nodejs-apps-45mg</guid>
-      <description>&lt;p&gt;We love JavaScript and TypeScript just as much as the next dev, but building high-performing, highly scalable Node.js apps sure isn’t easy! In particular, determining how exactly components work and interact with each other in different libraries and frameworks can be really challenging. &lt;/p&gt;
-
-&lt;p&gt;Also, event-driven code execution makes it hard to understand how Node.js backend code actually works, especially when you’re working with older code that uses callbacks (&lt;a href="http://callbackhell.com/"&gt;callback hell&lt;/a&gt;  or &lt;a href="https://en.wikipedia.org/wiki/Pyramid_of_doom_(programming)"&gt;pyramid of doom&lt;/a&gt;, anyone?!). JavaScript’s relative lack of guardrails and not dictating design patterns as much as other languages do is great, but that increased freedom means you need solid architectural oversight and thorough code reviews. &lt;/p&gt;
-
-&lt;p&gt;We’ve also found that while the Node.js core is super stable, the dev tooling is a bit immature compared to other languages. If you’re not careful, you end up writing messy Node.js apps. It takes a lot of grit and discipline to write really good JavaScript and TypeScript code! This is probably why the languages can be so difficult to learn on your own, and why skilled JavaScript and TypeScript developers can be so hard to find.&lt;/p&gt;
-
-&lt;p&gt;So… let’s solve some of these challenges, shall we?! &lt;/p&gt;
-
-&lt;p&gt;We are THRILLED to announce that after many requests from &lt;a href="https://appland.com/community/"&gt;our community&lt;/a&gt;, we’re releasing the &lt;a href="https://appland.com/docs/quickstart/"&gt;beta version of AppMap for JavaScript&lt;/a&gt;!!&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#whats-appmap"&gt;
-  &lt;/a&gt;
-  What’s AppMap?
-&lt;/h3&gt;
-
-&lt;p&gt;Here’s the deal for those of you who aren’t yet familiar: &lt;a href="https://appland.com/docs/appmap-overview.html"&gt;AppMap&lt;/a&gt; is like Google Maps for your backend code. It works with Ruby, Java, Python - and now JavaScript and TypeScript. AppMap collects information about how your code works and what it does as your code runs, and this information is presented as interactive maps (aka AppMaps) that you can search and navigate. It works equally well with monolithic code bases and microservices.  &lt;/p&gt;
-
-&lt;p&gt;AppMap is free and open source, and you can use it right in your code editor (&lt;a href="https://marketplace.visualstudio.com/items?itemName=appland.appmap"&gt;VSCode&lt;/a&gt; or &lt;a href="https://plugins.jetbrains.com/plugin/16701-appmap"&gt;JetBrains&lt;/a&gt;) so your flow isn’t ever interrupted.&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#what-can-i-do-with-it"&gt;
-  &lt;/a&gt;
-  What can I do with it?
-&lt;/h3&gt;
-
-&lt;p&gt;AppMap is a really helpful tool for working with complex languages like JavaScript and TypeScript, because it allows you to a) understand what exactly you’ve just built and b) what other devs have built. &lt;/p&gt;
-
-&lt;p&gt;For example, you can use AppMap to:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;
-&lt;strong&gt;&lt;em&gt;Document and explain your code&lt;/em&gt;&lt;/strong&gt; -- AppMap automatically documents end-to-end code and data flows, web services catalogs and your app’s database schema as you work. You can also record interactive maps of any piece of code and share it with other devs via a URL or by attaching it to a ticket in Jira or GitHub to clearly communicate your code’s behavior, logic and design.&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;&lt;em&gt;Understand how new-to-you code works&lt;/em&gt;&lt;/strong&gt; -- Instead of trying to decipher an entirely new codebase, you can use AppMaps to learn and read just the code that’s relevant to your task. Source code is just a click away, so you can easily move back and forth between high-level code design views, code execution traces and source code details.&lt;/li&gt;
-&lt;li&gt;
-&lt;strong&gt;&lt;em&gt;Debug code&lt;/em&gt;&lt;/strong&gt; -- Since AppMap provides interactive maps of all the factors that might be contributing to a bug, you can figure out where things are going wrong. You can quickly navigate around source code, and see parameter values, HTTP server and client requests and complete SQL queries.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h3&gt;
-  &lt;a href="#what-are-the-requirements"&gt;
-  &lt;/a&gt;
-  What are the requirements?
-&lt;/h3&gt;
-
-&lt;p&gt;You’ll need Node v14, 16, 17 (latest update) to get the most out of AppMap for JavaScript. &lt;/p&gt;
-
-&lt;p&gt;Currently, AppMap for JavaScript is optimized to work with:&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;An application that has mocha tests, mocha &amp;gt;= 8.0.0 (older versions are not supported)&lt;/li&gt;
-&lt;li&gt;An application that uses the Express.js framework 4.x&lt;/li&gt;
-&lt;li&gt;A git repository&lt;/li&gt;
-&lt;li&gt;An application that uses one of these DB drivers: mysql, pg or sqlite3&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;h3&gt;
-  &lt;a href="#how-do-i-get-started"&gt;
-  &lt;/a&gt;
-  How do I get started?
-&lt;/h3&gt;
-
-&lt;p&gt;Here’s a brief video that walks you through how to install the AppMap extension for VSCode, how to install the AppMap agent for JavaScript and how to use them to visualize the architecture of a Node.js application: &lt;/p&gt;
-
-&lt;p&gt;&lt;iframe width="710" height="399" src="https://www.youtube.com/embed/qFjBiLVGXgg"&gt;
-&lt;/iframe&gt;
-&lt;/p&gt;
-
-&lt;h3&gt;
-  &lt;a href="#where-can-i-find-more-info"&gt;
-  &lt;/a&gt;
-  Where can I find more info?
-&lt;/h3&gt;
-
-&lt;p&gt;Check out &lt;a href="https://appland.com/docs/appmap-overview.html"&gt;our doc site&lt;/a&gt; for more info on how AppMap works and what you can use it for. A detailed reference guide for AppMap for JavaScript can be found &lt;a href="https://appland.com/docs/reference/appmap-agent-js.html"&gt;here&lt;/a&gt; and breakdown of the install process is available &lt;a href="https://github.com/land-of-apps/appmap-agent-js-demo/tree/main/appmap"&gt;here&lt;/a&gt;. For more AppMap tutorials, check out &lt;a href="https://appland.com/blog/"&gt;our blog&lt;/a&gt; and &lt;a href="https://www.youtube.com/channel/UCxVv4gVnr2Uf2PSzoELZUcg"&gt;YouTube channel&lt;/a&gt;. &lt;/p&gt;
-
-&lt;p&gt;Let us know what you think or if you have any questions! You can &lt;a href="https://discord.com/invite/N9VUap6"&gt;chat with us 1:1 on our Discord server&lt;/a&gt;, &lt;a href="https://twitter.com/landofapps"&gt;tweet us @LandofApps&lt;/a&gt; or &lt;a href="//mailto:%20support@app.land"&gt;email us anytime&lt;/a&gt;. &lt;/p&gt;
-
-&lt;p&gt;Happy AppMapping!&lt;/p&gt;
-
-</description>
-      <category>webdev</category>
-      <category>javascript</category>
-      <category>typescript</category>
     </item>
   </channel>
 </rss>
