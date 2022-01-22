@@ -7,6 +7,577 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>Faster module tests with Facter 4 and rspec-puppet</title>
+      <author>Gabriel Nagy</author>
+      <pubDate>Sat, 22 Jan 2022 10:03:16 +0000</pubDate>
+      <link>https://dev.to/puppet/faster-module-tests-with-facter-4-and-rspec-puppet-561e</link>
+      <guid>https://dev.to/puppet/faster-module-tests-with-facter-4-and-rspec-puppet-561e</guid>
+      <description>&lt;p&gt;The latest major version of &lt;a href="https://github.com/puppetlabs/facter"&gt;Facter&lt;/a&gt;—Puppet's tool for collecting system information—&lt;a href="https://puppet.com/blog/facter-4-back-to-the-roots/"&gt;has been out&lt;/a&gt; for some time now. However, we've been hard at work fixing bugs ever since. The fact that Facter has to be able to run on a variety of operating systems and architectures makes maintenance quite a challenging ordeal.&lt;/p&gt;
+
+&lt;p&gt;Returning to using Ruby as the language of choice (Facter 3 was &lt;a href="https://github.com/puppetlabs/facter/tree/3.x"&gt;written in C++&lt;/a&gt;) meant that we'd have a lot more freedom in structuring and writing the code, mostly at the expense of the added run time. This isn't an issue for how most people use Facter, for example Puppet loads &lt;a href="https://github.com/puppetlabs/puppet/blob/a5a77602a275f1106be9e6a810c5878d08998299/lib/puppet/indirector/facts/facter.rb#L39"&gt;all available facts&lt;/a&gt; at once when it runs, so a few seconds of added run time won't make a difference with Puppet runs that already take minutes. This was something we took into account when making the decision to return to Ruby with Facter 4 (initially Facter was written in Ruby, but was then rewritten in C++ for improved performance). What we didn't take into account were the intricacies of how Facter interacts with other downstream projects that we weren't aware of, such as the &lt;a href="https://rspec-puppet.com/"&gt;rspec-puppet&lt;/a&gt; test framework.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#what-is-raw-rspecpuppet-endraw-"&gt;
+  &lt;/a&gt;
+  What is &lt;code&gt;rspec-puppet&lt;/code&gt;?
+&lt;/h2&gt;
+
+&lt;p&gt;Well, RSpec is a well-known test framework for Ruby, and Puppet is... well, you probably already know or you wouldn't be here reading these words.&lt;/p&gt;
+
+&lt;p&gt;rspec-puppet is the tool of choice when writing unit tests for Puppet modules.  It provides a helpful syntax for interacting with Puppet catalogs in an RSpec way. Since it's unfeasible to acceptance test Puppet functionality on dozens of operating systems and versions, rspec-puppet circumvents this by making Facter &lt;em&gt;trick&lt;/em&gt; Puppet into thinking it runs on different OS configurations.&lt;/p&gt;
+
+&lt;p&gt;Puppet gets almost all of its system-related information using facts, so for example if you're running some Linux and you're curious to see how your Puppet manifest would behave on macOS, in most cases it's enough to feed Facter a bunch of macOS facts. Of course, the underlying implementation is more complicated than that, especially for Windows, but in a nutshell this is how rspec-puppet works.&lt;/p&gt;
+
+&lt;p&gt;For each test, rspec-puppet &lt;a href="https://github.com/puppetlabs/rspec-puppet/blob/84a9cfe48257e09061bda565189766cebd03d426/lib/rspec-puppet/support.rb#L482"&gt;stubs the fake facts&lt;/a&gt; using the &lt;a href="https://puppet.com/docs/puppet/latest/custom_facts.html"&gt;custom facts API&lt;/a&gt;. The &lt;em&gt;fake&lt;/em&gt; facts it gets from &lt;a href="https://github.com/voxpupuli/facterdb"&gt;facterdb&lt;/a&gt;, which is a gem that contains "dummy" facts for a variety of operating systems and Facter versions—basically lots of files containing &lt;code&gt;facter --json&lt;/code&gt; output. The resulting information is then fed to Puppet for catalog compilation.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#getting-slower-and-slower"&gt;
+  &lt;/a&gt;
+  Getting slower and slower...
+&lt;/h2&gt;
+
+&lt;p&gt;Over time, &lt;a href="https://tickets.puppetlabs.com/browse/FACT-3039"&gt;people have been noticing&lt;/a&gt; that module tests running with Facter 4 were much slower than Facter 2. Module tests have skipped Facter 3 altogether because even though Facter 3 ships a compatible Ruby module, in the end it's C++ code that's extremely incompatible with the Ruby ecosystem (you can't &lt;code&gt;gem install&lt;/code&gt; it like you would any other gem).&lt;/p&gt;
+
+&lt;p&gt;After some investigation it turned out that Facter 4 was evaluating underlying core facts even though they had been overridden by custom facts. The first instinct would be to classify this as a bug, but a closer look showed us that this functionality was intended in order to be fully-compatible with Facter 3.  And because modules never ran tests with Facter 3 this wasn't a problem until now.&lt;/p&gt;
+
+&lt;p&gt;Overriding a core fact, similar to how rspec-puppet does:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight ruby"&gt;&lt;code&gt;&lt;span class="no"&gt;Facter&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;add&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="ss"&gt;:ipaddress&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="ss"&gt;weight: &lt;/span&gt;&lt;span class="mi"&gt;999&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt;
+  &lt;span class="n"&gt;setcode&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt; &lt;span class="s1"&gt;'1.1.1.1'&lt;/span&gt; &lt;span class="p"&gt;}&lt;/span&gt;
+&lt;span class="k"&gt;end&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;will return the correct value (1.1.1.1) but it will cause Facter to also load the core &lt;code&gt;ipaddress&lt;/code&gt; fact, ultimately resolving all networking facts, which means executing system commands. &lt;/p&gt;
+
+&lt;p&gt;Assuming our custom &lt;code&gt;ipaddress&lt;/code&gt; fact is defined inside the &lt;code&gt;custom_facts&lt;/code&gt; directory, here's what gets called when we attempt to resolve the fact:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight shell"&gt;&lt;code&gt;&lt;span class="nv"&gt;$ FACTERLIB&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="nv"&gt;$PWD&lt;/span&gt;/custom_facts strace &lt;span class="nt"&gt;-f&lt;/span&gt; &lt;span class="nt"&gt;-eexecve&lt;/span&gt; facter ipaddress
+&lt;span class="o"&gt;[&lt;/span&gt;pid 1777063] execve&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;"/usr/bin/ip"&lt;/span&gt;, &lt;span class="o"&gt;[&lt;/span&gt;&lt;span class="s2"&gt;"ip"&lt;/span&gt;, &lt;span class="s2"&gt;"-o"&lt;/span&gt;, &lt;span class="s2"&gt;"link"&lt;/span&gt;, &lt;span class="s2"&gt;"show"&lt;/span&gt;&lt;span class="o"&gt;]&lt;/span&gt;, 0x563bf6b7acf0 /&lt;span class="k"&gt;*&lt;/span&gt; 110 vars &lt;span class="k"&gt;*&lt;/span&gt;/&lt;span class="o"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; 0
+&lt;span class="o"&gt;[&lt;/span&gt;pid 1777067] execve&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;"/usr/bin/ip"&lt;/span&gt;, &lt;span class="o"&gt;[&lt;/span&gt;&lt;span class="s2"&gt;"ip"&lt;/span&gt;, &lt;span class="s2"&gt;"link"&lt;/span&gt;, &lt;span class="s2"&gt;"show"&lt;/span&gt;&lt;span class="o"&gt;]&lt;/span&gt;, 0x563bf64eafa0 /&lt;span class="k"&gt;*&lt;/span&gt; 110 vars &lt;span class="k"&gt;*&lt;/span&gt;/&lt;span class="o"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; 0
+&lt;span class="o"&gt;[&lt;/span&gt;pid 1777068] execve&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;"/usr/bin/dhcpcd"&lt;/span&gt;, &lt;span class="o"&gt;[&lt;/span&gt;&lt;span class="s2"&gt;"/usr/bin/dhcpcd"&lt;/span&gt;, &lt;span class="s2"&gt;"-U"&lt;/span&gt;, &lt;span class="s2"&gt;"lo"&lt;/span&gt;&lt;span class="o"&gt;]&lt;/span&gt;, 0x563bf6aa57b0 /&lt;span class="k"&gt;*&lt;/span&gt; 110 vars &lt;span class="k"&gt;*&lt;/span&gt;/&lt;span class="o"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; 0
+&lt;span class="c"&gt;# ... dhcpcd is called for every network interface on the system&lt;/span&gt;
+&lt;span class="c"&gt;# I removed the other calls for brevity&lt;/span&gt;
+
+&lt;span class="o"&gt;[&lt;/span&gt;pid 1777078] execve&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;"/usr/bin/ip"&lt;/span&gt;, &lt;span class="o"&gt;[&lt;/span&gt;&lt;span class="s2"&gt;"ip"&lt;/span&gt;, &lt;span class="s2"&gt;"route"&lt;/span&gt;, &lt;span class="s2"&gt;"show"&lt;/span&gt;&lt;span class="o"&gt;]&lt;/span&gt;, 0x563bf6aba230 /&lt;span class="k"&gt;*&lt;/span&gt; 110 vars &lt;span class="k"&gt;*&lt;/span&gt;/&lt;span class="o"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; 0
+&lt;span class="o"&gt;[&lt;/span&gt;pid 1777079] execve&lt;span class="o"&gt;(&lt;/span&gt;&lt;span class="s2"&gt;"/usr/bin/ip"&lt;/span&gt;, &lt;span class="o"&gt;[&lt;/span&gt;&lt;span class="s2"&gt;"ip"&lt;/span&gt;, &lt;span class="s2"&gt;"-6"&lt;/span&gt;, &lt;span class="s2"&gt;"route"&lt;/span&gt;, &lt;span class="s2"&gt;"show"&lt;/span&gt;&lt;span class="o"&gt;]&lt;/span&gt;, 0x563bf6ae37d0 /&lt;span class="k"&gt;*&lt;/span&gt; 110 vars &lt;span class="k"&gt;*&lt;/span&gt;/&lt;span class="o"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; 0
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Doing this hundreds or even thousands of times per test suite definitely adds to the increase in run time, and it's redundant since the resolved facts are never needed.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#fixing-things-without-breaking-more-things"&gt;
+  &lt;/a&gt;
+  Fixing things without breaking more things
+&lt;/h2&gt;
+
+&lt;p&gt;Modifying Facter's behavior—undocumented as it was—was a no-go from the start,  as we &lt;a href="https://tickets.puppetlabs.com/browse/FACT-3000"&gt;found out before&lt;/a&gt; (Facter is a good example of &lt;a href="https://www.hyrumslaw.com/"&gt;Hyrum's law&lt;/a&gt; in action). So, we had to think of other ways to improve performance.&lt;/p&gt;
+
+&lt;p&gt;We started by decoupling Puppet from Facter as much as we could, introducing the possibility of having &lt;a href="https://tickets.puppetlabs.com/browse/PUP-11216"&gt;multiple Facter backends&lt;/a&gt;. While Puppet would &lt;a href="https://github.com/puppetlabs/puppet/blob/a5a77602a275f1106be9e6a810c5878d08998299/lib/puppet/runtime.rb#L21"&gt;use&lt;/a&gt; the &lt;a href="https://github.com/puppetlabs/puppet/blob/a5a77602a275f1106be9e6a810c5878d08998299/lib/puppet/facter_impl.rb"&gt;default Facter implementation&lt;/a&gt; when running on its own, external users would be able to define and pass their own Facter implementation when initializing Puppet, similar to how puppetserver configures Puppet to use its JRuby-compliant HTTP client.&lt;/p&gt;
+
+&lt;p&gt;To avoid breaking the Facter API, we ended up &lt;a href="https://github.com/puppetlabs/rspec-puppet/blob/046340805ba8877e34af22be7756ee972da84f9b/lib/rspec-puppet/facter_impl.rb"&gt;implementing an overcomplicated way of interacting with a hash&lt;/a&gt;. Using our dumb Facter backend, custom facts were now simply added to a hash, and querying them would just produce them from the hash if available:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight ruby"&gt;&lt;code&gt;&lt;span class="k"&gt;class&lt;/span&gt; &lt;span class="nc"&gt;FacterTestImpl&lt;/span&gt;
+  &lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;initialize&lt;/span&gt;
+    &lt;span class="vi"&gt;@facts&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{}&lt;/span&gt;
+  &lt;span class="k"&gt;end&lt;/span&gt;
+
+  &lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;value&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;fact_name&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="vi"&gt;@facts&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;fact_name&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;to_s&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt;
+  &lt;span class="k"&gt;end&lt;/span&gt;
+
+  &lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;add&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nb"&gt;name&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;options&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{},&lt;/span&gt; &lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;block&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+    &lt;span class="k"&gt;raise&lt;/span&gt; &lt;span class="s1"&gt;'Facter.add expects a block'&lt;/span&gt; &lt;span class="k"&gt;unless&lt;/span&gt; &lt;span class="nb"&gt;block_given?&lt;/span&gt;
+    &lt;span class="vi"&gt;@facts&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nb"&gt;name&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;to_s&lt;/span&gt;&lt;span class="p"&gt;]&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nb"&gt;instance_eval&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;block&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+  &lt;span class="k"&gt;end&lt;/span&gt;
+  &lt;span class="o"&gt;...&lt;/span&gt;
+&lt;span class="k"&gt;end&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;With our custom implementation we bypassed Facter altogether. This managed to bring us back to Facter 2 speeds, which behaved similarly by just returning the custom fact's value without resolving any additional facts.&lt;/p&gt;
+
+&lt;p&gt;Of course, there may be downsides to this approach, as Facter code paths will no longer be executed by rspec-puppet. In the past there have been occasions where we merged Facter work that passed our CI, but ended up failing in module tests, so switching to this implementation will get rid of this level of testing. I'd argue that it wasn't a module's business to validate Facter itself, but it was a good safety net for us as maintainers.&lt;/p&gt;
+
+&lt;p&gt;And because performance improvements mean nothing without showing the numbers, here's how test times have changed for the &lt;a href="https://github.com/puppetlabs/puppet-nginx"&gt;puppet-nginx&lt;/a&gt; module:&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--N_0nFVA4--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/vwhqmqiit3i2n0x3n318.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--N_0nFVA4--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/vwhqmqiit3i2n0x3n318.png" width="880" height="323"&gt;&lt;/a&gt;&lt;br&gt;Running &lt;code&gt;rake parallel_spec&lt;/code&gt; on the module using Puppet 7 / Facter 4 took around 47 minutes with the original rspec-puppet implementation.
+  &lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--Akhy4w-z--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/jg65snejczql6wj99ym2.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--Akhy4w-z--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/jg65snejczql6wj99ym2.png" width="880" height="313"&gt;&lt;/a&gt;&lt;br&gt;We managed to shave off around 11 minutes off the test run by using the custom Facter implementation in rspec-puppet.
+  &lt;/p&gt;
+
+&lt;p&gt;One thing I haven't mentioned is that running the same tests with Puppet 6 takes &lt;a href="https://github.com/GabrielNagy/puppet-nginx/runs/4149964576"&gt;a total of 25 minutes&lt;/a&gt;, so there's more to improve in Puppet itself as well.  However, from a Facter standpoint it's impossible to make the tests any faster, unless Ruby itself improves hash access speed 😜.&lt;/p&gt;
+
+&lt;p&gt;This new functionality is opt-in and configurable by setting the &lt;a href="https://github.com/puppetlabs/rspec-puppet#facter_implementation"&gt;&lt;code&gt;facter_implementation&lt;/code&gt;&lt;/a&gt; RSpec option in your &lt;code&gt;spec_helper.rb&lt;/code&gt;.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight ruby"&gt;&lt;code&gt;&lt;span class="no"&gt;RSpec&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;configure&lt;/span&gt; &lt;span class="k"&gt;do&lt;/span&gt; &lt;span class="o"&gt;|&lt;/span&gt;&lt;span class="n"&gt;config&lt;/span&gt;&lt;span class="o"&gt;|&lt;/span&gt;
+  &lt;span class="n"&gt;config&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nf"&gt;facter_implementation&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="ss"&gt;:rspec&lt;/span&gt;
+&lt;span class="k"&gt;end&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;It was first &lt;a href="https://github.com/puppetlabs/rspec-puppet/pull/16"&gt;made available&lt;/a&gt; in rspec-puppet &lt;a href="https://rubygems.org/gems/rspec-puppet/versions/2.11.0"&gt;2.11.0&lt;/a&gt;, with an additional &lt;a href="https://github.com/puppetlabs/rspec-puppet/pull/19"&gt;bugfix&lt;/a&gt; that was released in rspec-puppet &lt;a href="https://rubygems.org/gems/rspec-puppet/versions/2.11.1"&gt;2.11.1&lt;/a&gt;.&lt;/p&gt;
+
+
+
+
+&lt;p&gt;The investigation and work surrounding this improvement has spanned many months and was the product of multiple Puppet employees and community members, namely &lt;a href="https://github.com/gimmyxd"&gt;Gimmy&lt;/a&gt;, &lt;a href="https://github.com/joshcooper"&gt;Josh Cooper&lt;/a&gt;, &lt;a href="https://github.com/ekohl"&gt;Ewoud Kohl van Wijngaarden&lt;/a&gt; and &lt;a href="https://github.com/bastelfreak"&gt;Tim Meusel&lt;/a&gt;. Thanks to everyone who contributed!&lt;/p&gt;
+
+</description>
+    </item>
+    <item>
+      <title>How to Pass the AWS Solutions Architect Professional Exam</title>
+      <author>luan vu</author>
+      <pubDate>Sat, 22 Jan 2022 09:53:23 +0000</pubDate>
+      <link>https://dev.to/luanvu/how-to-pass-the-aws-solutions-architect-professional-exam-4f34</link>
+      <guid>https://dev.to/luanvu/how-to-pass-the-aws-solutions-architect-professional-exam-4f34</guid>
+      <description>&lt;p&gt;You are looking to take the AWS Certified Solutions Architect — Professional certification exam. Today I will help you with some tips &amp;amp; tricks that I learned during my professional exam preparation two years ago.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#how-i-passed-the-new-aws-solutions-architect-professional"&gt;
+  &lt;/a&gt;
+  How I PASSED the New AWS Solutions Architect Professional?
+&lt;/h2&gt;
+
+&lt;p&gt;Another guide to the certification exam, probably reading the White Paper, watching videos on YouTube, taking that course, etc. No! Such articles are present on the internet a lot. I can get you some:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;  &lt;a href="https://acloud.guru/forums/aws-csa-pro-2019/discussion/-L_joCzK9FTbpP2P7H0Z/how_i_passed_the_new_aws_solut"&gt;How I PASSED the New AWS Solutions Architect Professional (Feb 2019 version) exam last March 9!&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;  &lt;a href="https://acloud.guru/forums/aws-csa-pro-2019/discussion/-Lc31u8nAIbpeo9q9mM7/aws_certified_solutions_archit"&gt;AWS Certified Solutions Architect --- Professional 2019 (feedback)&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;  &lt;a href="https://virtualbonzo.com/2020/02/03/my-aws-solution-architect-professional-certification-experience/"&gt;My AWS Solution Architect Professional Certification Experience&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;  &lt;a href="https://medium.com/grey-frogs/my-path-to-aws-certified-solutions-architect-professional-bebd42eb5d5"&gt;My path to AWS Certified Solutions Architect --- Professional&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;  &lt;a href="https://acloud.guru/forums/aws-certified-solutions-architect-professional/discussion/-KEAY5AHdre2DzoI-H99/passed-sa-pro-today"&gt;Passed SA Pro today&lt;/a&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Those articles are already too many, and adding one of mine is nothing more. Are the other people correct? Right. But to do it is not as easy as it sounds. The exam depends on your ability to learn and your background knowledge. If you study for four months, you will die (I have looked for a whole year, what a shame), but you could still don't pass no matter an entire year's preparation.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#what-is-the-standard-learning-path"&gt;
+  &lt;/a&gt;
+  What is the standard learning path?
+&lt;/h3&gt;
+
+&lt;p&gt;In general, The path to passing the AWS certification exam includes (don't miss anything):&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#1-read-white-papers"&gt;
+  &lt;/a&gt;
+  1.  Read White papers
+&lt;/h3&gt;
+
+&lt;p&gt;There are hundreds of White papers, some with thousands of pages. Can you read it all? No matter how many you read, how much are you able to remember?&lt;/p&gt;
+
+&lt;p&gt;I just checked, now there are 314 White Paper &amp;amp; Guides; you can check them at &lt;a href="https://aws.amazon.com/whitepapers/?whitepapers-main.sort-by=item.additionalFields.sortDate&amp;amp;whitepapers-main.sort-order=desc&amp;amp;awsm.page-whitepapers-main=1"&gt;AWS Whitepapers &amp;amp; Guides&lt;/a&gt;.&lt;/p&gt;
+
+&lt;p&gt;You should read all the essential White Papers mentioned in those articles above.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#2-read-faqs"&gt;
+  &lt;/a&gt;
+  2.  Read FAQs
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;a href="https://aws.amazon.com/faqs/"&gt;AWS | FAQs&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;FAQs are also important. You should read all.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#3-watch-aws-reinvent-this-is-my-architecture-in-youtube"&gt;
+  &lt;/a&gt;
+  3.  Watch AWS re:Invent, This Is My Architecture in YouTube
+&lt;/h3&gt;
+
+&lt;p&gt;If you don't have much chance to try services architectures (like me), these videos are beneficial. They show you how a service should be used in actual projects (the exam too, of course) and how a group of services interact in architecture to resolve problems.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://www.youtube.com/c/amazonwebservices/search?query=AWS%20Re%3Ainvent"&gt;Amazon Web Services&lt;/a&gt;&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#4-take-some-onlineoffline-courses"&gt;
+  &lt;/a&gt;
+  4.  Take some online/offline courses
+&lt;/h3&gt;
+
+&lt;p&gt;It is the easiest to access. Many (most) AWS courses are available, both paid and paid. AWS also has some Exam Readiness (Free) to guide you through the exam questions&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://aws.amazon.com/training/course-descriptions/exam-workshop-solutions-architect-professional/"&gt;Exam Readiness: AWS Certified Solutions Architect --- Professional&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;There are many types of courses, but they are not enough in general. Especially some of the default courses require you to have a good knowledge of AWS and the overview for you. If you stick to them only, failure is inevitable.&lt;/p&gt;
+
+&lt;p&gt;I found a precious course on Udemy. It could be more expensive than usual, but the author deserves it.&lt;/p&gt;
+
+&lt;p&gt;&lt;a href="https://www.udemy.com/share/104sE03@v25ocWwp5mS6EczCcLEoR6xjbdtVk0GPohkBLMVwUaLf4HB5bd4GAH_1dxW_J10=/"&gt;https://www.udemy.com/share/104sE03@v25ocWwp5mS6EczCcLEoR6xjbdtVk0GPohkBLMVwUaLf4HB5bd4GAH_1dxW_J10=/&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;&lt;em&gt;Fun Fact: The first time I took the exam, It hit me in the face with a service called Amazon Mechanical Turk, which didn't appear in any of the White Papers, FAQs, or AWS Console. I think it is a question that has not been scored, so don't worry if AWS gives you such a surprise.&lt;/em&gt;&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#5-practice"&gt;
+  &lt;/a&gt;
+  5.  Practice
+&lt;/h3&gt;
+
+&lt;p&gt;Those learning materials are certainly informative, but it's hard to remember them all if you just read them and watch them do it. Practicing helps you understand better reflect better. Never skip practice any service.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#6-learn-english"&gt;
+  &lt;/a&gt;
+  6.  Learn English
+&lt;/h3&gt;
+
+&lt;p&gt;It's serious. It depends on the certification level you take the exam. With Professional, I took the exam, and all questions are very long; printing must also be over 50 pages. As I read and thought of the answer, it was indeed a terrible sprint. For test takers whose native language is not English (non-English speakers or English as a Second Language), AWS allows you to request accommodations, whereby you get a bonus of 30 minutes each time, so take advantage of it.&lt;/p&gt;
+
+&lt;p&gt;Many of you are probably shocked and don't dare to study, but that's the truth. This test is challenging, requiring hundreds of hours of study and practice. You should have terrible determination to make it through. Fortunately, Amazon will only test you on a few essential services. If you know (to the point of mastering) them, you have achieved over 80%. And if you don't understand these services and lose points, then strange services you never touch will be a lifesaver, but it is boundless knowledge. That is why AWS Solutions Architect Professional is touched, it is difficult to understand something deeply, and if it is broad, it is too wide to understand it all.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#tip-amp-trick"&gt;
+  &lt;/a&gt;
+  Tip &amp;amp; Trick
+&lt;/h2&gt;
+
+
+
+
+&lt;p&gt;I'm not a person who can remember well. I tried to learn by going from service to service and memorizing them. According to statistics, I have read at least 47 full books about AWS, about 10--20 White Papers. However, the more I try to remember, the more I forget, learning 10--20 services, overlooking the first ones, reading a lot of books also forgetting quite a bit. So, I chose to study on my own.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#service-classification"&gt;
+  &lt;/a&gt;
+  Service classification
+&lt;/h3&gt;
+
+&lt;p&gt;AWS has already categorized it for you at &lt;a href="https://aws.amazon.com/products/"&gt;https://aws.amazon.com/products/&lt;/a&gt;&lt;/p&gt;
+
+&lt;p&gt;Service classification is critical. It helps you know what you face and how you deal with it. If you encounter a storage service, you need to know security, capacity, availability, and reliability. If you use databases, remember it is RDBMS or NoSQL, cache, or Big data.&lt;/p&gt;
+
+&lt;p&gt;It also helps you to remember the service better. There are various service names you have never heard before, so classification helps you have some idea about it. For instance, EC2 Auto Scaling or Elastic Load Balancer sounds reminiscent, but what do you think Neptune's purpose? Universe? Snowball, Glacier, etc.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#based-on-wellarchitected-frameworks-five-pillars"&gt;
+  &lt;/a&gt;
+  Based on Well-Architected Framework's Five Pillars
+&lt;/h3&gt;
+
+&lt;p&gt;Well-Architected Framework provides guidelines to help customers deploy systems on AWS. The framework offers five main pillars:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;  Security&lt;/li&gt;
+&lt;li&gt;  Reliability&lt;/li&gt;
+&lt;li&gt;  Performance Efficiency&lt;/li&gt;
+&lt;li&gt;  Cost Optimization&lt;/li&gt;
+&lt;li&gt;  Operational Excellence&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;When encountering any service, you need to think about these pillars.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#1-security"&gt;
+  &lt;/a&gt;
+  1.  Security
+&lt;/h3&gt;
+
+&lt;p&gt;AWS places great emphasis on security across all architects. There are two main types of security that you need to know:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;  Security operations&lt;/li&gt;
+&lt;li&gt;  Data protection&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h4&gt;
+  &lt;a href="#security-operations"&gt;
+  &lt;/a&gt;
+  Security operations
+&lt;/h4&gt;
+
+&lt;p&gt;There are always employees who do wrong things they are not authorized to do or should not do. Those are why there are services like IAM, Organizations, Cognito, CloudTrail, etc. When learning a specific service, you must know how to grant access or limit it. Amazon S3, how to not allow others to publish it? How do I allow access to someone with another AWS account (and only them)? How to prevent someone from Terminating EC2 instances? Knowing what a service can do is important, but securing it is just as important.&lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#data-protection"&gt;
+  &lt;/a&gt;
+  Data protection
+&lt;/h4&gt;
+
+&lt;p&gt;You must get used to the concept of Encrypt at rest and Encrypt in transit. Is data stored in Storage encrypted? Is it encrypted when transferring data to the internet or on-premises via VPN? Most services are encrypted in transit by default, but encrypt at rest is not (Encryption is not enabled by default on EBS). There are still a lot of demanding customers out there. They require even more security. Have to use CloudHSM, use their certificate, or use end-to-end encryption too, and it's tough as well. You will become confusing with such services as KMS, CloudHSM, Direct Connect, Security Hub, Transit Gateway, VPN, etc... Still, it will frequently appear in the exam because that's how enterprise applications are built.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#2-resiliency-availability-and-disaster-recovery-dr"&gt;
+  &lt;/a&gt;
+  2.  Resiliency: Availability and Disaster Recovery (DR)
+&lt;/h3&gt;
+
+&lt;p&gt;High Availability, Blue/Green Deployment, Zero Down Time, Uptime, service level agreement (SLA), recovery time objective (RTO), recovery point objective (RPO), Redundancy, Failback, etc. You must go into deep dives on it.&lt;/p&gt;
+
+&lt;p&gt;Maybe the projects you have done or are doing are at an elementary level: one server, one database, one data center, etc. Stop and start again. But when it came to AWS, the architecture standard took a new high level. Your system must be redundant for everything: hardware failure leading to server stop or data loss. Possibilities like hurricanes, earthquakes, and volcanoes destroy a data center. Even, you have to consider the case of the main error from AWS.&lt;/p&gt;
+
+&lt;p&gt;You need to know four ways to preserve the system&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;  Backup and Restore&lt;/li&gt;
+&lt;li&gt;  Pilot Light&lt;/li&gt;
+&lt;li&gt;  Warm Standby&lt;/li&gt;
+&lt;li&gt;  Multi-site Example&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;For example, EC2 only guarantees 95.0% availability, which means every 1 hour, EC2 can be down for 3 minutes. We need to combine with Auto Scaling Group, Load Balancer to increase availability. More advanced, use Cross-region Load Balancer, Multi-site between AWS infrastructure and on-premises. The Serverless option can also be considered as an alternative. What about data? EC2 stores data in EBS. How to ensure no data loss? By now, you will probably have to know things like RAID, Snapshot, Point-in-time-recovery (PITR).&lt;/p&gt;
+
+&lt;p&gt;Similarly, in RDS, we have RDS snapshot, backtrack, Replica, Multi-AZ, etc. With ElastiCache, there is also Multi A-Z, Failover, Append Only Files (AOF)...You also need to know how long it takes to recover (RTO) and how much data can be lost (RPO). If customers need to restore the system within 1 hour, storing it in Glacier is wrong.&lt;br&gt;
+Refer&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;  &lt;a href="https://aws.amazon.com/blogs/publicsector/rapidly-recover-mission-critical-systems-in-a-disaster/"&gt;Rapidly recover mission-critical systems in a disaster&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;  &lt;a href="https://cloud.netapp.com/blog/understanding-aws-high-availability-compute-sql-and-storage"&gt;AWS High Availability: Compute, SQL and Storage&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;  &lt;a href="https://aws.amazon.com/blogs/startups/high-availability-for-mere-mortals/"&gt;High Availability for Mere Mortals&lt;/a&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3&gt;
+  &lt;a href="#3-performance"&gt;
+  &lt;/a&gt;
+  3.  Performance
+&lt;/h3&gt;
+
+&lt;p&gt;The performance here is understood as using computing resources to meet system requirements and maintain performance when conditions change or technology evolves. Some of the issues raised could be:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;  Latency&lt;/li&gt;
+&lt;li&gt;  IOPS&lt;/li&gt;
+&lt;li&gt;  Throughput&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;When choosing a service to use for your architecture, there are four types of resources you need to consider: compute, storage, database, and network.&lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#compute"&gt;
+  &lt;/a&gt;
+  Compute
+&lt;/h4&gt;
+
+&lt;p&gt;There are three main types of computing:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;  &lt;em&gt;Instance&lt;/em&gt;: a virtual server, typically EC2 and Lightsail. You can use EC2 to solve everything if there is no other option. For example, launch a MySQL server inside an EC2 instance.&lt;/li&gt;
+&lt;li&gt;  &lt;em&gt;Container&lt;/em&gt;: this is a way of virtualizing the operating system, I can immediately think of Docker, Kubernetes. With AWS, think about ECS, Fargate, and EKS. When to use Container instead of Instance? Most of the answers (in the test) will be customers who already use on-premises containers and want to spend the least amount of effort if migrating to AWS.&lt;/li&gt;
+&lt;li&gt;  &lt;em&gt;Function&lt;/em&gt;: focus on code and run without having to manage instances. Functions have three essential benefits: minimal management effort, outstanding scalability and are particularly suitable for event-based programs.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h4&gt;
+  &lt;a href="#storage"&gt;
+  &lt;/a&gt;
+  Storage
+&lt;/h4&gt;
+
+&lt;p&gt;There are three main types of storage:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;  Object Storage: just S3&lt;/li&gt;
+&lt;li&gt;  Block Storage: just EBS&lt;/li&gt;
+&lt;li&gt;  File Storage: EFS, FSx&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;In my opinion, Storage Gateway should also be included here. The storage classification doesn't make much sense either. You can save it in Object Storage, Block Storage, or File Storage with a file. However, there is a slight difference. E.g., S3 is limited to 3,500 PUT/COPY/POST/DELETE and 5,500 GET/HEAD requests per second per prefix (directory name), and don't forget there's also a KMS limit if you choose to encrypt. And yet, accessing files from S3 will have extremely high latency. Think about them when you use them. With EBS, it is necessary to know the difference between the volume types, which are optimal for IOPS? Which are optimal for Throughput? If you need even higher performance, you can think of RAID, but what are the disadvantages of RAID? Data loss, Downtime. EBS still has certain limitations: IOPS, Throughput, Hybrid Storage, Limit storage size, Sharing, Availability, etc. Then you will need to use EFS.&lt;/p&gt;
+
+&lt;h4&gt;
+  &lt;a href="#database"&gt;
+  &lt;/a&gt;
+  Database
+&lt;/h4&gt;
+
+&lt;p&gt;Databases can be divided into seven types:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;  Relational: RDS&lt;/li&gt;
+&lt;li&gt;  Key-Value: DynamoDB, or maybe even Redis&lt;/li&gt;
+&lt;li&gt;  Document: DocumentDB&lt;/li&gt;
+&lt;li&gt;  In-Memory: ElastiCache, MemoryDB (new)&lt;/li&gt;
+&lt;li&gt;  Graph: Neptune&lt;/li&gt;
+&lt;li&gt;  Time-Series: Timestream&lt;/li&gt;
+&lt;li&gt;  Ledger: QLDB&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Each type of database will be used for different purposes, but sometimes it is not too noticeable.&lt;/p&gt;
+
+&lt;p&gt;E.g., Customers using MySQL on-premises does not mean that going to AWS is required to use RDS. That's also just an option. Another option could be MySQL on EC2 instance, converting MySQL to DynamoDB.&lt;/p&gt;
+
+&lt;p&gt;If you want a database with high access frequency low latency, it can be DynamoDB, but if the data is not too necessary, ElastiCache is also a good choice.&lt;/p&gt;
+
+&lt;p&gt;In general, the database selection problem is not too complex. Usually, the question will revolve around the issue of optimizing a particular type of database.&lt;/p&gt;
+
+&lt;p&gt;E.g., the customer is using MySQL on RDS and is noticing slow response as traffic increases. Think about multi-writer, multi-reader, and maybe even ElastiCache to reduce RDS load.&lt;/p&gt;
+
+&lt;p&gt;Refer:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;  &lt;a href="https://www.youtube.com/watch?v=q81TVuV5u28&amp;amp;ref=wellarchitected"&gt;AWS re:Invent 2019: Leadership session: AWS purpose-built databases (DAT209-L)&lt;/a&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h4&gt;
+  &lt;a href="#network"&gt;
+  &lt;/a&gt;
+  Network
+&lt;/h4&gt;
+
+&lt;p&gt;All AWS components are connected through a network, AWS's private network, or the internet.&lt;/p&gt;
+
+&lt;p&gt;EC2 instances connect to EBS through the internal network; Route53, CloudFront, S3 in/out internet; the connection between AWS and on-premises... In this regard, there are several standard solutions:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;  CloudFront can reduce latency when accessing global&lt;/li&gt;
+&lt;li&gt;  Deploying (adding a system) on a region near the user is also the best way to reduce latency&lt;/li&gt;
+&lt;li&gt;  Upload/Download on S3 is slow: Use S3 transfer acceleration&lt;/li&gt;
+&lt;li&gt;  Connecting to On-premises using VPN is slow: Spend more money to use Direct Connect&lt;/li&gt;
+&lt;li&gt;  Latency-Based Routing in Amazon Route 53&lt;/li&gt;
+&lt;li&gt;  Use VPC Endpoints to use AWS's internal network
+Refer&lt;/li&gt;
+&lt;li&gt;  &lt;a href="https://wa.aws.amazon.com/wat.question.PERF_1.en.html"&gt;PERF 1: How do you select the best performing architecture?&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;  &lt;a href="https://wa.aws.amazon.com/wat.question.PERF_2.en.html"&gt;PERF 2: How do you select your compute solution?&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;  &lt;a href="https://wa.aws.amazon.com/wat.question.PERF_3.en.html"&gt;PERF 3: How do you select your storage solution?&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;  &lt;a href="https://wa.aws.amazon.com/wat.question.PERF_4.en.html"&gt;PERF 4: How do you select your database solution?&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;  &lt;a href="https://wa.aws.amazon.com/wat.question.PERF_5.en.html"&gt;PERF 5: How do you configure your networking solution?&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;  &lt;a href="https://wa.aws.amazon.com/wat.question.PERF_6.en.html"&gt;PERF 6: How do you evolve your workload to take advantage of new releases?&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;  &lt;a href="https://wa.aws.amazon.com/wat.question.PERF_7.en.html"&gt;PERF 7: How do you monitor your resources to ensure they are performing?&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;  &lt;a href="https://wa.aws.amazon.com/wat.question.PERF_8.en.html"&gt;PERF 8: How do you use tradeoffs to improve performance?&lt;/a&gt;
+&lt;/li&gt;
+&lt;li&gt;  &lt;a href="https://wa.aws.amazon.com/wat.pillar.performance.en.html"&gt;Performance Efficiency&lt;/a&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3&gt;
+  &lt;a href="#4-cost"&gt;
+  &lt;/a&gt;
+  4.  Cost
+&lt;/h3&gt;
+
+&lt;p&gt;Usually, there are two scenarios:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;  Customers already have the system and want to reduce the price&lt;/li&gt;
+&lt;li&gt;  Customers want to migrate to AWS for the lowest possible price.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;So how to optimize the price:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;  Choose cheaper services. When to use Kinesis instead of SQS? When to use a VPN instead of Direct Connect? When to use Spot Instances?&lt;/li&gt;
+&lt;li&gt;  Remove unnecessary resources.&lt;/li&gt;
+&lt;li&gt;  Commitment: Savings Plans, Reserved Instances&lt;/li&gt;
+&lt;li&gt;  Cost Management: Consolidated Billing, Cost Allocation Tags, Trust Advisor,...&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;And finally, remember, optimizing for price also comes at the expense of other things (performance, availability, reliability, security, etc.). The architecture you choose may not be perfect, but it is still the correct answer if it is feasible and the most cost-effective according to the customer's requirements.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#5-operational-excellence"&gt;
+  &lt;/a&gt;
+  5.  Operational Excellence
+&lt;/h3&gt;
+
+&lt;p&gt;&lt;em&gt;"The Operational Excellence pillar includes the ability to support development and run workloads effectively, gain insight into their operations, and to continuously improve supporting processes and procedures to deliver business value"&lt;/em&gt;&lt;/p&gt;
+
+&lt;p&gt;It depends on services, but there are some common aspects:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;  Infrastructure as code: in short, CloudFormation, Opsworks. You don't need to understand what Ansible or Puppet is, but you should know what Opsworks is and what it is suitable for. You also don't need to master the CloudFormation template, but you must know some basic syntax and create some services by CloudFormation, such as VPC, Subnets, RDS...&lt;/li&gt;
+&lt;li&gt;  Basic settings: some services have unique settings you must be familiar. E.g.: could I change Lambda CPU configuration? Restore an RDS snapshot, make a failover on an RDS instance? Change Launch Template, etc.&lt;/li&gt;
+&lt;li&gt;  Monitoring, Incident response: logging, metric visualizer, alarms, incident management, and remediation&lt;/li&gt;
+&lt;li&gt;  Some managed operator services: there are some services you should get to know, such as CloudTrail, Config, Personal Health Dashboard, Organizations, Service Catalog, Systems Manager.
+Refer&lt;/li&gt;
+&lt;li&gt;  &lt;a href="https://wa.aws.amazon.com/wellarchitected/2020-07-02T19-33-23/wat.pillar.operationalExcellence.en.html"&gt;https://wa.aws.amazon.com/wellarchitected/2020-07-02T19-33-23/wat.pillar.operationalExcellence.en.html&lt;/a&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3&gt;
+  &lt;a href="#dont-trust-keywords"&gt;
+  &lt;/a&gt;
+  Don't trust keywords
+&lt;/h3&gt;
+
+&lt;p&gt;When taking the exam, many of you will have a trick that believes in the keyword, see this keyword, and immediately decide. But here, things are not so clear. If you insist on choosing the most appropriate service, it is easy to lead you to the wrong architecture because this is a collection of services and methods, not a story of just one service.&lt;/p&gt;
+
+&lt;p&gt;E.g., When a customer needs a Relational database, RDS comes to mind, but don't forget you could also use EC2 and launch the database on its instance. Why does it? Because of the cost, there are features of the database that RDS does not support.&lt;/p&gt;
+
+&lt;p&gt;When customers think of storing static data, you think of S3. But, saving in EBS, EFS is also away.&lt;/p&gt;
+
+&lt;p&gt;When facing a problem, the answers will gather a lot of services and methods to solve it. Your job is to choose the most suitable plan, only the most appropriate service is not enough.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#do-what-customers-ask"&gt;
+  &lt;/a&gt;
+  Do what customers ask
+&lt;/h3&gt;
+
+&lt;p&gt;There are widespread errors I have encountered. Each question will present many problems, and you must focus on only some of them: What the customer wants. These could be requests:&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;  How to optimize price?&lt;/li&gt;
+&lt;li&gt;  How to reduce latency?&lt;/li&gt;
+&lt;li&gt;  How to shorten the processing time?&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Why is it a problem? Because the content of the question will be very rambling and make you think of its request in the wrong way.&lt;/p&gt;
+
+&lt;p&gt;E.g., The customer has a website deployed in region us-east-1, using EC2 instance and Application Load Balancer, Auto Scaling Group. The website has about 1 million users worldwide. Customers find that users accessing from Asia will experience significant latency. Ask how to optimize the price?&lt;/p&gt;
+
+&lt;p&gt;You can think of CloudFront with global access, high latency, and optimal price. However, CloudFront is not price-optimized too much, sometimes even increasing costs, while customer requirements are price-optimized. So you have to think about Spot Instances, Reserved Instances. So, your job is to choose the answer to the question, don't let other things distract you.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#time-management"&gt;
+  &lt;/a&gt;
+  Time management
+&lt;/h3&gt;
+
+&lt;p&gt;You have 170 minutes (or 200 minutes if you request as ESL) to solve 75 questions. However, the topic is very long. Furthermore, to the pressure of the exam, it is easy to get immersed in some difficult questions and waste a lot of time. Try to practice solving each question within 2 or 2.5 minutes. I will review the sentences marked with review the rest of the time.&lt;/p&gt;
+
+&lt;p&gt;Also, do not mark the review too many. Should only keep the check under 20 sentences. For questions you don't know or think you can't answer, answer indiscriminately and don't look back; spend your precious time on questions that are more likely to earn points.&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#conclude"&gt;
+  &lt;/a&gt;
+  Conclude
+&lt;/h2&gt;
+
+&lt;p&gt;The AWS Certified Solutions Architect --- Professional exam is challenging. You need a solid determination to overcome. But whether you pass or not, it doesn't matter; what matters is that you will gain various knowledge, which will help you in a real career path.&lt;/p&gt;
+
+</description>
+      <category>aws</category>
+      <category>sapc01</category>
+      <category>certification</category>
+    </item>
+    <item>
       <title>Day 0: Joined dev.to!</title>
       <author>Nandan Wewhare</author>
       <pubDate>Sat, 22 Jan 2022 08:52:43 +0000</pubDate>
@@ -1462,276 +2033,6 @@ Create a new file named &lt;code&gt;Page.js&lt;/code&gt; and type the following&
 </description>
       <category>javascript</category>
       <category>webdev</category>
-    </item>
-    <item>
-      <title>Sending Custom emails with NodeJS from 🪄scratch  and for no cost whatsoever🗡</title>
-      <author>IroncladDev</author>
-      <pubDate>Fri, 21 Jan 2022 23:34:43 +0000</pubDate>
-      <link>https://dev.to/ironcladdev/sending-custom-emails-with-nodejs-from-scratch-and-for-no-cost-whatsoever-1i2n</link>
-      <guid>https://dev.to/ironcladdev/sending-custom-emails-with-nodejs-from-scratch-and-for-no-cost-whatsoever-1i2n</guid>
-      <description>&lt;p&gt;In this tutorial, I'm going to show you how you can send custom emails with just NodeJS, two sweet npm packages, and a single email address.&lt;/p&gt;
-
-&lt;p&gt;The best part?  No email hosting is required, you can do this for no cost at all, and all in under 50 lines of code!&lt;/p&gt;
-
-&lt;p&gt;Let's get started!&lt;/p&gt;
-
-
-
-
-&lt;p&gt;In this example, I'll be using gmail to get an email.  You may do this anywhere else, but I would prefer google due to how easy it is to get an alternate email account.&lt;/p&gt;
-
-&lt;p&gt;After signing up for google, go to &lt;a href="https://myaccount.google.com/"&gt;https://myaccount.google.com/&lt;/a&gt;, go to the Security section and scroll to the &lt;strong&gt;Signing in to Google&lt;/strong&gt; section.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--1qGqOvzp--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/1ztvby82mbnjccqxcujm.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--1qGqOvzp--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/1ztvby82mbnjccqxcujm.png" alt="Signing into Google" width="880" height="337"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;To be able to send emails, you'll need an app password from your google account.  You can obtain this after setting up two-step verification.  If you are not using google, use the password for that email account and keep it somewhere safe since we'll need it again.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--F_JvgGiv--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/hokfh1bmy9ojby2lltgi.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--F_JvgGiv--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/hokfh1bmy9ojby2lltgi.png" alt="Click on App Passwords" width="880" height="675"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;After turning on two-step verification, click on App Passwords and create a new one for Mail.  As for the device, click on &lt;strong&gt;Other (custom name)&lt;/strong&gt; and name it anything you want.&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--_SnSYgRn--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/q7b1j3rjqjug94fnhsk9.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--_SnSYgRn--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/q7b1j3rjqjug94fnhsk9.png" alt="Setting up the password" width="880" height="175"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;After that, copy the 16-digit app password, save it, and we're ready to start getting into the code.&lt;/p&gt;
-
-
-
-
-&lt;p&gt;First, install two packages from npm - &lt;strong&gt;nodemailer&lt;/strong&gt; and &lt;strong&gt;nodemailer-juice&lt;/strong&gt;&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;nodemailer&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;require&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;nodemailer&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;inLineCss&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;require&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;nodemailer-juice&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;Why do we need nodemailer-juice?  Emails typically only accept inline styles and not any styling from CSS.  If you don't want to sweat your brain to pieces, it's a good option to use nodemailer juice - it automatically converts css within &lt;code&gt;&amp;lt;style&amp;gt;&amp;lt;/style&amp;gt;&lt;/code&gt; tags into inline CSS for you.&lt;/p&gt;
-
-&lt;p&gt;Now for the emailing function.  I've already made it, so all you have to do is call it to send an email.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="nx"&gt;sendEmail&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;to&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;subject&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;message&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-  &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;transporter&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;nodemailer&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;createTransport&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt;
-    &lt;span class="na"&gt;service&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;gmail&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="c1"&gt;//change if not using gmail&lt;/span&gt;
-    &lt;span class="na"&gt;host&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;smtp.gmail.com&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="c1"&gt;// also change if not using gmail&lt;/span&gt;
-    &lt;span class="na"&gt;port&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="mi"&gt;465&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="na"&gt;secure&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="na"&gt;auth&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-      &lt;span class="na"&gt;user&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;&amp;lt;you@email.com&amp;gt;&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-      &lt;span class="na"&gt;pass&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;&amp;lt;your-app-password&amp;gt;&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;
-    &lt;span class="p"&gt;}&lt;/span&gt;
-  &lt;span class="p"&gt;});&lt;/span&gt;
-  &lt;span class="nx"&gt;transporter&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;use&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="s1"&gt;compile&lt;/span&gt;&lt;span class="dl"&gt;'&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;inLineCss&lt;/span&gt;&lt;span class="p"&gt;());&lt;/span&gt; &lt;span class="c1"&gt;//makes your email nice and full of css&lt;/span&gt;
-
-  &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;mailDetails&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="na"&gt;from&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;&amp;lt;you@email.com&amp;gt;&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="na"&gt;to&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;to&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="na"&gt;subject&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;subject&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-    &lt;span class="na"&gt;html&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;message&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-  &lt;span class="p"&gt;};&lt;/span&gt;
-
-  &lt;span class="nx"&gt;transporter&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;sendMail&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;mailDetails&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="kd"&gt;function&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;data&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-    &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="nx"&gt;console&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;error&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
-  &lt;span class="p"&gt;});&lt;/span&gt;
-&lt;span class="p"&gt;}&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;For the sendEmail function, you &lt;em&gt;will&lt;/em&gt; have to pass in an html document for the parameter &lt;code&gt;message&lt;/code&gt;.  Just to let you know, hover states, css listeners, and literally anything that won't run in inline styles &lt;strong&gt;will not run&lt;/strong&gt;.&lt;/p&gt;
-
-&lt;p&gt;Unfortunately, I'm too lazy to write an entire document here for you.  I do have a template email at &lt;a href="https://replit.com/@IroncladDev/Noseletter"&gt;https://replit.com/@IroncladDev/Noseletter&lt;/a&gt; in case you wanted to use it.&lt;/p&gt;
-
-&lt;p&gt;To make things a bit easier, I would store the html document in a function (as a template string) and have some parameters in which I could pass title, body, and some other options.&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight javascript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;emailTemplate&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;title&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;body&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="s2"&gt;`&amp;lt;!DOCTYPE html&amp;gt;
-&amp;lt;html lang="en"&amp;gt;
-  &amp;lt;head&amp;gt;
-    ...
-    &amp;lt;style&amp;gt;
-      ...
-    &amp;lt;/style&amp;gt;
-  &amp;lt;/head&amp;gt;
-  &amp;lt;body&amp;gt;
-    &amp;lt;h1&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;title&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;&amp;lt;/h1&amp;gt;
-    &amp;lt;p&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;body&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;&amp;lt;/p&amp;gt;
-  &amp;lt;/body&amp;gt;
-&amp;lt;/html&amp;gt;`&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-&lt;p&gt;To pass the email template function into the sendEmail function, simply do like so:&lt;/p&gt;
-
-&lt;p&gt;&lt;code&gt;sendEmail("someone@email.com", "Email Title", emailTemplate("Email Title", "This is the body of the email"));&lt;/code&gt;&lt;/p&gt;
-
-&lt;p&gt;That, my friend, is all it takes to send emails in NodeJS.&lt;/p&gt;
-
-
-
-
-&lt;p&gt;Liked this post?&lt;br&gt;
-Don't forget to subscribe to my &lt;a href="https://www.connerow.dev"&gt;newsletter&lt;/a&gt; (located on my website footer) for new posts, new projects, recaps, and more!&lt;/p&gt;
-
-&lt;p&gt;Join my &lt;a href="https://discord.gg/TZCc8P2cyH"&gt;discord&lt;/a&gt; to get in touch and hang out!&lt;/p&gt;
-
-&lt;p&gt;Also, be sure to support this post with a couple reactions!&lt;/p&gt;
-
-</description>
-      <category>node</category>
-      <category>javascript</category>
-      <category>tutorial</category>
-      <category>programming</category>
-    </item>
-    <item>
-      <title>How to add amazing loading effect - PACE.JS</title>
-      <author>Adeleye Ayodeji</author>
-      <pubDate>Fri, 21 Jan 2022 22:54:06 +0000</pubDate>
-      <link>https://dev.to/adeleyeayodeji/how-to-add-amazing-loading-effect-pacejs-2ln3</link>
-      <guid>https://dev.to/adeleyeayodeji/how-to-add-amazing-loading-effect-pacejs-2ln3</guid>
-      <description>&lt;h6&gt;
-  &lt;a href="#do-you-want-to-add-amazing-web-loading-animation-like-devto-and-google-app-then-this-tutorial-is-for-you"&gt;
-  &lt;/a&gt;
-  Do you want to add amazing web loading animation like Dev.to and Google App? then this tutorial is for you.
-&lt;/h6&gt;
-
-&lt;p&gt;Youtube Tutorial : &lt;a href="https://www.youtube.com/watch?v=JvfMUbB4Tn4"&gt;https://www.youtube.com/watch?v=JvfMUbB4Tn4&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;PACE JS CDN: &lt;a href="https://codebyzach.github.io/pace/"&gt;https://codebyzach.github.io/pace/&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;&lt;strong&gt;Have an issue? Comment below.&lt;/strong&gt;&lt;/p&gt;
-
-&lt;p&gt;Source Code::&lt;/p&gt;
-
-&lt;p&gt;index.php&lt;br&gt;
-&lt;/p&gt;
-
-&lt;div class="highlight js-code-highlight"&gt;
-&lt;pre class="highlight php"&gt;&lt;code&gt;&lt;span class="cp"&gt;&amp;lt;!doctype html&amp;gt;&lt;/span&gt;
-&lt;span class="nt"&gt;&amp;lt;html&lt;/span&gt; &lt;span class="na"&gt;lang=&lt;/span&gt;&lt;span class="s"&gt;"en"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-
-    &lt;span class="nt"&gt;&amp;lt;head&amp;gt;&lt;/span&gt;
-        &lt;span class="c"&gt;&amp;lt;!-- Required meta tags --&amp;gt;&lt;/span&gt;
-        &lt;span class="nt"&gt;&amp;lt;meta&lt;/span&gt; &lt;span class="na"&gt;charset=&lt;/span&gt;&lt;span class="s"&gt;"utf-8"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-        &lt;span class="nt"&gt;&amp;lt;meta&lt;/span&gt; &lt;span class="na"&gt;name=&lt;/span&gt;&lt;span class="s"&gt;"viewport"&lt;/span&gt; &lt;span class="na"&gt;content=&lt;/span&gt;&lt;span class="s"&gt;"width=device-width, initial-scale=1"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-
-        &lt;span class="c"&gt;&amp;lt;!-- Bootstrap CSS --&amp;gt;&lt;/span&gt;
-        &lt;span class="nt"&gt;&amp;lt;link&lt;/span&gt; &lt;span class="na"&gt;href=&lt;/span&gt;&lt;span class="s"&gt;"https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/css/bootstrap.min.css"&lt;/span&gt; &lt;span class="na"&gt;rel=&lt;/span&gt;&lt;span class="s"&gt;"stylesheet"&lt;/span&gt;
-            &lt;span class="na"&gt;integrity=&lt;/span&gt;&lt;span class="s"&gt;"sha384-EVSTQN3/azprG1Anm3QDgpJLIm9Nao0Yz1ztcQTwFspd3yD65VohhpuuCOmLASjC"&lt;/span&gt; &lt;span class="na"&gt;crossorigin=&lt;/span&gt;&lt;span class="s"&gt;"anonymous"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-
-        &lt;span class="nt"&gt;&amp;lt;title&amp;gt;&lt;/span&gt;AJAX IMAGE UPLOAD WITH PROGRESS BAR&lt;span class="nt"&gt;&amp;lt;/title&amp;gt;&lt;/span&gt;
-        &lt;span class="nt"&gt;&amp;lt;link&lt;/span&gt; &lt;span class="na"&gt;rel=&lt;/span&gt;&lt;span class="s"&gt;"stylesheet"&lt;/span&gt; &lt;span class="na"&gt;href=&lt;/span&gt;&lt;span class="s"&gt;"css/flash.css"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;/head&amp;gt;&lt;/span&gt;
-
-    &lt;span class="nt"&gt;&amp;lt;body&amp;gt;&lt;/span&gt;
-        &lt;span class="nt"&gt;&amp;lt;h1&amp;gt;&lt;/span&gt;AJAX IMAGE UPLOAD WITH PROGRESS BAR&lt;span class="nt"&gt;&amp;lt;/h1&amp;gt;&lt;/span&gt;
-
-        &lt;span class="nt"&gt;&amp;lt;form&lt;/span&gt; &lt;span class="na"&gt;id=&lt;/span&gt;&lt;span class="s"&gt;"uploadimage"&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"p-3"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-            &lt;span class="nt"&gt;&amp;lt;div&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"form-group"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-                &lt;span class="nt"&gt;&amp;lt;label&lt;/span&gt; &lt;span class="na"&gt;for=&lt;/span&gt;&lt;span class="s"&gt;""&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;Upload File&lt;span class="nt"&gt;&amp;lt;/label&amp;gt;&lt;/span&gt;
-                &lt;span class="nt"&gt;&amp;lt;input&lt;/span&gt; &lt;span class="na"&gt;type=&lt;/span&gt;&lt;span class="s"&gt;"file"&lt;/span&gt; &lt;span class="na"&gt;name=&lt;/span&gt;&lt;span class="s"&gt;"image"&lt;/span&gt; &lt;span class="na"&gt;id=&lt;/span&gt;&lt;span class="s"&gt;""&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"form-control"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-            &lt;span class="nt"&gt;&amp;lt;/div&amp;gt;&lt;/span&gt;
-            &lt;span class="nt"&gt;&amp;lt;div&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"progress mt-3"&lt;/span&gt; &lt;span class="na"&gt;style=&lt;/span&gt;&lt;span class="s"&gt;"display:none;"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-                &lt;span class="nt"&gt;&amp;lt;div&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"progress-bar"&lt;/span&gt; &lt;span class="na"&gt;role=&lt;/span&gt;&lt;span class="s"&gt;"progressbar"&lt;/span&gt; &lt;span class="na"&gt;style=&lt;/span&gt;&lt;span class="s"&gt;"width: 0%;"&lt;/span&gt; &lt;span class="na"&gt;aria-valuenow=&lt;/span&gt;&lt;span class="s"&gt;"0"&lt;/span&gt; &lt;span class="na"&gt;aria-valuemin=&lt;/span&gt;&lt;span class="s"&gt;"0"&lt;/span&gt;
-                    &lt;span class="na"&gt;aria-valuemax=&lt;/span&gt;&lt;span class="s"&gt;"100"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;0%&lt;span class="nt"&gt;&amp;lt;/div&amp;gt;&lt;/span&gt;
-            &lt;span class="nt"&gt;&amp;lt;/div&amp;gt;&lt;/span&gt;
-            &lt;span class="nt"&gt;&amp;lt;button&lt;/span&gt; &lt;span class="na"&gt;class=&lt;/span&gt;&lt;span class="s"&gt;"btn btn-primary mt-2"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;Upload&lt;span class="nt"&gt;&amp;lt;/button&amp;gt;&lt;/span&gt;
-        &lt;span class="nt"&gt;&amp;lt;/form&amp;gt;&lt;/span&gt;
-
-
-        &lt;span class="c"&gt;&amp;lt;!-- Optional JavaScript; choose one of the two! --&amp;gt;&lt;/span&gt;
-        &lt;span class="nt"&gt;&amp;lt;script &lt;/span&gt;&lt;span class="na"&gt;src=&lt;/span&gt;&lt;span class="s"&gt;"https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&amp;lt;/script&amp;gt;&lt;/span&gt;
-
-        &lt;span class="c"&gt;&amp;lt;!-- Option 1: Bootstrap Bundle with Popper --&amp;gt;&lt;/span&gt;
-        &lt;span class="nt"&gt;&amp;lt;script &lt;/span&gt;&lt;span class="na"&gt;src=&lt;/span&gt;&lt;span class="s"&gt;"https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/js/bootstrap.bundle.min.js"&lt;/span&gt;
-            &lt;span class="na"&gt;integrity=&lt;/span&gt;&lt;span class="s"&gt;"sha384-MrcW6ZMFYlzcLA8Nl+NtUVF0sA7MsXsP1UyJoMp4YLEuNSfAP+JcXn/tWtIaxVXM"&lt;/span&gt; &lt;span class="na"&gt;crossorigin=&lt;/span&gt;&lt;span class="s"&gt;"anonymous"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-        &lt;span class="nt"&gt;&amp;lt;/script&amp;gt;&lt;/span&gt;
-
-        &lt;span class="c"&gt;&amp;lt;!-- Option 2: Separate Popper and Bootstrap JS --&amp;gt;&lt;/span&gt;
-        &lt;span class="nt"&gt;&amp;lt;script &lt;/span&gt;&lt;span class="na"&gt;src=&lt;/span&gt;&lt;span class="s"&gt;"https://cdn.jsdelivr.net/npm/@popperjs/core@2.9.2/dist/umd/popper.min.js"&lt;/span&gt;
-            &lt;span class="na"&gt;integrity=&lt;/span&gt;&lt;span class="s"&gt;"sha384-IQsoLXl5PILFhosVNubq5LC7Qb9DXgDA9i+tQ8Zj3iwWAwPtgFTxbJ8NT4GN1R8p"&lt;/span&gt; &lt;span class="na"&gt;crossorigin=&lt;/span&gt;&lt;span class="s"&gt;"anonymous"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-        &lt;span class="nt"&gt;&amp;lt;/script&amp;gt;&lt;/span&gt;
-        &lt;span class="nt"&gt;&amp;lt;script &lt;/span&gt;&lt;span class="na"&gt;src=&lt;/span&gt;&lt;span class="s"&gt;"https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/js/bootstrap.min.js"&lt;/span&gt;
-            &lt;span class="na"&gt;integrity=&lt;/span&gt;&lt;span class="s"&gt;"sha384-cVKIPhGWiC2Al4u+LWgxfKTRIcfu0JTxR+EQDz/bgldoEyl4H0zUF0QKbrJ0EcQF"&lt;/span&gt; &lt;span class="na"&gt;crossorigin=&lt;/span&gt;&lt;span class="s"&gt;"anonymous"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&lt;/span&gt;
-        &lt;span class="nt"&gt;&amp;lt;/script&amp;gt;&lt;/span&gt;
-
-        &lt;span class="nt"&gt;&amp;lt;script &lt;/span&gt;&lt;span class="na"&gt;src=&lt;/span&gt;&lt;span class="s"&gt;"js/pace.js"&lt;/span&gt;&lt;span class="nt"&gt;&amp;gt;&amp;lt;/script&amp;gt;&lt;/span&gt;
-        &lt;span class="nt"&gt;&amp;lt;script&amp;gt;&lt;/span&gt;
-        &lt;span class="nx"&gt;$&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nb"&gt;document&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;ajaxStart&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kd"&gt;function&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-            &lt;span class="nx"&gt;Pace&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;restart&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
-        &lt;span class="p"&gt;});&lt;/span&gt;
-        &lt;span class="nt"&gt;&amp;lt;/script&amp;gt;&lt;/span&gt;
-        &lt;span class="nt"&gt;&amp;lt;script&amp;gt;&lt;/span&gt;
-        &lt;span class="nx"&gt;$&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nb"&gt;document&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;ready&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kd"&gt;function&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-            &lt;span class="nx"&gt;$&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;#uploadimage&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;submit&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kd"&gt;function&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;e&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-                &lt;span class="nx"&gt;e&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;preventDefault&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
-                &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;form&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;FormData&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-                &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;$&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="k"&gt;this&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;find&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;input[name='image']&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;val&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;==&lt;/span&gt; &lt;span class="dl"&gt;""&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-                    &lt;span class="nx"&gt;alert&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Select an image&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-                    &lt;span class="k"&gt;return&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-                &lt;span class="p"&gt;}&lt;/span&gt;
-                &lt;span class="c1"&gt;//AJAX&lt;/span&gt;
-                &lt;span class="nx"&gt;$&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;ajax&lt;/span&gt;&lt;span class="p"&gt;({&lt;/span&gt;
-                    &lt;span class="na"&gt;type&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;POST&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-                    &lt;span class="na"&gt;url&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;upload.php&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-                    &lt;span class="na"&gt;data&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="nx"&gt;form&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-                    &lt;span class="na"&gt;cache&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kc"&gt;false&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-                    &lt;span class="na"&gt;contentType&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kc"&gt;false&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-                    &lt;span class="na"&gt;processData&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kc"&gt;false&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-                    &lt;span class="na"&gt;beforeSend&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-                        &lt;span class="nx"&gt;$&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;.progress&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;slideDown&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
-                        &lt;span class="nx"&gt;$&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;#uploadimage&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;find&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;button&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;text&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Uploading....&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-                    &lt;span class="p"&gt;},&lt;/span&gt;
-                    &lt;span class="na"&gt;xhr&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kd"&gt;function&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-                        &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;xhr&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nb"&gt;window&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;XMLHttpRequest&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;
-                        &lt;span class="nx"&gt;xhr&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;upload&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;addEventListener&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;progress&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;evt&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;=&amp;gt;&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-                            &lt;span class="c1"&gt;//Check for progress&lt;/span&gt;
-                            &lt;span class="k"&gt;if&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;evt&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;lengthComputable&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-                                &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;percentage&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;evt&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;loaded&lt;/span&gt; &lt;span class="o"&gt;/&lt;/span&gt; &lt;span class="nx"&gt;evt&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;total&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt; &lt;span class="mi"&gt;100&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-                                &lt;span class="c1"&gt;//100%&lt;/span&gt;
-                                &lt;span class="kd"&gt;let&lt;/span&gt; &lt;span class="nx"&gt;percentageformatted&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nx"&gt;percentage&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;toFixed&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-                                &lt;span class="c1"&gt;//progress bar initialize&lt;/span&gt;
-                                &lt;span class="nx"&gt;$&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;.progress-bar&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;css&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;width&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
-                                    &lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;percentageformatted&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;%`&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;attr&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
-                                    &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;aria-valuenow&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="nx"&gt;percentageformatted&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;text&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
-                                    &lt;span class="s2"&gt;`&lt;/span&gt;&lt;span class="p"&gt;${&lt;/span&gt;&lt;span class="nx"&gt;percentageformatted&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="s2"&gt;%`&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-                            &lt;span class="p"&gt;}&lt;/span&gt;
-                        &lt;span class="p"&gt;},&lt;/span&gt; &lt;span class="kc"&gt;false&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-                        &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="nx"&gt;xhr&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;
-                    &lt;span class="p"&gt;},&lt;/span&gt;
-                    &lt;span class="na"&gt;success&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="kd"&gt;function&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;response&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
-                        &lt;span class="nx"&gt;$&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;.progress-bar&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;addClass&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;bg-success&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-                        &lt;span class="nx"&gt;$&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;#uploadimage&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;find&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;button&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="nx"&gt;text&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Upload&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;
-                    &lt;span class="p"&gt;}&lt;/span&gt;
-                &lt;span class="p"&gt;});&lt;/span&gt;
-            &lt;span class="p"&gt;});&lt;/span&gt;
-        &lt;span class="p"&gt;});&lt;/span&gt;
-        &lt;span class="nt"&gt;&amp;lt;/script&amp;gt;&lt;/span&gt;
-    &lt;span class="nt"&gt;&amp;lt;/body&amp;gt;&lt;/span&gt;
-
-&lt;span class="nt"&gt;&amp;lt;/html&amp;gt;&lt;/span&gt;
-&lt;/code&gt;&lt;/pre&gt;
-
-&lt;/div&gt;
-
-
-
-</description>
-      <category>javascript</category>
-      <category>programming</category>
-      <category>tutorial</category>
-      <category>beginners</category>
     </item>
   </channel>
 </rss>
