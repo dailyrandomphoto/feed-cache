@@ -7,6 +7,873 @@
     <link>https://dev.to</link>
     <language>en</language>
     <item>
+      <title>Stop using static cloud credentials in GitHub Actions</title>
+      <author>Lee Briggs</author>
+      <pubDate>Sun, 23 Jan 2022 23:20:02 +0000</pubDate>
+      <link>https://dev.to/jaxxstorm/stop-using-static-cloud-credentials-in-github-actions-45il</link>
+      <guid>https://dev.to/jaxxstorm/stop-using-static-cloud-credentials-in-github-actions-45il</guid>
+      <description>&lt;p&gt;Picture the scene. You're configuring your automation pipelines, whether it's deploying infrastructure, applications or any other piece of your CI/CD pipeline that needs to access a cloud provider. You want to do things properly, so you define a well scoped role with a minimum set of permissions that you need for the pipeline to be successful. Then you assign those permissions to your cloud provider's authentication mechanism. If you're lucky, your CI/CD pipeline runs in the cloud too, so you never need to define a set of static credentials.&lt;/p&gt;
+
+&lt;p&gt;If you're not using self hosted runners for your CI/CD pipeline, you might pause for a second. "I need to remember to rotate these credentials" you think. Maybe you'll set a reminder to rotate them in a month's time, or perhaps you'll set up some elaborate mechanism to rotate them. More likely than not, you'll forget about it completely until your wonderful InfoSec team bug you about them, hopefully it'll be for a compliance reasons and not because someone got hold of them.&lt;/p&gt;
+
+&lt;p&gt;Until recently, these hard coded credentials have been not only dangeorus, but unavoidable. Mechanisms for accessing cloud provider from &lt;em&gt;outside&lt;/em&gt; the cloud provider itself have been almost non-existent. You defined an IAM user/service principal/service account/insert other mechanism here and you just...hoped. &lt;/p&gt;
+
+&lt;p&gt;In addition to these credentials being static and hard to rotate, often the credentials stored in CI/CD services can have extremely broad and permissive privileges. If you're running infrastructure automation, for example, you might need to scope the credentials to basically admin permissions, which is an extremely worrying prospect.&lt;/p&gt;
+
+&lt;p&gt;The good news is, this is starting to change, and a well defined protocol is in the middle of these changes. &lt;/p&gt;
+
+&lt;p&gt;If you're using GitHub Actions to as your CI/CD tool of choice, you can now use OIDC with the 3 major cloud providers to securely authenticate to that provider. You can find a long, well defined document in the GitHub documentation &lt;a href="https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/about-security-hardening-with-openid-connect"&gt;here&lt;/a&gt;. This document clearly states the benefit of using OIDC, but for posterity, we'll repeat them here:&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;&lt;em&gt;No cloud secrets&lt;/em&gt;: You won't need to duplicate your cloud credentials as long-lived GitHub secrets. Instead, you can configure the OIDC trust on your cloud provider, and then update your workflows to request a short-lived access token from the cloud provider through OIDC.&lt;/p&gt;
+
+&lt;p&gt;&lt;em&gt;Authentication and authorization management&lt;/em&gt;: You have more granular control over how workflows can use credentials, using your cloud provider's authentication (authN) and authorization (authZ) tools to control access to cloud resources.&lt;/p&gt;
+
+&lt;p&gt;&lt;em&gt;Rotating credentials&lt;/em&gt;: With OIDC, your cloud provider issues a short-lived access token that is only valid for a single workflow run, and then automatically expires.&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;This all sounds pretty amazing right? No cloud credentials?! How do I set this up?&lt;/p&gt;
+
+&lt;p&gt;In the rest of this blog post, we'll look at how you can use &lt;a href="https://pulumi.com"&gt;Pulumi&lt;/a&gt;'s TypeScript SDKs to quickly an easy set up GitHub actions, so you don't have to manually configure the access!&lt;/p&gt;
+
+&lt;p&gt;It's of course quite possible to use Pulumi's other SDKs, as well as other infrastructure as code tools to do the setup, but we'll use Pulumi in this walkthrough. If you don't want to read a whole blog post, you can go directly to the code &lt;a href="https://github.com/jaxxstorm/secure-cloud-access"&gt;here&lt;/a&gt; with example actions running to show you this does really work, honest.&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;To jump directly to your cloud provider, use these links: &lt;a href="#aws"&gt;AWS&lt;/a&gt; | &lt;a href="#azure"&gt;Azure&lt;/a&gt; | &lt;a href="#google-cloud"&gt;Google Cloud&lt;/a&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;h2&gt;
+  &lt;a href="#aws"&gt;
+  &lt;/a&gt;
+  AWS
+&lt;/h2&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;The complete code for this example can be found &lt;a href="https://github.com/jaxxstorm/secure-cloud-access/tree/main/aws"&gt;here&lt;/a&gt;"&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;AWS has leaned into OIDC as an authentication mechanism since they introduced &lt;a href="https://aws.amazon.com/blogs/opensource/introducing-fine-grained-iam-roles-service-accounts/"&gt;IAM roles for service accounts&lt;/a&gt; back in 2019. The ability to use OIDC as an authentication mechanism has also been extended to other services, and GitHub actions is one of them.&lt;/p&gt;
+
+&lt;p&gt;We'll need the &lt;a href="https://www.pulumi.com/registry/packages/aws/"&gt;Pulumi AWS provider&lt;/a&gt; in order to interact with AWS, as well as the &lt;a href="https://www.pulumi.com/registry/packages/github/"&gt;GitHub provider&lt;/a&gt;, so make sure you've got those installed in your Pulumi program like so:&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight yaml"&gt;&lt;code&gt;&lt;span class="s"&gt;npm install @pulumi/aws @pulumi/github&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;h3&gt;
+  &lt;a href="#create-an-oidc-provider"&gt;
+  &lt;/a&gt;
+  Create an OIDC Provider
+&lt;/h3&gt;
+
+&lt;p&gt;The first step in being able to use OIDC in GitHub actions is to define an OIDC provider.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;oidcProvider&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;aws&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;iam&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;OpenIdConnectProvider&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;example&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="na"&gt;thumbprintLists&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;6938fd4d98bab03faadb97b34396831e3780aea1&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt;
+  &lt;span class="na"&gt;clientIdLists&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;https://github.com/jaxxstorm&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;sts.amazonaws.com&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt;
+  &lt;span class="na"&gt;url&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;https://token.actions.githubusercontent.com&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+&lt;span class="p"&gt;});&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;The URL is important here, as it the thumprint. You can essentially copy and paste these static values. The &lt;code&gt;clientIDList&lt;/code&gt; needs to be updated to use your GitHub organization, and this can be used across repositories within your GitHub Org.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#define-an-iam-role"&gt;
+  &lt;/a&gt;
+  Define an IAM Role
+&lt;/h3&gt;
+
+&lt;p&gt;Next up, we'll need to define an IAM role. We'll set a condition on this IAM role to scope the role to repository in the &lt;code&gt;Condition&lt;/code&gt; field. You can scope the access to anything that exists in the &lt;a href="https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/about-security-hardening-with-openid-connect#understanding-the-oidc-token"&gt;OIDC token&lt;/a&gt; - in this example we're allowing all, because YOLO.&lt;br&gt;
+&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight typescript"&gt;&lt;code&gt;&lt;span class="kd"&gt;const&lt;/span&gt; &lt;span class="nx"&gt;role&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="k"&gt;new&lt;/span&gt; &lt;span class="nx"&gt;aws&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;iam&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Role&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;secure-cloud-access&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+  &lt;span class="na"&gt;description&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Access for github.com/jaxxstorm/secure-cloud-access&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+  &lt;span class="na"&gt;assumeRolePolicy&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+    &lt;span class="na"&gt;Version&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;2012-10-17&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+    &lt;span class="na"&gt;Statement&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;
+      &lt;span class="p"&gt;{&lt;/span&gt;
+        &lt;span class="na"&gt;Action&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;sts:AssumeRoleWithWebIdentity&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt;
+        &lt;span class="na"&gt;Effect&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;Allow&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+        &lt;span class="na"&gt;Condition&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+          &lt;span class="na"&gt;StringLike&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+            &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;token.actions.githubusercontent.com:sub&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;
+              &lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="s2"&gt;repo:jaxxstorm/secure-cloud-access:*&lt;/span&gt;&lt;span class="dl"&gt;"&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="c1"&gt;// replace with your repo&lt;/span&gt;
+          &lt;span class="p"&gt;},&lt;/span&gt;
+        &lt;span class="p"&gt;},&lt;/span&gt;
+        &lt;span class="na"&gt;Principal&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;
+          &lt;span class="na"&gt;Federated&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt; &lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;oidcProvider&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;arn&lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt;
+        &lt;span class="p"&gt;},&lt;/span&gt;
+      &lt;span class="p"&gt;},&lt;/span&gt;
+    &lt;span class="p"&gt;],&lt;/span&gt;
+  &lt;span class="p"&gt;}&lt;/span&gt; &lt;span class="k"&gt;as&lt;/span&gt; &lt;span class="nx"&gt;aws&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;iam&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;PolicyDocument&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;
+&lt;span class="p"&gt;});&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+
+
+&lt;p&gt;Next up, we'll need to attach a policy to this role, to define what this repository will be able to do in AWS. In this example I'm going to just add `ReadOnly permissions, but we'll need to be considerate about what this repo is going to do.&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;&lt;/code&gt;`typescript&lt;br&gt;
+// get our AWS account ID&lt;br&gt;
+const partition = aws.getPartition();&lt;/p&gt;
+
+&lt;p&gt;// Attack the readonlyaccess policy&lt;br&gt;
+partition.then((p) =&amp;gt; {&lt;br&gt;
+  new aws.iam.PolicyAttachment("readOnly", {&lt;br&gt;
+    policyArn: &lt;code&gt;arn:${p.partition}:iam::aws:policy/ReadOnlyAccess&lt;/code&gt;,&lt;br&gt;
+    roles: [role.name],&lt;br&gt;
+  });&lt;br&gt;
+});&lt;br&gt;
+`&lt;code&gt;&lt;/code&gt;&lt;/p&gt;
+
+&lt;p&gt;Our final step is to use Pulumi's &lt;code&gt;GitHub&lt;/code&gt; provider to store the role name in a GitHub actions secret, so we can quickly and easy access it from a workflow:&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;&lt;/code&gt;&lt;code&gt;typescript&lt;br&gt;
+new github.ActionsSecret("roleArn", {&lt;br&gt;
+  repository: "secure-cloud-access",&lt;br&gt;
+  secretName: "ROLE_ARN",&lt;br&gt;
+  plaintextValue: role.arn,&lt;br&gt;
+});&lt;br&gt;
+&lt;/code&gt;&lt;code&gt;&lt;/code&gt;&lt;/p&gt;
+
+&lt;p&gt;Your final Pulumi program will look a bit like this:&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;&lt;/code&gt;`typescript&lt;br&gt;
+import * as aws from "@pulumi/aws";&lt;br&gt;
+import * as github from "@pulumi/github"&lt;/p&gt;
+
+&lt;p&gt;const oidcProvider = new aws.iam.OpenIdConnectProvider("secure-cloud-access", {&lt;br&gt;
+  thumbprintLists: ["6938fd4d98bab03faadb97b34396831e3780aea1"],&lt;br&gt;
+  clientIdLists: ["&lt;a href="https://github.com/jaxxstorm"&gt;https://github.com/jaxxstorm&lt;/a&gt;", "sts.amazonaws.com"],&lt;br&gt;
+  url: "&lt;a href="https://token.actions.githubusercontent.com"&gt;https://token.actions.githubusercontent.com&lt;/a&gt;",&lt;br&gt;
+});&lt;/p&gt;
+
+&lt;p&gt;const role = new aws.iam.Role("secure-cloud-access", {&lt;br&gt;
+  description: "Access for github.com/jaxxstorm/secure-cloud-access",&lt;br&gt;
+  assumeRolePolicy: {&lt;br&gt;
+    Version: "2012-10-17",&lt;br&gt;
+    Statement: [&lt;br&gt;
+      {&lt;br&gt;
+        Action: ["sts:AssumeRoleWithWebIdentity"],&lt;br&gt;
+        Effect: "Allow",&lt;br&gt;
+        Condition: {&lt;br&gt;
+          StringLike: {&lt;br&gt;
+            "token.actions.githubusercontent.com:sub":&lt;br&gt;
+              "repo:jaxxstorm/secure-cloud-access:*",&lt;br&gt;
+          },&lt;br&gt;
+        },&lt;br&gt;
+        Principal: {&lt;br&gt;
+          Federated: [oidcProvider.arn],&lt;br&gt;
+        },&lt;br&gt;
+      },&lt;br&gt;
+    ],&lt;br&gt;
+  } as aws.iam.PolicyDocument,&lt;br&gt;
+});&lt;/p&gt;
+
+&lt;p&gt;const partition = aws.getPartition();&lt;/p&gt;
+
+&lt;p&gt;partition.then((p) =&amp;gt; {&lt;br&gt;
+  new aws.iam.PolicyAttachment("readOnly", {&lt;br&gt;
+    policyArn: &lt;code&gt;arn:${p.partition}:iam::aws:policy/ReadOnlyAccess&lt;/code&gt;,&lt;br&gt;
+    roles: [role.name],&lt;br&gt;
+  });&lt;br&gt;
+});&lt;/p&gt;
+
+&lt;p&gt;new github.ActionsSecret("roleArn", {&lt;br&gt;
+  repository: "secure-cloud-access",&lt;br&gt;
+  secretName: "ROLE_ARN",&lt;br&gt;
+  plaintextValue: role.arn,&lt;br&gt;
+});&lt;/p&gt;
+
+&lt;p&gt;export const roleArn = role.arn;&lt;br&gt;
+`&lt;code&gt;&lt;/code&gt;&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#define-your-github-actions-workflow"&gt;
+  &lt;/a&gt;
+  Define your GitHub Actions workflow
+&lt;/h3&gt;
+
+&lt;p&gt;Now, let's define a workflow to verify what credentials we got:&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;&lt;/code&gt;`yaml&lt;/p&gt;
+
+&lt;h1&gt;
+  &lt;a href="#the-workflow-creates-static-website-using-aws-s3"&gt;
+  &lt;/a&gt;
+  The workflow Creates static website using aws s3
+&lt;/h1&gt;
+
+&lt;p&gt;name: AWS Workflow&lt;br&gt;
+on:&lt;br&gt;
+  push&lt;br&gt;
+permissions:&lt;br&gt;
+  id-token: write&lt;br&gt;
+  contents: read&lt;br&gt;
+jobs:&lt;br&gt;
+  CheckAccess:&lt;br&gt;
+    runs-on: ubuntu-latest&lt;br&gt;
+    steps:&lt;br&gt;
+      - name: Git clone the repository&lt;br&gt;
+        uses: actions/checkout@v2&lt;br&gt;
+      - name: configure aws credentials&lt;br&gt;
+        uses: aws-actions/configure-aws-credentials@master&lt;br&gt;
+        with:&lt;br&gt;
+          role-to-assume: ${{ secrets.ROLE_ARN }}&lt;br&gt;
+          role-session-name: githubactions&lt;br&gt;
+          aws-region: us-west-2&lt;br&gt;
+      - name:  Check permissions&lt;br&gt;
+        run: |&lt;br&gt;
+          aws sts get-caller-identity&lt;br&gt;
+`&lt;code&gt;&lt;/code&gt;&lt;/p&gt;
+
+&lt;p&gt;You'll notice we're passing the &lt;code&gt;ROLE_ARN&lt;/code&gt; from the repository secret directly, so we don't have to hardcode anything. Now, run your Pulumi program to create all the AWS resources needed, and check everything in. You should have access to AWS with &lt;code&gt;ReadOnly&lt;/code&gt; access, without having to specify any AWS credentials!&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#azure"&gt;
+  &lt;/a&gt;
+  Azure
+&lt;/h2&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;The complete code for this example can be found &lt;a href="https://github.com/jaxxstorm/secure-cloud-access/tree/main/azure"&gt;here&lt;/a&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;To configure "credentialless access" in Azure, we can follow a similar pattern. We'll need to use Pulumi's &lt;a href="https://www.pulumi.com/registry/packages/azuread/"&gt;Azure AD&lt;/a&gt; provider, the &lt;a href="https://www.pulumi.com/registry/packages/github/"&gt;GitHub&lt;/a&gt; as well as the &lt;a href="https://www.pulumi.com/registry/packages/azure-native/"&gt;Azure Native&lt;/a&gt; provider. We're also going to use the Azure SDK to make our life a little easier, so make sure you've run the following in your Pulumi program before you proceed:&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;&lt;/code&gt;&lt;code&gt;yaml&lt;br&gt;
+npm install @pulumi/azure-native @pulumi/azuread @pulumi/github @azure/arm-authorization @azure/ms-rest-js&lt;br&gt;
+&lt;/code&gt;&lt;code&gt;&lt;/code&gt;&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#create-an-azure-ad-application-and-service-principal"&gt;
+  &lt;/a&gt;
+  Create an Azure AD Application and Service Principal
+&lt;/h3&gt;
+
+&lt;p&gt;Our first step is to define the user that GitHub actions will use to get its permissions. We create an Azure AD Application, a Service Principal and a random password, like so:&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;&lt;/code&gt;`typescript&lt;br&gt;
+// create an azure AD application&lt;br&gt;
+const adApp = new azuread.Application("gha", {&lt;br&gt;
+  displayName: "githubActions",&lt;br&gt;
+});&lt;/p&gt;
+
+&lt;p&gt;// create a service principal&lt;br&gt;
+const adSp = new azuread.ServicePrincipal(&lt;br&gt;
+  "ghaSp",&lt;br&gt;
+  { applicationId: adApp.applicationId },&lt;br&gt;
+  { parent: adApp }&lt;br&gt;
+);&lt;/p&gt;
+
+&lt;p&gt;// mandatory SP password&lt;br&gt;
+const adSpPassword = new azuread.ServicePrincipalPassword(&lt;br&gt;
+  "aksSpPassword",&lt;br&gt;
+  {&lt;br&gt;
+    servicePrincipalId: adSp.id,&lt;br&gt;
+    endDate: "2099-01-01T00:00:00Z",&lt;br&gt;
+  },&lt;br&gt;
+  { parent: adSp }&lt;br&gt;
+);&lt;br&gt;
+`&lt;code&gt;&lt;/code&gt;&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#create-a-federated-identity-credential"&gt;
+  &lt;/a&gt;
+  Create a Federated Identity Credential
+&lt;/h3&gt;
+
+&lt;p&gt;Now here comes the magic. We're going to create a Federated Identity credential, which has a subject for our repository in it. Azure is stricter about the subject than AWS, so we'll need to define what part of the OIDC token we want to allow access. In this example, I'm allowing the main branch access, but you can use any part of the &lt;a href="https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/about-security-hardening-with-openid-connect#understanding-the-oidc-token"&gt;OIDC token&lt;/a&gt; like the environment.&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;&lt;/code&gt;`typescript&lt;br&gt;
+/*&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;This is the magic. We set the subject to the repo we're running from&lt;/li&gt;
+&lt;li&gt;Also need to ensure your AD Application is the one where access is defined
+*/
+new azuread.ApplicationFederatedIdentityCredential(
+"gha",
+{
+audiences: ["api://AzureADTokenExchange"],
+subject: "repo:jaxxstorm/secure-cloud-access:ref:refs/heads/main", // this can be any ref
+issuer: "&lt;a href="https://token.actions.githubusercontent.com"&gt;https://token.actions.githubusercontent.com&lt;/a&gt;",
+applicationObjectId: adApp.objectId,
+displayName: "github-actions",
+},
+{ parent: adApp }
+);
+`&lt;code&gt;&lt;/code&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;h3&gt;
+  &lt;a href="#define-a-permissions-this-application-gets"&gt;
+  &lt;/a&gt;
+  Define a permissions this application gets
+&lt;/h3&gt;
+
+&lt;p&gt;Now we've got the federated identity credential, we need to create a role assignment. There's going to be a lot to unpack here, so let's look at the code first, then walk through it.&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;&lt;/code&gt;`typescript&lt;/p&gt;
+
+&lt;p&gt;import { AuthorizationManagementClient } from "@azure/arm-authorization";&lt;br&gt;
+import { TokenCredentials } from "@azure/ms-rest-js";&lt;br&gt;
+import * as authorization from "@pulumi/azure-native/authorization";&lt;/p&gt;
+
+&lt;p&gt;async function getAuthorizationManagementClient(): Promise {&lt;br&gt;
+  const config = await authorization.getClientConfig();&lt;br&gt;
+  const token = await authorization.getClientToken();&lt;br&gt;
+  const credentials = new TokenCredentials(token.token);&lt;br&gt;
+  // Note: reuse the credentials and/or the client in case your scenario needs&lt;br&gt;
+  // multiple calls to Azure SDKs.&lt;br&gt;
+  return new AuthorizationManagementClient(credentials, config.subscriptionId);&lt;br&gt;
+}&lt;/p&gt;
+
+&lt;p&gt;async function getRoleIdByName(&lt;br&gt;
+  roleName: string,&lt;br&gt;
+  scope?: string&lt;br&gt;
+): Promise {&lt;br&gt;
+  const client = await getAuthorizationManagementClient();&lt;br&gt;
+  const roles = await client.roleDefinitions.list(scope || "", {&lt;br&gt;
+    filter: &lt;code&gt;roleName eq '${roleName}'&lt;/code&gt;,&lt;br&gt;
+  });&lt;br&gt;
+  if (roles.length === 0) {&lt;br&gt;
+    throw new Error(&lt;code&gt;role "${roleName}" not found at scope "${scope}"&lt;/code&gt;);&lt;br&gt;
+  }&lt;br&gt;
+  if (roles.length &amp;gt; 1) {&lt;br&gt;
+    throw new Error(&lt;br&gt;
+      &lt;code&gt;too many roles "${roleName}" found at scope "${scope}". Found: ${roles.length}&lt;/code&gt;&lt;br&gt;
+    );&lt;br&gt;
+  }&lt;br&gt;
+  const role = roles[0];&lt;br&gt;
+  return role.id!;&lt;br&gt;
+}&lt;/p&gt;
+
+&lt;p&gt;const subInfo = authorization.getClientConfig();&lt;/p&gt;
+
+&lt;p&gt;subInfo.then((info) =&amp;gt; {&lt;br&gt;
+    new authorization.RoleAssignment("readOnly", {&lt;br&gt;
+    principalId: adSp.id,&lt;br&gt;
+    principalType: authorization.PrincipalType.ServicePrincipal,&lt;br&gt;
+    scope: pulumi.interpolate&lt;code&gt;/subscriptions/${info.subscriptionId}&lt;/code&gt;,&lt;br&gt;
+    roleDefinitionId: getRoleIdByName("Reader"),&lt;br&gt;
+  });&lt;br&gt;
+});&lt;br&gt;
+`&lt;code&gt;&lt;/code&gt;&lt;/p&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;Huge thanks to &lt;a href="https://twitter.com/mikhailshilkov"&gt;Mikhail Shilkov&lt;/a&gt; here for his prior art on retrieving the &lt;code&gt;roleDefinitionId&lt;/code&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;Why do we need all this? Well, we could hard code the &lt;code&gt;roleDefinitionId&lt;/code&gt; but looking it up is cleaner. Let's step through it:&lt;/p&gt;
+
+&lt;p&gt;First we define an auth client to talk to Azure using the Azure TypeScript SDK&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;&lt;/code&gt;&lt;code&gt;typescript&lt;br&gt;
+async function getAuthorizationManagementClient():  Promise&amp;lt;AuthorizationManagementClient&amp;gt; {&lt;br&gt;
+  const config = await authorization.getClientConfig();&lt;br&gt;
+  const token = await authorization.getClientToken();&lt;br&gt;
+  const credentials = new TokenCredentials(token.token);&lt;br&gt;
+  // Note: reuse the credentials and/or the client in case your scenario needs&lt;br&gt;
+  // multiple calls to Azure SDKs.&lt;br&gt;
+  return new AuthorizationManagementClient(credentials, config.subscriptionId);&lt;br&gt;
+}&lt;br&gt;
+&lt;/code&gt;&lt;code&gt;&lt;/code&gt;&lt;/p&gt;
+
+&lt;p&gt;Then, we define a function which can look up an Azure role by its name, rather than the long string you define it by:&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;&lt;/code&gt;&lt;code&gt;typescript&lt;br&gt;
+async function getRoleIdByName(&lt;br&gt;
+  roleName: string,&lt;br&gt;
+  scope?: string&lt;br&gt;
+): Promise&amp;lt;string&amp;gt; {&lt;br&gt;
+  const client = await getAuthorizationManagementClient();&lt;br&gt;
+  const roles = await client.roleDefinitions.list(scope || "", {&lt;br&gt;
+    filter:&lt;/code&gt;roleName eq '${roleName}'&lt;code&gt;,&lt;br&gt;
+  });&lt;br&gt;
+  if (roles.length === 0) {&lt;br&gt;
+    throw new Error(&lt;/code&gt;role "${roleName}" not found at scope "${scope}"&lt;code&gt;);&lt;br&gt;
+  }&lt;br&gt;
+  if (roles.length &amp;gt; 1) {&lt;br&gt;
+    throw new Error(&lt;br&gt;
+&lt;/code&gt;too many roles "${roleName}" found at scope "${scope}". Found: ${roles.length}&lt;code&gt;&lt;br&gt;
+    );&lt;br&gt;
+  }&lt;br&gt;
+  const role = roles[0];&lt;br&gt;
+  return role.id!;&lt;br&gt;
+}&lt;br&gt;
+&lt;/code&gt;&lt;code&gt;&lt;/code&gt;&lt;/p&gt;
+
+&lt;p&gt;Now, we use &lt;code&gt;azure-native&lt;/code&gt;'s &lt;code&gt;authorization&lt;/code&gt; package to get the current client information:&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;&lt;/code&gt;&lt;code&gt;typescript&lt;br&gt;
+const subInfo = authorization.getClientConfig();&lt;br&gt;
+&lt;/code&gt;&lt;code&gt;&lt;/code&gt;&lt;/p&gt;
+
+&lt;p&gt;Now, we can create a role assignment for our service principal that defines the ReadOnly permission:&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;&lt;/code&gt;&lt;code&gt;typescript&lt;br&gt;
+subInfo.then((info) =&amp;gt; {&lt;br&gt;
+    new authorization.RoleAssignment("readOnly", {&lt;br&gt;
+    principalId: adSp.id,&lt;br&gt;
+    principalType: authorization.PrincipalType.ServicePrincipal,&lt;br&gt;
+    scope: pulumi.interpolate&lt;/code&gt;/subscriptions/${info.subscriptionId}&lt;code&gt;,&lt;br&gt;
+    roleDefinitionId: getRoleIdByName("Reader"),&lt;br&gt;
+  });&lt;br&gt;
+});&lt;br&gt;
+&lt;/code&gt;&lt;code&gt;&lt;/code&gt;&lt;/p&gt;
+
+&lt;p&gt;At this stage, our service principal has read only permissions on the subscription we're using. Now, let's allow GitHub actions to use it.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#define-github-secrets"&gt;
+  &lt;/a&gt;
+  Define GitHub secrets
+&lt;/h3&gt;
+
+&lt;p&gt;Our final step is to define the GitHub secrets that we use in our workflow:&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;&lt;/code&gt;`typescript&lt;br&gt;
+subInfo.then((info) =&amp;gt; {&lt;/p&gt;
+
+&lt;p&gt;// define some github actions secrets so your AZ login is correct&lt;br&gt;
+  new github.ActionsSecret("tenantId", {&lt;br&gt;
+    repository: "secure-cloud-access",&lt;br&gt;
+    secretName: "AZURE_TENANT_ID",&lt;br&gt;
+    plaintextValue: info.tenantId,&lt;br&gt;
+  });&lt;/p&gt;
+
+&lt;p&gt;new github.ActionsSecret("subscriptionId", {&lt;br&gt;
+    repository: "secure-cloud-access",&lt;br&gt;
+    secretName: "AZURE_SUBSCRIPTION_ID",&lt;br&gt;
+    plaintextValue: info.subscriptionId,&lt;br&gt;
+  });&lt;br&gt;
+});&lt;/p&gt;
+
+&lt;p&gt;// finally, we set the client id to be the application we created&lt;br&gt;
+new github.ActionsSecret("clientId", {&lt;br&gt;
+  repository: "secure-cloud-access",&lt;br&gt;
+  secretName: "AZURE_CLIENT_ID",&lt;br&gt;
+  plaintextValue: adApp.applicationId,&lt;br&gt;
+});&lt;br&gt;
+`&lt;code&gt;&lt;/code&gt;&lt;/p&gt;
+
+&lt;p&gt;Note, we need to define the &lt;code&gt;tenantId&lt;/code&gt; and &lt;code&gt;subcriptionId&lt;/code&gt; inside the promise returned by the &lt;code&gt;subInfo&lt;/code&gt; call. The &lt;code&gt;clientId&lt;/code&gt; is set to our Azure AD application client id.&lt;/p&gt;
+
+&lt;p&gt;Our complete Pulumi program looks like this:&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;&lt;/code&gt;`typescript&lt;br&gt;
+import * as pulumi from "@pulumi/pulumi";&lt;br&gt;
+import * as authorization from "@pulumi/azure-native/authorization";&lt;br&gt;
+import * as azuread from "@pulumi/azuread";&lt;br&gt;
+import * as github from "@pulumi/github";&lt;/p&gt;
+
+&lt;p&gt;import { AuthorizationManagementClient } from "@azure/arm-authorization";&lt;br&gt;
+import { TokenCredentials } from "@azure/ms-rest-js";&lt;/p&gt;
+
+&lt;p&gt;async function getAuthorizationManagementClient(): Promise {&lt;br&gt;
+  const config = await authorization.getClientConfig();&lt;br&gt;
+  const token = await authorization.getClientToken();&lt;br&gt;
+  const credentials = new TokenCredentials(token.token);&lt;br&gt;
+  // Note: reuse the credentials and/or the client in case your scenario needs&lt;br&gt;
+  // multiple calls to Azure SDKs.&lt;br&gt;
+  return new AuthorizationManagementClient(credentials, config.subscriptionId);&lt;br&gt;
+}&lt;/p&gt;
+
+&lt;p&gt;async function getRoleIdByName(&lt;br&gt;
+  roleName: string,&lt;br&gt;
+  scope?: string&lt;br&gt;
+): Promise {&lt;br&gt;
+  const client = await getAuthorizationManagementClient();&lt;br&gt;
+  const roles = await client.roleDefinitions.list(scope || "", {&lt;br&gt;
+    filter: &lt;code&gt;roleName eq '${roleName}'&lt;/code&gt;,&lt;br&gt;
+  });&lt;br&gt;
+  if (roles.length === 0) {&lt;br&gt;
+    throw new Error(&lt;code&gt;role "${roleName}" not found at scope "${scope}"&lt;/code&gt;);&lt;br&gt;
+  }&lt;br&gt;
+  if (roles.length &amp;gt; 1) {&lt;br&gt;
+    throw new Error(&lt;br&gt;
+      &lt;code&gt;too many roles "${roleName}" found at scope "${scope}". Found: ${roles.length}&lt;/code&gt;&lt;br&gt;
+    );&lt;br&gt;
+  }&lt;br&gt;
+  const role = roles[0];&lt;br&gt;
+  return role.id!;&lt;br&gt;
+}&lt;/p&gt;
+
+&lt;p&gt;// create an azure AD application&lt;br&gt;
+const adApp = new azuread.Application("gha", {&lt;br&gt;
+  displayName: "githubActions",&lt;br&gt;
+});&lt;/p&gt;
+
+&lt;p&gt;// create a service principal&lt;br&gt;
+const adSp = new azuread.ServicePrincipal(&lt;br&gt;
+  "ghaSp",&lt;br&gt;
+  { applicationId: adApp.applicationId },&lt;br&gt;
+  { parent: adApp }&lt;br&gt;
+);&lt;/p&gt;
+
+&lt;p&gt;// mandatory SP password&lt;br&gt;
+const adSpPassword = new azuread.ServicePrincipalPassword(&lt;br&gt;
+  "aksSpPassword",&lt;br&gt;
+  {&lt;br&gt;
+    servicePrincipalId: adSp.id,&lt;br&gt;
+    endDate: "2099-01-01T00:00:00Z",&lt;br&gt;
+  },&lt;br&gt;
+  { parent: adSp }&lt;br&gt;
+);&lt;/p&gt;
+
+&lt;p&gt;/*&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;This is the magic. We set the subject to the repo we're running from&lt;/li&gt;
+&lt;li&gt;Also need to ensure your AD Application is the one where access is defined
+*/
+new azuread.ApplicationFederatedIdentityCredential(
+"gha",
+{
+audiences: ["api://AzureADTokenExchange"],
+subject: "repo:jaxxstorm/secure-cloud-access:ref:refs/heads/main", // this can be any ref
+issuer: "&lt;a href="https://token.actions.githubusercontent.com"&gt;https://token.actions.githubusercontent.com&lt;/a&gt;",
+applicationObjectId: adApp.objectId,
+displayName: "github-actions",
+},
+{ parent: adApp }
+);&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;// retrieve the current tenant and subscription&lt;br&gt;
+const subInfo = authorization.getClientConfig();&lt;/p&gt;
+
+&lt;p&gt;subInfo.then((info) =&amp;gt; {&lt;/p&gt;
+
+&lt;p&gt;// define some github actions secrets so your AZ login is correct&lt;br&gt;
+  new github.ActionsSecret("tenantId", {&lt;br&gt;
+    repository: "secure-cloud-access",&lt;br&gt;
+    secretName: "AZURE_TENANT_ID",&lt;br&gt;
+    plaintextValue: info.tenantId,&lt;br&gt;
+  });&lt;/p&gt;
+
+&lt;p&gt;new github.ActionsSecret("subscriptionId", {&lt;br&gt;
+    repository: "secure-cloud-access",&lt;br&gt;
+    secretName: "AZURE_SUBSCRIPTION_ID",&lt;br&gt;
+    plaintextValue: info.subscriptionId,&lt;br&gt;
+  });&lt;/p&gt;
+
+&lt;p&gt;/* define a role assignment so we have permissions on the subscription&lt;/p&gt;
+
+&lt;ul&gt;
+&lt;li&gt;We use the helper to get the role by name, but you can of course define it explicitly
+*/
+new authorization.RoleAssignment("readOnly", {
+principalId: adSp.id,
+principalType: authorization.PrincipalType.ServicePrincipal,
+scope: pulumi.interpolate&lt;code&gt;/subscriptions/${info.subscriptionId}&lt;/code&gt;,
+roleDefinitionId: getRoleIdByName("Reader"),
+});
+});&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;// finally, we set the client id to be the application we created&lt;br&gt;
+new github.ActionsSecret("clientId", {&lt;br&gt;
+  repository: "secure-cloud-access",&lt;br&gt;
+  secretName: "AZURE_CLIENT_ID",&lt;br&gt;
+  plaintextValue: adApp.applicationId,&lt;br&gt;
+});&lt;br&gt;
+`&lt;code&gt;&lt;/code&gt;&lt;/p&gt;
+
+&lt;p&gt;Run your Pulumi program and define all your infrastructure, then we can define our workflow.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#define-the-github-actions-workflow"&gt;
+  &lt;/a&gt;
+  Define the GitHub Actions workflow
+&lt;/h3&gt;
+
+&lt;p&gt;Our GitHub actions workflow will use the secrets we defined to know how to authenticate. It looks a little bit like this:&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;&lt;/code&gt;`yaml&lt;br&gt;
+name: Run Azure Login with OpenID Connect&lt;br&gt;
+on: [push]&lt;/p&gt;
+
+&lt;p&gt;permissions:&lt;br&gt;
+  id-token: write&lt;br&gt;
+  contents: read&lt;/p&gt;
+
+&lt;p&gt;jobs: &lt;br&gt;
+  CheckAccess:&lt;br&gt;
+    runs-on: ubuntu-latest&lt;br&gt;
+    steps:&lt;br&gt;
+    - name: 'Az CLI login'&lt;br&gt;
+      uses: azure/login@v1&lt;br&gt;
+      with:&lt;br&gt;
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}&lt;br&gt;
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}&lt;br&gt;
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}&lt;/p&gt;
+
+&lt;div class="highlight js-code-highlight"&gt;
+&lt;pre class="highlight plaintext"&gt;&lt;code&gt;- name: 'Run Azure CLI commands'
+  run: |
+      az account show
+      az group list
+      pwd 
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;/div&gt;
+
+&lt;p&gt;`&lt;code&gt;&lt;/code&gt;&lt;/p&gt;
+
+&lt;p&gt;Check all this in, and watch the magic as GitHub Actions is now authenticated against Azure!&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#google-cloud"&gt;
+  &lt;/a&gt;
+  Google Cloud
+&lt;/h2&gt;
+
+&lt;blockquote&gt;
+&lt;p&gt;The complete code for this example can be found &lt;a href="https://github.com/jaxxstorm/secure-cloud-access/tree/main/gcp"&gt;here&lt;/a&gt;&lt;/p&gt;
+&lt;/blockquote&gt;
+
+&lt;p&gt;Google Cloud supports OIDC authentication using workflow providers. We'll use the &lt;code&gt;@pulumi/gcp&lt;/code&gt; and &lt;code&gt;@pulumi/google-native&lt;/code&gt; to achieve our goals here, so make sure the following packages are installed in your Pulumi program:&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;&lt;/code&gt;&lt;code&gt;yaml&lt;br&gt;
+npm install @pulumi/gcp @pulumi/google-native&lt;br&gt;
+&lt;/code&gt;&lt;code&gt;&lt;/code&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#define-the-service-account"&gt;
+  &lt;/a&gt;
+  Define the Service Account
+&lt;/h2&gt;
+
+&lt;p&gt;We'll need a GCP service account to for GitHub actions to use. We'll assign the service account the &lt;code&gt;viewer&lt;/code&gt; role:&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;&lt;/code&gt;`typescript&lt;br&gt;
+const serviceAccount = new google.iam.v1.ServiceAccount(name, {&lt;br&gt;
+    accountId: "github-actions"&lt;br&gt;
+})&lt;/p&gt;
+
+&lt;p&gt;new gcp.projects.IAMMember("github-actions", {&lt;br&gt;
+    role: "roles/viewer",&lt;br&gt;
+    member: pulumi.interpolate&lt;code&gt;serviceAccount:${serviceAccount.email}&lt;/code&gt;&lt;br&gt;
+})&lt;br&gt;
+`&lt;code&gt;&lt;/code&gt;&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#create-a-workloadidentitypool"&gt;
+  &lt;/a&gt;
+  Create a WorkloadIdentityPool
+&lt;/h3&gt;
+
+&lt;p&gt;Now we'll define a workload identity pool for GitHub actions to use&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;&lt;/code&gt;&lt;code&gt;typescript&lt;br&gt;
+const identityPool = new gcp.iam.WorkloadIdentityPool("github-actions", {&lt;br&gt;
+  disabled: false,&lt;br&gt;
+  workloadIdentityPoolId:&lt;/code&gt;github-actions&lt;code&gt;,&lt;br&gt;
+});&lt;br&gt;
+&lt;/code&gt;&lt;code&gt;&lt;/code&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#create-a-workloadidentitypoolprovider"&gt;
+  &lt;/a&gt;
+  Create a WorkloadIdentityPoolProvider
+&lt;/h2&gt;
+
+&lt;p&gt;We'll now need to define a provider for this workload identity pool. The mappings section is important, here is where we map Google OIDC subjects to the OIDC token objects. The following works pretty well:&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;&lt;/code&gt;&lt;code&gt;typescript&lt;br&gt;
+const identityPoolProvider = new gcp.iam.WorkloadIdentityPoolProvider(&lt;br&gt;
+  "github-actions",&lt;br&gt;
+  {&lt;br&gt;
+    workloadIdentityPoolId: identityPool.workloadIdentityPoolId,&lt;br&gt;
+    workloadIdentityPoolProviderId: "github-actions",&lt;br&gt;
+    oidc: {&lt;br&gt;
+      issuerUri: "https://token.actions.githubusercontent.com",&lt;br&gt;
+    },&lt;br&gt;
+    attributeMapping: {&lt;br&gt;
+      "google.subject": "assertion.sub",&lt;br&gt;
+      "attribute.actor": "assertion.actor",&lt;br&gt;
+      "attribute.repository": "assertion.repository",&lt;br&gt;
+    },&lt;br&gt;
+  }&lt;br&gt;
+);&lt;br&gt;
+&lt;/code&gt;&lt;code&gt;&lt;/code&gt;&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#assign-the-workload-identity-permission"&gt;
+  &lt;/a&gt;
+  Assign the workload identity permission
+&lt;/h2&gt;
+
+&lt;p&gt;Now we've defined the workload identity and provider, we need to allow our earlier defined service account to use these new resources:&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;&lt;/code&gt;&lt;code&gt;typescript&lt;br&gt;
+new gcp.serviceaccount.IAMMember("repository", {&lt;br&gt;
+    serviceAccountId: serviceAccount.name,&lt;br&gt;
+    role: "roles/iam.workloadIdentityUser",&lt;br&gt;
+    member: pulumi.interpolate&lt;/code&gt;principalSet://iam.googleapis.com/${identityPool.name}/attribute.repository/jaxxstorm/secure-cloud-access&lt;code&gt;&lt;br&gt;
+})&lt;br&gt;
+&lt;/code&gt;&lt;code&gt;&lt;/code&gt;&lt;/p&gt;
+
+&lt;p&gt;Notice here that we interpolate the name of the identity pool, and also the name of the repository that we want to access.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#create-the-github-actions-secrets"&gt;
+  &lt;/a&gt;
+  Create the GitHub actions secrets
+&lt;/h3&gt;
+
+&lt;p&gt;Now we'll store some important information in GitHub secrets so we don't have to hardcode them in our workflow:&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;&lt;/code&gt;`typescript&lt;br&gt;
+new github.ActionsSecret("identityProvider", {&lt;br&gt;
+  repository: "secure-cloud-access",&lt;br&gt;
+  secretName: "WORKLOAD_IDENTITY_PROVIDER",&lt;br&gt;
+  plaintextValue: identityPoolProvider.name,&lt;br&gt;
+});&lt;/p&gt;
+
+&lt;p&gt;new github.ActionsSecret("subscriptionId", {&lt;br&gt;
+  repository: "secure-cloud-access",&lt;br&gt;
+  secretName: "SERVICE_ACCOUNT_EMAIL",&lt;br&gt;
+  plaintextValue: serviceAccount.email,&lt;br&gt;
+});&lt;br&gt;
+`&lt;code&gt;&lt;/code&gt;&lt;/p&gt;
+
+&lt;p&gt;We're storing the identity pool provider name, and the service account we created's email address as actions.&lt;/p&gt;
+
+&lt;p&gt;Your complete Pulumi program should look like this:&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;&lt;/code&gt;`typescript&lt;br&gt;
+import * as pulumi from "@pulumi/pulumi";&lt;br&gt;
+import * as gcp from "@pulumi/gcp";&lt;br&gt;
+import * as google from "@pulumi/google-native";&lt;br&gt;
+import * as github from "@pulumi/github";&lt;/p&gt;
+
+&lt;p&gt;const name = "github-actions";&lt;/p&gt;
+
+&lt;p&gt;const serviceAccount = new google.iam.v1.ServiceAccount(name, {&lt;br&gt;
+  accountId: "github-actions",&lt;br&gt;
+});&lt;/p&gt;
+
+&lt;p&gt;new gcp.projects.IAMMember("github-actions", {&lt;br&gt;
+  role: "roles/viewer",&lt;br&gt;
+  member: pulumi.interpolate&lt;code&gt;serviceAccount:${serviceAccount.email}&lt;/code&gt;,&lt;br&gt;
+});&lt;/p&gt;
+
+&lt;p&gt;const identityPool = new gcp.iam.WorkloadIdentityPool("github-actions", {&lt;br&gt;
+  disabled: false,&lt;br&gt;
+  workloadIdentityPoolId: &lt;code&gt;${name}-4&lt;/code&gt;,&lt;br&gt;
+});&lt;/p&gt;
+
+&lt;p&gt;const identityPoolProvider = new gcp.iam.WorkloadIdentityPoolProvider(&lt;br&gt;
+  "github-actions",&lt;br&gt;
+  {&lt;br&gt;
+    workloadIdentityPoolId: identityPool.workloadIdentityPoolId,&lt;br&gt;
+    workloadIdentityPoolProviderId: &lt;code&gt;${name}&lt;/code&gt;,&lt;br&gt;
+    oidc: {&lt;br&gt;
+      issuerUri: "&lt;a href="https://token.actions.githubusercontent.com"&gt;https://token.actions.githubusercontent.com&lt;/a&gt;",&lt;br&gt;
+    },&lt;br&gt;
+    attributeMapping: {&lt;br&gt;
+      "google.subject": "assertion.sub",&lt;br&gt;
+      "attribute.actor": "assertion.actor",&lt;br&gt;
+      "attribute.repository": "assertion.repository",&lt;br&gt;
+    },&lt;br&gt;
+  }&lt;br&gt;
+);&lt;/p&gt;
+
+&lt;p&gt;new gcp.serviceaccount.IAMMember("repository", {&lt;br&gt;
+  serviceAccountId: serviceAccount.name,&lt;br&gt;
+  role: "roles/iam.workloadIdentityUser",&lt;br&gt;
+  member: pulumi.interpolate&lt;code&gt;principalSet://iam.googleapis.com/${identityPool.name}/attribute.repository/jaxxstorm/secure-cloud-access&lt;/code&gt;,&lt;br&gt;
+});&lt;/p&gt;
+
+&lt;p&gt;new github.ActionsSecret("identityProvider", {&lt;br&gt;
+  repository: "secure-cloud-access",&lt;br&gt;
+  secretName: "WORKLOAD_IDENTITY_PROVIDER",&lt;br&gt;
+  plaintextValue: identityPoolProvider.name,&lt;br&gt;
+});&lt;/p&gt;
+
+&lt;p&gt;new github.ActionsSecret("subscriptionId", {&lt;br&gt;
+  repository: "secure-cloud-access",&lt;br&gt;
+  secretName: "SERVICE_ACCOUNT_EMAIL",&lt;br&gt;
+  plaintextValue: serviceAccount.email,&lt;br&gt;
+});&lt;/p&gt;
+
+&lt;p&gt;export const workloadIdentityProviderUrl = identityPoolProvider.name;&lt;br&gt;
+export const serviceAccountEmail = serviceAccount.email;&lt;br&gt;
+`&lt;code&gt;&lt;/code&gt;&lt;/p&gt;
+
+&lt;p&gt;Run your Pulumi program, created the needed resources and then we can define our workflow.&lt;/p&gt;
+
+&lt;h3&gt;
+  &lt;a href="#define-the-workflow"&gt;
+  &lt;/a&gt;
+  Define the workflow
+&lt;/h3&gt;
+
+&lt;p&gt;Now we've configured all the access we need, we can define a workflow to check our access:&lt;/p&gt;
+
+&lt;p&gt;&lt;code&gt;&lt;/code&gt;`yaml&lt;br&gt;
+name: List services in GCP&lt;br&gt;
+on:&lt;br&gt;
+  push&lt;/p&gt;
+
+&lt;p&gt;permissions:&lt;br&gt;
+  id-token: write&lt;/p&gt;
+
+&lt;p&gt;jobs:&lt;br&gt;
+  Get_OIDC_ID_token:&lt;br&gt;
+    runs-on: ubuntu-latest&lt;br&gt;
+    steps:&lt;br&gt;
+    - id: 'auth'&lt;br&gt;
+      name: 'Authenticate to GCP'&lt;br&gt;
+      uses: 'google-github-actions/&lt;a href="mailto:auth@v0.3.1"&gt;auth@v0.3.1&lt;/a&gt;'&lt;br&gt;
+      with:&lt;br&gt;
+          create_credentials_file: 'true'&lt;br&gt;
+          workload_identity_provider: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}&lt;br&gt;
+          service_account: ${{ secrets.SERVICE_ACCOUNT_EMAIL }}&lt;br&gt;
+    - id: 'gcloud'&lt;br&gt;
+      name: 'gcloud'&lt;br&gt;
+      run: |-&lt;br&gt;
+        gcloud auth login --brief --cred-file="${{ steps.auth.outputs.credentials_file_path }}" --project briggs-237615&lt;br&gt;
+        gcloud auth list&lt;br&gt;
+`&lt;code&gt;&lt;/code&gt;&lt;/p&gt;
+
+&lt;p&gt;We're using the &lt;code&gt;auth&lt;/code&gt; action, creating a credentials file and then verifying we're authenticated.&lt;/p&gt;
+
+&lt;p&gt;Check all this in, and watch in awe as your GitHub action runs with GCP access without any hardcoded credentials!&lt;/p&gt;
+
+&lt;h2&gt;
+  &lt;a href="#wrap-up"&gt;
+  &lt;/a&gt;
+  Wrap Up
+&lt;/h2&gt;
+
+&lt;p&gt;This blog post guides you through accessing the 3 major cloud providers with GitHub Actions without specifying hardcoded credentials. It's my hope that more CI/CD providers will offer this support soon, as well as other awesome cloud providers. &lt;/p&gt;
+
+</description>
+      <category>aws</category>
+      <category>azure</category>
+      <category>github</category>
+      <category>googlecloud</category>
+    </item>
+    <item>
       <title>JavaScript for Making API Calls</title>
       <author>Olumide</author>
       <pubDate>Sun, 23 Jan 2022 23:02:15 +0000</pubDate>
@@ -1958,57 +2825,6 @@ you can animate transform and other properties too, I am just using opacity to f
       <category>javascript</category>
       <category>showdev</category>
       <category>productivity</category>
-    </item>
-    <item>
-      <title>AWS VPC: What you need to understand</title>
-      <author>Sulaiman Olubiyi </author>
-      <pubDate>Sun, 23 Jan 2022 18:47:01 +0000</pubDate>
-      <link>https://dev.to/damdev95/aws-vpc-what-you-need-to-understand-2dbk</link>
-      <guid>https://dev.to/damdev95/aws-vpc-what-you-need-to-understand-2dbk</guid>
-      <description>&lt;p&gt;Have you been wondering how AWS defines the backbone of its networking service?&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--rGk4VL4T--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/lc2249q8mnsjcdtbtqka.png" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--rGk4VL4T--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/lc2249q8mnsjcdtbtqka.png" alt="AWS VPC diagram" width="598" height="361"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;p&gt;Well, this is all thanks to VPC Virtual Private Cloud, a virtual network within the AWS cloud, and it comprises the following: security groups, network access control list (NACl), subnet, route tables, internet gateway and NAT gateway.&lt;br&gt;
-Using an analogy, AWS cloud can be described as an estate which contains several houses.&lt;br&gt;
-A VPC is an individual house in that estate and you can place your properties in different positions in your house. Some properties may be placed in the living room while others in the bedroom. When expecting a visitor, that is, traffic from the internet. This can refer to the isolated logical network in the AWS cloud where you provision your resources such as application and database servers. The concept of VPC components are explained thus:&lt;/p&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--bhIR1Lw0--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/3wmrzasxc5kmau1jren9.jpg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--bhIR1Lw0--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/3wmrzasxc5kmau1jren9.jpg" alt="Typical Analogy of VPC in form of estate" width="880" height="466"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;Internet Gateway: This is likened to the telephone in your house and it is the only way for anyone that wants to visit you to reach you. If your telephone line is off, nobody can reach your house and only the people within your house can talk to each other.
-In AWS, this refers to the default route to the internet which enables your resources in the VPC to communicate with the internet.&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--JjBjXePP--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/56rm77btdgl2t8sy2bpz.jpg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--JjBjXePP--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/56rm77btdgl2t8sy2bpz.jpg" alt="Image showing the estate and the visitor" width="880" height="837"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;&lt;p&gt;Subnets: These are logical segmentation of your resources, they can be likened to the properties in your house. The properties placed in the living room are public subnets, all your visitors can see them such as television, stereo system etc. &lt;br&gt;
-In AWS, Web/Application servers are deployed in the public subnets, external users can have access to them and are reachable on the internet.&lt;br&gt;
-The properties placed in your bedroom are private subnets, they are accessible within your house, that is, only your family members have access to them.&lt;br&gt;
-In AWS, database servers are mostly placed in the private subnets in VPC because they are only accessible within your VPC network.&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;NAT Gateway: By default, only people staying in the living room can meet the visitors, perhaps you are in the bedroom and you want to meet the visitor, you can use your mobile phone to talk to them, but you would be the one to make a call request.&lt;br&gt;
-In AWS, this allows resources deployed in the private subnets to have access to the internet, and is especially used for upgrade and software patches for database servers or to enhance the security level of the system.&lt;/p&gt;&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;&lt;a href="https://res.cloudinary.com/practicaldev/image/fetch/s--3anVmdRC--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/8a7pxd3aiawpvppl0txs.jpg" class="article-body-image-wrapper"&gt;&lt;img src="https://res.cloudinary.com/practicaldev/image/fetch/s--3anVmdRC--/c_limit%2Cf_auto%2Cfl_progressive%2Cq_auto%2Cw_880/https://dev-to-uploads.s3.amazonaws.com/uploads/articles/8a7pxd3aiawpvppl0txs.jpg" alt="Security measure towards the house" width="766" height="548"&gt;&lt;/a&gt;&lt;/p&gt;
-
-&lt;ul&gt;
-&lt;li&gt;&lt;p&gt;Network Access Control List: These are the security guards guarding your home, they will check the visitor,to either grant access to the building or not.&lt;br&gt;
-In AWS, this serves as a security measure at the subnet level for your VPC network to deny or allow inbound and outbound traffic. At default, it allows both inbound and outbound traffic.&lt;br&gt;
-Inbound traffic: User's request entering the VPC &lt;br&gt;
-Outbound traffic: User's response leaving the VPC&lt;/p&gt;&lt;/li&gt;
-&lt;li&gt;&lt;p&gt;Security Group: You have an electronic door which checks the visitors before they can come in. If they have an appointment or invite, they will be granted access to your living room and welcomed to your home, and when the visitor is departing, he wouldn’t be subjected to another check (stateful).&lt;br&gt;
-In AWS, this is a security measure at the instance level, it only allows traffic and it is stateful which means once the traffic is allowed in, automatically the traffic will be permitted out.&lt;/p&gt;&lt;/li&gt;
-&lt;/ul&gt;
-
-&lt;p&gt;I hope you understand the basics of VPC, your comments are welcome&lt;br&gt;
-Cheers 😊&lt;/p&gt;
-
-</description>
-      <category>aws</category>
-      <category>cloud</category>
-      <category>devops</category>
     </item>
   </channel>
 </rss>
